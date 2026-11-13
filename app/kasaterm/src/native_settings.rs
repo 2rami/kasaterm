@@ -4848,7 +4848,7 @@ fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
 }
 
 /// 디스크 지키기 — 문턱 아래면 알리고, 다시 만들 수 있는 빌드 산출물만 스스로 치운다(docs/disk-guard.md).
-#[cfg(unix)]
+/// Windows 는 쓰는 중 판정 수단이 없어 알리기만 한다 — 정리 줄을 안 그린다.
 fn paint_disk_guard(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
     use kasa_socket::disk_guard::{CAP_CHOICES_GIB, WARN_CHOICES_GIB};
     section_title(g, x, *y, "디스크 지키기", "");
@@ -4861,10 +4861,12 @@ fn paint_disk_guard(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
         .map(|(gb, text)| (text.as_str(), disk.warn_gib == *gb, SettingsAction::DiskWarnGib(*gb)))
         .collect();
     seg_row(g, s, hits, x, y, w, "남은 공간 경고", &warn_cells);
-    toggle_row_hint(g, s, hits, x, y, w, "빌드 산출물 자동 정리",
-        "cargo target·flutter build·Xcode DerivedData 중 30분 넘게 안 쓰고 아무도 열지 않은 것만 지웁니다",
-        disk.auto_prune, SettingsAction::DiskAutoPrune(!disk.auto_prune));
-    if disk.auto_prune {
+    if cfg!(unix) {
+        toggle_row_hint(g, s, hits, x, y, w, "빌드 산출물 자동 정리",
+            "cargo target·flutter build·Xcode DerivedData 중 30분 넘게 안 쓰고 아무도 열지 않은 것만 지웁니다",
+            disk.auto_prune, SettingsAction::DiskAutoPrune(!disk.auto_prune));
+    }
+    if cfg!(unix) && disk.auto_prune {
         let cap: Vec<String> = CAP_CHOICES_GIB.iter().map(|gb| format!("{gb}GB")).collect();
         let cap_cells: Vec<(&str, bool, SettingsAction)> = CAP_CHOICES_GIB
             .iter()

@@ -1180,6 +1180,8 @@ struct Seen {
     rtt_ms: Option<u64>,
     /// 그 기계의 기기색 표(`/term/device-colors`). 옛 판은 None.
     device_colors: Option<Value>,
+    /// 그 기계의 디스크 지키기 상태(`/term/disk`). 옛 판은 None.
+    disk: Option<Value>,
     at: Instant,
     requested_at: Instant,
     panes: Vec<Value>,
@@ -1227,7 +1229,7 @@ fn merge_refreshed_panes(
     anyhow::ensure!(current_id == expected_id, "pane host identity changed during refresh");
     let panes = panes.ok_or_else(|| anyhow::anyhow!("could not refresh remote panes"))?;
     let mut seen = old.cloned().unwrap_or(Seen {
-        rtt_ms: None, device_colors: None, at: requested_at, requested_at,
+        rtt_ms: None, device_colors: None, disk: None, at: requested_at, requested_at,
         panes: Vec::new(), sync: true, build: None, machine_id: current.machine_id,
     });
     seen.panes = panes;
@@ -1388,6 +1390,15 @@ async fn fetch_json(client: &reqwest::Client, base: &str, path: &str) -> Option<
     let resp = client.get(format!("{base}{path}")).timeout(FETCH_TIMEOUT).send().await.ok()?;
     if !resp.status().is_success() { return None; }
     serde_json::from_str(&resp.text().await.ok()?).ok()
+}
+
+/// 붙어 있는 기계들의 디스크 지키기 상태 — (이름, `/term/disk` 값). 캐시라 공짜다.
+pub fn cached_disk() -> Vec<(String, Value)> {
+    let Ok(c) = cache().lock() else { return Vec::new() };
+    c.iter()
+        .filter(|(_, seen)| seen.at.elapsed() < STALE_AFTER)
+        .filter_map(|(label, seen)| seen.disk.clone().map(|v| (label.clone(), v)))
+        .collect()
 }
 
 /// 붙어 있는 기계들의 기기색 표 — (이름, 표). 캐시라 공짜다.
@@ -1552,10 +1563,11 @@ pub async fn poll_loop() {
                     Err(failure) => return Err((m, failure)),
                 };
                 let rtt_ms = Some(asked.elapsed().as_millis() as u64);
-                let (sync, version, device_colors) = tokio::join!(
+                let (sync, version, device_colors, disk) = tokio::join!(
                     probe_sync(client, &via),
                     fetch_version(client, &via),
                     fetch_json(client, &via, "/term/device-colors"),
+                    fetch_json(client, &via, "/term/disk"),
                 );
                 let version = version.unwrap_or_default();
                 if let Some(kasanet) = &version.kasanet {
@@ -1564,6 +1576,7 @@ pub async fn poll_loop() {
                 let seen = Seen {
                     rtt_ms,
                     device_colors: device_colors.filter(|v| v.get("at").is_some()),
+                    disk: disk.filter(|v| v.get("free").is_some()),
                     at: asked,
                     requested_at: asked,
                     panes,
@@ -1987,7 +2000,7 @@ mod tests {
             at: requested_at, requested_at,
             panes: vec![serde_json::json!({"id":"%8", "window":window})],
             sync: false, build: Some("known-build".into()), machine_id: Some("device-one".into()),
-            rtt_ms: Some(12), device_colors: Some(serde_json::json!({"at":123})),
+            rtt_ms: Some(12), device_colors: Some(serde_json::json!({"at":123})), disk: None,
         }
     }
 
@@ -2072,7 +2085,7 @@ mod tests {
                 "status":"waiting", "kind":"permission", "waiting_for":"approve",
                 "response_end":{"surface_id":"%8","source":"s","completion":"01","idle":true,"error":false,"background":false}})],
             sync: true, build: None, machine_id: Some("same-device".into()),
-            rtt_ms: None, device_colors: None,
+            rtt_ms: None, device_colors: None, disk: None,
         };
         let mut c = Cache::from([("mini".into(), seen(Duration::ZERO))]);
         assert_eq!(cached_pane_from(&c, "mini", "%8", true).unwrap()["kind"], "permission");
@@ -2111,7 +2124,7 @@ mod tests {
         guest.base = "http://127.0.0.1:19011".into(); guest.home = false; guest.roots.clear();
         let seen = |age| Seen { at: Instant::now() - age, requested_at: Instant::now() - age, panes: vec![], sync:true,
             build:Some("build".into()), machine_id:Some("same-stable-machine-id".into()),
-            rtt_ms: None, device_colors: None };
+            rtt_ms: None, device_colors: None, disk: None };
         let mut c = Cache::from([(configured.label.clone(), seen(Duration::ZERO)),
             (guest.label.clone(), seen(Duration::ZERO))]);
         for rows in [vec![configured.clone(), guest.clone()], vec![guest.clone(), configured.clone()]] {
@@ -2177,7 +2190,7 @@ mod tests {
             build: Some("same-build".to_string()),
             machine_id: Some("stable-mini-1".to_string()),
             rtt_ms: None,
-            device_colors: None,
+            device_colors: None, disk: None,
         };
         let uplink = crate::uplink::GatewayMachine {
             id: "stable-mini-1".to_string(),
@@ -2207,7 +2220,7 @@ mod tests {
             build: None,
             machine_id: Some("stable-mini-1".to_string()),
             rtt_ms: None,
-            device_colors: None,
+            device_colors: None, disk: None,
         };
         let live = vec![crate::uplink::GatewayMachine {
             id: "stable-mini-1".to_string(),

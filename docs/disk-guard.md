@@ -3,13 +3,15 @@
 2026-11-13 18:08 맥북 데이터 볼륨의 남은 공간이 0 이 되자 카사텀이 stderr 한 줄을 못 써 panic 하고 잠금 오염 연쇄로
 죽었다(그 panic 은 c339fe76 에서 따로 고쳤다). 채운 것은 학생 작업 폴더의 cargo target(`/tmp/kt-live-rt` 40GB,
 `/tmp/kt-voice-*` 16GB, 레포 `target` 16GB), Xcode DerivedData 11GB, flutter build, `~/Library/Caches` 126GB 였다.
-같은 날 맥미니도 98%(남은 10GB)였다 — 거기서는 크롬의 서명 복제본(`/var/folders/…/X/com.google.Chrome.code_sign_clone`)이
-69GB, 릴리스 도구 상태(`~/.local/state/kasaterm-preview`)가 57GB 였다.
+같은 날 맥미니도 98%(남은 10GB)였다 — 거기서 새던 곳은 릴리스 도구가 판마다 남기고 안 지우던 계획 작업 폴더(38개 29GB)였다
+(아래 「맥미니」). `du` 로는 크롬의 서명 복제본(`/var/folders/…/X/com.google.Chrome.code_sign_clone`)이 69GB 로 보였지만
+APFS 복제본이라 원본과 블록을 나눠 써서, 45개를 지워도 20MB 만 비었다.
 
 앱이 남은 공간을 지켜보다 문턱 아래면 사람을 부르고, 다시 만들 수 있는 빌드 산출물만 스스로 치운다. 나머지(캐시·다른
-앱 데이터)는 크기만 재서 「큰 곳」으로 보여 준다. 코드는 `crates/kasa-socket/src/disk_guard.rs`(지키미·정리·기록,
-`disk_guard/outputs.rs` 찾기·지우기, `disk_guard/in_use.rs` 쓰는 중 판정), 앱 쪽은 `app/kasaterm/src/disk_warning.rs`,
-CLI 는 `kasaterm-cli disk`, 폰은 `/term/disk` 를 읽는다.
+앱 데이터)는 크기만 재서 「큰 곳」으로 보여 준다. 코드는 `crates/kasa-socket/src/disk_guard.rs`(지키미·알림 판정·기록),
+`disk_guard/prune.rs`(언제·얼마나·무엇을 남기나), `disk_guard/outputs.rs`(찾기·지우기 가드), `disk_guard/in_use.rs`
+(쓰는 중 판정), 앱 쪽은 `app/kasaterm/src/disk_warning.rs`, CLI 는 `kasaterm-cli disk`. 폰과 다른 기기는 `/term/disk` 를
+읽는다.
 
 ## 지켜보기
 
@@ -28,6 +30,10 @@ CLI 는 `kasaterm-cli disk`, 폰은 `/term/disk` 를 읽는다.
   `waiting:blocked`(대기 소리)이고 칸은 `disk` 다 — 관문은 빈 칸을 받지 않고, 폰은 없는 칸이면 눌러도 허브에 머문다.
 - 문턱 아래로 내려가면 그 자리에서 정리부터 한 바퀴 돌고, 그 뒤에도 문턱 아래일 때 알린다. 스스로 치워 문턱 위로 올라섰으면
   사람을 부르지 않는다(기록에만 남는다).
+- 다른 기기: 기기 명부 폴러가 붙어 있는 기기마다 `/term/panes` 와 함께 `/term/disk` 를 받아 둔다(`machines::cached_disk`).
+  앱은 명부가 새로 받을 때만 그 캐시를 읽어, 그 기기가 문턱을 새로 넘으면 같은 판정(`Status::alert_step`, 그 기기의 문턱
+  그대로)으로 **이 맥에도** 알림을 띄운다. 폰 푸시는 그 기기가 스스로 보내니 겹쳐 보내지 않는다. 사이드바 카드도 그 기기를
+  함께 싣는다.
 
 ## 자동으로 지우는 것 — 다시 만들 수 있는 빌드 산출물만
 
@@ -85,7 +91,9 @@ CLI 는 `kasaterm-cli disk`, 폰은 `/term/disk` 를 읽는다.
 `~/.local/state/kasaterm-preview`·`/tmp`·이 사용자의 `/var/folders` 임시 묶음을 문턱 아래일 때(한 시간에 한 번, 수준이
 올라가면 바로) `du -skx` 로 재서 1GB 넘는 곳 앞 다섯을 「큰 곳」으로 보여 준다. 캐시와 다른 앱의 데이터는 그 앱이 아직
 쓰는지 알 수 없고 지우면 로그인·설정이 날아가는 것도 섞여 있어 사람이 고른다. 다른 앱의 컨테이너·받은 파일·휴지통은
-macOS 가 접근 허락 창을 띄우므로 재지 않는다.
+macOS 가 접근 허락 창을 띄우므로 재지 않는다. `du` 는 APFS 복제본(clonefile)을 통째로 센다 — 원본과 블록을
+나눠 쓰는 복제본이 많은 곳(크롬 서명 복제본)은 실제보다 훨씬 크게 보인다. 큰 곳은 「어디부터 볼까」의 실마리지 지우면 그만큼
+빈다는 약속이 아니다.
 
 ## 화면
 
@@ -113,12 +121,18 @@ macOS 가 접근 허락 창을 띄우므로 재지 않는다.
 
 ## 맥미니
 
-같은 앱이라 맥미니에서도 그대로 돈다(맥미니의 카사텀이 새 판이어야 한다). 맥미니의 알림은 그 맥에 사람이 없으니 폰 푸시가
-본 길이다. 맥미니를 채운 것 대부분(크롬 서명 복제본·릴리스 도구 상태)은 자동으로 지우는 것이 아니라 「큰 곳」으로 뜬다.
+같은 앱이라 맥미니에서도 그대로 돈다(맥미니의 카사텀이 새 판이어야 한다). 맥미니의 알림은 그 맥에 사람이 없으니 폰 푸시와
+맥북의 알림·사이드바 카드가 본 길이다.
+
+맥미니를 채우던 릴리스 도구의 계획 작업 폴더는 릴리스 도구가 스스로 거둔다 — tick 끝의 `tools/release/plan_sweep.py` 가
+최근 5개와 아직 안 끝난 요청이 가리키는 계획은 두고, 나머지의 `plans/<id>/work/`(격리 워크트리·dmg·자산, 판마다 0.9GB)를
+지운다. `plan.json`·`state.json` 은 남겨 대기열이 옛 계획을 다시 읽어도 깨지지 않는다. 디스크 지키기는 그 상태 폴더를
+손대지 않는다([automatic-preview-updates.md](automatic-preview-updates.md)).
 
 ## Windows
 
-범위 밖이다. 쓰는 중 판정의 두 기둥이 없다 — 다른 프로세스의 환경 변수(`CARGO_TARGET_DIR`·`PWD`)를 읽는 `ps -E`, 이
+남은 공간 감시·문턱 알림·사이드바 카드·설정의 「남은 공간 경고」는 돈다(`GetDiskFreeSpaceExW`). 빌드 산출물 자동 정리와 큰 곳
+재기는 하지 않는다. 쓰는 중 판정의 두 기둥이 없다 — 다른 프로세스의 환경 변수(`CARGO_TARGET_DIR`·`PWD`)를 읽는 `ps -E`, 이
 사용자의 열린 파일·작업 폴더를 보는 `lsof`. Windows 에서 이것을 하려면 프로세스마다 PEB 를 읽고 핸들을 훑어야 하고(관리자
-권한·Restart Manager), 그 없이 지우면 도는 빌드의 target 을 지울 수 있다. 학생 격리 빌드가 쌓이는 곳도 맥이다. 그래서
-Windows 판은 지키미를 세우지 않고(경고 카드·알림도 없다) `kasaterm-cli disk prune` 은 까닭을 말하고 끝난다.
+권한·Restart Manager), 그 없이 지우면 도는 빌드의 target 을 지울 수 있다. 학생 격리 빌드가 쌓이는 곳도 맥이다. 그래서 설정에
+정리 줄을 그리지 않고 `kasaterm-cli disk prune` 은 까닭을 말하고 끝난다.

@@ -7616,6 +7616,7 @@ impl ApplicationHandler<UserEvent> for App {
             });
         }
         self.refresh_machines_col();
+        self.refresh_remote_disk();
         self.pump_remote_completions();
         self.refresh_mirror_theme();
         self.poll_mirror_sync();

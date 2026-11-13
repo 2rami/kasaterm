@@ -9,18 +9,20 @@
 mod in_use;
 #[cfg(unix)]
 mod outputs;
+#[cfg(unix)]
+mod prune;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
-#[cfg(unix)]
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(unix)]
 pub use outputs::Kind;
+#[cfg(unix)]
+pub use prune::{run_and_log, run_pass, Removed, Report, Skipped};
 
 const GIB: u64 = 1 << 30;
 /// 설정 화면이 고르게 하는 값(GB).
@@ -31,12 +33,10 @@ pub const DEFAULT_CAP_GIB: u64 = 15;
 const DEFAULT_CRITICAL_GIB: u64 = 5;
 const DEFAULT_IDLE_MIN: u64 = 30;
 /// 경고가 풀리려면 문턱보다 이만큼 더 비어야 한다 — 문턱 언저리를 오가며 같은 알림이 되풀이되지 않게.
-#[cfg(unix)]
 const HYSTERESIS: u64 = 2 * GIB;
 /// 문턱 아래에서 치울 때는 문턱 위로 이만큼 올라설 때까지 — 다음 빌드 한 번에 다시 내려가지 않게.
 #[cfg(unix)]
 const PRESSURE_MARGIN: u64 = 5 * GIB;
-#[cfg(unix)]
 const TICK: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 const ROUTINE_EVERY: Duration = Duration::from_secs(60 * 60);
@@ -45,11 +45,9 @@ const ROUTINE_EVERY: Duration = Duration::from_secs(60 * 60);
 const FIRST_ROUTINE_AFTER: Duration = Duration::from_secs(5 * 60);
 #[cfg(unix)]
 const PRESSURE_EVERY: Duration = Duration::from_secs(10 * 60);
-#[cfg(unix)]
 const PLACES_EVERY: Duration = Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const PLACES_SHOWN: usize = 5;
-#[cfg(unix)]
 const LOG_MAX: u64 = 1 << 20;
 /// 리그가 사이드바 경고를 그려 보려고 남은 공간을 속인다(GB).
 const FAKE_FREE_ENV: &str = "KASATERM_DISK_FAKE_FREE_GIB";
@@ -105,7 +103,7 @@ fn config_dir() -> Option<PathBuf> {
     settings_path()?.parent().map(Path::to_path_buf)
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
     #[default]
@@ -125,24 +123,25 @@ pub fn level(free: u64, cfg: &Config) -> Level {
 }
 
 /// 크기만 재서 보여 주는 곳. 자동으로 지우지 않는다.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Place {
     pub label: String,
     pub path: String,
     pub bytes: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PassSummary {
     pub at: u64,
-    pub reason: &'static str,
+    pub reason: String,
     pub freed: u64,
     pub removed: usize,
     pub skipped: usize,
 }
 
-/// 사이드바·폰 허브·`/term/disk` 가 읽는 값.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+/// 사이드바·폰 허브·`/term/disk` 가 읽는 값. 다른 기기의 값도 같은 꼴로 받는다(모르는 칸은 기본값).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Status {
     pub free: u64,
     pub total: u64,
@@ -194,7 +193,6 @@ impl Status {
         (title, body.join(" "))
     }
 
-    #[cfg(unix)]
     /// 화면에 보이는 값이 같은가 — 남은 공간은 0.1GB 단위로만 본다. 1분마다 다시 그리지 않게.
     fn shown_same(&self, other: &Status) -> bool {
         let tenth = GIB / 10;
@@ -262,7 +260,6 @@ pub fn refresh() {
     }
 }
 
-#[cfg(unix)]
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -295,7 +292,18 @@ fn volume_space(path: &Path) -> Option<(u64, u64)> {
     Some(((fs.f_bavail as u64).saturating_mul(block), (fs.f_blocks as u64).saturating_mul(block)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn volume_space(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+    // SAFETY: wide 는 NUL 로 끝나는 경로이고 세 출력 칸은 이 함수가 쥔 지역 변수다.
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, &mut total, &mut free) };
+    (ok != 0).then_some((avail, total))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn volume_space(_path: &Path) -> Option<(u64, u64)> {
     None
 }
@@ -337,7 +345,6 @@ pub fn log_path() -> Option<PathBuf> {
     })
 }
 
-#[cfg(unix)]
 fn append_log(line: &impl Serialize) {
     use std::io::Write;
     let Some(path) = log_path() else { return };
@@ -481,335 +488,16 @@ pub fn measure_places() -> Vec<Place> {
     Vec::new()
 }
 
-#[cfg(unix)]
-#[derive(Clone, Debug, Serialize)]
-pub struct Removed {
-    pub path: String,
-    pub kind: Kind,
-    pub bytes: u64,
-}
-
-#[cfg(unix)]
-#[derive(Clone, Debug, Serialize)]
-pub struct Skipped {
-    pub path: String,
-    pub kind: Kind,
-    pub bytes: u64,
-    pub why: String,
-}
-
-/// 정리 한 바퀴의 기록 — 그대로 기록 파일의 한 줄이 된다.
-#[cfg(unix)]
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct Report {
-    pub at: u64,
-    pub reason: &'static str,
-    pub dry_run: bool,
-    pub free_before: u64,
-    pub free_after: u64,
-    pub outputs: usize,
-    pub outputs_bytes: u64,
-    pub cap: u64,
-    pub removed: Vec<Removed>,
-    pub skipped: Vec<Skipped>,
-    pub error: Option<String>,
-}
-
-#[cfg(unix)]
-impl Report {
-    pub fn freed(&self) -> u64 {
-        self.removed.iter().map(|r| r.bytes).sum()
-    }
-
-    fn worth_logging(&self) -> bool {
-        self.reason != Reason::Routine.as_str()
-            || !self.removed.is_empty()
-            || !self.skipped.is_empty()
-            || self.error.is_some()
-    }
-
-    fn summary(&self) -> PassSummary {
-        PassSummary {
-            at: self.at,
-            reason: self.reason,
-            freed: self.freed(),
-            removed: self.removed.len(),
-            skipped: self.skipped.len(),
-        }
-    }
-}
-
-/// 어디를 보고 어디까지 지울 수 있나. `allowed` 밖·`deny` 안은 산출물 표식이 있어도 지우지 않는다.
-#[cfg(unix)]
-struct Scope {
-    roots: Vec<outputs::Root>,
-    derived_data: Option<PathBuf>,
-    allowed: Vec<PathBuf>,
-    deny: Vec<PathBuf>,
-}
-
-#[cfg(unix)]
-impl Scope {
-    fn current(extra_repos: &[PathBuf]) -> Result<Scope, &'static str> {
-        let home = crate::home_dir().ok_or("홈 폴더를 몰라요")?;
-        let deny = vec![outputs::real(&home.join(RELEASE_STATE))];
-        if let Some(test) = std::env::var_os(ROOTS_ENV).filter(|v| !v.is_empty()) {
-            let roots: Vec<PathBuf> = std::env::split_paths(&test).filter(|p| p.is_dir()).collect();
-            return Ok(Scope::of(roots.into_iter().map(|path| outputs::Root { path, depth: 2 }).collect(), None, deny));
-        }
-        if isolated() {
-            return Err("격리 실행이라 지우지 않아요");
-        }
-        let mut roots = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(tmp_root()) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let real_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-                if real_dir && (name.starts_with("kt-") || name.starts_with("kasaterm-")) {
-                    roots.push(outputs::Root { path: entry.path(), depth: 2 });
-                }
-            }
-        }
-        roots.push(outputs::Root { path: home.join("Library/Caches/kasaterm-builds"), depth: 2 });
-        for repo in remembered_repos().into_iter().chain(extra_repos.iter().cloned()) {
-            roots.push(outputs::Root { path: repo, depth: 1 });
-        }
-        let derived = home.join("Library/Developer/Xcode/DerivedData");
-        Ok(Scope::of(roots, Some(derived), deny))
-    }
-
-    fn of(roots: Vec<outputs::Root>, derived_data: Option<PathBuf>, deny: Vec<PathBuf>) -> Scope {
-        let allowed = roots
-            .iter()
-            .map(|r| r.path.as_path())
-            .chain(derived_data.as_deref())
-            .filter_map(|p| std::fs::canonicalize(p).ok())
-            .collect();
-        Scope { roots, derived_data, allowed, deny }
-    }
-}
-
-#[cfg(unix)]
-struct Row {
-    output: outputs::Output,
-    real: PathBuf,
-    bytes: u64,
-    used: u64,
-}
-
-/// 얼마나 치울지. 평소에는 산출물 합을 상한 밑으로, 문턱 아래에서는 남은 공간이 문턱 위로 올라설 때까지.
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug)]
-enum Goal {
-    Cap(u64),
-    Free { free: u64, want: u64 },
-}
-
-#[cfg(unix)]
-fn goal_for(free: u64, cfg: &Config) -> Goal {
-    if free < cfg.warn_free {
-        Goal::Free { free, want: cfg.warn_free.saturating_add(PRESSURE_MARGIN) }
-    } else {
-        Goal::Cap(cfg.build_cap)
-    }
-}
-
-/// 오래 안 쓴 것부터 지울 차례를 정한다. 최근에 바뀐 것·누가 쓰는 것·아직 남을 다른 산출물이 링크로 가리키는
-/// 것은 건너뛰고 까닭을 남긴다.
-#[cfg(unix)]
-fn plan(
-    rows: &[Row],
-    goal: Goal,
-    idle_secs: u64,
-    used: &std::collections::HashSet<PathBuf>,
-    now: u64,
-) -> (Vec<usize>, Vec<(usize, String)>) {
-    let links: Vec<_> = rows
-        .iter()
-        .map(|r| if r.output.kind == Kind::Cargo { outputs::links_into(&r.output.path) } else { Default::default() })
-        .collect();
-    let referrers: Vec<Vec<usize>> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            (0..rows.len()).filter(|&j| j != i && links[j].iter().any(|l| l.starts_with(&row.real))).collect()
-        })
-        .collect();
-    let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by_key(|&i| rows[i].used);
-    let mut total: u64 = rows.iter().map(|r| r.bytes).sum();
-    let mut gained = 0u64;
-    let (mut doomed, mut skipped) = (Vec::new(), Vec::new());
-    for i in order {
-        let enough = match goal {
-            Goal::Cap(cap) => total <= cap,
-            Goal::Free { free, want } => free.saturating_add(gained) >= want,
-        };
-        if enough {
-            break;
-        }
-        let row = &rows[i];
-        let age = now.saturating_sub(row.used);
-        let why = if age < idle_secs {
-            Some(format!("{}분 전에 바뀌었어요", age / 60))
-        } else if in_use::in_use(&row.output, used) {
-            Some("쓰는 중이에요".to_string())
-        } else if referrers[i].iter().any(|j| !doomed.contains(j)) {
-            Some("남는 산출물이 링크로 가리켜요".to_string())
-        } else {
-            None
-        };
-        match why {
-            Some(why) => skipped.push((i, why)),
-            None => {
-                doomed.push(i);
-                total = total.saturating_sub(row.bytes);
-                gained = gained.saturating_add(row.bytes);
-            }
-        }
-    }
-    (doomed, skipped)
-}
-
-#[cfg(unix)]
-fn run_in(
-    cfg: &Config,
-    reason: Reason,
-    scope: &Scope,
-    dry_run: bool,
-    measure: &dyn Fn(&Path) -> u64,
-    used_paths: &dyn Fn() -> Result<std::collections::HashSet<PathBuf>, in_use::Unknown>,
-    free_now: &dyn Fn() -> Option<u64>,
-) -> Report {
-    let at = now_secs();
-    let free_before = free_now().unwrap_or(0);
-    let mut report = Report { at, reason: reason.as_str(), dry_run, free_before, free_after: free_before, cap: cfg.build_cap, ..Report::default() };
-    let rows: Vec<Row> = outputs::find(&scope.roots, scope.derived_data.as_deref())
-        .into_iter()
-        .map(|output| Row { real: outputs::real(&output.path), bytes: measure(&output.path), used: outputs::last_used(&output.path), output })
-        .collect();
-    report.outputs = rows.len();
-    report.outputs_bytes = rows.iter().map(|r| r.bytes).sum();
-    let goal = goal_for(free_before, cfg);
-    let satisfied = match goal {
-        Goal::Cap(cap) => report.outputs_bytes <= cap,
-        Goal::Free { free, want } => free >= want,
-    };
-    if satisfied || rows.is_empty() {
-        return report;
-    }
-    let used = match used_paths() {
-        Ok(used) => used,
-        Err(in_use::Unknown(why)) => {
-            report.error = Some(format!("누가 무엇을 쓰는지 몰라 지우지 않았어요 — {why}"));
-            return report;
-        }
-    };
-    let idle = cfg.idle.as_secs();
-    let (doomed, skipped) = plan(&rows, goal, idle, &used, at);
-    let entry = |row: &Row| (row.output.path.to_string_lossy().into_owned(), row.output.kind, row.bytes);
-    report.skipped = skipped
-        .into_iter()
-        .map(|(i, why)| {
-            let (path, kind, bytes) = entry(&rows[i]);
-            Skipped { path, kind, bytes, why }
-        })
-        .collect();
-    for i in doomed {
-        let row = &rows[i];
-        let (path, kind, bytes) = entry(row);
-        if let Goal::Free { want, .. } = goal {
-            if !dry_run && free_now().is_some_and(|free| free >= want) {
-                break;
-            }
-        }
-        if dry_run {
-            report.removed.push(Removed { path, kind, bytes });
-            continue;
-        }
-        // 지우기 직전 다시 잰다 — 계획 뒤에 시작한 빌드가 그 산출물을 잡았을 수 있다.
-        let fresh = match used_paths() {
-            Ok(fresh) => fresh,
-            Err(in_use::Unknown(why)) => {
-                report.error = Some(format!("다시 재지 못해 멈췄어요 — {why}"));
-                break;
-            }
-        };
-        let moved = outputs::real(&row.output.path) != row.real || outputs::last_used(&row.output.path) != row.used;
-        if moved || in_use::in_use(&row.output, &fresh) {
-            report.skipped.push(Skipped { path, kind, bytes, why: "다시 재니 쓰는 중이에요".into() });
-            continue;
-        }
-        match outputs::remove(&row.output, &scope.allowed, &scope.deny) {
-            Ok(()) => report.removed.push(Removed { path, kind, bytes }),
-            Err(why) => report.skipped.push(Skipped { path, kind, bytes, why: why.into() }),
-        }
-    }
-    report.free_after = free_now().unwrap_or(free_before);
-    report
-}
-
-/// 잠금 — 앱과 `kasaterm-cli disk prune` 이 같은 산출물을 함께 지우지 않게 한 번에 하나만 돈다.
-#[cfg(unix)]
-fn lock() -> Option<std::fs::File> {
-    use std::os::unix::io::AsRawFd;
-    let dir = config_dir()?;
-    let _ = std::fs::create_dir_all(&dir);
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("disk-guard.lock")).ok()?;
-    // SAFETY: 열린 파일의 기술자다. 잠금은 file 이 닫힐 때 풀린다.
-    (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(file)
-}
-
-/// 정리 한 바퀴. `extra_repos` 는 이번에 함께 볼 레포(빌드 직후의 레포). 기록은 부른 쪽이 남긴다.
-#[cfg(unix)]
-pub fn run_pass(cfg: &Config, reason: Reason, extra_repos: &[PathBuf], dry_run: bool) -> Report {
-    let free_now = || free_space().map(|(free, _)| free);
-    let refused = |why: &str| Report {
-        at: now_secs(),
-        reason: reason.as_str(),
-        dry_run,
-        free_before: free_now().unwrap_or(0),
-        free_after: free_now().unwrap_or(0),
-        cap: cfg.build_cap,
-        error: Some(why.to_string()),
-        ..Report::default()
-    };
-    let scope = match Scope::current(extra_repos) {
-        Ok(scope) => scope,
-        Err(why) => return refused(why),
-    };
-    let Some(_lock) = lock() else { return refused("다른 정리가 도는 중이에요") };
-    run_in(cfg, reason, &scope, dry_run, &|p| du_bytes(p).unwrap_or(0), &in_use::used_paths, &free_now)
-}
-
-/// 정리하고 기록한다 — 앱과 CLI 가 같은 길로 남긴다.
-#[cfg(unix)]
-pub fn run_and_log(cfg: &Config, reason: Reason, extra_repos: &[PathBuf], dry_run: bool) -> Report {
-    let report = run_pass(cfg, reason, extra_repos, dry_run);
-    if report.worth_logging() && !dry_run {
-        append_log(&report);
-    }
-    report
-}
-
 /// 지키미를 세운다. 이미 섰으면 false. `on_event` 는 지키미 스레드에서 불린다 — 앱은 이벤트 루프로 넘기기만 한다.
+/// Windows 는 재고 알리기만 한다(정리는 docs/disk-guard.md 「Windows」).
 pub fn spawn(on_event: impl Fn(Event) + Send + 'static) -> bool {
-    #[cfg(unix)]
-    {
-        let (tx, rx) = std::sync::mpsc::channel();
-        if WAKE.set(Mutex::new(tx)).is_err() {
-            return false;
-        }
-        std::thread::Builder::new().name("disk-guard".into()).spawn(move || watch(&rx, &on_event)).is_ok()
+    let (tx, rx) = std::sync::mpsc::channel();
+    if WAKE.set(Mutex::new(tx)).is_err() {
+        return false;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = on_event;
-        false
-    }
+    std::thread::Builder::new().name("disk-guard".into()).spawn(move || watch(&rx, &on_event)).is_ok()
 }
 
-#[cfg(unix)]
 fn publish(status: Status) -> bool {
     let Ok(mut slot) = PUBLISHED.lock() else { return false };
     let changed = slot.as_deref().is_none_or(|old| !old.shown_same(&status));
@@ -817,23 +505,30 @@ fn publish(status: Status) -> bool {
     changed
 }
 
-#[cfg(unix)]
 /// 알림을 낼 수준. 문턱을 새로 넘을 때만 사람을 부르고, 문턱 위로 넉넉히 올라서야 다시 부를 수 있다.
-fn next_alert(alerted: Level, free: u64, cfg: &Config) -> (Level, bool) {
-    let now = level(free, cfg);
-    let relaxed = alerted.min(level(free.saturating_sub(HYSTERESIS), cfg));
+fn next_alert(alerted: Level, free: u64, warn: u64, critical: u64) -> (Level, bool) {
+    let at = |free: u64| if free < critical { Level::Critical } else if free < warn { Level::Low } else { Level::Ok };
+    let now = at(free);
+    let relaxed = alerted.min(at(free.saturating_sub(HYSTERESIS)));
     if now > relaxed { (now, true) } else { (relaxed, false) }
 }
 
-#[cfg(unix)]
+impl Status {
+    /// 다른 기기의 값으로 같은 판정을 한다 — 그 기기가 알린 문턱 그대로. `(다음 기억, 지금 부를까)`.
+    pub fn alert_step(&self, alerted: Level) -> (Level, bool) {
+        next_alert(alerted, self.free, self.warn_free, self.critical_free)
+    }
+}
+
 fn watch(rx: &std::sync::mpsc::Receiver<()>, on_event: &dyn Fn(Event)) {
     use std::sync::mpsc::RecvTimeoutError;
-    let started = Instant::now();
     let mut wait = Duration::from_secs(2);
-    let (mut last_routine, mut last_pressure): (Option<Instant>, Option<Instant>) = (None, None);
+    #[cfg(unix)]
+    let mut schedule = prune::Schedule::new();
     let mut places: Option<(Instant, Level)> = None;
     let mut alerted = Level::Ok;
     let mut big: Vec<Place> = Vec::new();
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut last_pass: Option<PassSummary> = None;
     loop {
         match rx.recv_timeout(wait) {
@@ -842,28 +537,14 @@ fn watch(rx: &std::sync::mpsc::Receiver<()>, on_event: &dyn Fn(Event)) {
         }
         wait = TICK;
         let cfg = Config::load();
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let Some((mut free, total)) = free_space() else { continue };
-        let low = level(free, &cfg) != Level::Ok;
-        let due = |last: Option<Instant>, every: Duration, first: Duration| {
-            last.map_or(started.elapsed() >= first, |t| t.elapsed() >= every)
-        };
-        let reason = if low && due(last_pressure, PRESSURE_EVERY, Duration::ZERO) {
-            Some(Reason::Pressure)
-        } else {
-            due(last_routine, ROUTINE_EVERY, FIRST_ROUTINE_AFTER).then_some(Reason::Routine)
-        };
-        if let Some(reason) = reason {
-            last_routine = Some(Instant::now());
-            if low {
-                last_pressure = last_routine;
+        #[cfg(unix)]
+        if let Some(pass) = schedule.tick(&cfg, free) {
+            if pass.removed > 0 {
+                last_pass = Some(pass);
             }
-            if cfg.auto_prune {
-                let report = run_and_log(&cfg, reason, &[], false);
-                if !report.removed.is_empty() {
-                    last_pass = Some(report.summary());
-                }
-                free = free_space().map_or(free, |(f, _)| f);
-            }
+            free = free_space().map_or(free, |(f, _)| f);
         }
         let now = level(free, &cfg);
         let status = |big: &[Place]| Status {
@@ -872,7 +553,7 @@ fn watch(rx: &std::sync::mpsc::Receiver<()>, on_event: &dyn Fn(Event)) {
             level: now,
             warn_free: cfg.warn_free,
             critical_free: cfg.critical_free,
-            auto_prune: cfg.auto_prune,
+            auto_prune: cfg.auto_prune && cfg!(unix),
             big: big.to_vec(),
             last_pass: last_pass.clone(),
         };
@@ -890,7 +571,7 @@ fn watch(rx: &std::sync::mpsc::Receiver<()>, on_event: &dyn Fn(Event)) {
             places = Some((Instant::now(), now));
             changed = publish(status(&big));
         }
-        let (next, alert) = next_alert(alerted, free, &cfg);
+        let (next, alert) = next_alert(alerted, free, cfg.warn_free, cfg.critical_free);
         alerted = next;
         if alert {
             append_log(&serde_json::json!({"at": now_secs(), "event": "alert", "level": now, "free": free, "big": big}));
@@ -901,37 +582,12 @@ fn watch(rx: &std::sync::mpsc::Receiver<()>, on_event: &dyn Fn(Event)) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
-
-    const NOW: u64 = 2_000_000_000;
 
     fn cfg() -> Config {
         Config::from_settings(&Value::Null)
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kasa-disk-pass-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        outputs::real(&dir)
-    }
-
-    fn target(at: &Path) -> PathBuf {
-        std::fs::create_dir_all(at.join("debug")).unwrap();
-        std::fs::write(at.join("CACHEDIR.TAG"), outputs::CARGO_TAG).unwrap();
-        at.to_path_buf()
-    }
-
-    fn row(path: &Path, age_h: u64) -> Row {
-        let output = outputs::Output { path: path.to_path_buf(), kind: Kind::Cargo, workspace: path.parent().unwrap().to_path_buf() };
-        Row { real: outputs::real(path), output, bytes: 10 * GIB, used: NOW - age_h * 3600 }
-    }
-
-    fn doomed(rows: &[Row], goal: Goal, used: &HashSet<PathBuf>) -> Vec<PathBuf> {
-        plan(rows, goal, 30 * 60, used, NOW).0.into_iter().map(|i| rows[i].output.path.clone()).collect()
     }
 
     #[test]
@@ -947,92 +603,12 @@ mod tests {
     }
 
     #[test]
-    fn over_the_cap_the_longest_unused_go_first_until_under() {
-        let root = scratch("cap");
-        let (old, mid, new) = (target(&root.join("old/target")), target(&root.join("mid/target")), target(&root.join("new/target")));
-        let rows = [row(&new, 2), row(&old, 9), row(&mid, 5)];
-        assert_eq!(doomed(&rows, Goal::Cap(15 * GIB), &HashSet::new()), vec![old, mid]);
-        assert!(doomed(&rows, Goal::Cap(30 * GIB), &HashSet::new()).is_empty());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn under_pressure_the_cap_is_ignored_until_free_space_recovers() {
-        let root = scratch("pressure");
-        let (a, b, c) = (target(&root.join("a/target")), target(&root.join("b/target")), target(&root.join("c/target")));
-        let rows = [row(&a, 9), row(&b, 8), row(&c, 7)];
-        let goal = Goal::Free { free: 3 * GIB, want: 25 * GIB };
-        assert_eq!(doomed(&rows, goal, &HashSet::new()), vec![a, b, c.clone()]);
-        let recent = [row(&c, 0)];
-        assert!(doomed(&recent, goal, &HashSet::new()).is_empty(), "a target touched minutes ago stays even under pressure");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_build_seen_through_an_alias_or_a_running_binary_protects_its_target() {
-        let root = scratch("alias");
-        let kt = target(&root.join("kt-x/target"));
-        let idle = target(&root.join("idle/target"));
-        let alias = root.join("tmp");
-        std::os::unix::fs::symlink(&root, &alias).unwrap();
-        let seen: HashSet<PathBuf> = in_use::env_paths(&format!("cargo build PWD={}/kt-x", alias.display()))
-            .iter()
-            .map(|p| outputs::real(p))
-            .collect();
-        assert!(doomed(&[row(&kt, 9)], Goal::Cap(GIB), &seen).is_empty());
-        let running: HashSet<PathBuf> = in_use::lsof_paths(&format!("p1\nftxt\nn{}/debug/kasaterm\n", kt.display()));
-        assert_eq!(doomed(&[row(&kt, 9), row(&idle, 8)], Goal::Cap(5 * GIB), &running), vec![idle]);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_target_another_links_into_stays_until_that_one_goes_too() {
-        let root = scratch("links");
-        let shared = target(&root.join("tell-mobile/source/target"));
-        std::fs::create_dir_all(shared.join("ios")).unwrap();
-        let sender = target(&root.join("report-senders/source/target"));
-        std::os::unix::fs::symlink(shared.join("ios"), sender.join("ios")).unwrap();
-        let rows = [row(&shared, 9), row(&sender, 5)];
-        for cap in [15, 1] {
-            assert_eq!(doomed(&rows, Goal::Cap(cap * GIB), &HashSet::new()), vec![sender.clone()]);
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_pass_removes_idle_outputs_inside_scope_and_logs_why_others_stay() {
-        let root = scratch("run");
-        let old = target(&root.join("kt-old/target"));
-        let busy = target(&root.join("kt-busy/target"));
-        let mobile = root.join("kt-old/mobile");
-        std::fs::create_dir_all(mobile.join("build/ios")).unwrap();
-        std::fs::write(mobile.join("pubspec.yaml"), "name: x\n").unwrap();
-        let scope = Scope::of(vec![outputs::Root { path: root.clone(), depth: 3 }], None, vec![]);
-        let busy_ws = outputs::real(&root.join("kt-busy"));
-        let used = move || Ok(HashSet::from([busy_ws.join("src")]));
-        let mut c = cfg();
-        c.build_cap = 0;
-        c.idle = Duration::ZERO;
-        let report = run_in(&c, Reason::Manual, &scope, false, &|_| GIB, &used, &|| Some(100 * GIB));
-        let removed: HashSet<_> = report.removed.iter().map(|r| PathBuf::from(&r.path)).collect();
-        assert_eq!(removed, HashSet::from([old.clone(), mobile.join("build")]));
-        assert!(!old.exists() && !mobile.join("build").exists() && mobile.join("pubspec.yaml").exists());
-        assert!(busy.exists());
-        assert_eq!(report.skipped.len(), 1);
-        assert_eq!(report.skipped[0].why, "쓰는 중이에요");
-        let unknown = || Err(in_use::Unknown("ps 를 못 읽었어요"));
-        let left = run_in(&c, Reason::Manual, &scope, false, &|_| GIB, &unknown, &|| Some(100 * GIB));
-        assert!(left.removed.is_empty() && left.error.is_some() && busy.exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn alerts_fire_once_per_new_level_and_rearm_only_well_above_the_threshold() {
         let c = cfg();
         let mut alerted = Level::Ok;
         let mut fired = Vec::new();
         for free_gib in [30, 19, 18, 21, 19, 4, 6, 4, 23, 19] {
-            let (next, alert) = next_alert(alerted, free_gib * GIB, &c);
+            let (next, alert) = next_alert(alerted, free_gib * GIB, c.warn_free, c.critical_free);
             alerted = next;
             if alert {
                 fired.push(free_gib);
@@ -1047,7 +623,7 @@ mod tests {
             free: 9 * GIB / 2,
             level: Level::Critical,
             big: vec![Place { label: "~/Library/Caches".into(), path: String::new(), bytes: 126 * GIB }],
-            last_pass: Some(PassSummary { at: 0, reason: "pressure", freed: 12 * GIB, removed: 2, skipped: 0 }),
+            last_pass: Some(PassSummary { at: 0, reason: "pressure".into(), freed: 12 * GIB, removed: 2, skipped: 0 }),
             ..Status::default()
         };
         let (title, body) = status.alert_text("맥미니");
