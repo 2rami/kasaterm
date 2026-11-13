@@ -61,7 +61,7 @@ pub(crate) fn summarize(accounts: &[Value], active: &str, sync: Option<&Value>, 
 }
 
 struct Entry {
-    tried: Instant,
+    tried: Option<Instant>,
     inflight: bool,
     value: Option<DeviceAccount>,
 }
@@ -78,12 +78,12 @@ pub(crate) fn poll(base: &str) {
     }
     let start = {
         let Ok(mut cache) = cache().lock() else { return };
-        let entry = cache.entry(base.to_string()).or_insert(Entry { tried: Instant::now() - EVERY, inflight: false, value: None });
-        if entry.inflight || entry.tried.elapsed() < EVERY {
+        let entry = cache.entry(base.to_string()).or_insert(Entry { tried: None, inflight: false, value: None });
+        if entry.inflight || entry.tried.is_some_and(|at| at.elapsed() < EVERY) {
             false
         } else {
             entry.inflight = true;
-            entry.tried = Instant::now();
+            entry.tried = Some(Instant::now());
             true
         }
     };
