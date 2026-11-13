@@ -26,6 +26,7 @@ tokio-tungstenite = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+image = { workspace = true }
 kasa-remote = { workspace = true, features = ["test-isolation"] }
 kasa-identity = { workspace = true, features = ["test-support"] }
 kasa-device = { workspace = true, features = ["test-support", "test-isolation"] }

@@ -349,7 +349,7 @@ pub(crate) struct RemoteSeat {
     pub(crate) remote_id: String,
     pub(crate) surface_key: Option<String>,
     pub(crate) name: String,
-    /// 알림 본문 재료 — 그 칸이 하던 일, 없으면 세션 제목.
+    /// 알림 본문 재료 — 그 칸 학생이 마지막에 한 말(원본 행의 `last_reply`).
     pub(crate) detail: String,
 }
 
@@ -1173,6 +1173,8 @@ pub(crate) struct TurnObservation {
     pub(crate) intent: String,
     /// 꼬리에서 본 뒤 작업(서브에이전트·백그라운드)이 아직 안 돌아왔나.
     pub(crate) bg: bool,
+    /// 마지막 턴이 스스로 깨어날 예약을 걸고 끝났나(`transcript::continues`).
+    pub(crate) continues: bool,
 }
 
 /// 훅이 알린 턴 경계 — UserPromptSubmit 이 열고 Stop 이 닫는다. 기록보다 먼저 온다(ms)

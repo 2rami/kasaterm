@@ -276,10 +276,12 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "attention_kind": b.and_then(|p| p.attention_kind.clone()),
                 "waiting_for": b.and_then(|p| p.waiting_for.clone()),
                 "idle_secs": b.and_then(|p| p.idle_secs),
-                // 완료 보고(`kasaterm-cli done`) — 폰 알림은 턴 끝이 아니라 이것으로 울린다.
+                // 완료 보고(`kasaterm-cli done`) — 끝의 가장 확실한 신호다. 보고 시각은 다른 기기가 같은 보고를
+                // 두 번 울리지 않게 가르는 열쇠다(`kasa_agents::ring`).
                 "done_outcome": b.and_then(|p| p.done_outcome.clone()),
                 "done_summary": b.and_then(|p| p.done_summary.clone()),
                 "done_ago_secs": b.and_then(|p| p.done_ago_secs),
+                "done_at_ms": b.and_then(|p| p.done_at_ms),
                 // 도는 지 몇 초 — 폰 목록 줄이 데스크톱 사이드바 줄처럼 띠 끝에 시간을 단다.
                 "busy_secs": b.and_then(|p| p.busy_secs),
                 // 무엇을 하는 중인가 — 폰이 「작업 중」 대신 정확한 말을 쓴다(2026-09-08 지시
@@ -287,6 +289,8 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 // 최신 도구 라벨, background 는 아직 안 끝난 백그라운드 셸·감시의 설명,
                 // subagents 는 도는 서브에이전트의 설명.
                 "doing": b.map(|p| p.intent.clone()).filter(|s| !s.is_empty()),
+                // 학생이 마지막에 한 말(120자) — 다른 기기의 끝남 알림이 그 학생 말로 온다(`kasa_agents::ring::finished`).
+                "last_reply": b.map(|p| p.last_reply.clone()).filter(|s| !s.is_empty()),
                 "background": b.map(|p| p.background.clone()).unwrap_or_default(),
                 "subagents": b.map(|p| p.subagents.clone()).unwrap_or_default(),
                 // agent 이름이 없는 하네스(codex)는 이름표로 얼굴을 찾는다.

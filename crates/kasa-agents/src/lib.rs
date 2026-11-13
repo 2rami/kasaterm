@@ -4,6 +4,7 @@
 pub mod claude_models;
 pub mod transcript;
 pub mod codex_children;
+pub mod ring;
 pub mod session_fork;
 
 pub mod runtime;

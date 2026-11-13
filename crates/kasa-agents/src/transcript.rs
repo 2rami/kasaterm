@@ -15,6 +15,8 @@ use kasa_socket::backend::{ActivityEvent, ConversationTurn, PaneActivity};
 
 mod signals;
 pub use signals::{turn_signal_from_tail, PendingQuestion, Questions, TurnSignal};
+mod latest;
+pub use latest::{continues, last_words, pending_tool};
 
 /// transcript에서 뽑은 한 번의 도구 사용.
 #[derive(Clone, Debug)]
@@ -603,6 +605,7 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         done_outcome: None,
         done_summary: None,
         done_ago_secs: None,
+        done_at_ms: None,
         detached: false,
         machine: None,
         title_pinned: false,
@@ -794,6 +797,7 @@ fn agy_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         done_outcome: None,
         done_summary: None,
         done_ago_secs: None,
+        done_at_ms: None,
         detached: false,
         machine: None,
         title_pinned: false,
@@ -878,7 +882,12 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         while let Some(i) = line[scan..].find("<task-id>") {
             let s = scan + i + "<task-id>".len();
             let Some(j) = line[s..].find("</task-id>") else { break };
-            done_tasks.insert(line[s..s + j].trim().to_string());
+            // 모니터의 사건 통보(`<event>`)는 끝이 아니다 — 모니터는 그 뒤로도 돈다.
+            let rest = &line[s + j..];
+            let notice = &rest[..rest.find("</task-notification>").unwrap_or(rest.len())];
+            if !notice.contains("<event>") {
+                done_tasks.insert(line[s..s + j].trim().to_string());
+            }
             scan = s + j;
         }
         // cwd 는 user/assistant 줄 최상위에 절대경로로 실린다 — 최신(역순 첫) 1개.
@@ -951,7 +960,8 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                             let bg = b.pointer("/input/run_in_background");
                             let is_bg = bg.and_then(|x| x.as_bool()).unwrap_or(false)
                                 || bg.and_then(|x| x.as_str()).is_some_and(|s| s.eq_ignore_ascii_case("true"));
-                            if name == "Bash" && is_bg {
+                            // 백그라운드 하위 에이전트는 「띄웠다」는 결과가 바로 와서 결과 짝으로는 끝난 것처럼 보인다.
+                            if matches!(name, "Bash" | "Agent" | "Task") && is_bg {
                                 let id = b.get("id").and_then(|x| x.as_str()).unwrap_or("");
                                 let desc = b
                                     .pointer("/input/description")
@@ -1022,6 +1032,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                                     .split("with ID: ")
                                     .nth(1)
                                     .or_else(|| txt.split("Monitor started (task ").nth(1))
+                                    .or_else(|| txt.split("agentId: ").nth(1))
                                     .and_then(|s| s.split(['.', ' ', '\n', ',', ')']).next())
                                     .filter(|s| !s.is_empty())
                                 {
@@ -1123,6 +1134,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         done_outcome: None,
         done_summary: None,
         done_ago_secs: None,
+        done_at_ms: None,
         detached: false,
         machine: None,
         title_pinned: false,

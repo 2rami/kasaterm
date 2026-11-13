@@ -258,6 +258,8 @@ pub struct Gate {
     approvals: Arc<approvals::Store>,
     /// 데스크톱이 올린 끝냄·대기 알림의 기기별 분당 송신 수(`gateway_push_alert.rs`).
     push_alerts: Arc<push_alert::Meter>,
+    /// 데스크톱이 맡긴 알림 얼굴(`gateway_push_alert/face.rs`).
+    push_faces: Arc<push_alert::Faces>,
     /// 닉네임·올린 프사(`gateway_profile.rs`).
     profiles: Arc<profile::Profiles>,
     auth_changes: tokio::sync::watch::Sender<u64>,
@@ -363,6 +365,7 @@ impl Gate {
             enroll: Arc::new(install::Enroll::from_env()),
             approvals: Arc::new(approvals::Store::open(state_path.as_deref())),
             push_alerts: Arc::default(),
+            push_faces: Arc::new(push_alert::Faces::open(state_path.as_deref())),
             profiles: Arc::new(profile::Profiles::open(state_path.as_deref())),
             auth_changes: tokio::sync::watch::channel(0).0,
             state_path,

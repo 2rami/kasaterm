@@ -4,7 +4,13 @@ import UserNotifications
 /// 푸시를 「학생이 보낸 메시지」 모양으로 바꾼다 — 아이콘 자리에 학생 얼굴(대화 알림).
 /// 서버가 payload 에 `sender`(이름)·`avatar`(얼굴 그림 주소)를 실어 주면 그림을 받아
 /// INSendMessageIntent 로 감싼다. 못 받으면 원래 알림 그대로 낸다(30초 안에 끝내야
-/// 하므로 그림은 짧게 기다린다).
+/// 하므로 그림은 짧게 기다린다). 계정 폰의 얼굴 주소는 관문이 맡아 둔 그림이라 인증 없이
+/// 열린다(`/relay/push/face/<id>.png`, 주소가 곧 자격).
+///
+/// 대화 알림은 제목 자리에 보낸 사람 이름을 그려 원래 제목을 버린다. 그래서 displayName 에
+/// 알림 제목을 그대로 준다 — 새 데스크톱은 제목이 곧 학생 이름이고, 옛 데스크톱의
+/// 「시로코 · 끝냄」도 상태를 잃지 않는다. 같은 학생끼리 묶는 건 이름이 아니라 handle 이다
+/// (맥 `macos_notify.rs` `with_character_avatar` 와 같다).
 final class NotificationService: UNNotificationServiceExtension {
   private var handler: ((UNNotificationContent) -> Void)?
   private var content: UNMutableNotificationContent?
@@ -79,13 +85,15 @@ final class NotificationService: UNNotificationServiceExtension {
     image: Data?,
     thread: String?
   ) -> UNNotificationContent {
+    let identity = "kasaterm:\(sender)"
+    let title = content.title.trimmingCharacters(in: .whitespacesAndNewlines)
     let person = INPerson(
-      personHandle: INPersonHandle(value: sender, type: .unknown),
+      personHandle: INPersonHandle(value: identity, type: .unknown),
       nameComponents: nil,
-      displayName: sender,
+      displayName: title.isEmpty ? sender : title,
       image: image.map { INImage(imageData: $0) },
       contactIdentifier: nil,
-      customIdentifier: sender
+      customIdentifier: identity
     )
     let intent = INSendMessageIntent(
       recipients: nil,

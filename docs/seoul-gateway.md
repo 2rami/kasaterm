@@ -60,9 +60,11 @@ Nagle 이 프레임마다 상대의 지연 ACK(40ms)를 기다리게 해 요청 
   피드백은 `/etc/kasa-relay/feedback.env`). Caddy 는 공식 2.11.6(우분투 2.6.2 는 PROXY 프로토콜 리스너가 없다), systemd `kasa-edge`.
   원격 승인 폰 알림용 APNs 열쇠는 `/etc/kasa-relay/apns/AuthKey_<id>.p8`(디렉터리 root:kasa-relay 750, 파일 kasa-relay 0600),
   env 에 `KASATERM_APNS_KEY_ID`·`KASATERM_APNS_TEAM_ID`·`KASATERM_APNS_KEY_PATH`([remote-approval.md](remote-approval.md)).
-  관문이 새로 쓰는 파일은 상태 옆 `relay-push.json`(폰 푸시 토큰)·`relay-approvals-audit.jsonl`(승인 감사).
-  계정 폰의 끝냄·대기 알림도 같은 열쇠로 관문이 쏜다(`POST /relay/push/alert`) — 이 창구가 없는 옛 관문이면 데스크톱이
-  404 를 받고 조용히 넘어가니, 그 알림이 오려면 관문을 새 판으로 갈아 끼워야 한다(`gateway.sh build` → `upgrade`).
+  관문이 새로 쓰는 파일은 상태 옆 `relay-push.json`(폰 푸시 토큰)·`relay-approvals-audit.jsonl`(승인 감사)·
+  `relay-push-faces.json` + `relay-push-faces/<id>.png`(알림 아이콘 자리의 학생 얼굴, 계정마다 64장·2MB·30일).
+  계정 폰의 끝냄·대기·막힘 알림도 같은 열쇠로 관문이 쏜다(`POST /relay/push/alert`) — 이 창구가 없는 옛 관문이면 데스크톱이
+  404 를 받고 조용히 넘어가니, 그 알림이 오려면 관문을 새 판으로 갈아 끼워야 한다(`gateway.sh build` → `upgrade`). 얼굴·막힘
+  종류를 모르는 옛 관문에도 알림은 얼굴 없이·끝냄으로 간다([remote-approval.md](remote-approval.md)).
 - 운영 `tools/kasa-gateway-seoul/gateway.sh`(이 맥): `build`(도커 교차 컴파일) · `upgrade <바이너리>` · `install` · `env` ·
   `state` · `sync-install` · `edge`(Caddy·nginx 설정만, 재시작) · `allow <이름>`(on-demand 인증서 허가) · `status`.
   중계는 `tools/kasanet-relay/relay.sh`.

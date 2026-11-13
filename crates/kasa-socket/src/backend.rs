@@ -183,6 +183,9 @@ pub struct ResponseEnd {
     /// 답을 기다리는 질문의 호출 ID.
     #[serde(default)]
     pub questions: Vec<String>,
+    /// 마지막 턴이 스스로 깨어날 예약을 걸고 끝났다(`ScheduleWakeup` 등) — 끝남이 아니다. 모르는 옛 원본은 false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continues: bool,
 }
 
 /// One pane's self-reported activity, published to a shared board so
@@ -416,6 +419,9 @@ pub struct PaneActivity {
     /// 보고 후 경과 초 — UI 가 "3분 전 완료" 상대 표시를 하도록 절대시각 대신 나이.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_ago_secs: Option<u64>,
+    /// 보고 시각(epoch ms) — 보고마다 다른 열쇠라 다른 기기가 같은 보고로 두 번 울리지 않는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at_ms: Option<u64>,
     /// **화면에 없는 pane**(사용자가 닫았거나 숨김 — PTY 는 재부착 대비로 돈다).
     /// 사용자가 닫은 pane 은 화면에서 사라졌는데 board 에는 멀쩡히 떠서, 학생들이
     /// 거기가 닫힌 줄 모르고 새 일을 시켰다(사용자 2026-08-15 「내가 pane 닫아도

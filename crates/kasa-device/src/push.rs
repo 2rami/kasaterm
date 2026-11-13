@@ -3,13 +3,14 @@
 //!
 //! 재료 셋: ①폰이 `POST /term/push-token` 으로 맡긴 기기 토큰(`push_tokens.json`,
 //! 0600) ②애플 푸시 열쇠(`~/.config/kasaterm/apns/key.json` — key_id·team_id·p8,
-//! 앱스토어 API 열쇠와 **다른** 열쇠다) ③상태 변화 감시 루프(`push_loop`) — 폰이 읽는
-//! `/term/panes` 행(이 기계 + 명부 기계 캐시)을 4초마다 대조해 「승인·질문 대기로 들어감」
-//! 「바쁨→끝냄」 순간에만 쏜다. 상태를 그대로 폴링해 쏘면 같은 대기가 매번 온다.
+//! 앱스토어 API 열쇠와 **다른** 열쇠다) ③언제 울릴지 — 승인·질문 기다림·막힘·정말 다 끝남뿐이고, 판정과 문구는
+//! 데스크톱 알림과 같은 `kasa_agents::ring` 이다. 이 기계 칸은 앱의 판정이 맥 알림과 같은 사건으로 [`send_detached`]
+//! 를 부르고, 명부 기계 칸은 `push_loop` 가 그 기계 행(`/term/panes` 캐시)을 같은 규칙으로 본다.
 //!
 //! 계정 모드 폰은 데스크톱에 토큰을 맡기지 않고 관문에만 맡긴다(폰 `push.dart` `bindAccount`) — 이 기기엔
 //! 토큰도 열쇠도 없을 수 있다. 그래서 이 기계 학생의 알림은 관문 로그인이 있으면 관문(`POST /relay/push/alert`)에도
 //! 올리고, 관문이 계정 폰들에 쏜다. 명부 기계 행은 올리지 않는다 — 그 기계가 계정 기기면 스스로 올려 두 번 온다.
+//! 계정 폰의 알림 확장은 이 기기의 `/term/avatar` 를 못 여니 학생 얼굴은 관문에 맡긴다(`push/face.rs`).
 //!
 //! APNs 는 HTTP/2 + ES256 JWT(`iss`=팀, `kid`=열쇠) 를 요구한다. 서명은 ring 으로
 //! 직접 한다 — jsonwebtoken 을 더 들이지 않으려고. 토큰은 50분마다 새로 만든다
@@ -21,13 +22,15 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use kasa_agents::ring as call;
+
+pub mod face;
+
 /// 앱의 번들 id — `apns-topic`. 폰 프로젝트(mobile/ios)와 같아야 한다.
 pub const TOPIC: &str = "com.debimarlene.kasaterm";
 const TICK: Duration = Duration::from_secs(4);
-/// 같은 pane 에 연달아 쏘지 않는 최소 간격 — 대기↔바쁨을 튀는 스피너 오판이 있다.
+/// 같은 pane 의 대기를 연달아 쏘지 않는 최소 간격 — 대기↔바쁨을 튀는 스피너 오판이 있다.
 const MIN_GAP: Duration = Duration::from_secs(15);
-/// 이보다 오래된 완료 보고는 울리지 않는다 — 끊겼던 기계가 다시 붙으면 묵은 보고가 새 줄로 들어온다.
-const DONE_FRESH_SECS: u64 = 120;
 const JWT_TTL: Duration = Duration::from_secs(50 * 60);
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -302,15 +305,16 @@ pub async fn send(alert: &Alert) -> usize {
 }
 
 /// 관문에 올릴 몸통. 관문은 상한을 넘거나 제어 문자가 든 몸통을 통째로 거절하니(알림이 사라진다) 여기서 맞춰
-/// 다듬는다 — 쪽지 요약엔 줄바꿈이 든다. 얼굴은 싣지 않는다(관문이 안 받는다, `gateway_push_alert.rs`).
-pub fn relay_body(alert: &Alert) -> Value {
+/// 다듬는다 — 쪽지 요약엔 줄바꿈이 든다. 얼굴은 그림의 해시만 싣는다. 해시가 없으면 `face` 키도 없다 — 옛 관문은
+/// 모르는 키가 든 몸통을 거절한다(`deny_unknown_fields`).
+pub fn relay_body(alert: &Alert, face: Option<&str>) -> Value {
     let clip = |text: &str, max: usize| -> String {
         text.chars().map(|c| if c.is_control() { ' ' } else { c }).take(max).collect()
     };
     let url = alert.url.as_deref().filter(|u| {
         u.len() <= 2048 && (u.starts_with("https://") || u.starts_with("http://")) && !u.chars().any(char::is_control)
     });
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "title": clip(&alert.title, 120),
         "body": clip(&alert.body, 180),
         "pane": alert.pane,
@@ -318,7 +322,11 @@ pub fn relay_body(alert: &Alert) -> Value {
         "collapse": alert.collapse.as_deref().map(|c| clip(c, 64)),
         "sender": alert.sender.as_deref().map(|s| clip(s, 40)),
         "url": url,
-    })
+    });
+    if let Some(hash) = face {
+        body["face"] = hash.into();
+    }
+    body
 }
 
 fn relay_client() -> &'static reqwest::Client {
@@ -334,34 +342,87 @@ fn relay_client() -> &'static reqwest::Client {
 
 /// 관문 로그인이 있으면 관문에 올린다. 답의 `phones` 는 토큰이 있는 계정 폰 수다.
 async fn send_account(alert: &Alert) -> usize {
-    static OLD_GATEWAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let Some((cred, _)) = crate::device_auth::capture() else { return 0 };
-    let url = format!("{}/relay/push/alert", cred.relay.trim_end_matches('/'));
-    let response = match relay_client().post(url).bearer_auth(&cred.token).json(&relay_body(alert)).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[push] 관문에 못 올림: {e}");
-            return 0;
+    let face = alert.avatar_slug.as_deref().and_then(face::of);
+    relay_alert(cred.relay.trim_end_matches('/'), &cred.token, alert, face.as_ref()).await
+}
+
+/// 관문에 알림 한 통. 얼굴은 해시만 먼저 싣고, 관문이 모른다고 하면(409 `face_unknown`) 그림을 올린 뒤 다시 보낸다.
+/// 새 필드 때문에 알림이 사라지지 않게 — 그림을 못 올렸거나 관문이 얼굴 든 몸통을 거절하면(옛 관문은 400
+/// `bad_request`) 얼굴 없이, 막힘 종류를 모르면(400 `bad_kind`) 끝냄으로 한 번 더 보낸다. 409·400 은 아무 폰에도 안
+/// 쏜 답이라 다시 보내도 두 번 울리지 않는다.
+pub async fn relay_alert(base: &str, token: &str, alert: &Alert, face: Option<&face::Face>) -> usize {
+    static OLD_GATEWAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let url = format!("{base}/relay/push/alert");
+    let (mut face, mut uploaded, mut plain_kind) = (face, false, false);
+    loop {
+        let mut body = relay_body(alert, face.map(|f| f.hash.as_str()));
+        if plain_kind {
+            body["kind"] = "done".into();
         }
-    };
-    let status = response.status().as_u16();
-    let value: Value = response.json().await.unwrap_or_default();
-    match status {
-        200..=299 => value["phones"].as_u64().unwrap_or(0) as usize,
-        401 if value["error"] == "unauthorized" => {
-            crate::device_auth::reject_token(&cred.token);
-            0
-        }
-        // 창구가 없는 옛 관문 — 알림마다 같은 말을 쌓지 않는다.
-        404 => {
-            if !OLD_GATEWAY.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("[push] 관문이 옛 판이라 계정 폰 알림을 못 올림(/relay/push/alert 없음)");
+        let response = match relay_client().post(&url).bearer_auth(token).json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[push] 관문에 못 올림: {e}");
+                return 0;
             }
-            0
+        };
+        let status = response.status().as_u16();
+        let value: Value = response.json().await.unwrap_or_default();
+        match (status, face) {
+            (200..=299, _) => return value["phones"].as_u64().unwrap_or(0) as usize,
+            (409, Some(f)) if value["error"] == "face_unknown" && !uploaded => {
+                uploaded = true;
+                if !upload_face(base, token, f).await {
+                    face = None;
+                }
+            }
+            // 막힘 종류를 모르는 옛 관문 — 끝냄으로라도 간다(본문이 막힌 사연을 말한다).
+            (400, _) if value["error"] == "bad_kind" && alert.kind == "waiting:blocked" && !plain_kind => plain_kind = true,
+            (400 | 409, Some(_)) => {
+                if value["error"] == "bad_request" {
+                    eprintln!("[push] 관문이 옛 판이라 얼굴 없이 보냄(face 를 모름)");
+                    face::pause();
+                }
+                face = None;
+            }
+            (401, _) if value["error"] == "unauthorized" => {
+                crate::device_auth::reject_token(token);
+                return 0;
+            }
+            // 창구가 없는 옛 관문 — 알림마다 같은 말을 쌓지 않는다.
+            (404, _) => {
+                if !OLD_GATEWAY.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("[push] 관문이 옛 판이라 계정 폰 알림을 못 올림(/relay/push/alert 없음)");
+                }
+                return 0;
+            }
+            _ => {
+                eprintln!("[push] 관문이 알림을 거절함 ({status} {})", value["error"].as_str().unwrap_or(""));
+                return 0;
+            }
         }
-        _ => {
-            eprintln!("[push] 관문이 알림을 거절함 ({status} {})", value["error"].as_str().unwrap_or(""));
-            0
+    }
+}
+
+async fn upload_face(base: &str, token: &str, face: &face::Face) -> bool {
+    let url = format!("{base}/relay/push/face/{}", face.hash);
+    let sent = relay_client()
+        .put(url)
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "image/png")
+        .body(face.png.clone())
+        .send()
+        .await;
+    match sent {
+        Ok(r) if r.status().is_success() => true,
+        Ok(r) => {
+            eprintln!("[push] 관문이 얼굴을 안 받음 ({})", r.status());
+            false
+        }
+        Err(e) => {
+            eprintln!("[push] 얼굴을 못 올림: {e}");
+            false
         }
     }
 }
@@ -444,16 +505,10 @@ pub async fn send_to(env: &str, token: &str, payload: &Value, collapse: &str) ->
         .map_err(|(status, text)| (status.as_u16(), text))
 }
 
-/// 폰을 울리는 대기는 사람이 골라야 하는 것(승인·질문)뿐이다 — 답 기다림·오래 쉼까지 울리니
-/// 끝냄·승인 알림이 묻혔다(2026-10-29 「done일때만 오게, 선택해야되는거나」).
-fn needs_choice(kind: &str) -> bool {
-    matches!(kind, "permission" | "question")
-}
-
 /// 쪽지 중 폰을 울릴 것 — 끝냄·실패·고를 것·브라우저에서 사람 손 기다림(`docs/chrome-mirror.md`),
 /// 그리고 「이 폰」으로 보낸 페이지(울리지 않으면 종 목록을 열기 전엔 못 본다). 나머지는 종 목록에만 남는다.
 fn note_rings(kind: &str) -> bool {
-    matches!(kind, "done_ok" | "done_fail" | "browser" | "link") || needs_choice(kind)
+    matches!(kind, "done_ok" | "done_fail" | "browser" | "link") || call::wait_rings(kind)
 }
 
 /// 쪽지가 들어왔을 때 — `notes::add` 뒤에서 부른다.
@@ -478,21 +533,30 @@ pub fn note_arrived_blocking(character: &str, kind: &str, summary: &str, pane: &
     }
 }
 
+/// GUI 스레드에서 기다리지 않고 보낸다 — 앱의 판정(맥 알림과 같은 사건)이 이 기계 칸의 알림을 폰에도 낼 때.
+pub fn send_detached(alert: Alert) {
+    let _ = std::thread::Builder::new().name("kasa-push".into()).spawn(move || {
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            rt.block_on(send(&alert));
+        }
+    });
+}
+
+/// 쪽지도 보낸 학생이 하는 말로 — 제목은 학생 이름, 본문은 쪽지 요약.
 fn note_alert(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) -> Alert {
     let who = if character.is_empty() { "학생" } else { character };
-    let head = match kind {
-        "permission" => "승인 기다림",
-        "question" => "질문",
-        "waiting" | "idle" => "답 기다림",
-        "done_ok" => "끝냄",
-        "done_fail" => "실패",
-        "dead" => "멈춤",
-        "link" => "페이지",
-        _ => "쪽지",
+    let said = call::spoken(summary);
+    let body = match kind {
+        _ if !said.is_empty() => said,
+        "link" => "선생님, 이 페이지 봐 주세요.".to_string(),
+        "permission" => call::ask("", None),
+        "question" => call::question(""),
+        "done_fail" => "선생님, 잘 안 됐어요.".to_string(),
+        _ => "선생님, 다 끝났어요.".to_string(),
     };
     Alert {
-        title: format!("{who} · {head}"),
-        body: summary.chars().take(180).collect(),
+        title: who.to_string(),
+        body,
         machine: None,
         pane: pane.to_string(),
         kind: format!("note:{kind}"),
@@ -505,172 +569,110 @@ fn note_alert(character: &str, kind: &str, summary: &str, pane: &str, url: Optio
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct Seen {
-    waiting: bool,
-    kind: String,
-    /// 완료 보고가 있으면 그 나이(초).
-    done_ago: Option<u64>,
+/// 다른 기계 칸 하나 — 끝남·막힘은 [`call::Finish`], 대기는 사람이 골라야 하는 대기로 들어선 순간.
+#[derive(Default)]
+struct RowWatch {
+    finish: call::Finish,
+    wait: Option<String>,
+    waited_at: Option<Instant>,
 }
 
-fn seen_of(row: &Value) -> Seen {
-    let status = row.get("status").and_then(Value::as_str).unwrap_or("");
-    Seen {
-        waiting: status == "waiting" || status == "blocked",
-        kind: row.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
-        done_ago: row
-            .get("done_outcome")
-            .and_then(Value::as_str)
-            .map(|_| row.get("done_ago_secs").and_then(Value::as_u64).unwrap_or(0)),
-    }
+/// 명부 기계 행들의 판정. 이 기계 칸은 여기서 보지 않는다 — 앱의 판정이 맥 알림과 같은 사건으로 폰에도 보낸다
+/// (같은 칸을 두 곳이 판정하면 한쪽에만 오는 알림·두 번 오는 알림이 생겼다).
+#[derive(Default)]
+struct RemoteRows {
+    seen: HashMap<String, RowWatch>,
 }
 
-/// 새 완료 보고인가 — 보고가 새로 생겼거나, 같은 칸이 다시 보고해 나이가 줄었을 때.
-/// 다른 기계의 줄은 목록 캐시라 갱신 사이에 나이가 멈춰 있으니 「줄었나」로만 가른다.
-fn new_done(prev: Option<&Seen>, cur: &Seen) -> bool {
-    let Some(age) = cur.done_ago.filter(|a| *a <= DONE_FRESH_SECS) else {
-        return false;
-    };
-    prev.and_then(|p| p.done_ago).is_none_or(|before| age < before)
-}
-
-/// 이 기계 + 명부 기계의 pane 행을 한 번 모은다 — (기계 route, 행).
-async fn all_rows() -> Vec<(Option<String>, Value)> {
-    let mut out = Vec::new();
-    if let Some(port) = std::env::var("KASASPACE_MCP_PORT").ok().and_then(|p| p.parse::<u16>().ok()) {
-        if let Ok(resp) = client_local()
-            .get(format!("http://127.0.0.1:{port}/term/panes"))
-            .timeout(Duration::from_secs(3))
-            .send()
-            .await
-        {
-            if let Ok(v) = resp.json::<Value>().await {
-                for row in v.as_array().cloned().unwrap_or_default() {
-                    if row.get("mirror_of").and_then(Value::as_str).is_some() {
-                        continue;
-                    }
-                    out.push((None, row));
-                }
-            }
-        }
-    }
-    for m in crate::machines::snapshot() {
-        let route = m.get("route").and_then(Value::as_str).map(str::to_string);
-        for row in m.get("panes").and_then(Value::as_array).cloned().unwrap_or_default() {
-            // 거울 pane 은 몸통이 저쪽이라 저쪽 행이 따로 온다 — 두 번 안 쏘게 뺀다.
-            if row.get("mirror_of").and_then(Value::as_str).is_some() {
-                continue;
-            }
-            out.push((route.clone(), row));
-        }
-    }
-    out
-}
-
-fn client_local() -> &'static reqwest::Client {
-    static C: OnceLock<reqwest::Client> = OnceLock::new();
-    C.get_or_init(|| reqwest::Client::builder().build().unwrap_or_default())
-}
-
-/// 쏠 길이 하나라도 있나 — 이 기기에 맡긴 토큰과 열쇠, 또는 관문 로그인(계정 폰은 관문이 쏜다).
-fn ready() -> bool {
-    (!tokens().is_empty() && configured()) || crate::device_auth::capture().is_some()
-}
-
-/// 상태 변화 감시 — 본체(PTY 를 가진 앱) 한 곳만 돈다. 첫 바퀴는 기준만 잡고 안 쏜다
-/// (켜자마자 대기 중인 학생 전부가 한꺼번에 울리지 않게).
-///
-/// 「끝냄」은 턴이 끝날 때가 아니라 완료 보고(`kasaterm-cli done`)가 들어올 때만 울린다 — 백그라운드
-/// 작업을 기다리는 학생은 턴을 몇 번이고 끝내서, 끝날 때마다 폰이 울렸다(2026-10-31 「done 상태인
-/// 학생만 보내게」).
-pub async fn push_loop() {
-    let mut last: HashMap<String, Seen> = HashMap::new();
-    let mut sent_at: HashMap<String, Instant> = HashMap::new();
-    let mut primed = false;
-    loop {
-        tokio::time::sleep(TICK).await;
-        if !ready() {
-            continue;
-        }
-        let rows = all_rows().await;
-        let mut now_seen: HashMap<String, Seen> = HashMap::new();
+impl RemoteRows {
+    fn update(&mut self, rows: Vec<(String, Value)>, now: Instant) -> Vec<Alert> {
+        let mut out = Vec::new();
+        let mut alive = std::collections::HashSet::new();
         for (route, row) in rows {
             let Some(id) = row.get("id").and_then(Value::as_str) else { continue };
             let name = row.get("name").and_then(Value::as_str).unwrap_or("");
             if name.is_empty() || row.get("closed").and_then(Value::as_bool).unwrap_or(false) {
                 continue;
             }
-            let key = format!("{}/{id}", route.as_deref().unwrap_or(""));
-            let cur = seen_of(&row);
-            let prev = last.get(&key).cloned();
-            now_seen.insert(key.clone(), cur.clone());
-            if !primed {
-                continue;
-            }
-            let title_of = || {
-                row.get("title")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| row.get("waiting_for").and_then(Value::as_str).map(str::to_string))
-                    .unwrap_or_default()
-            };
-            let where_ = route.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
+            let key = format!("{route}/{id}");
+            alive.insert(key.clone());
+            let first = !self.seen.contains_key(&key);
+            let watch = self.seen.entry(key.clone()).or_default();
+            let status = row.get("status").and_then(Value::as_str).unwrap_or("");
+            let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
+            let wait = (matches!(status, "waiting" | "blocked") && call::wait_rings(kind)).then(|| kind.to_string());
+            // 대기↔바쁨을 튀는 스피너 오판이 있다 — 같은 칸의 대기는 15초 안에 다시 울리지 않는다.
+            let entering = !first && wait.is_some() && watch.wait != wait
+                && watch.waited_at.is_none_or(|at| now.saturating_duration_since(at) >= MIN_GAP);
+            watch.wait = wait;
             let slug = row
                 .get("slug")
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .or_else(|| kasa_characters::character::slug_for_any(name));
-            let alert = if cur.waiting
-                && needs_choice(&cur.kind)
-                && !prev.as_ref().is_some_and(|p| p.waiting && p.kind == cur.kind)
-            {
-                let head = if cur.kind == "permission" { "승인 기다림" } else { "질문 기다림" };
-                Some(Alert {
-                    title: format!("{name} · {head}{where_}"),
-                    body: title_of(),
-                    machine: route.clone(),
-                    pane: id.to_string(),
-                    kind: format!("waiting:{}", cur.kind),
-                    collapse: Some(format!("wait-{key}")),
-                    sender: Some(name.to_string()),
-                    avatar_slug: slug.clone(),
-                    url: None,
-                })
-            } else if new_done(prev.as_ref(), &cur) {
-                let failed = row.get("done_outcome").and_then(Value::as_str) == Some("failed");
-                Some(Alert {
-                    title: format!("{name} · {}{where_}", if failed { "실패" } else { "끝냄" }),
-                    body: row
-                        .get("done_summary")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .unwrap_or_else(title_of),
-                    machine: route.clone(),
-                    pane: id.to_string(),
-                    kind: "done".into(),
-                    collapse: Some(format!("done-{key}")),
-                    sender: Some(name.to_string()),
-                    avatar_slug: slug.clone(),
-                    url: None,
-                })
-            } else {
-                None
+            let alert = |body: String, kind: &str, collapse: String| Alert {
+                title: format!("{name} ({route})"),
+                body,
+                machine: Some(route.clone()),
+                pane: id.to_string(),
+                kind: kind.to_string(),
+                collapse: Some(collapse),
+                sender: Some(name.to_string()),
+                avatar_slug: slug.clone(),
+                url: None,
             };
-            if let Some(alert) = alert {
-                if sent_at.get(&key).is_some_and(|t| t.elapsed() < MIN_GAP) {
-                    continue;
+            if entering {
+                watch.waited_at = Some(now);
+                let reason = row.get("waiting_for").and_then(Value::as_str).unwrap_or("");
+                let body = if kind == "permission" { call::ask(call::tool_in_reason(reason), None) } else { call::question(reason) };
+                out.push(alert(body, &format!("waiting:{kind}"), format!("wait-{key}")));
+            }
+            match watch.finish.update(&call::row_facts(&row), now) {
+                Some(call::Ring::Finished { report, .. }) => {
+                    let said = row.get("last_reply").and_then(Value::as_str);
+                    out.push(alert(call::finished(report.as_ref(), said), "done", format!("done-{key}")));
                 }
-                sent_at.insert(key.clone(), Instant::now());
-                let n = send(&alert).await;
-                if n > 0 {
-                    eprintln!("[push] {} → 폰 {n}대", alert.title);
+                Some(call::Ring::Blocked { report }) => {
+                    out.push(alert(call::blocked(&report), "waiting:blocked", format!("blocked-{key}")));
                 }
+                None => {}
             }
         }
-        last = now_seen;
-        primed = true;
+        self.seen.retain(|key, _| alive.contains(key));
+        out
+    }
+}
+
+/// 명부 기계의 pane 행 — (기계 route, 행). 거울 pane 은 몸통이 저쪽이라 저쪽 행이 따로 온다 — 두 번 안 쏘게 뺀다.
+fn remote_rows() -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for m in crate::machines::snapshot() {
+        let Some(route) = m.get("route").and_then(Value::as_str) else { continue };
+        for row in m.get("panes").and_then(Value::as_array).cloned().unwrap_or_default() {
+            if row.get("mirror_of").and_then(Value::as_str).is_none() {
+                out.push((route.to_string(), row));
+            }
+        }
+    }
+    out
+}
+
+/// 명부 기계 학생의 알림을 이 기기에 맡긴 폰에 쏜다 — 본체(PTY 를 가진 앱) 한 곳만 돈다. 계정 폰은 그 기계가 스스로
+/// 관문에 올리므로 여기서는 이 기기 토큰으로만 보낸다(`send` 는 다른 기계 칸을 관문에 안 올린다). 첫 바퀴는 기준만
+/// 잡는다(켜자마자 대기 중인 학생 전부가 한꺼번에 울리지 않게).
+pub async fn push_loop() {
+    let mut rows = RemoteRows::default();
+    loop {
+        tokio::time::sleep(TICK).await;
+        if tokens().is_empty() || !configured() {
+            continue;
+        }
+        for alert in rows.update(remote_rows(), Instant::now()) {
+            let n = send(&alert).await;
+            if n > 0 {
+                eprintln!("[push] {} → 폰 {n}대", alert.title);
+            }
+        }
     }
 }
 
@@ -696,30 +698,54 @@ mod tests {
         for kind in ["waiting", "idle", "dead", "note", ""] {
             assert!(!super::note_rings(kind), "{kind}");
         }
-        assert!(!super::needs_choice("idle"));
+        let note = super::note_alert("시로코", "done_ok", "## 결과\n**빌드** 끝났어요.", "%3", None);
+        assert_eq!((note.title.as_str(), note.body.as_str()), ("시로코", "빌드 끝났어요."));
+    }
+
+    fn row(status: &str, end: Option<(&str, bool)>) -> serde_json::Value {
+        let mut row = serde_json::json!({"id": "%3", "name": "시로코", "status": status});
+        if let Some((completion, background)) = end {
+            row["response_end"] = serde_json::json!({"surface_id": "%3", "session_id": "s1", "source": "a",
+                "completion": completion, "idle": status == "idle", "error": false, "background": background});
+        }
+        row
+    }
+
+    /// 다른 기계 칸도 데스크톱과 같은 규칙이다 — 턴만 끝나고 bg 가 돌면 안 울리고, 다 끝난 순간 한 번.
+    #[test]
+    fn other_machine_rows_ring_by_the_shared_rule() {
+        let mut rows = super::RemoteRows::default();
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + std::time::Duration::from_secs(s);
+        let feed = |rows: &mut super::RemoteRows, row: serde_json::Value, t| rows.update(vec![("mini".into(), row)], t);
+        assert!(feed(&mut rows, row("working", Some(("", false))), at(0)).is_empty());
+        let mut waiting = row("waiting", Some(("", false)));
+        waiting["kind"] = "permission".into();
+        waiting["waiting_for"] = "Bash 승인 대기".into();
+        let asked = feed(&mut rows, waiting.clone(), at(4));
+        assert_eq!(asked.len(), 1);
+        assert_eq!((asked[0].title.as_str(), asked[0].body.as_str(), asked[0].kind.as_str()),
+            ("시로코 (mini)", "선생님, 명령을 실행해도 될까요?", "waiting:permission"));
+        assert!(feed(&mut rows, waiting, at(8)).is_empty(), "같은 대기는 한 번");
+
+        assert!(feed(&mut rows, row("idle", Some(("0a", true))), at(12)).is_empty());
+        assert!(feed(&mut rows, row("idle", Some(("0a", true))), at(30)).is_empty(), "bg 가 도는 동안은 끝이 아니다");
+        assert!(feed(&mut rows, row("idle", Some(("0a", false))), at(34)).is_empty());
+        let done = feed(&mut rows, row("idle", Some(("0a", false))), at(40));
+        assert_eq!(done.len(), 1);
+        assert_eq!((done[0].kind.as_str(), done[0].body.as_str()), ("done", "선생님, 다 끝났어요."));
+        assert!(feed(&mut rows, row("idle", Some(("0a", false))), at(50)).is_empty());
+
+        let mut stuck = row("idle", Some(("0a", false)));
+        stuck["done_outcome"] = "failed".into();
+        stuck["done_summary"] = "막힘: 열쇠가 없어요".into();
+        stuck["done_at_ms"] = 99.into();
+        let blocked = feed(&mut rows, stuck, at(54));
+        assert_eq!((blocked[0].kind.as_str(), blocked[0].body.as_str()), ("waiting:blocked", "선생님, 막혔어요. 열쇠가 없어요"));
     }
 
     #[test]
-    fn a_turn_ending_without_a_done_report_never_rings() {
-        let seen = |row: serde_json::Value| super::seen_of(&row);
-        let working = seen(serde_json::json!({"status": "working"}));
-        let idle = seen(serde_json::json!({"status": "idle"}));
-        assert!(!super::new_done(Some(&working), &idle));
-        assert!(!super::new_done(None, &idle));
-
-        let reported = seen(serde_json::json!({"status": "working", "done_outcome": "succeeded", "done_ago_secs": 0}));
-        assert!(super::new_done(Some(&working), &reported));
-        let later = seen(serde_json::json!({"status": "idle", "done_outcome": "succeeded", "done_ago_secs": 8}));
-        assert!(!super::new_done(Some(&reported), &later), "같은 보고가 쉬는 칸으로 넘어가도 다시 울리지 않는다");
-        let again = seen(serde_json::json!({"status": "idle", "done_outcome": "failed", "done_ago_secs": 1}));
-        assert!(super::new_done(Some(&later), &again), "다시 보고하면 나이가 줄어 다시 울린다");
-
-        let stale = seen(serde_json::json!({"status": "idle", "done_outcome": "succeeded", "done_ago_secs": 3600}));
-        assert!(!super::new_done(None, &stale), "다시 붙은 기계의 묵은 보고는 울리지 않는다");
-    }
-
-    #[test]
-    fn the_relay_body_fits_the_gateway_and_never_names_a_machine_or_face() {
+    fn the_relay_body_fits_the_gateway_and_names_a_face_only_by_hash() {
         let alert = super::Alert {
             title: "가".repeat(130),
             body: "첫 줄\n둘째 줄".repeat(40),
@@ -731,7 +757,7 @@ mod tests {
             avatar_slug: Some("shiroko".into()),
             url: Some("javascript:alert(1)".into()),
         };
-        let body = super::relay_body(&alert);
+        let body = super::relay_body(&alert, None);
         assert_eq!(body["title"].as_str().unwrap().chars().count(), 120);
         let text = body["body"].as_str().unwrap();
         assert_eq!(text.chars().count(), 180);
@@ -739,10 +765,75 @@ mod tests {
         assert_eq!(body["sender"].as_str().unwrap().chars().count(), 40);
         assert!(!body["sender"].as_str().unwrap().contains('\t'));
         assert!(body["url"].is_null() && body["collapse"].is_null());
-        assert!(body.get("avatar").is_none() && body.get("machine").is_none());
+        assert!(body.get("machine").is_none() && body.get("avatar").is_none());
+        assert!(body.get("face").is_none(), "옛 관문은 모르는 키가 든 몸통을 통째로 거절한다");
 
+        let hash = "ab".repeat(32);
         let page = super::Alert { url: Some("https://example.com/a".into()), ..alert };
-        assert_eq!(super::relay_body(&page)["url"], "https://example.com/a");
+        let body = super::relay_body(&page, Some(&hash));
+        assert_eq!(body["url"], "https://example.com/a");
+        assert_eq!(body["face"], hash.as_str());
+        assert!(body.get("avatar").is_none());
+    }
+
+    /// 얼굴 필드를 모르는 옛 관문(`deny_unknown_fields`)에 보내도 알림은 얼굴 없이 한 번 간다.
+    #[tokio::test]
+    async fn an_old_gateway_still_gets_the_alert_without_the_face() {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct OldBody {
+            title: String,
+            body: String,
+            pane: String,
+            kind: String,
+            collapse: Option<String>,
+            sender: Option<String>,
+            url: Option<String>,
+        }
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = accepted.clone();
+        let app = axum::Router::new().route(
+            "/relay/push/alert",
+            axum::routing::post(move |raw: axum::body::Bytes| {
+                let seen = seen.clone();
+                async move {
+                    use axum::response::IntoResponse as _;
+                    let old_kinds = ["done", "waiting:permission", "waiting:question"];
+                    match serde_json::from_slice::<OldBody>(&raw) {
+                        Ok(body) if !old_kinds.contains(&body.kind.as_str()) => (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({"ok": false, "error": "bad_kind"})),
+                        )
+                            .into_response(),
+                        Ok(_) => {
+                            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            axum::Json(serde_json::json!({"ok": true, "phones": 2})).into_response()
+                        }
+                        Err(_) => (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({"ok": false, "error": "bad_request"})),
+                        )
+                            .into_response(),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let face = super::face::Face { hash: "ab".repeat(32), png: vec![1, 2, 3] };
+        let alert = super::Alert {
+            title: "시로코".into(), body: "끝났어요.".into(), machine: None,
+            pane: "%3".into(), kind: "done".into(), collapse: None,
+            sender: Some("시로코".into()), avatar_slug: Some("shiroko".into()), url: None,
+        };
+        assert_eq!(super::relay_alert(&base, "kasa_test", &alert, Some(&face)).await, 2);
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1, "한 번만 울린다");
+        let stuck = super::Alert { kind: "waiting:blocked".into(), ..alert };
+        assert_eq!(super::relay_alert(&base, "kasa_test", &stuck, Some(&face)).await, 2, "막힘은 끝냄으로라도 간다");
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// 진짜 열쇠가 있는 기계에서만 — ring 이 애플 .p8 을 읽고 서명하는지.

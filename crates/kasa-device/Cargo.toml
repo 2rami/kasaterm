@@ -18,6 +18,7 @@ bytes = { workspace = true }
 futures-util = { workspace = true }
 # Retry-After may contain legacy HTTP dates that must share one parser.
 httpdate = "1"
+image = { workspace = true }
 kasa-characters = { workspace = true }
 kasa-collab = { workspace = true, features = ["net"] }
 kasa-identity = { workspace = true }

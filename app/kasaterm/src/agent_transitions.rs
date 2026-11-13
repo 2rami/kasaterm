@@ -1,17 +1,20 @@
 //! Quiet output and tab switches are not proof of completion. Notification history
 //! therefore belongs to each PTY/session and requires a stable, normal end record.
+//! 끝남·막힘을 언제 울릴지는 폰 푸시와 같은 판정(`kasa_agents::ring`)이다.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::agent_state::{AgentState, Resolved, WaitKind};
+use kasa_agents::ring::{self, Finish, Report, Ring};
 
-const COMPLETION_SETTLE: Duration = Duration::from_secs(2);
+use crate::agent_state::{AgentState, Resolved, WaitKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Transition {
-    /// 같은 세션에서 새로 확인한 정상 응답 종료만 알린다.
-    TurnDone { key: u64 },
+    /// 정말 다 끝남 — 정상 종료나 완료 보고가 백그라운드 작업·스스로 깨어날 예약 없이 그대로 있다.
+    Finished { key: u64, report: Option<Report> },
+    /// 막힘·승인 필요·재시작 필요·실패 보고.
+    Blocked { report: Report },
     /// 사람 차례가 됐다, 또는 기다리는 이유의 종류가 바뀌었다.
     Waiting { kind: WaitKind, reason: String, key: Option<String> },
     /// 하네스가 오류로 멈췄다(라벨이 바뀌면 다시 한 번).
@@ -73,18 +76,30 @@ pub(crate) struct Observer {
 struct Seen {
     source: Option<String>,
     state: AgentState,
-    completion: Option<u64>,
-    pending: Option<(u64, Option<Instant>)>,
+    finish: Finish,
     questions: HashSet<String>,
+}
+
+/// 판정 사실을 끝남 판정의 모양으로.
+fn finish_facts(r: &Resolved) -> ring::Facts {
+    ring::Facts {
+        source: r.source.clone(),
+        idle: matches!(r.state, AgentState::Idle | AgentState::Waiting { kind: WaitKind::Idle, .. }),
+        completion: r.completion,
+        error: r.has_error,
+        busy: r.bg_active,
+        questions: !r.questions.is_empty(),
+        continues: r.continues,
+        report: r.report.clone(),
+    }
 }
 
 impl Observer {
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         let now = Instant::now();
-        self.panes.values().filter_map(|seen| seen.pending.map(|(_, since)| {
-            since.map(|at| at + COMPLETION_SETTLE).unwrap_or(now + Duration::from_millis(300))
-                .max(now + Duration::from_millis(50))
-        })).min()
+        self.panes.values().filter(|seen| seen.finish.pending()).map(|seen| {
+            seen.finish.deadline().unwrap_or(now + Duration::from_millis(300)).max(now + Duration::from_millis(50))
+        }).min()
     }
 
     pub(crate) fn update(&mut self, panes: &HashMap<String, Resolved>) -> Vec<(String, Vec<Transition>)> {
@@ -96,7 +111,7 @@ impl Observer {
     }
 
     fn settled_deadline(&self) -> Option<Instant> {
-        self.panes.values().filter_map(|seen| seen.pending.and_then(|(_, at)| at.map(|at| at + COMPLETION_SETTLE))).min()
+        self.panes.values().filter_map(|seen| seen.finish.deadline()).min()
     }
 
     fn update_selected_at(&mut self, panes: &HashMap<String, Resolved>, now: Instant, fresh: impl Fn(&String) -> bool) -> Vec<(String, Vec<Transition>)> {
@@ -104,8 +119,8 @@ impl Observer {
         let mut events = Vec::new();
         for (id, next) in panes {
             if !fresh(id) { continue; }
-            let same = self.panes.get(id).filter(|old| old.source == next.source);
-            let mut pending = same.and_then(|old| old.pending);
+            let old = self.panes.remove(id);
+            let same = old.as_ref().filter(|old| old.source == next.source);
             let mut out = transitions(same.map(|old| &old.state), &next.state);
             if !next.questions.is_empty() {
                 out.retain(|event| !matches!(event, Transition::Waiting { kind: WaitKind::Question, .. }));
@@ -116,33 +131,14 @@ impl Observer {
                         reason: question.prompt.clone(), key: Some(question.id.clone()) });
                 }
             }
-            if let Some(old) = same {
-                let idle = matches!(next.state, AgentState::Idle | AgentState::Waiting { kind: WaitKind::Idle, .. });
-                let eligible = next.source.is_some() && !next.has_error && !next.bg_active && next.questions.is_empty();
-                if !eligible || pending.is_some_and(|(key, _)| next.completion != Some(key)) {
-                    pending = None;
-                }
-                if eligible {
-                    if let Some(key) = next.completion.filter(|key| Some(*key) != old.completion) {
-                        pending = Some((key, None));
-                    }
-                    // A Stop hook may immediately continue the turn. A normal end
-                    // must remain current before it can announce a finished response.
-                    if let Some((key, since)) = pending.as_mut() {
-                        if !idle {
-                            *since = None;
-                        } else if now.saturating_duration_since(*since.get_or_insert(now)) >= COMPLETION_SETTLE {
-                            out.push(Transition::TurnDone { key: *key });
-                            pending = None;
-                        }
-                    }
-                }
+            let mut finish = old.map(|old| old.finish).unwrap_or_default();
+            match finish.update(&finish_facts(next), now) {
+                Some(Ring::Finished { key, report }) => out.push(Transition::Finished { key, report }),
+                Some(Ring::Blocked { report }) => out.push(Transition::Blocked { report }),
+                None => {}
             }
-            // Retain the last seen completion across the next working turn. A stale
-            // record reappearing after a quiet timeout is not a new response.
-            let completion = next.completion.or_else(|| same.and_then(|old| old.completion));
             self.panes.insert(id.clone(), Seen { source: next.source.clone(), state: next.state.clone(),
-                completion, pending, questions: next.questions.iter().map(|q| q.id.clone()).collect() });
+                finish, questions: next.questions.iter().map(|q| q.id.clone()).collect() });
             if !out.is_empty() { events.push((id.clone(), out)); }
         }
         events
@@ -160,7 +156,8 @@ pub(crate) fn remote_fact(row: &serde_json::Value, now: Instant) -> Resolved {
             && row.get("state_fresh").and_then(|v| v.as_bool()) != Some(false));
     let Some(end) = end else {
         return Resolved { state: AgentState::Unknown, source: None, completion: None, questions: Vec::new(),
-            reason: "remote", bg_active: false, has_error: false, intent: String::new(), since: now };
+            reason: "remote", bg_active: false, has_error: false, intent: String::new(), since: now,
+            continues: false, report: None };
     };
     Resolved {
         state: if end.idle { AgentState::Idle } else { AgentState::Working },
@@ -174,6 +171,8 @@ pub(crate) fn remote_fact(row: &serde_json::Value, now: Instant) -> Resolved {
         has_error: end.error,
         intent: String::new(),
         since: now,
+        continues: end.continues,
+        report: ring::row_report(row),
     }
 }
 
@@ -216,13 +215,13 @@ impl RemoteObserver {
         due
     }
 
-    /// 다른 기기의 새 표본이 이 칸의 종료를 대신 확인하지 않게 표본 열쇠도 함께 받는다.
+    /// 다른 기기의 새 표본이 이 칸의 종료를 대신 확인하지 않게 표본 열쇠도 함께 받는다. 끝남·막힘만 돌려준다.
     pub(crate) fn update<'a>(
         &mut self,
         generation: u64,
         rows: impl IntoIterator<Item = (String, String, &'a serde_json::Value)>,
         now: Instant,
-    ) -> Vec<(String, u64)> {
+    ) -> Vec<(String, Transition)> {
         self.generation = Some(generation);
         let mut samples = HashMap::new();
         let mut fresh = HashSet::new();
@@ -235,10 +234,9 @@ impl RemoteObserver {
         let events = self.inner.update_selected_at(&panes, now, |key| fresh.contains(key));
         if self.inner.settled_deadline().is_none_or(|at| at > now) { self.wake = None; }
         events.into_iter()
-            .flat_map(|(key, events)| events.into_iter().filter_map(move |event| match event {
-                Transition::TurnDone { key: done } => Some((key.clone(), done)),
-                _ => None,
-            }))
+            .flat_map(|(key, events)| events.into_iter()
+                .filter(|event| matches!(event, Transition::Finished { .. } | Transition::Blocked { .. }))
+                .map(move |event| (key.clone(), event)))
             .collect()
     }
 }
@@ -307,14 +305,15 @@ mod tests {
 
     fn fact(state: AgentState, completion: Option<u64>) -> Resolved {
         Resolved { state, source: Some("session-a".into()), completion, questions: Vec::new(),
-            reason: "fixture", bg_active: false, has_error: false, intent: String::new(), since: std::time::Instant::now() }
+            reason: "fixture", bg_active: false, has_error: false, intent: String::new(), since: std::time::Instant::now(),
+            continues: false, report: None }
     }
 
     fn step(observer: &mut Observer, value: Resolved) -> Vec<Transition> {
         let panes = HashMap::from([("%a".into(), value)]);
         let now = Instant::now();
         observer.update_at(&panes, now).into_iter()
-            .chain(observer.update_at(&panes, now + Duration::from_secs(2)))
+            .chain(observer.update_at(&panes, now + ring::SETTLE))
             .flat_map(|(_, e)| e).collect()
     }
 
@@ -323,10 +322,10 @@ mod tests {
         let mut observer = Observer::default();
         assert!(step(&mut observer, fact(AgentState::Working, None)).is_empty());
         assert!(step(&mut observer, fact(AgentState::Idle, None)).is_empty());
-        assert_eq!(step(&mut observer, fact(AgentState::Idle, Some(1))), [Transition::TurnDone { key: 1 }]);
+        assert_eq!(step(&mut observer, fact(AgentState::Idle, Some(1))), [done(1)]);
         assert!(step(&mut observer, fact(AgentState::Working, None)).is_empty());
         assert!(step(&mut observer, fact(AgentState::Idle, Some(1))).is_empty());
-        assert_eq!(step(&mut observer, fact(AgentState::Idle, Some(2))), [Transition::TurnDone { key: 2 }]);
+        assert_eq!(step(&mut observer, fact(AgentState::Idle, Some(2))), [done(2)]);
     }
 
     #[test]
@@ -344,24 +343,53 @@ mod tests {
         panes.insert("%hidden".into(), fact(AgentState::Idle, Some(3)));
         let now = Instant::now();
         assert!(observer.update_at(&panes, now).is_empty());
-        assert_eq!(observer.update_at(&panes, now + Duration::from_secs(2)), [("%hidden".into(), vec![Transition::TurnDone { key: 3 }])]);
+        assert_eq!(observer.update_at(&panes, now + ring::SETTLE), [("%hidden".into(), vec![done(3)])]);
         assert!(observer.update(&panes).is_empty());
     }
 
+    fn done(key: u64) -> Transition {
+        Transition::Finished { key, report: None }
+    }
+
+    /// 오류 난 끝은 끝남이 아니다. 백그라운드 작업·답 안 한 질문·스스로 깨어날 예약이 남은 끝은 그것이 걷힐 때까지 기다렸다가
+    /// 걷힌 순간 한 번 울린다 — 턴만 끝났다고 울리면 bg 를 기다리며 턴을 몇 번이고 끝내는 학생이 폰을 계속 울렸다.
     #[test]
-    fn errors_background_work_and_pending_questions_are_not_completion() {
-        for case in 0..3 {
+    fn errors_are_not_completion_and_unfinished_work_holds_it_until_it_clears() {
+        for case in 0..4 {
             let mut observer = Observer::default();
             step(&mut observer, fact(AgentState::Working, None));
-            let mut done = fact(AgentState::Idle, Some(1));
-            done.has_error = case == 0;
-            done.bg_active = case == 1;
-            if case == 2 { done.questions.push(crate::transcript::PendingQuestion {
+            let mut held = fact(AgentState::Idle, Some(1));
+            held.has_error = case == 0;
+            held.bg_active = case == 1;
+            held.continues = case == 3;
+            if case == 2 { held.questions.push(crate::transcript::PendingQuestion {
                 id: "q".into(), prompt: "선택".into(), blocking: false,
             }); }
-            assert!(!step(&mut observer, done).iter().any(|e| matches!(e, Transition::TurnDone { .. })));
-            assert!(step(&mut observer, fact(AgentState::Idle, Some(1))).is_empty());
+            assert!(!step(&mut observer, held).iter().any(|e| matches!(e, Transition::Finished { .. })), "{case}");
+            let cleared = step(&mut observer, fact(AgentState::Idle, Some(1)));
+            assert_eq!(cleared, if case == 0 { vec![] } else { vec![done(1)] }, "{case}");
         }
+    }
+
+    #[test]
+    fn a_done_report_rings_once_and_a_blocked_report_rings_at_once() {
+        let report = |outcome: &str| Report { key: 42, outcome: outcome.into(), summary: "요약".into() };
+        let mut observer = Observer::default();
+        step(&mut observer, fact(AgentState::Working, None));
+        let mut reporting = fact(AgentState::Working, None);
+        reporting.report = Some(report("succeeded"));
+        assert!(step(&mut observer, reporting).is_empty(), "보고는 턴이 끝나야 울린다");
+        let mut ended = fact(AgentState::Idle, Some(1));
+        ended.report = Some(report("succeeded"));
+        assert_eq!(step(&mut observer, ended.clone()), [Transition::Finished { key: 42, report: Some(report("succeeded")) }]);
+        assert!(step(&mut observer, ended).is_empty());
+
+        let mut observer = Observer::default();
+        step(&mut observer, fact(AgentState::Working, None));
+        let mut stuck = fact(AgentState::Working, None);
+        stuck.report = Some(report("failed"));
+        let rang = observer.update_at(&HashMap::from([("%a".into(), stuck)]), Instant::now());
+        assert_eq!(rang, [("%a".into(), vec![Transition::Blocked { report: report("failed") }])]);
     }
 
     #[test]
@@ -403,15 +431,32 @@ mod tests {
                 "completion": completion, "idle": idle, "error": false, "background": false, "questions": []}})
     }
 
-    /// 원격 표본 둘을 2초 넘게 띄워 먹인다 — 세대가 바뀔 때만 판정하는 펌프와 같다.
+    /// 원격 표본 둘을 유지 시간 넘게 띄워 먹인다 — 세대가 바뀔 때만 판정하는 펌프와 같다.
     fn sample(observer: &mut RemoteObserver, generation: &mut u64, at: &mut Instant, row: &serde_json::Value) -> Vec<u64> {
         let mut out = Vec::new();
         for _ in 0..2 {
             *generation += 1;
-            *at += Duration::from_millis(2100);
-            out.extend(observer.update(*generation, [("mini\u{1f}key".to_string(), generation.to_string(), row)], *at).into_iter().map(|(_, k)| k));
+            *at += ring::SETTLE + Duration::from_millis(100);
+            out.extend(observer.update(*generation, [("mini\u{1f}key".to_string(), generation.to_string(), row)], *at)
+                .into_iter().filter_map(|(_, event)| match event { Transition::Finished { key, .. } => Some(key), _ => None }));
         }
         out
+    }
+
+    #[test]
+    fn a_remote_blocked_report_rings_by_its_report_time() {
+        let (mut observer, mut generation, mut at) = (RemoteObserver::default(), 0, Instant::now());
+        sample(&mut observer, &mut generation, &mut at, &remote(false, None, "s1"));
+        let mut stuck = remote(false, None, "s1");
+        stuck["done_outcome"] = "failed".into();
+        stuck["done_summary"] = "막힘: 열쇠".into();
+        stuck["done_at_ms"] = 1_700_000_000_000u64.into();
+        let key = "mini\u{1f}key".to_string();
+        generation += 1;
+        let rang = observer.update(generation, [(key.clone(), generation.to_string(), &stuck)], at);
+        assert!(matches!(rang.as_slice(), [(_, Transition::Blocked { report })] if report.key == 1_700_000_000_000));
+        generation += 1;
+        assert!(observer.update(generation, [(key, generation.to_string(), &stuck)], at).is_empty());
     }
 
     #[test]
@@ -434,15 +479,17 @@ mod tests {
         assert!(sample(&mut observer, &mut generation, &mut at, &remote(true, Some("0e"), "s2")).is_empty());
     }
 
+    /// 원격도 로컬과 같다 — 오류 난 끝은 끝남이 아니고, 남은 일(bg·질문·예약)은 걷힐 때까지 기다렸다가 한 번.
     #[test]
-    fn remote_errors_questions_and_background_work_are_not_completion() {
-        for field in ["error", "background", "questions"] {
+    fn remote_errors_are_not_completion_and_unfinished_work_holds_it() {
+        for field in ["error", "background", "questions", "continues"] {
             let (mut observer, mut generation, mut at) = (RemoteObserver::default(), 0, Instant::now());
             sample(&mut observer, &mut generation, &mut at, &remote(false, None, "s1"));
             let mut done = remote(true, Some("01"), "s1");
             done["response_end"][field] = if field == "questions" { serde_json::json!(["call-a"]) } else { true.into() };
             assert!(sample(&mut observer, &mut generation, &mut at, &done).is_empty(), "{field}");
-            assert!(sample(&mut observer, &mut generation, &mut at, &remote(true, Some("01"), "s1")).is_empty(), "{field}");
+            let cleared = sample(&mut observer, &mut generation, &mut at, &remote(true, Some("01"), "s1"));
+            assert_eq!(cleared, if field == "error" { vec![] } else { vec![1] }, "{field}");
         }
     }
 
@@ -455,11 +502,11 @@ mod tests {
         assert!(observer.update(generation, [("k".to_string(), generation.to_string(), &row)], at).is_empty());
         assert!(!observer.fresh(generation), "같은 세대는 다시 판정하지 않는다");
         assert!(!observer.wants_sample(at + Duration::from_secs(1)));
-        assert!(observer.wants_sample(at + COMPLETION_SETTLE), "만기에는 새로 읽기를 청한다");
-        assert!(!observer.wants_sample(at + COMPLETION_SETTLE), "한 번만 청한다");
+        assert!(observer.wants_sample(at + ring::SETTLE), "만기에는 새로 읽기를 청한다");
+        assert!(!observer.wants_sample(at + ring::SETTLE), "한 번만 청한다");
         assert!(observer.deadline().is_some(), "표본이 올 때까지 다시 깨어 본다");
         generation += 1;
-        assert_eq!(observer.update(generation, [("k".to_string(), generation.to_string(), &row)], at + COMPLETION_SETTLE), [("k".to_string(), 1)]);
+        assert_eq!(observer.update(generation, [("k".to_string(), generation.to_string(), &row)], at + ring::SETTLE), [("k".to_string(), done(1))]);
         assert_eq!(observer.deadline(), None);
     }
 
@@ -472,10 +519,10 @@ mod tests {
         observer.update(1, [("a".into(), "a1".into(), &working), ("b".into(), "b1".into(), &working)], now);
         observer.update(2, [("a".into(), "a2".into(), &done), ("b".into(), "b1".into(), &working)], now);
         assert!(observer.update(3, [("a".into(), "a2".into(), &done), ("b".into(), "b2".into(), &working)],
-            now + COMPLETION_SETTLE).is_empty());
-        assert!(observer.wants_sample(now + COMPLETION_SETTLE));
+            now + ring::SETTLE).is_empty());
+        assert!(observer.wants_sample(now + ring::SETTLE));
         assert_eq!(observer.update(4, [("a".into(), "a3".into(), &done), ("b".into(), "b2".into(), &working)],
-            now + COMPLETION_SETTLE), [("a".into(), 10)]);
+            now + ring::SETTLE), [("a".into(), super::tests::done(10))]);
     }
 
     #[test]
@@ -501,8 +548,8 @@ mod tests {
         assert_eq!(observer.next_deadline(), None);
         panes.insert("%a".into(), fact(AgentState::Idle, Some(1)));
         observer.update_at(&panes, now);
-        assert_eq!(observer.next_deadline(), Some(now + COMPLETION_SETTLE));
-        observer.update_at(&panes, now + COMPLETION_SETTLE);
+        assert_eq!(observer.next_deadline(), Some(now + ring::SETTLE));
+        observer.update_at(&panes, now + ring::SETTLE);
         assert_eq!(observer.next_deadline(), None);
     }
 }

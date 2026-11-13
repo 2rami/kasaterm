@@ -5,13 +5,19 @@
 //! - 올리는 쪽은 데스크톱 기기만. 어느 기계인지는 몸통이 말하지 않는다 — 관문이 그 기기 기록의 machine_id 로
 //!   `~<machine_id>` 를 붙인다(폰이 누르면 그 경로로 그 기계 화면을 연다).
 //! - 종류는 폰을 울리는 것만 받는다 — 관문이 아무 알림이나 중계하는 문이 되지 않게.
-//! - 얼굴 주소는 싣지 않는다. 알림 확장은 인증 없이 받아 와야 하는데 계정 경로는 기기 토큰이 있어야 열린다.
+//! - 얼굴은 데스크톱이 해시(`face`)만 싣고 그림은 관문에 따로 맡긴다(`gateway_push_alert/face.rs`). 알림 확장은 인증
+//!   없이 받아 와야 하는데 계정 경로는 기기 토큰이 있어야 열려서, 관문이 인증 없는 주소를 `avatar` 로 싣는다.
+//!   모르는 해시면 아무 데도 안 쏘고 409 `face_unknown` — 데스크톱이 그림을 올리고 다시 보낸다.
 //! - 기기마다 분당 30통 — 고장 난 감시 루프가 폰을 끝없이 울리지 않게.
 
 use super::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
+
+#[path = "gateway_push_alert/face.rs"]
+mod face;
+pub(super) use face::Faces;
 
 const PER_MINUTE: usize = 30;
 const WINDOW: Duration = Duration::from_secs(60);
@@ -24,7 +30,9 @@ const MAX_URL: usize = 2048;
 const NOTE_KINDS: [&str; 6] = ["done_ok", "done_fail", "permission", "question", "browser", "link"];
 
 pub(super) fn routes() -> Router<Gate> {
-    Router::new().route("/relay/push/alert", axum::routing::post(alert))
+    Router::new()
+        .route("/relay/push/alert", axum::routing::post(alert))
+        .route("/relay/push/face/{name}", get(face::fetch).put(face::upload))
 }
 
 /// 기기 → 최근 1분 동안 받은 알림 시각. 1분짜리라 메모리에만 둔다.
@@ -62,14 +70,18 @@ struct AlertBody {
     sender: Option<String>,
     #[serde(default)]
     url: Option<String>,
+    /// 학생 얼굴 그림의 sha256 — 그림은 `PUT /relay/push/face/<sha256>` 로 따로 맡는다.
+    #[serde(default)]
+    face: Option<String>,
 }
 
 fn fits(text: &str, max: usize) -> bool {
     text.chars().count() <= max && !text.chars().any(char::is_control)
 }
 
+/// `waiting:blocked` 는 막힘(막힘·승인 필요·실패 보고, 오래 가는 오류) — 폰 확장이 대기 소리를 고른다.
 fn kind_ok(kind: &str) -> bool {
-    matches!(kind, "done" | "waiting:permission" | "waiting:question")
+    matches!(kind, "done" | "waiting:permission" | "waiting:question" | "waiting:blocked")
         || kind.strip_prefix("note:").is_some_and(|k| NOTE_KINDS.contains(&k))
 }
 
@@ -99,10 +111,11 @@ fn lone_collapse(device: &str) -> String {
     collapse_id(device, &bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
 }
 
-/// 몸통을 검사해 폰에 갈 payload 로. 모양은 데스크톱 `push.rs` `send()` 와 같다 — 폰 `push.dart` 가 같은 키를 읽는다.
-fn payload(body: AlertBody, device: &str, machine_id: &str) -> Result<Value, &'static str> {
+/// 몸통을 검사해 폰에 갈 payload 와 얼굴 해시로. 모양은 데스크톱 `push.rs` `send()` 와 같다 — 폰 `push.dart` 와 알림
+/// 확장이 같은 키를 읽는다. `avatar` 는 얼굴을 찾은 뒤 부른 쪽이 넣는다.
+fn payload(body: AlertBody, device: &str, machine_id: &str) -> Result<(Value, Option<String>), &'static str> {
     let given = |v: Option<String>| v.filter(|s| !s.is_empty());
-    let (collapse, sender, url) = (given(body.collapse), given(body.sender), given(body.url));
+    let (collapse, sender, url, face) = (given(body.collapse), given(body.sender), given(body.url), given(body.face));
     let text_ok = fits(&body.title, 120)
         && fits(&body.body, 180)
         && !body.pane.is_empty()
@@ -118,9 +131,12 @@ fn payload(body: AlertBody, device: &str, machine_id: &str) -> Result<Value, &'s
     if !url.as_deref().is_none_or(url_ok) {
         return Err("bad_url");
     }
+    if !face.as_deref().is_none_or(kasa_device::push::face::is_hash) {
+        return Err("bad_face");
+    }
     let machine = format!("~{machine_id}");
     let collapse = collapse.map_or_else(|| lone_collapse(device), |c| collapse_id(device, &c));
-    Ok(json!({
+    let payload = json!({
         "aps": {
             "alert": {"title": body.title, "body": body.body},
             "sound": "default",
@@ -133,7 +149,12 @@ fn payload(body: AlertBody, device: &str, machine_id: &str) -> Result<Value, &'s
         "sender": sender,
         "url": url,
         "collapse": collapse,
-    }))
+    });
+    Ok((payload, face))
+}
+
+fn avatar_url(origin: &str, id: &str) -> String {
+    format!("{origin}/relay/push/face/{id}.png")
 }
 
 async fn alert(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
@@ -147,6 +168,7 @@ async fn alert(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
     let Some(machine_id) = rec.machine_id.filter(|m| !m.is_empty()) else {
         return json_err(StatusCode::FORBIDDEN, "machine_required");
     };
+    let origin = gate.public_origin(req.headers());
     let bytes = match tokio::time::timeout(Duration::from_secs(10), axum::body::to_bytes(req.into_body(), MAX_BODY)).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(_)) => return json_err(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
@@ -155,15 +177,25 @@ async fn alert(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
     let Ok(body) = serde_json::from_slice::<AlertBody>(&bytes) else {
         return json_err(StatusCode::BAD_REQUEST, "bad_request");
     };
-    let payload = match payload(body, &device, &machine_id) {
-        Ok(payload) => payload,
+    let (mut payload, face) = match payload(body, &device, &machine_id) {
+        Ok(built) => built,
         Err(code) => return json_err(StatusCode::BAD_REQUEST, code),
+    };
+    // 409 는 몫을 세기 전에 — 그림을 올린 뒤 다시 보내는 한 통이 두 번 세지지 않게.
+    let avatar = match face.map(|hash| gate.push_faces.known(&rec.account, &hash, now_secs())) {
+        Some(face::Known::Unknown) => return json_err(StatusCode::CONFLICT, "face_unknown"),
+        Some(face::Known::Id(id)) => origin.map(|origin| avatar_url(&origin, &id)),
+        Some(face::Known::Off) | None => None,
     };
     if !gate.push_alerts.allow(&device, Instant::now()) {
         return json_err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
     }
+    let linked = avatar.is_some();
+    if let Some(url) = avatar {
+        payload["avatar"] = url.into();
+    }
     let phones = approvals::send_push(&gate, &rec.account, payload);
-    axum::Json(json!({"ok": true, "phones": phones})).into_response()
+    axum::Json(json!({"ok": true, "phones": phones, "face": linked})).into_response()
 }
 
 #[cfg(test)]
@@ -179,24 +211,37 @@ mod tests {
             collapse: Some("done-/%3".into()),
             sender: Some("시로코".into()),
             url: None,
+            face: None,
         }
     }
 
     #[test]
-    fn the_gateway_names_the_machine_and_sends_no_avatar() {
-        let p = payload(body("done"), "dev_0011223344556677", "machine-macbook-1").unwrap();
+    fn the_gateway_names_the_machine_and_links_only_a_kept_face() {
+        let (p, face) = payload(body("done"), "dev_0011223344556677", "machine-macbook-1").unwrap();
         assert_eq!(p["machine"], "~machine-macbook-1");
         assert_eq!(p["aps"]["thread-id"], "~machine-macbook-1/%3");
         assert_eq!(p["aps"]["mutable-content"], 1);
         assert_eq!(p["aps"]["sound"], "default");
         assert_eq!(p["collapse"], "dev_0011223344556677-done-/%3");
         assert_eq!(p["sender"], "시로코");
-        assert!(p.get("avatar").is_none());
+        assert!(face.is_none() && p.get("avatar").is_none(), "얼굴 주소는 맡긴 그림을 찾은 뒤에만 싣는다");
+
+        let mut b = body("done");
+        b.face = Some("ab".repeat(32));
+        let (p, face) = payload(b, "dev_a", "machine-a").unwrap();
+        assert_eq!(face.as_deref(), Some("ab".repeat(32).as_str()));
+        assert!(p.get("avatar").is_none() && p.get("face").is_none(), "해시는 폰에 가지 않는다");
+        for bad in ["AB".repeat(32), "ab".repeat(31), "../x".into()] {
+            let mut b = body("done");
+            b.face = Some(bad.clone());
+            assert_eq!(payload(b, "dev_a", "machine-a").err(), Some("bad_face"), "{bad}");
+        }
+        assert_eq!(avatar_url("https://gw.example", &"0f".repeat(16)), format!("https://gw.example/relay/push/face/{}.png", "0f".repeat(16)));
     }
 
     #[test]
     fn only_kinds_that_ring_the_phone_pass() {
-        for kind in ["done", "waiting:permission", "waiting:question", "note:done_ok", "note:done_fail",
+        for kind in ["done", "waiting:permission", "waiting:question", "waiting:blocked", "note:done_ok", "note:done_fail",
             "note:permission", "note:question", "note:browser", "note:link"] {
             assert!(payload(body(kind), "dev_a", "machine-a").is_ok(), "{kind}");
         }
@@ -227,19 +272,19 @@ mod tests {
         }
         let mut b = body("note:link");
         b.url = Some("https://example.com/a?b=1".into());
-        assert_eq!(payload(b, "dev_a", "machine-a").unwrap()["url"], "https://example.com/a?b=1");
+        assert_eq!(payload(b, "dev_a", "machine-a").unwrap().0["url"], "https://example.com/a?b=1");
     }
 
     #[test]
     fn collapse_fits_apple_and_pages_never_replace_each_other() {
         let mut b = body("done");
         b.collapse = Some("가".repeat(60));
-        let id = payload(b, "dev_0011223344556677", "machine-a").unwrap()["collapse"].as_str().unwrap().to_string();
+        let id = payload(b, "dev_0011223344556677", "machine-a").unwrap().0["collapse"].as_str().unwrap().to_string();
         assert!(id.len() <= MAX_COLLAPSE && id.starts_with("dev_0011223344556677-"));
         let lone = || {
             let mut b = body("note:link");
             b.collapse = None;
-            payload(b, "dev_a", "machine-a").unwrap()["collapse"].as_str().unwrap().to_string()
+            payload(b, "dev_a", "machine-a").unwrap().0["collapse"].as_str().unwrap().to_string()
         };
         let (one, two) = (lone(), lone());
         assert_ne!(one, two);
@@ -265,9 +310,10 @@ mod tests {
                 avatar_slug: Some("shiroko".into()),
                 url: url.map(str::to_string),
             };
-            let body: AlertBody = serde_json::from_value(kasa_device::push::relay_body(&alert)).unwrap();
-            let p = payload(body, "dev_a", "machine-a").unwrap_or_else(|e| panic!("{kind}: {e}"));
-            assert_eq!(p["kind"], kind);
+            let face = "cd".repeat(32);
+            let body: AlertBody = serde_json::from_value(kasa_device::push::relay_body(&alert, Some(&face))).unwrap();
+            let (p, sent) = payload(body, "dev_a", "machine-a").unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_eq!((p["kind"].as_str(), sent), (Some(kind), Some(face)));
         }
     }
 
@@ -343,6 +389,22 @@ mod tests {
             (response.status().as_u16(), response.json().await.unwrap_or_default())
         }
 
+        async fn put_face(&self, bearer: Option<&str>, hash: &str, png: Vec<u8>) -> (u16, Value) {
+            let mut req = reqwest::Client::new().put(format!("{}/relay/push/face/{hash}", self.base)).body(png);
+            if let Some(token) = bearer {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send().await.unwrap();
+            (response.status().as_u16(), response.json().await.unwrap_or_default())
+        }
+
+        fn face_id(&self, account: &str, hash: &str) -> Option<String> {
+            match self.gate.push_faces.known(account, hash, now_secs()) {
+                face::Known::Id(id) => Some(id),
+                _ => None,
+            }
+        }
+
         async fn alert(&self, bearer: Option<&str>, body: Value) -> (u16, Value) {
             self.post("/relay/push/alert", bearer, body).await
         }
@@ -387,6 +449,7 @@ mod tests {
             (json!({"pane": ""}), "bad_text"),
             (json!({"kind": "note:link", "url": "javascript:alert(1)"}), "bad_url"),
             (json!({"machine": "someone-else"}), "bad_request"),
+            (json!({"face": "NOT-A-HASH"}), "bad_face"),
         ] {
             let mut body = done();
             for (k, v) in patch.as_object().unwrap() {
@@ -403,7 +466,7 @@ mod tests {
         let first = rig.device("dev_phone1", "geno", "phone");
         let second = rig.device("dev_phone2", "geno", "phone");
         let stranger = rig.device("dev_phone3", "other", "phone");
-        assert_eq!(rig.alert(Some(&desk), done()).await, (200, json!({"ok": true, "phones": 0})));
+        assert_eq!(rig.alert(Some(&desk), done()).await, (200, json!({"ok": true, "phones": 0, "face": false})));
         rig.give_push_token(&first, &"a1".repeat(32)).await;
         rig.give_push_token(&stranger, &"c3".repeat(32)).await;
         assert_eq!(rig.alert(Some(&desk), done()).await.1["phones"], 1);
@@ -423,5 +486,79 @@ mod tests {
         }
         assert_eq!(rig.alert(Some(&desk), done()).await, (429, json!({"ok": false, "error": "rate_limited"})));
         assert_eq!(rig.alert(Some(&other), done()).await.0, 200);
+    }
+
+    fn face_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(96, 96, |x, y| image::Rgba([x as u8, y as u8, 200, 255]));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn an_unknown_face_is_asked_for_once_then_served_without_auth() {
+        let rig = Rig::new().await;
+        let desk = rig.device("dev_desk", "geno", "desktop");
+        let phone = rig.device("dev_phone", "geno", "phone");
+        let stranger = rig.device("dev_desk2", "other", "desktop");
+        let png = face_png();
+        let hash = kasa_device::push::face::hash(&png);
+        let mut with_face = done();
+        with_face["face"] = hash.clone().into();
+
+        assert_eq!(rig.alert(Some(&desk), with_face.clone()).await, (409, json!({"ok": false, "error": "face_unknown"})));
+        assert_eq!(rig.put_face(None, &hash, png.clone()).await.0, 401);
+        assert_eq!(rig.put_face(Some(&phone), &hash, png.clone()).await.1["error"], "desktop_only");
+        assert_eq!(rig.put_face(Some(&desk), &"0".repeat(64), png.clone()).await.1["error"], "face_mismatch");
+        let gif = b"GIF89a-not-a-png".to_vec();
+        assert_eq!(rig.put_face(Some(&desk), &kasa_device::push::face::hash(&gif), gif).await.1["error"], "bad_face");
+        let mut huge = png.clone();
+        huge.resize(kasa_device::push::face::MAX_BYTES + 1, 0);
+        assert_eq!(rig.put_face(Some(&desk), &kasa_device::push::face::hash(&huge), huge).await.0, 413);
+        assert_eq!(rig.put_face(Some(&desk), &hash, png.clone()).await, (200, json!({"ok": true})));
+
+        let (status, answer) = rig.alert(Some(&desk), with_face.clone()).await;
+        assert_eq!((status, answer["face"].as_bool()), (200, Some(true)));
+        assert_eq!(rig.alert(Some(&desk), done()).await.1["face"], false);
+        assert_eq!(rig.alert(Some(&stranger), with_face).await.1["error"], "face_unknown", "얼굴은 계정마다 따로 둔다");
+
+        let id = rig.face_id("geno", &hash).unwrap();
+        let got = reqwest::get(format!("{}/relay/push/face/{id}.png", rig.base)).await.unwrap();
+        assert_eq!(got.status(), 200);
+        assert_eq!(got.headers()["content-type"], "image/png");
+        assert_eq!(got.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(got.bytes().await.unwrap().as_ref(), png.as_slice());
+        for path in [format!("{hash}.png"), format!("{}.png", "0".repeat(32)), id.clone()] {
+            let miss = reqwest::get(format!("{}/relay/push/face/{path}", rig.base)).await.unwrap();
+            assert_eq!(miss.status(), 404, "{path}");
+        }
+    }
+
+    /// 데스크톱의 실제 보내기(`relay_alert`)가 새 관문에서 그림을 한 번 올리고 얼굴을 잇는다.
+    #[tokio::test]
+    async fn the_desktop_uploads_a_face_once_and_the_alert_still_rings() {
+        let rig = Rig::new().await;
+        let desk = rig.device("dev_desk", "geno", "desktop");
+        let phone = rig.device("dev_phone", "geno", "phone");
+        rig.give_push_token(&phone, &"a1".repeat(32)).await;
+        let face = kasa_device::push::face::from_raw(&face_png()).unwrap();
+        let alert = kasa_device::push::Alert {
+            title: "시로코".into(),
+            body: "빌드 끝났어요.".into(),
+            machine: None,
+            pane: "%3".into(),
+            kind: "done".into(),
+            collapse: Some("done-/%3".into()),
+            sender: Some("시로코".into()),
+            avatar_slug: Some("shiroko".into()),
+            url: None,
+        };
+        assert_eq!(kasa_device::push::relay_alert(&rig.base, &desk, &alert, Some(&face)).await, 1);
+        let id = rig.face_id("geno", &face.hash).expect("그림을 맡았다");
+        assert_eq!(kasa_device::push::relay_alert(&rig.base, &desk, &alert, Some(&face)).await, 1);
+        assert_eq!(rig.face_id("geno", &face.hash), Some(id));
+        let uploads = rig.gate.push_alerts.0.lock().unwrap().get("face:dev_desk").map(VecDeque::len);
+        assert_eq!(uploads, Some(1), "같은 그림은 다시 안 올린다");
+        assert_eq!(kasa_device::push::relay_alert(&rig.base, &desk, &alert, None).await, 1);
     }
 }

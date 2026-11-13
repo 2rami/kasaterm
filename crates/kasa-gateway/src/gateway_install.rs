@@ -86,8 +86,8 @@ impl Gate {
         Some((token, meta))
     }
 
-    /// 매니페스트의 ipa 주소는 절대 주소여야 한다. 관문의 공개 주소를 알면 그것을, 모르면 들어온 Host 를 쓴다.
-    fn public_origin(&self, headers: &axum::http::HeaderMap) -> Option<String> {
+    /// 매니페스트의 ipa 주소·알림 얼굴 주소는 절대 주소여야 한다. 관문의 공개 주소를 알면 그것을, 모르면 들어온 Host 를 쓴다.
+    pub(super) fn public_origin(&self, headers: &axum::http::HeaderMap) -> Option<String> {
         if !self.oauth.config.origin.is_empty() {
             return Some(self.oauth.config.origin.clone());
         }

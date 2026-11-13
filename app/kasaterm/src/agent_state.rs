@@ -208,6 +208,22 @@ pub(crate) struct Resolved {
     pub intent: String,
     /// 이 상태에 들어온 때. 「14분째」의 기준점.
     pub since: Instant,
+    /// 마지막 턴이 스스로 깨어날 예약을 걸고 끝났다 — 끝남이 아니다.
+    pub continues: bool,
+    /// 지금 칸에 붙은 완료 보고(`kasaterm-cli done`).
+    pub report: Option<kasa_agents::ring::Report>,
+}
+
+/// 한 pane 의 명시적 완료 보고 한 건. `idle_seen`: 보고 직후엔 그 턴이 아직
+/// working 이라(보고 명령 자체가 턴 안에서 돈다) "working 이면 소거"를 즉시 적용하면
+/// 한 번도 못 보인다 — idle 을 한 번 관찰한 뒤의 working 만 새 브리프로 친다.
+pub(crate) struct DoneReport {
+    pub outcome: String,
+    pub summary: String,
+    pub at: Instant,
+    /// 보고 시각(epoch ms) — `wait --since` 가 옛 브리프의 보고와 새 보고를 가르고, 알림이 보고를 가른다.
+    pub at_ms: u64,
+    pub idle_seen: bool,
 }
 
 /// Enter 직후 이만큼은 훅·기록이 아직 안 왔어도 열린 턴으로 본다 — UserPromptSubmit 이
@@ -480,6 +496,9 @@ pub(crate) struct StateHub {
     pub perm_mode: Mutex<HashMap<String, String>>,
     /// pane 의 화면 표식 — GUI 스캔(`refresh_pane_activity`)이 틱마다 채운다.
     pub screen: Mutex<HashMap<String, ScreenSigns>>,
+    /// surface_id → 명시적 완료 보고(`kasaterm-cli done`). transcript 휴리스틱은 "놀고 있다"만 알지 "맡은 일이
+    /// 성공/실패로 끝났다"는 모른다 — 학생 자기 보고가 완료 판정의 정본. 보드 빌더(`PtyBackend`)와 같은 맵이다.
+    pub done_reports: Arc<Mutex<HashMap<String, DoneReport>>>,
     transcript: Mutex<HashMap<String, TurnObservation>>,
     resolved: Mutex<(Option<Instant>, HashMap<String, Resolved>)>,
     notifications: Mutex<crate::agent_transitions::Observer>,
@@ -607,6 +626,7 @@ impl StateHub {
             let harness = session.as_ref().and_then(|p| p.active_agent());
             let mut evidence = Evidence { harness, ..Default::default() };
             let mut source = None;
+            let mut continues = false;
             if kasa_remote::remote::is_remote_pane(id) {
                 let facts = kasa_remote::remote::cached_fresh_pane(id);
                 let word = facts
@@ -635,6 +655,7 @@ impl StateHub {
                     evidence.transcript_present = true;
                     evidence.transcript_error = obs.error.clone();
                     evidence.bg_active = obs.bg;
+                    continues = obs.continues;
                     evidence.intent = obs.intent.clone();
                     let sid = obs.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                     evidence.official = match official.get(&sid).map(String::as_str) {
@@ -695,10 +716,15 @@ impl StateHub {
             let has_error = matches!(state, AgentState::Error { .. })
                 || evidence.transcript_error.is_some()
                 || matches!(evidence.official, Some(Official::Waiting { error: true }));
+            // 보고 맵은 보드 빌더도 쥔다 — 기다리지 않고, 못 잡으면 지난 판정의 보고를 그대로 쓴다.
+            let report = match self.done_reports.try_lock() {
+                Ok(mut reports) => current_report(&mut reports, id, &state),
+                Err(_) => previous.get(id).and_then(|prev| prev.report.clone()),
+            };
             next.insert(
                 id.clone(),
                 Resolved { state, source, completion, questions: evidence.questions, reason,
-                    bg_active: evidence.bg_active, has_error, intent: evidence.intent, since },
+                    bg_active: evidence.bg_active, has_error, intent: evidence.intent, since, continues, report },
             );
         }
         drop(transcript);
@@ -752,6 +778,7 @@ impl StateHub {
                     error: crate::transcript::harness_error(&tail),
                     intent: snap.intent,
                     bg: !snap.background.is_empty() || !snap.subagents.is_empty(),
+                    continues: crate::transcript::continues(&tail),
                 },
             );
         }
@@ -781,7 +808,19 @@ pub(crate) fn response_end(id: &str, r: &Resolved) -> Option<kasa_socket::backen
         error: r.has_error,
         background: r.bg_active,
         questions: r.questions.iter().map(|q| q.id.clone()).collect(),
+        continues: r.continues,
     })
+}
+
+/// 칸의 완료 보고. 쉬는 것을 한 번 본 뒤 다시 일하면 새 일을 받은 것이라 걷는다(보드 빌더와 같은 규칙).
+fn current_report(reports: &mut HashMap<String, DoneReport>, id: &str, state: &AgentState) -> Option<kasa_agents::ring::Report> {
+    let idle = matches!(state, AgentState::Idle | AgentState::Waiting { kind: WaitKind::Idle, .. });
+    if reports.get(id).is_some_and(|r| r.idle_seen && matches!(state, AgentState::Working)) {
+        reports.remove(id);
+    }
+    let report = reports.get_mut(id)?;
+    report.idle_seen |= idle;
+    Some(kasa_agents::ring::Report { key: report.at_ms, outcome: report.outcome.clone(), summary: report.summary.clone() })
 }
 
 /// 거울 칸은 여기서 종료 증거를 만들지 않는다. 원본이 실어 보낸 `response_end` 는 원격 관찰자

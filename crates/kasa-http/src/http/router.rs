@@ -50,6 +50,7 @@ pub fn spawn_http_server_opts(
     run_scheduler: bool,
 ) -> std::io::Result<u16> {
     crate::install_collab_env();
+    kasa_device::push::face::set_source(term_assets::avatar_png);
     // Bind synchronously so we can learn (and return) the real port before
     // handing the socket to tokio.
     let addr = bind_addr();

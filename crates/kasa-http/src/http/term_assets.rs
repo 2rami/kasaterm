@@ -169,47 +169,16 @@ pub(super) fn avatar_slug(agent_name: &str) -> Option<String> {
 /// 폰에서 「누구 화면인가」가 이름 한 줄로만 남으면 눈에 안 들어와서, 같은 그림을
 /// 웹에도 준다. 자산은 GUI 가 쓰는 것 그대로다(따로 복제하지 않는다).
 async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> impl IntoResponse {
-    // 대화 보기의 쪽지는 보낸 학생 이름(`⟦아로나⟧`)만 안다 — 슬러그가 아니면 명부에서 이름으로 찾는다.
-    let raw = slug.trim_end_matches(".png");
-    let slug = if raw.is_ascii() {
-        raw.to_string()
-    } else {
-        kasa_characters::character::slug_for_any(raw).unwrap_or_default()
-    };
-    macro_rules! avatars {
-        ($($s:literal),* $(,)?) => {
-            match slug.trim_end_matches(".png") {
-                $($s => Some(
-                    include_bytes!(concat!(
-                        "../../../../app/kasaterm/assets/students/profile/", $s, ".png"
-                    )).as_slice()
-                ),)*
-                _ => None,
-            }
-        };
-    }
-    // 디스크가 먼저다 — 테마 학생의 얼굴은 번들에 없고, 사용자가 덮어쓴 그림도
-    // 여기 있다(GUI 의 찾기 순서와 같다).
-    let disk = kasa_characters::character::profile_png_on_disk(slug.trim_end_matches(".png"));
-    let bundled = avatars!(
-        "akane", "akari", "ako", "arisu", "arona", "aru", "asuna", "atsuko", "ayane", "azusa",
-        "chihiro", "chinatsu", "eimi", "fubuki", "fuuka", "hanako", "hare", "haruka", "haruna",
-        "hasumi", "hibiki", "hifumi", "himari", "hina", "hinata", "hiyori", "hoshino", "ichika",
-        "iori", "iroha", "izuna", "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei",
-        "kirino", "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
-        "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa", "neru",
-        "niya", "noa", "nonomi", "prana", "rio", "sakurako", "saori", "satsuki", "seia", "sena",
-        "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki", "tsukuyo", "tsurugi",
-        "utaha", "wakamo", "yukari", "yuuka", "yuzu",
-    );
     // 번들 그림은 판이 바뀌기 전엔 안 변하니 영구 캐시. 디스크 그림은 사람이
     // 갈아 끼울 수 있고 **같은 슬러그가 다른 테마를 가리키게 되기도 한다** — 그걸
     // immutable 로 굳히면 브라우저가 옛 얼굴을 계속 쥔다.
-    let cache = if disk.is_some() { "public, max-age=60" } else { "public, max-age=31536000, immutable" };
-    match disk.or_else(|| bundled.map(<[u8]>::to_vec)) {
-        Some(b) => (
+    match avatar_lookup(&slug) {
+        Some((b, disk)) => (
             axum::http::StatusCode::OK,
-            [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, cache)],
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, if disk { "public, max-age=60" } else { "public, max-age=31536000, immutable" }),
+            ],
             b,
         ),
         None => (
@@ -221,6 +190,51 @@ async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> 
             Vec::new(),
         ),
     }
+}
+
+/// 학생 얼굴 — 계정 폰 알림이 관문에 맡기는 그림도 이것이다(`kasa_device::push::face`).
+pub(crate) fn avatar_png(slug: &str) -> Option<Vec<u8>> {
+    avatar_lookup(slug).map(|(png, _)| png)
+}
+
+/// 슬러그(또는 학생 이름) → (그림, 디스크에서 왔나).
+fn avatar_lookup(slug: &str) -> Option<(Vec<u8>, bool)> {
+    // 대화 보기의 쪽지는 보낸 학생 이름(`⟦아로나⟧`)만 안다 — 슬러그가 아니면 명부에서 이름으로 찾는다.
+    let raw = slug.trim_end_matches(".png");
+    let slug = if raw.is_ascii() {
+        raw.to_string()
+    } else {
+        kasa_characters::character::slug_for_any(raw).unwrap_or_default()
+    };
+    macro_rules! avatars {
+        ($($s:literal),* $(,)?) => {
+            match slug.as_str() {
+                $($s => Some(
+                    include_bytes!(concat!(
+                        "../../../../app/kasaterm/assets/students/profile/", $s, ".png"
+                    )).as_slice()
+                ),)*
+                _ => None,
+            }
+        };
+    }
+    // 디스크가 먼저다 — 테마 학생의 얼굴은 번들에 없고, 사용자가 덮어쓴 그림도
+    // 여기 있다(GUI 의 찾기 순서와 같다).
+    if let Some(disk) = kasa_characters::character::profile_png_on_disk(&slug) {
+        return Some((disk, true));
+    }
+    let bundled = avatars!(
+        "akane", "akari", "ako", "arisu", "arona", "aru", "asuna", "atsuko", "ayane", "azusa",
+        "chihiro", "chinatsu", "eimi", "fubuki", "fuuka", "hanako", "hare", "haruka", "haruna",
+        "hasumi", "hibiki", "hifumi", "himari", "hina", "hinata", "hiyori", "hoshino", "ichika",
+        "iori", "iroha", "izuna", "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei",
+        "kirino", "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
+        "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa", "neru",
+        "niya", "noa", "nonomi", "prana", "rio", "sakurako", "saori", "satsuki", "seia", "sena",
+        "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki", "tsukuyo", "tsurugi",
+        "utaha", "wakamo", "yukari", "yuuka", "yuzu",
+    );
+    bundled.map(|b| (b.to_vec(), false))
 }
 
 /// `GET /term/walk/<slug>.png` — 일하는 학생의 걷는 그림. 프레임을 가로로 이은 한 장이고

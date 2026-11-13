@@ -324,19 +324,7 @@ pub struct PtyBackend {
     /// "놀고 있다"만 알지 "맡은 일이 성공/실패로 끝났다"는 모른다 — 학생 자기 보고가
     /// board 완료 판정의 정본. 소거 규칙은 board 빌더 참조(idle 을 지나 다시 working
     /// = 새 브리프 → 스테일).
-    done_reports: Arc<Mutex<HashMap<String, DoneReport>>>,
-}
-
-/// 한 pane 의 명시적 완료 보고 한 건. `idle_seen`: 보고 직후엔 그 턴이 아직
-/// working 이라(보고 명령 자체가 턴 안에서 돈다) "working 이면 소거"를 즉시 적용하면
-/// 한 번도 못 보인다 — idle 을 한 번 관찰한 뒤의 working 만 새 브리프로 친다.
-struct DoneReport {
-    outcome: String,
-    summary: String,
-    at: std::time::Instant,
-    /// 보고 시각(epoch ms) — `wait --since` 가 옛 브리프의 보고와 새 보고를 가른다.
-    at_ms: u64,
-    idle_seen: bool,
+    done_reports: Arc<Mutex<HashMap<String, crate::agent_state::DoneReport>>>,
 }
 
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
@@ -609,6 +597,7 @@ impl PtyBackend {
             ws,
             // 결속 맵은 허브 것을 함께 쓴다 — 판정이 어느 기록을 읽을지 여기서 안다.
             bound: hub.bound.clone(),
+            done_reports: hub.done_reports.clone(),
             hub,
             tell_binding_epochs: Mutex::new(HashMap::new()),
             spawned_by: Arc::new(Mutex::new(HashMap::new())),
@@ -629,7 +618,6 @@ impl PtyBackend {
             bg_agents,
             nudged: Arc::new(Mutex::new(HashMap::new())),
             view_panes: Arc::new(Mutex::new(HashSet::new())),
-            done_reports: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -3862,6 +3850,7 @@ impl Backend for PtyBackend {
                             row.done_summary =
                                 (!rep.summary.is_empty()).then(|| rep.summary.clone());
                             row.done_ago_secs = Some(rep.at.elapsed().as_secs());
+                            row.done_at_ms = Some(rep.at_ms);
                         }
                     }
                 }
@@ -4284,7 +4273,7 @@ impl Backend for PtyBackend {
         // done 직후 같은 턴 끝에 notify 가 와서 보고가 보이기도 전에 죽는다.
         self.done_reports.lock().unwrap().insert(
             surface_id.to_string(),
-            DoneReport {
+            crate::agent_state::DoneReport {
                 outcome: outcome.to_string(),
                 summary: summary.to_string(),
                 at: std::time::Instant::now(),

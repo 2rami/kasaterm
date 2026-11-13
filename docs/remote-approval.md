@@ -41,11 +41,17 @@ mod(tool.check · classic.PermissionRequest)
 | `POST /relay/approvals/approver` | 계정 기기 | 이 관문 실행 동안 그 앱 화면의 승인 열쇠(43자) 해시를 맡긴다 |
 | `POST·DELETE /relay/approvals/push` | 폰 | APNs 토큰 맡기기·거두기(기기 하나에 토큰 하나) |
 | `GET /relay/approvals/audit?limit=` | 계정 기기 | 감사 줄, 최근 것부터 |
-| `POST /relay/push/alert` | 데스크톱 기기만 | 이 기계 학생의 끝냄·대기·쪽지 `{title, body, pane, kind, collapse?, sender?, url?}` 를 계정 폰들에 쏜다(`gateway_push_alert.rs`). 기계는 관문 기록의 `~<machine_id>`, 종류는 폰을 울리는 것만, 기기당 분당 30통. 답 `{ok, phones}` — 토큰이 있는 계정 폰 수 |
+| `POST /relay/push/alert` | 데스크톱 기기만 | 이 기계 학생의 끝냄·대기·막힘·쪽지 `{title, body, pane, kind, collapse?, sender?, url?, face?}` 를 계정 폰들에 쏜다(`gateway_push_alert.rs`). 기계는 관문 기록의 `~<machine_id>`, 종류는 폰을 울리는 것만(`done`·`waiting:permission`·`waiting:question`·`waiting:blocked`·쪽지), 기기당 분당 30통. `face` 는 학생 얼굴 PNG 의 sha256 — 이 계정이 맡긴 그림이면 payload `avatar` 에 받는 주소를 싣고, 모르면 아무 데도 안 쏘고 409 `face_unknown`. 답 `{ok, phones, face}` — 토큰이 있는 계정 폰 수, 얼굴을 실었나 |
+| `PUT /relay/push/face/<sha256>` | 데스크톱 기기만 | 학생 얼굴 PNG(64KB·256px 이하, 실제로 풀려야 함, 몸통 해시가 주소와 같아야 함)를 계정별로 맡긴다. 계정마다 64장·2MB, 30일 안 쓰인 것은 지우고 넘치면 오래 안 쓰인 것부터. 올리기는 기기당 분당 30번(알림과 따로 센다) |
+| `GET /relay/push/face/<id>.png` | 인증 없음 | 맡긴 얼굴. `<id>` 는 그림마다 관문이 뽑은 128비트 난수라 주소가 곧 자격이다(알림 확장은 열쇠고리를 못 봐 인증 없이 받아야 한다). 내용 해시를 주소로 쓰지 않는 까닭: 번들 학생 얼굴처럼 누구나 가진 그림은 해시를 넣어 보는 것만으로 어느 계정이 그 학생을 쓰는지 떠볼 수 있다 |
 
 거절 코드: `desktop_only` · `already_closed`(409, 지금 상태 동봉) · `expired`(410) · `digest_mismatch` ·
 `truncated_cannot_allow` · `approver_required` · `not_origin` · `too_many_pending`(계정당 열린 요청 32).
-알림 창구는 `bad_kind` · `bad_text` · `bad_url` · `machine_required` · `rate_limited`(429).
+알림 창구는 `bad_kind` · `bad_text` · `bad_url` · `bad_face` · `face_unknown`(409) · `machine_required` · `rate_limited`(429),
+얼굴 창구는 `bad_face` · `face_mismatch` · `face_too_large`(413) · `storage_unavailable`(503).
+알림 몸통은 모르는 키를 거절한다. 그래서 데스크톱은 새 필드에 막히면 알림을 잃지 않게 한 번 더 보낸다 — 옛 관문이 `face` 든 몸통을
+거절하면(400 `bad_request`) 얼굴 없이(한 시간 동안은 얼굴을 싣지 않는다), `waiting:blocked` 를 모르면(`bad_kind`) `done` 으로.
+409·400 은 아무 폰에도 안 쏜 답이라 다시 보내도 두 번 울리지 않는다.
 
 ## 지키는 것
 

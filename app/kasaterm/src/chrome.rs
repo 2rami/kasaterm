@@ -27,7 +27,7 @@ fn remote_seat(route: &str, label: &str, row: &serde_json::Value) -> Option<crat
         remote_id: id,
         surface_key,
         name: text("name").unwrap_or_default(),
-        detail: text("doing").or_else(|| text("title")).unwrap_or_default(),
+        detail: text("last_reply").unwrap_or_default(),
     })
 }
 
@@ -665,12 +665,7 @@ impl App {
         let is_active_pane = self.notification_surface_is_visible(id);
         let background_window = self.window_of_pane(id).filter(|wi| *wi != self.active_window);
         match ev {
-            Transition::TurnDone { key } => {
-                let Some(resolved) = self.collab.hub.resolved(id).filter(|r| {
-                    r.completion == Some(key) && !r.has_error && !r.bg_active && r.questions.is_empty()
-                        && matches!(r.state, crate::agent_state::AgentState::Idle
-                            | crate::agent_state::AgentState::Waiting { kind: crate::agent_state::WaitKind::Idle, .. })
-                }) else { return };
+            Transition::Finished { key, report } => {
                 self.notify_flash.insert(id.to_string(), now);
                 self.wake_blink(id);
                 self.turn_done_panes.insert(id.to_string());
@@ -678,32 +673,30 @@ impl App {
                 if let Some(wi) = background_window {
                     self.window_alert.insert(wi);
                 }
+                // 본문은 그 학생이 선생님께 하는 말이다 — 보고 요약, 없으면 마지막에 한 말의 첫머리. 상태 낱말(「응답
+                // 완료」)을 제목에 박으면 대화 알림이 제목 자리에 보낸 사람 이름을 그려 그 낱말이 사라졌고, 이름과 상태만
+                // 오는 알림은 열어 봐야 알았다(2026-09-21 「캐릭터랑 세션 이름만 오던데」).
+                let body = kasa_agents::ring::finished(report.as_ref(), self.pane_last_words(id).as_deref());
+                let dedup = format!("done:{id}:{key:016x}");
+                self.ring_phone(id, character.as_deref(), &body, "done", format!("done-/{id}"), &dedup);
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
-                    let intent = resolved.intent;
-                    // 본문이 비면 이름만 뜬 알림이 된다 — 무엇을 하다 그리 됐는지가 빠지면
-                    // 사람은 그 pane 을 열어 봐야 하고, 그러느니 안 보게 된다(2026-09-21
-                    // 「캐릭터랑 세션 이름만 오던데」). 있는 재료를 순서대로 잇는다.
-                    let detail = |parts: [Option<String>; 2]| -> String {
-                        parts.into_iter().flatten()
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>()
-                            .join(" · ")
-                    };
-                    // An engine's turn end proves a response ended, not that the whole project succeeded.
-                    let title = format!("{who} · 응답 완료");
-                    let key = format!("done:{id}:{key}");
-                    let text = detail([self.pane_last_reply(id), Some(intent)]);
-                    let body = if text.is_empty() { "응답을 마쳤어요".to_string() } else { text };
-                    notify_desktop(
-                        &title,
-                        &body,
-                        character.as_deref(),
-                        Some(&key),
-                        Some((id, sid.as_deref())),
-                    );
+                    notify_desktop(&who, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
                 }
+            }
+            Transition::Blocked { report } => {
+                self.notify_flash.remove(id);
+                self.wake_blink(id);
+                if let Some(wi) = background_window {
+                    self.window_alert.insert(wi);
+                }
+                if !(self.window_focused && is_active_pane) {
+                    self.unread_panes.insert(id.to_string());
+                }
+                let body = kasa_agents::ring::blocked(&report);
+                let dedup = format!("blocked:{id}:{}", report.key);
+                self.ring_phone(id, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup);
+                notify_desktop(&who, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
             }
             // 60초 방치는 알릴 일이 아니다 — 학생이 답을 마치고 서 있는 것뿐이고, 그건 완료 알림과
             // 입력창 위 손 흔들기가 이미 말했다. 여기서 토스트·알림·읽지 않음을 세우면 승인처럼
@@ -719,14 +712,13 @@ impl App {
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
                 }
-                let title = match kind {
-                    crate::agent_state::WaitKind::Permission => "⚠ 권한 필요",
-                    crate::agent_state::WaitKind::Question => "❓ 질문",
-                    crate::agent_state::WaitKind::Idle => "⏸ 대기",
+                let (body, push_kind) = match kind {
+                    crate::agent_state::WaitKind::Permission => (self.permission_words(id, &reason), "waiting:permission"),
+                    _ => (kasa_agents::ring::question(&reason), "waiting:question"),
                 };
-                let body = if reason.is_empty() { who.clone() } else { format!("{who} — {reason}") };
                 let key = key.map(|key| format!("question:{id}:{key}")).unwrap_or_else(|| format!("approval:{id}"));
-                notify_desktop(title, &body, character.as_deref(), Some(&key), Some((id, sid.as_deref())));
+                self.ring_phone(id, character.as_deref(), &body, push_kind, format!("wait-/{id}"), &key);
+                notify_desktop(&who, &body, character.as_deref(), Some(&key), Some((id, sid.as_deref())));
             }
             // 스스로 다시 시도하는 오류는 붙들어 둔다 — 하루에도 몇 번 스쳐 가는 끊김마다 알림이
             // 오면 진짜 멈춘 것까지 안 보게 된다(2026-09-29 「가끔 연결 끊기면 알림 오는 것」).
@@ -802,8 +794,8 @@ impl App {
         col.remote_unread.retain(alive);
         col.remote_quiet.retain(alive);
         col.remote_seats = seats;
-        for (key, done) in events {
-            self.apply_remote_turn_done(&key, done);
+        for (key, event) in events {
+            self.apply_remote_turn_done(&key, event);
         }
         self.sync_remote_done_marks();
     }
@@ -818,16 +810,25 @@ impl App {
                 && self.info.machines_col.machines.iter().any(|m| m.online && &m.label == label))
     }
 
-    /// 원격 칸 하나의 응답 완료를 원본의 `TurnDone` 과 같은 모양으로 옮긴다. 그 칸을 비추는 거울이 있으면
+    /// 원격 칸 하나의 끝남·막힘을 원본의 `Finished`·`Blocked` 과 같은 모양으로 옮긴다. 그 칸을 비추는 거울이 있으면
     /// 거울 칸이 원본처럼 반짝이고 읽지 않음이 되며, 없으면 원격 목록의 읽지 않음으로 남는다.
-    fn apply_remote_turn_done(&mut self, key: &str, done: u64) {
+    fn apply_remote_turn_done(&mut self, key: &str, event: crate::agent_transitions::Transition) {
+        use crate::agent_transitions::Transition;
         if self.lite || self.booted_at.elapsed() < Self::BOOT_QUIET {
             return;
         }
         let Some(seat) = self.info.machines_col.remote_seats.iter().find(|s| s.key == key).cloned() else { return };
         if std::env::var_os("KASATERM_STATE_LOG").is_some() {
-            eprintln!("[state] remote {key} TurnDone {done:016x}");
+            eprintln!("[state] remote {key} {event:?}");
         }
+        let (body, dedupe) = match &event {
+            Transition::Finished { key: done, report } => {
+                let said = Some(seat.detail.as_str()).filter(|s| !s.trim().is_empty());
+                (kasa_agents::ring::finished(report.as_ref(), said), format!("done:{key}:{done:016x}"))
+            }
+            Transition::Blocked { report } => (kasa_agents::ring::blocked(report), format!("blocked:{key}:{}", report.key)),
+            _ => return,
+        };
         let now = std::time::Instant::now();
         let mirrors = self.remote_mirrors(&seat);
         let mut looking = false;
@@ -856,13 +857,11 @@ impl App {
             return;
         }
         let who = if seat.name.is_empty() { "pane" } else { seat.name.as_str() };
-        let body = [seat.label.as_str(), seat.detail.trim()].into_iter()
-            .filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
         notify_desktop(
-            &format!("{who} · 응답 완료"),
+            &format!("{who} ({})", seat.label),
             &body,
             (!seat.name.is_empty()).then_some(seat.name.as_str()),
-            Some(&format!("done:{key}:{done:016x}")),
+            Some(&dedupe),
             mirrors.first().map(|id| (id.as_str(), None)),
         );
     }
@@ -967,6 +966,7 @@ impl App {
     fn notify_trouble(&mut self, id: &str, label: &str) {
         let character = self.notification_character(id);
         let who = character.clone().unwrap_or_else(|| "pane".to_string());
+        let body = kasa_agents::ring::trouble(label);
         let sid = self.pane_claude_sid.get(id).cloned();
         let is_active_pane = self.notification_surface_is_visible(id);
         self.wake_blink(id);
@@ -976,7 +976,52 @@ impl App {
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(id.to_string());
         }
-        notify_desktop("⚠ 오류", &format!("{who} — {label}"), character.as_deref(), Some(&format!("error:{id}")), Some((id, sid.as_deref())));
+        // 저절로 안 풀리는 오류는 막힘이다 — 폰에도 같은 말로 간다.
+        let dedup = format!("error:{id}");
+        self.ring_phone(id, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup);
+        notify_desktop(&who, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
+    }
+
+    /// 이 기계 칸의 알림을 폰에도 — 맥 알림과 같은 사건·같은 말이다(`kasa_agents::ring`). 폰은 사람이 자리에 없을 때 보는
+    /// 것이라 이 칸을 보고 있어도 보낸다. 다른 기계 칸은 그 기계가 스스로 보낸다.
+    fn ring_phone(&self, id: &str, character: Option<&str>, body: &str, kind: &str, collapse: String, dedup: &str) {
+        if kasa_remote::remote::is_remote_pane(id) || crate::lite_mode() || !notify_dedup_passes(&format!("phone:{dedup}")) {
+            return;
+        }
+        let who = character.unwrap_or("학생");
+        // 격리 실행은 사람의 폰을 울리지 않는다 — 시험이 볼 수 있게 탐침 파일에만 남긴다.
+        if crate::verification_run() {
+            notification_probe(&serde_json::json!({"phone": kind, "title": who, "body": body, "pane": id}));
+            return;
+        }
+        kasa_device::push::send_detached(kasa_device::push::Alert {
+            title: who.to_string(),
+            body: body.to_string(),
+            machine: None,
+            pane: id.to_string(),
+            kind: kind.to_string(),
+            collapse: Some(collapse),
+            sender: character.map(str::to_string),
+            avatar_slug: character.and_then(kasa_characters::character::slug_for_any),
+            url: None,
+        });
+    }
+
+    /// 승인을 구하는 말 — 열린 승인 요청(연결 mod)의 도구·입력이 먼저, 없으면 기록 꼬리의 결과 없는 도구 호출, 그것도
+    /// 없으면 대기 이유 글의 도구 이름.
+    fn permission_words(&self, id: &str, reason: &str) -> String {
+        let open = kasa_students::claude_mod::permissions()
+            .into_iter()
+            .find(|ask| ask["surface"].as_str() == Some(id))
+            .map(|ask| (ask["tool"].as_str().unwrap_or_default().to_string(), ask["input"].clone()));
+        let pending = open.or_else(|| {
+            let path = self.collab.hub.bound.lock().ok()?.get(id).cloned()?;
+            crate::transcript::pending_tool(&crate::socket::read_tail(&path, 128 * 1024).0)
+        });
+        match pending {
+            Some((tool, input)) => kasa_agents::ring::ask(&tool, Some(&input)),
+            None => kasa_agents::ring::ask(kasa_agents::ring::tool_in_reason(reason), None),
+        }
     }
 
     /// pane 이 현존하고 캐릭터가 배정됐으면 그 이름(고정값) — 토스트 "누가" 소스.
@@ -987,14 +1032,12 @@ impl App {
     /// 기록 꼬리를 그 자리에서 읽는다 — 매 틱 도는 길이 아니라 알림이 나갈 때 한 번뿐이라
     /// 싸고, 캐시를 하나 더 두면 그것이 낡는 자리가 또 생긴다. 묶인 기록이 없으면(훅이 아직
     /// 안 붙은 pane) None 이고, 그때는 부르는 쪽이 하던 일로 대신한다.
-    pub(crate) fn pane_last_reply(&self, id: &str) -> Option<String> {
+    pub(crate) fn pane_last_words(&self, id: &str) -> Option<String> {
         let path = self.collab.hub.bound.lock().ok()?.get(id).cloned()?;
         let (tail, idle) = crate::socket::read_tail(&path, 128 * 1024);
-        let said = crate::transcript::snapshot_from_tail(id, &tail, idle).last_reply;
-        let said = said.trim();
-        // 한 줄만 — 알림은 두어 줄이면 잘리고, 첫 문장이 대개 결론이다.
-        let first = said.lines().find(|line| !line.trim().is_empty())?.trim();
-        (!first.is_empty()).then(|| first.chars().take(120).collect())
+        crate::transcript::last_words(&tail)
+            .or_else(|| Some(crate::transcript::snapshot_from_tail(id, &tail, idle).last_reply))
+            .filter(|said| !said.trim().is_empty())
     }
 
     fn notification_surface_is_visible(&self, surface: &str) -> bool {
@@ -4109,6 +4152,20 @@ fn notify_dedup_passes(key: &str) -> bool {
 
 fn desktop_notice_allowed(bundled: bool, authorized: bool) -> bool { bundled && authorized }
 
+/// 격리 실행의 알림 탐침(`KASATERM_NOTIFICATION_PROBE=1`) — 격리 폴더의 `notifications.jsonl` 에 한 줄.
+fn notification_probe(line: &serde_json::Value) {
+    if std::env::var("KASATERM_NOTIFICATION_PROBE").as_deref() != Ok("1") {
+        return;
+    }
+    if let Some(root) = std::env::var_os("TMPDIR").and_then(|p| std::fs::canonicalize(p).ok())
+        .filter(|p| p.starts_with("/private/tmp") || p.starts_with("/tmp")) {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(root.join("notifications.jsonl")) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
 pub(crate) fn notify_desktop(
     title: &str, body: &str, character: Option<&str>, dedup: Option<&str>,
     route: Option<(&str, Option<&str>)>,
@@ -4116,15 +4173,7 @@ pub(crate) fn notify_desktop(
     if crate::lite_mode() || dedup.is_some_and(|k| !notify_dedup_passes(k)) { return; }
     let windows_rig = cfg!(windows) && std::env::var_os("KASATERM_NOTIFY_TOAST").is_some();
     if crate::verification_run() && !windows_rig {
-        if std::env::var("KASATERM_NOTIFICATION_PROBE").as_deref() == Ok("1") {
-            if let Some(root) = std::env::var_os("TMPDIR").and_then(|p| std::fs::canonicalize(p).ok())
-                .filter(|p| p.starts_with("/private/tmp") || p.starts_with("/tmp")) {
-                use std::io::Write;
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(root.join("notifications.jsonl")) {
-                    let _ = writeln!(file, "{}", serde_json::json!({"title": title, "body": body, "route": route}));
-                }
-            }
-        }
+        notification_probe(&serde_json::json!({"title": title, "body": body, "route": route}));
         return;
     }
     #[cfg(target_os = "macos")]

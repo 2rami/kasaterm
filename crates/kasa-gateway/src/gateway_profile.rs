@@ -116,7 +116,7 @@ impl Profiles {
     }
 }
 
-fn write_private_bytes(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(super) fn write_private_bytes(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     let tmp = path.with_extension("tmp");
     let mut opts = std::fs::OpenOptions::new();
