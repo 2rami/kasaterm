@@ -99,8 +99,8 @@ impl PtySession {
         // (prompt_box_rows)이 걸러주고 pane 테두리만 드물게 오색.
         #[cfg(windows)]
         let resolved = {
-            let shellish = resolved.as_deref().is_none_or(is_shell_exe);
-            if shellish && orphan_claude_of_this_gui(&table) {
+            let broken_chain_possible = resolved.as_deref().is_none_or(is_git_bash_shell);
+            if broken_chain_possible && orphan_claude_of_this_gui(&table) {
                 Some("claude".to_string())
             } else {
                 resolved
@@ -126,7 +126,9 @@ impl PtySession {
         // 고아 사슬로 claude 가 트리에서 끊긴 pane 은 자식-없음=idle 로 오판돼
         // confirm 없이 닫힌다 — active_process_name 과 같은 폴백으로 방어.
         #[cfg(windows)]
-        if orphan_claude_of_this_gui(&table) {
+        if table.iter().find(|(p, _, _)| *p == pid).is_none_or(|(_, _, name)| is_git_bash_shell(name))
+            && orphan_claude_of_this_gui(&table)
+        {
             return true;
         }
         false
@@ -182,11 +184,28 @@ fn is_shell_exe(name: &str) -> bool {
 /// 캐시 안에서만 돌고, cmdline 조회는 이름이 claude 인 프로세스로 한정.
 #[cfg(windows)]
 fn orphan_claude_of_this_gui(table: &[(u32, u32, String)]) -> bool {
+    // 칸마다 묻지만 답은 하나다 — 1초 안에는 다시 안 잰다(claude 마다 다른 프로세스 메모리를 읽는다).
+    static LAST: std::sync::Mutex<Option<(Instant, bool)>> = std::sync::Mutex::new(None);
+    if let Some((at, found)) = *LAST.lock().unwrap_or_else(|e| e.into_inner()) {
+        if at.elapsed() < std::time::Duration::from_secs(1) {
+            return found;
+        }
+    }
     let marker = format!("kasaterm-shim-{}", std::process::id());
-    table
+    let found = table
         .iter()
         .filter(|(_, _, name)| name.to_ascii_lowercase().contains("claude"))
-        .any(|(pid, _, _)| process_cmdline(*pid).is_some_and(|cl| cl.contains(&marker)))
+        .any(|(pid, _, _)| process_cmdline(*pid).is_some_and(|cl| cl.contains(&marker)));
+    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), found));
+    found
+}
+
+/// 사슬이 끊기는 것은 Git bash 런처뿐이다(위 `active_process_name` 주석). cmd·PowerShell 칸에 고아 폴백을 쓰면, 이 앱이
+/// 띄운 claude 가 어디든 하나만 있어도 셸만 있는 칸까지 claude 로 보였고 칸마다 claude 명령줄을 다 읽었다.
+#[cfg(windows)]
+fn is_git_bash_shell(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.strip_suffix(".exe").unwrap_or(&lower), "bash" | "sh")
 }
 
 /// `(pid, ppid, exe_name)` for every running process — the cross-platform
