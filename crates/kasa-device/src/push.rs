@@ -627,13 +627,13 @@ impl RemoteRows {
                 let body = if kind == "permission" { call::ask(call::tool_in_reason(reason), None) } else { call::question(reason) };
                 out.push(alert(body, &format!("waiting:{kind}"), format!("wait-{key}")));
             }
+            let said = row.get("last_reply").and_then(Value::as_str);
             match watch.finish.update(&call::row_facts(&row), now) {
                 Some(call::Ring::Finished { report, .. }) => {
-                    let said = row.get("last_reply").and_then(Value::as_str);
                     out.push(alert(call::finished(report.as_ref(), said), "done", format!("done-{key}")));
                 }
                 Some(call::Ring::Blocked { report }) => {
-                    out.push(alert(call::blocked(&report), "waiting:blocked", format!("blocked-{key}")));
+                    out.push(alert(call::blocked(&report, said), "waiting:blocked", format!("blocked-{key}")));
                 }
                 None => {}
             }
@@ -736,12 +736,19 @@ mod tests {
         assert_eq!((done[0].kind.as_str(), done[0].body.as_str()), ("done", "선생님, 다 끝났어요."));
         assert!(feed(&mut rows, row("idle", Some(("0a", false))), at(50)).is_empty());
 
-        let mut stuck = row("idle", Some(("0a", false)));
+        // 막힘은 그 턴이 끝난 뒤 학생의 답 글로 — 행의 `last_reply` 가 없으면 보고에서.
+        let mut stuck = row("idle", Some(("0b", false)));
         stuck["done_outcome"] = "failed".into();
-        stuck["done_summary"] = "막힘: 열쇠가 없어요".into();
+        stuck["done_summary"] = "승인 필요: 배포".into();
         stuck["done_at_ms"] = 99.into();
-        let blocked = feed(&mut rows, stuck, at(54));
-        assert_eq!((blocked[0].kind.as_str(), blocked[0].body.as_str()), ("waiting:blocked", "선생님, 막혔어요. 열쇠가 없어요"));
+        assert!(feed(&mut rows, stuck.clone(), at(54)).is_empty());
+        let blocked = feed(&mut rows, stuck.clone(), at(60));
+        assert_eq!((blocked[0].kind.as_str(), blocked[0].body.as_str()), ("waiting:blocked", "선생님, 승인이 필요해요. 배포"));
+        stuck["done_at_ms"] = 100.into();
+        stuck["last_reply"] = "선생님, 배포해도 될까요? 시험은 다 통과했어요.".into();
+        assert!(feed(&mut rows, stuck.clone(), at(64)).is_empty());
+        let asked = feed(&mut rows, stuck, at(70));
+        assert_eq!(asked[0].body, "선생님, 배포해도 될까요?");
     }
 
     #[test]

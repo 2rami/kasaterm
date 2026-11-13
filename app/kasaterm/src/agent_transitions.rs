@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn a_done_report_rings_once_and_a_blocked_report_rings_at_once() {
+    fn a_done_report_rings_once_and_a_blocked_report_when_its_turn_ends() {
         let report = |outcome: &str| Report { key: 42, outcome: outcome.into(), summary: "요약".into() };
         let mut observer = Observer::default();
         step(&mut observer, fact(AgentState::Working, None));
@@ -384,12 +384,15 @@ mod tests {
         assert_eq!(step(&mut observer, ended.clone()), [Transition::Finished { key: 42, report: Some(report("succeeded")) }]);
         assert!(step(&mut observer, ended).is_empty());
 
+        // 막힘 보고는 그 턴이 끝나야 — 학생이 사연을 말하는 답 글이 그때 선다.
         let mut observer = Observer::default();
         step(&mut observer, fact(AgentState::Working, None));
         let mut stuck = fact(AgentState::Working, None);
         stuck.report = Some(report("failed"));
-        let rang = observer.update_at(&HashMap::from([("%a".into(), stuck)]), Instant::now());
-        assert_eq!(rang, [("%a".into(), vec![Transition::Blocked { report: report("failed") }])]);
+        assert!(step(&mut observer, stuck.clone()).is_empty());
+        stuck.state = AgentState::Idle;
+        stuck.completion = Some(2);
+        assert_eq!(step(&mut observer, stuck), [Transition::Blocked { report: report("failed") }]);
     }
 
     #[test]
@@ -447,16 +450,18 @@ mod tests {
     fn a_remote_blocked_report_rings_by_its_report_time() {
         let (mut observer, mut generation, mut at) = (RemoteObserver::default(), 0, Instant::now());
         sample(&mut observer, &mut generation, &mut at, &remote(false, None, "s1"));
-        let mut stuck = remote(false, None, "s1");
+        let mut stuck = remote(true, Some("0c"), "s1");
         stuck["done_outcome"] = "failed".into();
         stuck["done_summary"] = "막힘: 열쇠".into();
         stuck["done_at_ms"] = 1_700_000_000_000u64.into();
-        let key = "mini\u{1f}key".to_string();
-        generation += 1;
-        let rang = observer.update(generation, [(key.clone(), generation.to_string(), &stuck)], at);
+        let mut rang = Vec::new();
+        for _ in 0..2 {
+            generation += 1;
+            at += ring::SETTLE + Duration::from_millis(100);
+            rang.extend(observer.update(generation, [("mini\u{1f}key".to_string(), generation.to_string(), &stuck)], at));
+        }
         assert!(matches!(rang.as_slice(), [(_, Transition::Blocked { report })] if report.key == 1_700_000_000_000));
-        generation += 1;
-        assert!(observer.update(generation, [(key, generation.to_string(), &stuck)], at).is_empty());
+        assert!(sample(&mut observer, &mut generation, &mut at, &stuck).is_empty());
     }
 
     #[test]

@@ -6,7 +6,10 @@
 //!
 //! 「정말 다 끝남」은 정상 종료한 턴 + 그 칸에 도는 백그라운드 작업·하위 에이전트·모니터 없음 + 스스로 깨어날 예약 없음이
 //! [`SETTLE`] 동안 그대로일 때다. 학생의 완료 보고(`kasaterm-cli done`)가 가장 확실한 끝이라, 보고가 있으면 그 턴의 끝은
-//! 보고한 일과 같은 일로 묶는다.
+//! 보고한 일과 같은 일로 묶는다. 막힘 보고도 그 턴이 끝나야 울린다 — 학생이 선생님께 사연을 말하는 답 글이 그때 선다.
+//!
+//! 말은 그 학생이 마지막에 선생님께 한 답 글의 첫머리다. 학생은 페르소나 말투로 「선생님, …했어요」라고 쓰니 그것이 곧
+//! 사람에게 하는 말이다. 완료 보고 요약은 판에 남기는 메모라(「… 완료(/term/walk 200), 남은 것: …」) 답 글을 못 찾을 때만 쓴다.
 
 use std::time::{Duration, Instant};
 
@@ -58,6 +61,7 @@ pub struct Facts {
 pub enum Ring {
     /// 정말 다 끝남. 보고로 끝났으면 그 보고, `key` 는 알림 겹침을 가르는 열쇠.
     Finished { key: u64, report: Option<Report> },
+    /// 막힘·승인 필요·재시작 필요·실패 보고 — 그 턴이 끝난 뒤.
     Blocked { report: Report },
 }
 
@@ -101,15 +105,9 @@ impl Finish {
         if facts.source.is_none() {
             return None;
         }
-        let mut ring = None;
         if let Some(report) = facts.report.as_ref().filter(|r| Some(r.key) != self.report) {
             self.report = Some(report.key);
-            if report.blocked() {
-                self.pending = None;
-                ring = Some(Ring::Blocked { report: report.clone() });
-            } else {
-                self.pending = Some(Pending { key: report.key, report: Some(report.clone()), since: None });
-            }
+            self.pending = Some(Pending { key: report.key, report: Some(report.clone()), since: None });
         }
         if let Some(key) = facts.completion.filter(|key| Some(*key) != self.completion) {
             self.completion = Some(key);
@@ -121,20 +119,27 @@ impl Finish {
         }
         // 일하는 중인데 종료 열쇠가 없다 — 그 끝은 마지막 끝이 아니었다(Stop 훅이 이었거나 다음 턴이 섰다). 조용해진 뒤
         // 옛 열쇠가 다시 보여도 새 끝이 아니다.
+        // 막힘 보고는 오류로도 지우지 않는다 — 사람이 손써야 하는 일이라고 학생이 직접 말했다.
         let reopened = facts.completion.is_none() && !facts.idle;
-        if facts.error || reopened && self.pending.as_ref().is_some_and(|p| p.report.is_none()) {
+        let blocked = self.pending.as_ref().is_some_and(|p| p.report.as_ref().is_some_and(Report::blocked));
+        if !blocked && (facts.error || reopened && self.pending.as_ref().is_some_and(|p| p.report.is_none())) {
             self.pending = None;
         }
-        let settled = facts.idle && !facts.busy && !facts.questions && !facts.continues;
-        if let Some(pending) = self.pending.as_mut() {
-            if !settled {
-                pending.since = None;
-            } else if now.saturating_duration_since(*pending.since.get_or_insert(now)) >= SETTLE {
-                let done = self.pending.take().map(|p| Ring::Finished { key: p.key, report: p.report });
-                return ring.or(done);
-            }
+        // 막힌 학생은 남은 일을 기다리지 않는다 — 턴이 끝나 사람 차례가 된 것으로 충분하다.
+        let settled = facts.idle && (blocked || !facts.busy && !facts.questions && !facts.continues);
+        let pending = self.pending.as_mut()?;
+        if !settled {
+            pending.since = None;
+            return None;
         }
-        ring
+        if now.saturating_duration_since(*pending.since.get_or_insert(now)) < SETTLE {
+            return None;
+        }
+        let Pending { key, report, .. } = self.pending.take()?;
+        Some(match report {
+            Some(report) if report.blocked() => Ring::Blocked { report },
+            report => Ring::Finished { key, report },
+        })
     }
 }
 
@@ -210,6 +215,54 @@ fn plain_inline(line: &str) -> String {
     out.replace("**", "").replace("__", "").replace(['`', '*'], "")
 }
 
+/// 괄호 속 덧붙임(「(/term/walk 200, 방 이름 확인)」)은 말이 아니라 메모라 뺀다. 짝이 안 맞으면 그대로 둔다.
+fn without_asides(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut depth = 0usize;
+    let mut held = String::new();
+    for c in line.chars() {
+        match c {
+            '(' | '（' => {
+                depth += 1;
+                held.push(c);
+            }
+            ')' | '）' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    held.clear();
+                } else {
+                    held.push(c);
+                }
+            }
+            _ if depth > 0 => held.push(c),
+            _ => out.push(c),
+        }
+    }
+    out.push_str(&held);
+    out
+}
+
+/// 주소·경로는 사람에게 소리 내 읽을 말이 아니다 — 주소는 호스트, 경로는 마지막 이름만 남긴다.
+fn without_paths(line: &str) -> String {
+    line.split(' ')
+        .map(|word| {
+            let lead = word.len() - word.trim_start_matches(['「', '\'', '"']).len();
+            let core_end = word.trim_end_matches([',', '.', '」', '!', '?', ':', ';', '\'', '"']).len().max(lead);
+            let (head, core, tail) = (&word[..lead], &word[lead..core_end], &word[core_end..]);
+            let named = if core.starts_with("http://") || core.starts_with("https://") {
+                host(core)
+            } else {
+                let parts = core.split('/').filter(|p| !p.is_empty()).count();
+                let rooted = core.starts_with('/') || core.starts_with("~/") || core.starts_with("./");
+                let filed = core.rsplit('/').next().is_some_and(|last| last.contains('.'));
+                if core.contains('/') && parts > 0 && (rooted || parts >= 3 || parts == 2 && filed) { file_name(core) } else { core }
+            };
+            format!("{head}{named}{tail}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn strip_marker(line: &str) -> &str {
     let line = line.trim_start_matches('>').trim_start();
     if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")).or_else(|| line.strip_prefix("+ ")) {
@@ -224,27 +277,10 @@ fn strip_marker(line: &str) -> &str {
     line
 }
 
-/// 앞에서부터 `n` 문장. 마침표 뒤에 빈칸이 와야 문장 끝으로 본다(`push.rs`·`0.2.1` 은 끝이 아니다).
-fn first_sentences(text: &str, n: usize) -> &str {
-    let mut count = 0;
-    let mut chars = text.char_indices().peekable();
-    while let Some((at, c)) = chars.next() {
-        if matches!(c, '.' | '!' | '?' | '。' | '…') {
-            let end = at + c.len_utf8();
-            if chars.peek().is_none_or(|(_, next)| next.is_whitespace()) {
-                count += 1;
-                if count == n {
-                    return &text[..end];
-                }
-            }
-        }
-    }
-    text
-}
-
-/// 학생이 한 말을 알림 한두 문장으로 — 코드 덩이·표·마크다운 표시를 걷고 첫 두 문장만, [`BODY_MAX`] 안으로.
-pub fn spoken(text: &str) -> String {
-    let mut parts = Vec::new();
+/// 글을 문장으로. 줄이 바뀌면 문장도 바뀌고(목록 한 줄은 한 마디다), 줄 안에서는 마침표·물음표·느낌표·물결 뒤에 빈칸이 와야
+/// 끝으로 본다(`push.rs`·`0.2.1` 은 끝이 아니다). 코드 덩이·표·머리글·괄호 속 메모는 뺀다.
+fn sentences(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut fenced = false;
     for raw in text.lines() {
         let line = raw.trim();
@@ -257,14 +293,58 @@ pub fn spoken(text: &str) -> String {
         if fenced || rule || line.starts_with('|') || line.starts_with('#') {
             continue;
         }
-        let words = plain_inline(strip_marker(line));
-        let words = words.trim();
-        if !words.is_empty() {
-            parts.push(words.to_string());
+        let words = without_paths(&without_asides(&plain_inline(strip_marker(line))));
+        let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut start = 0;
+        let mut chars = words.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            if matches!(c, '.' | '!' | '?' | '。' | '…' | '~') && chars.peek().is_none_or(|(_, next)| next.is_whitespace()) {
+                let end = at + c.len_utf8();
+                out.push(words[start..end].trim().to_string());
+                start = end;
+            }
+        }
+        out.push(words[start..].trim().to_string());
+    }
+    out.retain(|s| !s.trim_matches(['.', '!', '?', '~', '…', ' ']).is_empty());
+    out
+}
+
+/// 인사·추임새뿐인 문장(「네, 선생님!」·「마키 왔어요~」·「다 됐어요!」) — 호칭·기호를 빼면 몇 자 안 남는다.
+fn filler(sentence: &str) -> bool {
+    sentence.replace("선생님", "").chars().filter(|c| c.is_alphanumeric()).count() <= 6
+}
+
+fn joined(parts: &[String]) -> String {
+    let mut out = String::new();
+    for part in parts {
+        if !out.is_empty() {
+            if !out.ends_with(['.', '!', '?', '~', '…', '。']) {
+                out.push('.');
+            }
+            out.push(' ');
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+/// 학생이 한 말을 알림 첫머리로 — 첫 문장, 그것이 인사·추임새뿐이면 알맹이가 나올 때까지 다음 문장까지(세 문장 안),
+/// [`BODY_MAX`] 안으로. 코드 덩이·표·머리글·목록 기호·괄호 속 메모·경로를 걷는다.
+pub fn spoken(text: &str) -> String {
+    // 쪽지·전달 글의 보낸 이 표(`⟦유즈⟧`)는 말이 아니다.
+    let text = text.trim_start();
+    let text = text.strip_prefix('⟦').and_then(|rest| rest.split_once('⟧')).map_or(text, |(_, said)| said);
+    let all = sentences(text);
+    let mut taken = Vec::new();
+    for sentence in all.into_iter().take(3) {
+        let stop = !filler(&sentence);
+        taken.push(sentence);
+        if stop {
+            break;
         }
     }
-    let flat = parts.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
-    clip(first_sentences(&flat, 2), BODY_MAX)
+    clip(&joined(&taken), BODY_MAX)
 }
 
 fn file_name(path: &str) -> &str {
@@ -317,9 +397,10 @@ pub fn tool_in_reason(reason: &str) -> &str {
     reason.split_once("permission to use ").map_or("", |(_, tool)| tool.split_whitespace().next().unwrap_or(""))
 }
 
-/// 학생이 묻는 말. 비면 묻고 싶은 것이 있다는 말만.
+/// 학생이 묻는 말 — 물음이 든 첫 문장. 비면 묻고 싶은 것이 있다는 말만.
 pub fn question(prompt: &str) -> String {
-    let said = spoken(prompt);
+    let asked = sentences(prompt).into_iter().find(|s| s.contains('?') || s.contains('？'));
+    let said = asked.map(|s| clip(&s, BODY_MAX)).unwrap_or_else(|| spoken(prompt));
     if said.is_empty() {
         "선생님, 여쭤볼 게 있어요.".to_string()
     } else if said.starts_with("선생님") {
@@ -329,8 +410,11 @@ pub fn question(prompt: &str) -> String {
     }
 }
 
-/// 막힌 보고 — 무엇 때문에 멈췄는지를 앞에 말한다.
-pub fn blocked(report: &Report) -> String {
+/// 막혔다는 말 — 학생이 그 턴 끝에 선생님께 한 답 글이 먼저다. 못 찾으면 보고에서 무엇 때문에 멈췄는지를 앞에 말한다.
+pub fn blocked(report: &Report, last_words: Option<&str>) -> String {
+    if let Some(said) = last_words.map(spoken).filter(|s| !s.is_empty()) {
+        return said;
+    }
     let (mark, rest) = kasa_socket::cli::done_mark(&report.outcome, &report.summary);
     let head = match mark {
         "막힘" => "막혔어요.",
@@ -347,10 +431,10 @@ pub fn trouble(label: &str) -> String {
     clip(&format!("선생님, 막혔어요. {}", label.trim()), BODY_MAX)
 }
 
-/// 다 끝났다는 말 — 보고 요약이 먼저, 없으면 학생이 마지막에 한 말.
+/// 다 끝났다는 말 — 학생이 마지막에 선생님께 한 답 글이 먼저, 못 찾으면 보고 요약.
 pub fn finished(report: Option<&Report>, last_words: Option<&str>) -> String {
-    let said = report.map(|r| spoken(&r.summary)).filter(|s| !s.is_empty());
-    said.or_else(|| last_words.map(spoken).filter(|s| !s.is_empty()))
+    let said = last_words.map(spoken).filter(|s| !s.is_empty());
+    said.or_else(|| report.map(|r| spoken(&r.summary)).filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "선생님, 다 끝났어요.".to_string())
 }
 
@@ -434,12 +518,16 @@ mod tests {
         assert_eq!(next, vec![Ring::Finished { key: 77, report: Some(done) }, Ring::Finished { key: 6, report: None }]);
     }
 
+    /// 막힘 보고는 그 턴이 끝나야 울린다 — 학생이 사연을 말하는 답 글이 그때 선다. 남은 백그라운드는 기다리지 않고, 한 번만.
     #[test]
-    fn a_blocked_report_rings_at_once_and_its_turn_end_is_silent() {
-        let stuck = report(9, "failed", "막힘: 열쇠가 없어요");
+    fn a_blocked_report_rings_once_when_its_turn_ends() {
+        let stuck = report(9, "failed", "승인 필요: 배포");
         let reporting = Facts { idle: false, report: Some(stuck.clone()), ..facts(None) };
-        let ended = Facts { report: Some(stuck.clone()), ..facts(Some(5)) };
-        let rang = run(&[facts(None), reporting, ended.clone(), ended.clone(), ended], 3);
+        assert!(run(&[facts(None), reporting.clone(), reporting.clone(), reporting.clone(), reporting], 3).is_empty(),
+            "보고하고 아직 말하는 중");
+        let ended = Facts { busy: true, report: Some(stuck.clone()), ..facts(Some(5)) };
+        let reporting = Facts { idle: false, report: Some(stuck.clone()), ..facts(None) };
+        let rang = run(&[facts(None), reporting, ended.clone(), ended.clone(), ended.clone(), ended], 3);
         assert_eq!(rang, vec![Ring::Blocked { report: stuck }]);
     }
 
@@ -466,14 +554,40 @@ mod tests {
     }
 
     #[test]
-    fn spoken_keeps_the_first_two_sentences_without_markdown_or_code() {
-        let text = "## 결과\n\n**빌드**를 `cargo test` 로 확인했어요. [문서](https://x.y/z)도 고쳤습니다.\n\n```rust\nfn main() {}\n```\n세 번째 문장은 빠져요.";
-        assert_eq!(spoken(text), "빌드를 cargo test 로 확인했어요. 문서도 고쳤습니다.");
-        assert_eq!(spoken("- push.rs 와 v0.2.187 을 봤어요\n- 끝"), "push.rs 와 v0.2.187 을 봤어요 끝");
+    fn spoken_is_the_opening_without_markdown_code_paths_or_asides() {
+        let text = "## 결과\n\n**빌드**를 `cargo test` 로 확인했어요. [문서](https://x.y/z)도 고쳤습니다.\n\n```rust\nfn main() {}\n```";
+        assert_eq!(spoken(text), "빌드를 cargo test 로 확인했어요.");
+        assert_eq!(spoken("- crates/kasa-device/src/push.rs 를 고쳤어요(시험 3개)\n- 끝"), "push.rs 를 고쳤어요");
         assert_eq!(spoken("| a | b |\n|---|---|\n표 뒤 말."), "표 뒤 말.");
+        assert_eq!(spoken("v0.2.187 과 home·news 를 봤어요. 다음 말."), "v0.2.187 과 home·news 를 봤어요.");
+        assert_eq!(spoken("https://kasaterm.debimarlene.com/relay/install/abc 로 올렸어요."), "kasaterm.debimarlene.com 로 올렸어요.");
         let long = "가".repeat(400);
         assert_eq!(spoken(&long).chars().count(), BODY_MAX);
         assert!(spoken(&long).ends_with('…'));
+    }
+
+    #[test]
+    fn a_greeting_alone_carries_on_to_the_next_sentence() {
+        assert_eq!(spoken("네, 선생님! 마키 왔어요~ kontext-jp 페이지 다섯 장 다 새로 그렸어요. 부품도 셋 만들었고요."),
+            "네, 선생님! 마키 왔어요~ kontext-jp 페이지 다섯 장 다 새로 그렸어요.");
+        assert_eq!(spoken("다 됐어요!\n\n- 시험 통과"), "다 됐어요! 시험 통과");
+        assert_eq!(spoken("⟦유즈⟧ 선생님, 올렸어요."), "선생님, 올렸어요.");
+    }
+
+    /// 실제로 받은 모양 — 판 메모 같은 보고 요약이 아니라 학생이 선생님께 한 답 글이 본문이 된다(2026-11-13 「알림이 나한테
+    /// 하는 말처럼 안 와」).
+    #[test]
+    fn the_body_is_the_reply_to_the_teacher_not_the_board_memo() {
+        let yuzu = report(1, "succeeded",
+            "맥북·미니 0.2.223 교체·복원·이어가기 완료(/term/walk 200, 방 이름 확인), 옛 0.2.221 백업 정리. 남은 것: 집 PC");
+        let yuzu_said = "선생님, 맥북이랑 미니를 0.2.223 으로 올리고 학생들 다 이어 놨어요. `/term/walk` 도 200 이 나와요.\n\n            - 옛 0.2.221 백업은 지웠어요\n- 남은 건 집 PC 예요";
+        assert_eq!(finished(Some(&yuzu), Some(yuzu_said)), "선생님, 맥북이랑 미니를 0.2.223 으로 올리고 학생들 다 이어 놨어요.");
+        let maki = report(2, "succeeded", "kontext-jp 페이지 5장(home·news·shops·about·detail) 높음 · 부품 3(새 3: hero·card·nav)");
+        let maki_said = "네 선생님! kontext-jp 페이지 다섯 장 다 높은 쪽으로 다시 그렸어요. 부품은 세 개 새로 만들었어요.";
+        assert_eq!(finished(Some(&maki), Some(maki_said)), "네 선생님! kontext-jp 페이지 다섯 장 다 높은 쪽으로 다시 그렸어요.");
+        assert_eq!(finished(Some(&yuzu), None), "맥북·미니 0.2.223 교체·복원·이어가기 완료, 옛 0.2.221 백업 정리.",
+            "답 글을 못 찾을 때만 보고 요약");
+        assert_eq!(finished(None, None), "선생님, 다 끝났어요.");
     }
 
     #[test]
@@ -493,14 +607,16 @@ mod tests {
     }
 
     #[test]
-    fn blocked_finished_and_questions_speak_like_the_student() {
-        assert_eq!(blocked(&report(1, "failed", "막힘: **열쇠**가 없어요")), "선생님, 막혔어요. 열쇠가 없어요");
-        assert_eq!(blocked(&report(1, "failed", "승인 필요: 배포")), "선생님, 승인이 필요해요. 배포");
-        assert_eq!(blocked(&report(1, "failed", "테스트 실패")), "선생님, 잘 안 됐어요. 테스트 실패");
-        assert_eq!(finished(Some(&report(1, "succeeded", "다 됐어요")), Some("무시")), "다 됐어요");
-        assert_eq!(finished(None, Some("```\nx\n```\n끝냈어요.")), "끝냈어요.");
-        assert_eq!(finished(None, None), "선생님, 다 끝났어요.");
+    fn blocked_and_questions_speak_like_the_student() {
+        let approval = report(1, "failed", "승인 필요: 프로덕션 배포 (kubectl apply -f deploy.yaml)");
+        assert_eq!(blocked(&approval, Some("선생님, 프로덕션에 배포해도 될까요? 시험은 다 통과했어요.")),
+            "선생님, 프로덕션에 배포해도 될까요?");
+        assert_eq!(blocked(&approval, None), "선생님, 승인이 필요해요. 프로덕션 배포");
+        assert_eq!(blocked(&report(1, "failed", "막힘: **열쇠**가 없어요"), None), "선생님, 막혔어요. 열쇠가 없어요");
+        assert_eq!(blocked(&report(1, "failed", "테스트 실패"), Some("")), "선생님, 잘 안 됐어요. 테스트 실패");
         assert_eq!(question("어느 쪽으로 할까요?"), "선생님, 어느 쪽으로 할까요?");
+        assert_eq!(question("배포 방식을 정해야 해요. 블루그린으로 할까요, 한 번에 바꿀까요?"),
+            "선생님, 블루그린으로 할까요, 한 번에 바꿀까요?");
         assert_eq!(question("선생님, 이거요?"), "선생님, 이거요?");
         assert_eq!(question(""), "선생님, 여쭤볼 게 있어요.");
         assert_eq!(trouble("API 오류 (2분째)"), "선생님, 막혔어요. API 오류 (2분째)");

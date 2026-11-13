@@ -673,7 +673,7 @@ impl App {
                 if let Some(wi) = background_window {
                     self.window_alert.insert(wi);
                 }
-                // 본문은 그 학생이 선생님께 하는 말이다 — 보고 요약, 없으면 마지막에 한 말의 첫머리. 상태 낱말(「응답
+                // 본문은 그 학생이 선생님께 하는 말이다 — 마지막 답 글의 첫머리, 못 찾으면 보고 요약. 상태 낱말(「응답
                 // 완료」)을 제목에 박으면 대화 알림이 제목 자리에 보낸 사람 이름을 그려 그 낱말이 사라졌고, 이름과 상태만
                 // 오는 알림은 열어 봐야 알았다(2026-09-21 「캐릭터랑 세션 이름만 오던데」).
                 let body = kasa_agents::ring::finished(report.as_ref(), self.pane_last_words(id).as_deref());
@@ -693,7 +693,7 @@ impl App {
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
                 }
-                let body = kasa_agents::ring::blocked(&report);
+                let body = kasa_agents::ring::blocked(&report, self.pane_last_words(id).as_deref());
                 let dedup = format!("blocked:{id}:{}", report.key);
                 self.ring_phone(id, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup);
                 notify_desktop(&who, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
@@ -821,12 +821,12 @@ impl App {
         if std::env::var_os("KASATERM_STATE_LOG").is_some() {
             eprintln!("[state] remote {key} {event:?}");
         }
+        let said = Some(seat.detail.as_str()).filter(|s| !s.trim().is_empty());
         let (body, dedupe) = match &event {
             Transition::Finished { key: done, report } => {
-                let said = Some(seat.detail.as_str()).filter(|s| !s.trim().is_empty());
                 (kasa_agents::ring::finished(report.as_ref(), said), format!("done:{key}:{done:016x}"))
             }
-            Transition::Blocked { report } => (kasa_agents::ring::blocked(report), format!("blocked:{key}:{}", report.key)),
+            Transition::Blocked { report } => (kasa_agents::ring::blocked(report, said), format!("blocked:{key}:{}", report.key)),
             _ => return,
         };
         let now = std::time::Instant::now();
