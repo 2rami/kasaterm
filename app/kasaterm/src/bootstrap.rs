@@ -178,7 +178,9 @@ pub(crate) fn install_stderr_log(suffix: &str) {
         .map(|m| m.len() > 5 * 1024 * 1024)
         .unwrap_or(false)
     {
-        let _ = std::fs::remove_file(&log);
+        // 지우지 않고 한 판 물려 둔다 — 앱이 죽고 다시 뜨면 이 부팅이 죽기 직전 줄을 지워, 충돌 원인을 못 봤다
+        // (2026-11-13 집 PC, 22:33 충돌 뒤 23:04 부팅이 5MB 넘은 로그를 비움).
+        let _ = std::fs::rename(&log, log.with_extension("log.prev"));
     }
     let Ok(f) = std::fs::OpenOptions::new()
         .create(true)
