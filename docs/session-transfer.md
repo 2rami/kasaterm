@@ -63,7 +63,7 @@ kasaterm-cli machines move %3 local --cwd /Users/me/project
 
 도착 대화가 준비되면 이어 할 일을 한 번 넣는다 — 「이사 완료: <출발 기기> → <도착 기기>, cwd <경로>. 이어서: <글>」. `--resume '<글>'`이 이기고 `--no-resume`은 끈다. 둘 다 없으면 내 세션 이동(%N 생략)과 요청 때 일하던·답을 기다리던 세션은 「하던 일 이어서」를 넣고, 쉬던 세션은 깨우지 않는다. 턴이 끝나길 기다린 예약 이사도 요청 때 상태로 정한다. 넣은 사실은 토스트와 도착 칸의 tell 영수증에 남는다. `local` 데려오기는 아직 넣지 않는다.
 
-Codex 대화는 받는 기기가 rollout 머리의 cwd 를 보낸 기기 OS 꼴(맥 `/Users/…`, Windows `C:\…`)로도 받는다. 이 기기 안에서 찾는 대화는 여전히 이 기기 꼴만 받는다(`codex_sessions::CwdRule`).
+Codex 대화는 받는 기기가 rollout 머리의 cwd 를 보낸 기기 OS 꼴(맥 `/Users/…`, Windows `C:\…`)로도 받는다. 이 기기 안에서 찾는 대화는 여전히 이 기기 꼴만 받는다(`codex_sessions::CwdRule`). rollout 은 보낸 기기의 작업 폴더 목록(`runtime_workspace_roots`)도 품고 와서, 그대로 이어 켜면 Windows codex 가 맥 경로를 「path is not absolute」로 거절한다. 그래서 도착 칸은 `codex resume … --add-dir <도착 칸 폴더>` 로 켜 옛 목록 대신 이 기기 폴더를 준다. 도착 기기 codex 가 로그인돼 있어야 하고, 이어 갈 폴더를 묻는 화면에서 멈추지 않게 도착 기기 설정에 `tui.resume_cwd = "current"` 가 있어야 한다(없으면 resume 이 「session·current 중 고르기」에서 서서 확인 시간 30초를 넘긴다).
 
 `--run '<명령>'`은 필요할 때 도착 셸에 실행 명령을 준다. 한 인자로 인용하며 `local`에서는 지원하지 않는다. 명령은 POSIX 셸 꼴로 쓰고, 도착 기기가 자기 칸 셸 문법(cmd·PowerShell)으로 다시 짓는다(`/cmd` 의 `surface.launch`). 그 창구가 없는 옛 판에는 예전처럼 POSIX 줄을 친다. `machines connect --run` 도 같다.
 

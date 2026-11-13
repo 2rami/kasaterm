@@ -65,6 +65,19 @@ impl App {
                 let flag = if request.harness == "codex" { "--dangerously-bypass-approvals-and-sandbox" } else { "--dangerously-skip-permissions" };
                 command = format!("{} {flag}\r", command.trim_end_matches('\r'));
             }
+            // 받은 Codex 대화는 보낸 기기의 작업 폴더 목록(`runtime_workspace_roots`)을 품고 와서, 맥 경로를 받은
+            // Windows codex 는 「cannot restore workspace root … path is not absolute」로 resume 을 끝낸다.
+            // 도착 칸의 폴더를 직접 주면 codex 는 옛 목록 대신 그것으로 대화를 연다.
+            if request.harness == "codex" {
+                let cwd = session.shell_pid().and_then(crate::socket::pid_cwd)
+                    .ok_or_else(|| anyhow::anyhow!("도착 셸의 작업 폴더를 읽지 못했어요"))?;
+                // Windows 셸 cwd 는 끝에 `\` 가 붙어 오는데, 따옴표로 감싼 인자의 끝 `\"` 는 따옴표를 탈출시킨다.
+                let cwd = cwd.to_string_lossy();
+                let trimmed = cwd.trim_end_matches(['\\', '/']);
+                let cwd = if trimmed.is_empty() || trimmed.ends_with(':') { cwd.as_ref() } else { trimmed };
+                let root = kasa_socket::shell_line::ShellKind::Posix.quote(cwd);
+                command = format!("{} --add-dir {root}\r", command.trim_end_matches('\r'));
+            }
             // 별칭·프로필 함수가 출발 세션과 다른 권한 모드를 덧붙이지 않게 셰임을 직접 부른다.
             let shell = session.input_shell_name().as_deref()
                 .and_then(kasa_socket::shell_line::ShellKind::from_process_name)
