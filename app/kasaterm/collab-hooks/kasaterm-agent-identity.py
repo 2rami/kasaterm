@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -65,8 +66,17 @@ def main():
                                    "resumed": "" if fresh else "1",
                                    "pid": os.environ.get("KASATERM_LAUNCH_PID", str(os.getppid()))})
     request = urllib.request.Request(f"http://127.0.0.1:{int(port)}/agent-identity?{query}", data=b"", method="POST")
-    with urllib.request.urlopen(request, timeout=5) as response:
-        identity = json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            identity = json.load(response)
+    except urllib.error.HTTPError as error:
+        # 앱은 거절 이유를 본문에 싣는다. 상태 줄만 남기면 「HTTP Error 400」 말고는 단서가 없다.
+        try:
+            body = json.loads(error.read() or b"{}")
+        except ValueError:
+            body = {}
+        reason = body.get("error", "") if isinstance(body, dict) else ""
+        raise ValueError(f"앱이 거절함: {reason}" if reason else str(error)) from None
     if not all(isinstance(identity.get(key), str) for key in ("character", "persona", "slug")) or not identity["character"]:
         raise ValueError("incomplete launch identity")
     destination = Path(tempfile.mkdtemp(prefix="agent-identity-", dir=shim))

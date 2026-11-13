@@ -51,10 +51,10 @@ class IdentityTests(unittest.TestCase):
                                             env=env, capture_output=True, text=True, check=True)
                     target = Path(result.stdout.strip())
                     self.assertEqual(target.parent, root)
-                    self.assertEqual((target / "character").read_text(), "코하루")
-                    self.assertEqual((target / "persona").read_text(), "너는 코하루.")
-                    self.assertIn("너는 코하루.", (target / "append.md").read_text())
-                    self.assertIn("전체 시스템 지침은 아니에요", (target / "append.md").read_text())
+                    self.assertEqual((target / "character").read_text(encoding="utf-8"), "코하루")
+                    self.assertEqual((target / "persona").read_text(encoding="utf-8"), "너는 코하루.")
+                    self.assertIn("너는 코하루.", (target / "append.md").read_text(encoding="utf-8"))
+                    self.assertIn("전체 시스템 지침은 아니에요", (target / "append.md").read_text(encoding="utf-8"))
                     marker = json.loads((root / "instruction-_test.json").read_text())
                     self.assertEqual(marker["path"], str(target / "append.md"))
                     self.assertEqual(marker["launch_token"], str(len(queries)))
@@ -85,6 +85,32 @@ class IdentityTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
             self.assertIn("실행을 멈췄어요", result.stderr)
+
+    def test_refused_identity_shows_the_app_reason(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "identity launch timed out"}).encode())
+            def log_message(self, *args):
+                pass
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with tempfile.TemporaryDirectory(prefix="kasaterm-identity-refused-") as tmp:
+                root = Path(tmp)
+                (root / "socket.mcp_port").write_text(str(server.server_port))
+                env = dict(os.environ, KASATERM_PANE_ID="%test", KASATERM_SOCKET_PATH=str(root / "socket.sock"))
+                result = subprocess.run(["python3", "-X", "utf8", str(SCRIPT), "claude", str(root), "anchor"],
+                                        env=env, capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("identity launch timed out", result.stderr, "the app's refusal reason must reach the pane")
+        finally:
+            server.shutdown()
+            worker.join()
+            server.server_close()
 
 
 if __name__ == "__main__":
