@@ -423,10 +423,22 @@ class DismissKeyboard extends StatelessWidget {
 /// 워프의 입력칸 위 맥락 — 지금 폴더와 브랜치. 프롬프트 대신 여기서 어디인지 말한다.
 /// 셸의 명령 쪽과 학생의 대화 쪽이 같은 줄을 쓴다.
 class PlaceLine extends StatelessWidget {
-  const PlaceLine({super.key, required this.cwd, this.branch, required this.style, this.onTap});
+  const PlaceLine({
+    super.key,
+    required this.cwd,
+    this.branch,
+    this.model,
+    this.effort,
+    required this.style,
+    this.onTap,
+  });
 
   final String cwd;
   final String? branch;
+
+  /// 학생 칸의 모델(「Opus 5.5 1M」)과 effort — 데스크톱 상태줄이 보이는 것. 셸 칸은 비운다.
+  final String? model;
+  final String? effort;
 
   /// 글자색까지 — 셸은 판 글자색 40% 흐림, 대화는 테마의 흐린 글자.
   final TextStyle style;
@@ -476,9 +488,20 @@ class PlaceLine extends StatelessWidget {
           const SizedBox(width: 4),
           Text(branch!, maxLines: 1, style: style),
         ],
+        if (_engine.isNotEmpty) ...[
+          const SizedBox(width: 12),
+          Icon(Icons.auto_awesome_outlined, size: 14, color: style.color),
+          const SizedBox(width: 4),
+          Text(_engine, maxLines: 1, style: style),
+        ],
       ],
     ),
   );
+
+  String get _engine => [
+    for (final v in [model, effort])
+      if (v != null && v.trim().isNotEmpty) v.trim(),
+  ].join(' · ');
 }
 
 /// 옆으로 미는 키 줄 — 터미널 키 줄과 화면 거울 조작 줄.

@@ -563,6 +563,8 @@ class _ConversationViewState extends State<ConversationView> {
           PlaceLine(
             cwd: widget.pane.cwd,
             branch: widget.pane.branch,
+            model: widget.pane.modelLabel,
+            effort: widget.pane.effortLabel,
             style: TextStyle(
               fontFamily: 'TermMono',
               fontFamilyFallback: Look.flowMonoFallback,
