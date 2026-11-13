@@ -348,6 +348,7 @@ async fn term_ws_handler(
     ws: WebSocketUpgrade,
     Query(q): Query<std::collections::HashMap<String, String>>,
     axum::extract::RawQuery(raw): axum::extract::RawQuery,
+    drafts: Option<axum::Extension<Arc<dyn Backend>>>,
 ) -> axum::response::Response {
     if !ws_origin_ok(&headers) {
         eprintln!(
@@ -374,7 +375,10 @@ async fn term_ws_handler(
     // 정한 크기가 곧 원본), kill 제어 메시지를 받는다.
     let own = q.get("own").map_or(false, |v| v == "1" || v == "true");
     let expected_surface_key = q.get("surface_key").cloned();
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs, expected_surface_key, codec))
+    // from=phone|<기기 이름> — 폰·다른 기기 미러가 친 Enter 에 출처 꼬리표를 붙인다(`enter_tag`).
+    let origin = q.get("from").and_then(|f| kasa_socket::tell::origin_tag(f))
+        .zip(drafts.map(|axum::Extension(b)| b));
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs, expected_surface_key, codec, origin))
         .into_response()
 }
 
@@ -388,6 +392,7 @@ async fn term_ws_run(
     glyphs: bool,
     expected_surface_key: Option<String>,
     codec: kasa_wire::terminal_wire::Codec,
+    origin: Option<(String, Arc<dyn Backend>)>,
 ) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
@@ -811,6 +816,7 @@ async fn term_ws_run(
         false
     });
     let pong_shell = last_pong.clone();
+    let tag_surface = self_id.clone();
     let to_shell = tokio::spawn(async move {
         let mut logical_viewport = false;
         while let Some(Ok(msg)) = ws_rx.next().await {
@@ -823,6 +829,13 @@ async fn term_ws_run(
             match msg {
                 // 키 입력은 binary — 텍스트 채널과 섞이지 않아 파싱이 필요 없다.
                 Message::Binary(b) => {
+                    let tag = origin.as_ref().and_then(|(tag, drafts)|
+                        enter_tag(&b, tag, || drafts.composer_has_draft(&tag_surface)));
+                    if let Some(tag) = tag {
+                        let _ = sess_in.send_bytes(tag.as_bytes());
+                        // 글과 Enter 가 한 덩이로 닿으면 하네스가 Enter 를 붙여넣기의 일부로 먹는다(`/send` 와 같은 까닭).
+                        tokio::time::sleep(TAG_ENTER_GAP).await;
+                    }
                     let _ = sess_in.send_bytes(&b);
                 }
                 Message::Text(t) => {
@@ -997,6 +1010,15 @@ async fn finish_websocket_tasks(
     }
 }
 
+/// 꼬리표와 Enter 사이 — 하네스가 꼬리표를 다 받아 그린 뒤 Enter 를 읽게.
+const TAG_ENTER_GAP: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// 폰·미러가 보낸 키 한 덩이가 Enter 하나이고 입력창에 쓰던 글이 있으면, 그 Enter 앞에 칠 출처 꼬리표(앞 칸 띄움).
+/// 승인·고르기 창·빈 입력창·슬래시 명령에는 붙이지 않는다 — 글자가 메뉴를 고르거나 명령 인자가 된다(`draft` 가 가린다).
+fn enter_tag(frame: &[u8], tag: &str, draft: impl FnOnce() -> bool) -> Option<String> {
+    (frame == b"\r" && draft()).then(|| format!(" {tag}"))
+}
+
 /// 이 모듈 창구의 라우트. `router` 가 한 표로 합친 뒤 공통 레이어(Origin·토큰 가드)를 두른다.
 pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let layout_ws_backend = backend.clone();
@@ -1007,11 +1029,20 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
                 term_layout_ws_handler(layout_ws_backend.clone(), headers, ws)
             }),
         )
-        .route("/term/ws", get(term_ws_handler))
+        .route("/term/ws", get(term_ws_handler).layer(axum::Extension(backend.clone())))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_lone_enter_over_a_draft_gets_the_origin_tag() {
+        assert_eq!(super::enter_tag(b"\r", "⟦폰⟧", || true).as_deref(), Some(" ⟦폰⟧"));
+        assert_eq!(super::enter_tag(b"\r", "⟦폰⟧", || false), None, "빈 입력창·승인 창엔 안 붙인다");
+        let mut asked = false;
+        assert_eq!(super::enter_tag(b"a\r", "⟦폰⟧", || { asked = true; true }), None, "Enter 하나가 아니면 묻지도 않는다");
+        assert!(!asked);
+    }
+
     #[tokio::test]
     async fn a_sent_close_keeps_the_reader_until_the_peer_reply() {
         let (reply, peer_reply) = tokio::sync::oneshot::channel::<()>();

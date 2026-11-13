@@ -52,6 +52,8 @@ void main() {
       expect(relayedMessage('[$mark] 사람(13번) — 일반 문장'), isNull);
     }
     expect(relayedMessage('[미정] 시즈코(%13) — 알 수 없는 표식'), isNull);
+    final remote = relayedMessage('⟦유즈@맥미니⟧ 다른 기기에서');
+    expect((remote?.name, remote?.via, remote?.body), ('유즈', '맥미니 쪽지', '다른 기기에서'));
     expect(relayedMessage('승인 필요 시즈코(%13) — 괄호 없는 표식'), isNull);
   });
 

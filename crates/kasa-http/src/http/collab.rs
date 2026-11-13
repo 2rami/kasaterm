@@ -36,6 +36,11 @@ async fn term_chat_send(backend: Arc<dyn Backend>, Json(body): Json<serde_json::
     if surface.is_empty() || text.is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "surface·text 가 필요해요" }));
     }
+    // 보낸 자리(폰·미러한 기기)를 글 끝 꼬리표로 — 세션이 어디서 온 말인지 안다(`tell::origin_tag`).
+    let text = match body["from"].as_str().and_then(kasa_socket::tell::origin_tag) {
+        Some(tag) => format!("{text} {tag}"),
+        None => text,
+    };
     let sent = body["message_id"].as_str().filter(|id| kasa_socket::tell::valid_id(id).is_ok());
     if let Some(id) = sent {
         if !chat_sends::claim(id) {
@@ -526,11 +531,17 @@ mod tests {
         assert_eq!((tells[0]["surface_id"].as_str(), tells[0]["body"].as_str()), (Some("%3"), Some("폰에서 친 말")));
         assert!(tells[0]["message_id"].as_str().is_some_and(|id| id.starts_with("kt1.")));
         assert!(desk.pasted.lock().unwrap().is_empty());
+        drop(tells);
 
         let fresh = Arc::new(Desk { refuse: true, ..Default::default() });
         let Json(answer) = term_chat_send(fresh.clone(), Json(serde_json::json!({"surface": "%4", "text": "막 뜬 칸"}))).await;
         assert_eq!(answer["via"], "paste");
         assert_eq!(fresh.pasted.lock().unwrap().len(), 1);
+
+        // 보낸 자리를 글 끝 꼬리표로 — 세션이 폰에서 온 말인지 안다.
+        let tagged = Arc::new(Desk::default());
+        let Json(_) = term_chat_send(tagged.clone(), Json(serde_json::json!({"surface": "%5", "text": "짧게 답해", "from": "phone"}))).await;
+        assert_eq!(tagged.tells.lock().unwrap()[0]["body"], "짧게 답해 ⟦폰⟧");
     }
 
     /// 폰이 답을 못 받아 같은 표식으로 다시 보내면 한 번만 들어간다. 못 넣은 말은 다시 보내기가 들어간다.

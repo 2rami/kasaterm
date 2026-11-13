@@ -118,6 +118,40 @@ pub fn leaked_cli_flag(body: &str) -> Option<&'static str> {
         .find(|flag| text.strip_prefix(flag).is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)))
 }
 
+/// 꼬리표에 싣는 이름 — 표식 글자·줄바꿈을 걷고 20자까지. 비면 None.
+fn tag_label(raw: &str) -> Option<String> {
+    let clean: String = raw.chars().filter(|c| !matches!(c, '⟦' | '⟧' | '@' | '\n' | '\r')).collect();
+    let clean: String = clean.trim().chars().take(20).collect();
+    (!clean.trim().is_empty()).then(|| clean.trim().to_string())
+}
+
+/// 사람이 다른 자리에서 보낸 말의 출처 꼬리표 — 세션(Claude·Codex 공통)이 글로 어디서 온 말인지 안다
+/// (2026-11-13 「꼬리표로 하자」, 훅은 Codex 가 훅마다 사람 승인을 받아야 해 걷었다). `phone` 은 폰, 그 밖은 미러로
+/// 친 기기 이름. 글 **끝**에 붙는다 — 미러는 키를 한 자씩 그대로 넘겨 이미 쓴 글 앞으로 갈 수 없다.
+pub fn origin_tag(from: &str) -> Option<String> {
+    let from = tag_label(from)?;
+    Some(if from == "phone" { "⟦폰⟧".to_string() } else { format!("⟦미러@{from}⟧") })
+}
+
+/// 다른 기기로 나가는 tell 의 발신 표식에 보낸 기기를 더한다 — `⟦유즈⟧ …` → `⟦유즈@맥미니⟧ …`. 이름만으로는 두 기기에
+/// 같은 학생이 떠 있을 때 누가 보냈는지 못 가른다. 표식이 없거나(사람이 친 cli) 이미 기기가 붙었으면 그대로.
+pub fn mark_sender_machine(body: &str, machine: &str) -> String {
+    let Some(machine) = tag_label(machine) else { return body.to_string() };
+    let trimmed = body.trim_start();
+    match trimmed.strip_prefix('⟦').and_then(|rest| rest.split_once('⟧')) {
+        Some((name, rest)) if !name.contains('@') && !name.trim().is_empty() => format!("⟦{name}@{machine}⟧{rest}"),
+        _ => body.to_string(),
+    }
+}
+
+/// 발신 표식의 이름에서 기기를 뗀다 — `유즈@맥미니` → (`유즈`, Some(`맥미니`)).
+pub fn split_sender(name: &str) -> (&str, Option<&str>) {
+    match name.split_once('@') {
+        Some((who, machine)) if !who.trim().is_empty() && !machine.trim().is_empty() => (who.trim(), Some(machine.trim())),
+        _ => (name.trim(), None),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Address {
     pub machine_id: String,
@@ -471,6 +505,23 @@ fn private_dir(dir: &Path) -> Result<crate::private_store::DirGuard> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn origin_tags_name_the_phone_or_the_mirroring_machine() {
+        assert_eq!(super::origin_tag("phone").as_deref(), Some("⟦폰⟧"));
+        assert_eq!(super::origin_tag("맥미니").as_deref(), Some("⟦미러@맥미니⟧"));
+        assert_eq!(super::origin_tag(" ⟦맥@북⟧\n").as_deref(), Some("⟦미러@맥북⟧"), "표식 글자는 걷는다");
+        assert_eq!(super::origin_tag("  "), None);
+    }
+
+    #[test]
+    fn a_tell_leaving_for_another_machine_carries_the_sender_machine() {
+        assert_eq!(super::mark_sender_machine("⟦유즈⟧ 일 끝", "맥미니"), "⟦유즈@맥미니⟧ 일 끝");
+        assert_eq!(super::mark_sender_machine("⟦유즈@맥북⟧ 일 끝", "맥미니"), "⟦유즈@맥북⟧ 일 끝", "이미 붙었으면 그대로");
+        assert_eq!(super::mark_sender_machine("사람이 친 말", "맥미니"), "사람이 친 말");
+        assert_eq!(super::split_sender("유즈@맥미니"), ("유즈", Some("맥미니")));
+        assert_eq!(super::split_sender("유즈"), ("유즈", None));
+    }
+
     use super::*;
     fn address() -> Address { Address { machine_id:"machine".into(),surface_key:"key".into(),surface_id:"%1".into(),session_id:"session".into(),instance_id:"instance".into() } }
     fn ledger() -> Ledger {

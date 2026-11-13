@@ -169,6 +169,7 @@ void main() {
     final sent = rig.requests.where((r) => r.$1.endsWith('term/chat-send')).single.$2;
     expect(sent['surface'], '%3');
     expect(sent['text'], '커밋까지 해 줘');
+    expect(sent['from'], 'phone', reason: '데스크톱이 글 끝에 「⟦폰⟧」 꼬리표를 붙인다');
     expect(find.byType(ChatComposer), findsNothing, reason: '보냈으면 답 칸을 닫는다');
     expect(find.textContaining('보냈어요 · '), findsOneWidget);
     expect(find.text('커밋까지 해 줘'), findsOneWidget);

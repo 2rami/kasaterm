@@ -47,7 +47,18 @@ pub fn submit_remote(params: &Value) -> Result<Value> {
     let address = Address::parse(params.get("address").context("remote tell requires address")?)?;
     ensure!(address.machine_id != crate::board_service::local_id()?, "remote tell must name another machine");
     let (address, normalized) = prepare(params, address)?;
-    remote(&address,&normalized,"/collab/tell")
+    remote(&address,&from_here(normalized),"/collab/tell")
+}
+
+/// 다른 기기로 나가는 tell — 발신 표식에 이 기기 이름을 더한다(`tell::mark_sender_machine`). 받는 세션이 그
+/// 기기의 그 학생에게 `tell 이름@기기` 로 답할 수 있게.
+fn from_here(mut normalized: Value) -> Value {
+    // 기기 이름은 명령을 띄워 읽는다 — tell 마다 띄우지 않게 한 번만.
+    static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(body) = normalized["body"].as_str() {
+        normalized["body"] = json!(tell::mark_sender_machine(body, LABEL.get_or_init(crate::env::machine_label)));
+    }
+    normalized
 }
 
 fn prepare(params: &Value, address: Address) -> Result<(Address, Value)> {
@@ -73,7 +84,7 @@ pub fn submit(backend: &dyn Backend, params: &Value, wake: impl FnOnce() -> Resu
     let body = normalized["body"].as_str().unwrap_or_default().to_owned();
     if address.machine_id != crate::board_service::local_id()? {
         ensure!(params["local_only"] != true,"tell must terminate at its receiving machine");
-        return remote(&address,&normalized,"/collab/tell");
+        return remote(&address,&from_here(normalized),"/collab/tell");
     }
     {
         let store = ledger()?.lock().map_err(|_|anyhow::anyhow!("tell ledger lock failed"))?;

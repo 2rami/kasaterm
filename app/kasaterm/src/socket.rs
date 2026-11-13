@@ -4175,6 +4175,10 @@ impl Backend for PtyBackend {
         Ok(board)
     }
 
+    fn composer_has_draft(&self, surface_id: &str) -> bool {
+        kasa_pty::lookup_session(surface_id).is_some_and(|pty| crate::tell_delivery::composer_has_draft(&pty))
+    }
+
     fn clipboard_set(&self, text: &str) -> Result<()> {
         self.clipboard_set_opts(text, false)
     }

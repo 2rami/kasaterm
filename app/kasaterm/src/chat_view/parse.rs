@@ -572,8 +572,10 @@ pub(crate) fn relayed(text: &str) -> Option<(Sender, String)> {
     }
     let t = text.trim();
     // `kasaterm-cli tell` 이 보낸 칸의 학생 이름을 심는다.
+    // 다른 기기 학생은 `⟦이름@기기⟧` — 얼굴·색은 이름으로 찾는다.
     if let Some((name, body)) = t.strip_prefix('⟦').and_then(|r| r.split_once('⟧')) {
-        let ok = !name.trim().is_empty() && name.chars().count() <= 24 && !name.contains('\n');
+        let ok = !name.trim().is_empty() && name.chars().count() <= 48 && !name.contains('\n');
+        let (name, _) = kasa_socket::tell::split_sender(name);
         return ok.then(|| (sender(name, "쪽지"), body.trim().to_string()));
     }
     // 학생의 `done` 을 연 칸에 알리는 줄 — `[완료] 이름(%N) — 요약`(socket.rs `pane_done`).
@@ -1166,6 +1168,7 @@ mod tests {
         );
         assert_eq!(relayed(&format!("폰 알림 고쳐\n\n{hint}")).map(|(_, b)| b).as_deref(), Some("폰 알림 고쳐"));
         assert!(relayed(&format!("⟦아로나⟧ 일\n\n{hint}")).is_some_and(|(s, _)| s.name == "아로나"));
+        assert!(relayed("⟦유즈@맥미니⟧ 다른 기기에서").is_some_and(|(s, b)| s.name == "유즈" && b == "다른 기기에서"));
         assert!(relayed(&format!("{hint}\n\n사람 말")).is_none());
         assert!(relayed(hint).is_none());
     }

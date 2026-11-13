@@ -426,6 +426,39 @@ fn prompt_empty_with_particles(cells: &[Vec<GridCell>], cursor_row: usize, curso
     true
 }
 
+/// 입력창에 사람이 쓰던 글이 있고 커서가 그 글 끝이다 — 폰·미러가 친 Enter 앞에 출처 꼬리표를 쳐 넣어도 되는 때
+/// (`kasa_socket::tell::origin_tag`). 승인·고르기·이어 하기·대화 목록 창, 빈 입력창, 슬래시·셸·메모 명령은 아니다 —
+/// 거기에 글자를 치면 메뉴를 고르거나 명령 인자가 된다.
+pub(crate) fn composer_has_draft(pty: &kasa_pty::PtySession) -> bool {
+    let Some(harness) = pty.active_agent() else { return false };
+    let (cells, screen) = live_cells(pty);
+    composer_draft_at(&cells, screen.cursor_row as usize, screen.cursor_col as usize, harness)
+}
+
+fn composer_draft_at(cells: &[Vec<GridCell>], row: usize, col: usize, harness: kasa_pty::AgentKind) -> bool {
+    use crate::screenread::{self, PromptBox};
+    let Some(area) = screenread::prompt_box(cells) else { return false };
+    let rows = area.rows();
+    let supported = matches!((&area, harness), (PromptBox::Bordered {..}, kasa_pty::AgentKind::Claude)
+        | (PromptBox::Filled {..}, kasa_pty::AgentKind::Codex));
+    if !supported || !rows.contains(&row) || crate::input::rows_show_approval_prompt(cells).is_some()
+        || screenread::screen_is_resume_picker(cells) || screenread::screen_is_agents_list(cells)
+        || screenread::screen_is_ask_picker(cells) || prompt_empty_with_particles(cells, row, col, harness, true) {
+        return false;
+    }
+    let edge = |ch: char| ch == '\0' || ch.is_whitespace() || matches!(ch, '│' | '┃' | '║');
+    let marker = |ch: char| ch == '❯' || screenread::is_codex_composer_marker(ch);
+    let typed = |r: &Vec<GridCell>| r.iter().any(|cell| !edge(cell.ch) && !marker(cell.ch));
+    let draft: String = cells[rows.clone()].iter().flat_map(|r| r.iter().map(|cell| cell.ch)).collect();
+    let draft = draft.trim_start_matches(|ch: char| edge(ch) || marker(ch));
+    if draft.starts_with(['/', '!', '#']) {
+        return false;
+    }
+    // 커서가 마지막 글 줄의 끝 — 글 가운데에서 친 Enter 에 붙이면 꼬리표가 글 가운데 박힌다.
+    let last = rows.clone().filter(|&r| cells.get(r).is_some_and(typed)).last();
+    last == Some(row) && cells[row].iter().skip(col).all(|cell| edge(cell.ch))
+}
+
 pub(crate) fn resumed_input_ready(pty: &kasa_pty::PtySession, harness: kasa_pty::AgentKind) -> bool {
     let (cells, screen) = live_cells(pty);
     screen.bracketed_paste && resumed_prompt_ready(&cells, screen.cursor_row as usize, screen.cursor_col as usize, harness)
@@ -900,6 +933,21 @@ mod tests {
         assert!(paste_echoed("long","› [Pasted Content 1204 chars]\n"));
         assert!(paste_echoed("long","❯ head [...Truncated text #2 +80 lines...] tail\n"));
         assert!(!paste_echoed("","❯ \n"));
+    }
+
+    #[test]
+    fn the_origin_tag_goes_only_after_a_draft_with_the_cursor_at_its_end() {
+        use kasa_pty::AgentKind::{Claude, Codex};
+        let rule = row(&"─".repeat(40));
+        let screen = |line: &str| vec![row("▐▛███▜▌ Claude Code"), row(""), rule.clone(), row(line), rule.clone(), row("  footer")];
+        let draft = screen("❯ commit please");
+        assert!(composer_draft_at(&draft, 3, 15, Claude), "글 끝 커서");
+        assert!(!composer_draft_at(&draft, 3, 8, Claude), "글 가운데 커서");
+        assert!(!composer_draft_at(&screen("❯ "), 3, 2, Claude), "빈 입력창");
+        assert!(!composer_draft_at(&screen("❯ /model"), 3, 8, Claude), "슬래시 명령");
+        assert!(!composer_draft_at(&screen("❯ !ls"), 3, 5, Claude), "셸 명령");
+        assert!(!composer_draft_at(&draft, 3, 15, Codex), "하네스와 입력창 모양이 다르면 모른다");
+        assert!(!composer_draft_at(&[row("plain shell $ ls")], 0, 16, Claude), "입력창이 없다");
     }
 
     /// 새 세션 화면: 입력창이 맨 위에 있고 아래 40줄이 비었다 — 바닥 30줄만 보던 에코 확인이

@@ -1209,6 +1209,8 @@ pub(crate) fn tell_marker_line(row: &[GridCell]) -> Option<(usize, usize, String
         .iter()
         .filter(|&&c| c != ' ' && c != '\0')
         .collect();
+    // 다른 기기 학생은 `⟦이름@기기⟧` — 색·얼굴은 이름으로 찾는다.
+    let name = kasa_socket::tell::split_sender(&name).0.to_string();
     theme::character_accent_any(&name)?;
     Some((first, first + 1 + close_rel + 1, name))
 }
@@ -5746,6 +5748,8 @@ mod teammate_msg_tests {
         let (start, _, name) = tell_marker_line(&codex).expect("› 뒤 마커도 인정");
         assert_eq!((start, name.as_str()), (2, "아로나"));
         assert!(tell_marker_line(&row_from("그냥 내 입력", 80)).is_none());
+        let remote = row_from("❯ ⟦미도리@맥미니⟧ 다른 기기에서", 80);
+        assert_eq!(tell_marker_line(&remote).map(|(_, _, name)| name).as_deref(), Some("미도리"), "다른 기기 학생도 그 학생 색");
         assert!(tell_marker_line(&row_from("❯ 마커 없는 제출", 80)).is_none());
         assert!(tell_marker_line(&row_from("› 마커 없는 제출", 80)).is_none());
         assert!(tell_marker_line(&row_from("⟦없는캐릭⟧ x", 80)).is_none());

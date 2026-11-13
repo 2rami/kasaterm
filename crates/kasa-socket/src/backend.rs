@@ -1052,6 +1052,11 @@ pub trait Backend: Send + Sync {
     fn active_agent(&self) -> Option<String> {
         None
     }
+    /// 그 칸의 Claude·Codex 입력창에 사람이 쓰던 글이 있고, 커서가 그 글 끝에 있으며, 승인·고르기 창이 아니다 —
+    /// 폰·미러가 친 Enter 앞에 출처 꼬리표를 쳐 넣어도 되는 때(`tell::origin_tag`). 모르면 false(붙이지 않는다).
+    fn composer_has_draft(&self, _surface_id: &str) -> bool {
+        false
+    }
     /// 클립보드에 글을 넣는다 — **캐릭터가 사람 대신 복사해 주는 문**이다.
     ///
     /// 사람이 직접 끌어서 복사하는 길은 노플리커를 끈 claude 앞에서 막힌다: 그 하네스가

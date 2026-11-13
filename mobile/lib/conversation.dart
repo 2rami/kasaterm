@@ -673,15 +673,29 @@ final _injection = RegExp(
 bool isInjection(String text) => _injection.hasMatch(text);
 
 /// 사람이 아니라 다른 칸·카사텀·나쵸가 이 학생 입력칸에 넣은 말이면 보낸 쪽과 본문. 데스크톱
+/// 발신 표식의 이름에서 기기를 뗀다 — `유즈@맥미니` → (`유즈`, `맥미니`). 데스크톱 `tell::split_sender`.
+(String, String?) splitSender(String raw) {
+  final at = raw.indexOf('@');
+  if (at > 0 && at < raw.length - 1) {
+    final who = raw.substring(0, at).trim();
+    final machine = raw.substring(at + 1).trim();
+    if (who.isNotEmpty && machine.isNotEmpty) return (who, machine);
+  }
+  return (raw.trim(), null);
+}
+
 /// `chat_view::parse::relayed` 와 같은 규칙 — 표식을 안 읽으면 남의 말이 선생님 말풍선에 담긴다.
 ({String name, String via, String body})? relayedMessage(String text) {
   final mate = teammateMessage(text);
   if (mate != null) return (name: mate.$1, via: '쪽지', body: mate.$2);
   final t = text.trim();
-  final tell = RegExp(r'^⟦([^⟧\n]{1,24})⟧([\s\S]*)$').firstMatch(t);
+  final tell = RegExp(r'^⟦([^⟧\n]{1,48})⟧([\s\S]*)$').firstMatch(t);
   if (tell != null) {
-    final name = tell[1]!.trim();
-    return name.isEmpty ? null : (name: name, via: '쪽지', body: tell[2]!.trim());
+    // 다른 기기 학생은 `⟦이름@기기⟧`(데스크톱 `tell::mark_sender_machine`) — 얼굴은 이름으로, 기기는 종류 자리에.
+    final (name, machine) = splitSender(tell[1]!);
+    return name.isEmpty
+        ? null
+        : (name: name, via: machine == null ? '쪽지' : '$machine 쪽지', body: tell[2]!.trim());
   }
   final done = RegExp(r'^\[(완료|실패|막힘|재시작 필요|승인 필요)\][ \t]*([^()\r\n]*)\((%[^()\s]+)\)\s*(?:—\s*)?([\s\S]*)$').firstMatch(t);
   if (done != null) {

@@ -134,9 +134,10 @@ class TermSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  // from=phone — 폰에서 친 Enter 에 데스크톱이 「⟦폰⟧」 꼬리표를 붙여 세션이 어디서 온 말인지 안다.
   Uri _wsUri({bool gateway = false}) => server.wsUri(
     'term/ws',
-    query: {'pane': pane.id, 'grid': '1'},
+    query: {'pane': pane.id, 'grid': '1', 'from': 'phone'},
     machine: pane.machine,
     gateway: gateway,
   );

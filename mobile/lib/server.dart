@@ -1433,7 +1433,8 @@ class Server {
     final res = await _mutate(
       'term/chat-send',
       machine: machine,
-      json: {'surface': pane, 'text': text, 'message_id': id},
+      // from — 데스크톱이 글 끝에 「⟦폰⟧」 꼬리표를 붙인다(세션이 어디서 온 말인지 안다).
+      json: {'surface': pane, 'text': text, 'message_id': id, 'from': 'phone'},
       id: id,
       deduped: true,
     );

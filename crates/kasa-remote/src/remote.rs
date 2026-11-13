@@ -484,6 +484,9 @@ fn build_url(spec: &RemoteSpec, pane: Option<&str>, view: bool) -> String {
         url.push_str("&t=");
         url.push_str(t);
     }
+    // 이 기기에서 친 Enter 에 원본이 「미러@이 기기」 꼬리표를 붙이게(`kasa_socket::tell::origin_tag`).
+    url.push_str("&from=");
+    url.push_str(&urlencode(&kasa_device::machines::self_label()));
     url
 }
 
@@ -3306,13 +3309,14 @@ mod tests {
             token: None,
             identity: Default::default(),
         };
+        let from = format!("&from={}", urlencode(&kasa_device::machines::self_label()));
         assert_eq!(
             build_url(&spec, spec.pane.as_deref(), false),
-            "ws://127.0.0.1:8766/term/ws?own=1&pane=%2512"
+            format!("ws://127.0.0.1:8766/term/ws?own=1&pane=%2512{from}")
         );
         assert_eq!(
             build_url(&spec, spec.pane.as_deref(), true),
-            "ws://127.0.0.1:8766/term/ws?own=0&pane=%2512"
+            format!("ws://127.0.0.1:8766/term/ws?own=0&pane=%2512{from}")
         );
         let spec = RemoteSpec {
             base: "http://h:1".into(),
@@ -3326,7 +3330,7 @@ mod tests {
             url.contains("cwd=/Users/miku/%ED%95%9C%EA%B8%80%20%ED%8F%B4%EB%8D%94"),
             "{url}"
         );
-        assert!(url.ends_with("&t=tok"));
+        assert!(url.contains("&t=tok&from="), "이 기기 이름을 실어 원본이 출처 꼬리표를 붙인다: {url}");
     }
 }
 
