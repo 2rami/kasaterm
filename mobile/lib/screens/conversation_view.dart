@@ -253,7 +253,23 @@ class _ConversationViewState extends State<ConversationView> {
   bool _missing = false;
   String? _error;
   bool _awayFromBottom = false;
-  DateTime _menuHold = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 원본의 첫 답은 기록 꼬리 512KB(`socket.rs TRANSCRIPT_TAIL`)라 그보다 긴 대화는 앞이 빠진다 — 맨 위에 닿으면
+  /// 저장본 창구로 처음부터 받아 갈아 끼운다. 저장본 꼴은 시각을 남겨 말풍선 시계가 그대로다(`history=1` 은 걷는다).
+  static const _tailBytes = 512 * 1024;
+  bool _olderAvailable = false;
+  bool _olderLoading = false;
+  String? _olderError;
+
+  /// 대화를 통째로 갈아 끼울 때마다 오른다 — 그 전에 떠난 조각이 늦게 오면 옛 자리의 줄이라 버린다.
+  int _epoch = 0;
+  bool _menuHeld = false;
+
+  /// 고를 때 화면에 있던 창. 접어 두는 동안 다른 창이 서면 기다리지 않고 바로 보인다.
+  PromptMenu? _heldFrom;
+
+  /// 접기가 끝나는 때 다시 그린다 — 답을 기다리는 TUI 는 화면이 멈춰 있어 다른 계기가 오지 않는다.
+  Timer? _holdTimer;
 
   /// 창이 남는 누름(상자 켜기·탭 옮기기·굴리기) 직후의 메뉴 — 화면이 바뀌기 전 두 번째 누름은 옛 커서로 셈하게 되니 막는다.
   PromptMenu? _busyMenu;
@@ -318,6 +334,7 @@ class _ConversationViewState extends State<ConversationView> {
   @override
   void dispose() {
     _timer?.cancel();
+    _holdTimer?.cancel();
     _liveRetry?.cancel();
     if (_liveWake?.isCompleted == false) _liveWake!.complete();
     BackgroundGrace.instance.removeListener(_graceChanged);
@@ -406,7 +423,7 @@ class _ConversationViewState extends State<ConversationView> {
     final message = allow ? '' : (draft?.text.trim() ?? '');
     if (!allow) draft?.clear();
     HapticFeedback.selectionClick();
-    setState(() => _menuHold = DateTime.now().add(_menuHoldFor));
+    setState(_holdMenu);
     _toBottom();
     try {
       await widget.server.modDecide(
@@ -443,6 +460,7 @@ class _ConversationViewState extends State<ConversationView> {
     try {
       final pane = widget.pane;
       final from = _conv.offset;
+      final epoch = _epoch;
       final waited = _loaded && !_missing && !_cached && _receivedLive;
       final chunk = await widget.server.transcriptRaw(
         pane.id,
@@ -452,6 +470,10 @@ class _ConversationViewState extends State<ConversationView> {
         source: _conv.source,
       );
       if (!mounted) return;
+      if (epoch != _epoch) {
+        again = true;
+        return;
+      }
       if (chunk == null) {
         if (_cached) return;
         setState(() {
@@ -470,6 +492,10 @@ class _ConversationViewState extends State<ConversationView> {
         // 세션이 바뀌었다 — 다음 바퀴가 꼬리부터 다시 받는다.
         _conv.clear();
         _open.clear();
+        _olderAvailable = false;
+      } else if (chunk.reset) {
+        _olderAvailable = chunk.offset > _tailBytes;
+        _olderError = null;
       }
       if (_loaded && !_missing && !wasCached && _rowsVersion == _conv.version) return;
       setState(() {
@@ -489,6 +515,64 @@ class _ConversationViewState extends State<ConversationView> {
   void _onScroll() {
     final away = _scroll.hasClients && _scroll.offset > 240;
     if (away != _awayFromBottom) setState(() => _awayFromBottom = away);
+    // 거꾸로 선 목록이라 맨 위까지 남은 거리가 extentAfter 다.
+    if (_olderAvailable && !_olderLoading && _olderError == null && _scroll.hasClients &&
+        _scroll.position.extentAfter < 600) {
+      unawaited(_loadOlder());
+    }
+  }
+
+  /// 처음부터 지금 자리까지 저장본 조각으로 받아 대화를 갈아 끼운다. 받는 사이 새로 붙은 줄은 갈아 끼운 자리부터
+  /// 다음 바퀴가 잇는다. 칸이 다른 기록으로 옮겨 갔으면 그만둔다 — 지금 대화는 새 기록의 꼬리가 다시 채운다.
+  Future<void> _loadOlder() async {
+    if (_olderLoading || !mounted) return;
+    setState(() {
+      _olderLoading = true;
+      _olderError = null;
+    });
+    final target = _conv.offset;
+    final source = _conv.source;
+    final raw = StringBuffer();
+    var cursor = 0;
+    var held = '';
+    final deadline = DateTime.now().add(const Duration(minutes: 2));
+    try {
+      while (cursor < target) {
+        if (DateTime.now().isAfter(deadline)) {
+          throw const ServerException('앞 대화가 길어 시간 안에 다 못 받았어요');
+        }
+        final chunk = await widget.server.conversationArchive(widget.pane, cursor, held);
+        if (!mounted) return;
+        final next = chunk['offset'], text = chunk['raw'], origin = chunk['source'];
+        if (next is! int || text is! String) throw const ServerException('앞 대화 조각을 읽지 못했어요');
+        final moved = (cursor != 0 && chunk['reset'] == true) ||
+            (origin is String && origin.isNotEmpty && source.isNotEmpty && origin != source);
+        if (moved) {
+          setState(() {
+            _olderLoading = false;
+            _olderAvailable = false;
+          });
+          return;
+        }
+        if (next <= cursor) break;
+        raw.write(text);
+        cursor = next;
+        if (origin is String) held = origin;
+      }
+      _epoch++;
+      _conv.hydrateArchive(raw.toString(), next: cursor, source: held.isEmpty ? source : held);
+      setState(() {
+        _olderLoading = false;
+        _olderAvailable = false;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _olderLoading = false;
+          _olderError = e is ServerException ? e.message : '연결이 끊겨 앞 대화를 받지 못했어요';
+        });
+      }
+    }
   }
 
   void _toBottom() {
@@ -633,7 +717,7 @@ class _ConversationViewState extends State<ConversationView> {
     if (stays) {
       _markBusy(menu);
     } else {
-      setState(() => _menuHold = DateTime.now().add(_menuHoldFor));
+      setState(_holdMenu);
       _toBottom();
     }
     unawaited(_typeAndEnter(step));
@@ -662,11 +746,27 @@ class _ConversationViewState extends State<ConversationView> {
   void _dismiss() {
     if (!widget.session.canSend || _menu == null) return;
     widget.session.sendText('\x1b');
-    setState(() => _menuHold = DateTime.now().add(_menuHoldFor));
+    setState(_holdMenu);
   }
 
   /// 고른 직후엔 화면이 아직 옛 메뉴를 그리고 있다 — 두 번 누르지 않게 잠깐 접는다.
   static const _menuHoldFor = Duration(milliseconds: 1200);
+
+  void _holdMenu() {
+    _heldFrom = _screenMenu;
+    _menuHeld = true;
+    _holdTimer?.cancel();
+    _holdTimer = Timer(_menuHoldFor, () {
+      if (mounted) setState(() => _menuHeld = false);
+    });
+  }
+
+  /// 커서·체크만 다른 같은 창 — 화살표가 먼저 닿고 Enter 가 아직인 사이의 화면이다.
+  bool _sameWindow(PromptMenu a, PromptMenu b) => a.title == b.title &&
+    a.currentTab == b.currentTab &&
+    a.options.length == b.options.length &&
+    a.options.indexed.every((entry) =>
+      entry.$2.index == b.options[entry.$1].index && entry.$2.label == b.options[entry.$1].label);
 
   bool _sameMenu(PromptMenu a, PromptMenu b) => a.title == b.title &&
     a.options.length == b.options.length &&
@@ -680,7 +780,17 @@ class _ConversationViewState extends State<ConversationView> {
     });
 
   PromptMenu? get _menu {
-    if (DateTime.now().isBefore(_menuHold)) return null;
+    final menu = _screenMenu;
+    if (_menuHeld) {
+      final from = _heldFrom;
+      if (menu == null || (from != null && _sameWindow(from, menu))) return null;
+      _menuHeld = false;
+      _holdTimer?.cancel();
+    }
+    return menu;
+  }
+
+  PromptMenu? get _screenMenu {
     final lines = <String>[];
     // 질문 탭의 지금 탭은 배경색으로만 칠해진다 — 그 줄의 칠한 글을 함께 넘긴다.
     final lit = <int, String>{};
@@ -711,7 +821,7 @@ class _ConversationViewState extends State<ConversationView> {
     final accent = widget.pane.kind == 'permission' || asks
         ? StatusStyle.attention
         : widget.accent;
-    final held = DateTime.now().isBefore(_menuHold);
+    final held = _menuHeld;
     final cards = <Widget>[
       ConversationAsks(
         pane: widget.pane,
@@ -840,6 +950,7 @@ class _ConversationViewState extends State<ConversationView> {
     );
     final md = _markdownStyle(theme);
     final extra = typing ? 1 : 0;
+    final older = !widget.readOnly && (_olderAvailable || _olderLoading || _olderError != null);
     return LayoutBuilder(
       builder: (context, box) {
         final maxBubble = box.maxWidth * 0.8;
@@ -850,8 +961,15 @@ class _ConversationViewState extends State<ConversationView> {
               reverse: true,
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-              itemCount: list.length + extra,
+              itemCount: list.length + extra + (older ? 1 : 0),
               itemBuilder: (context, i) {
+                if (i == list.length + extra) {
+                  return _OlderRow(
+                    loading: _olderLoading,
+                    error: _olderError,
+                    onLoad: () => unawaited(_loadOlder()),
+                  );
+                }
                 if (i < extra) {
                   final slug = pane.slug;
                   return _Typing(
@@ -1632,6 +1750,49 @@ class _Note extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: theme.textTheme.labelSmall?.copyWith(color: dim),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 받은 꼬리보다 앞에 대화가 더 있을 때 목록 맨 위 줄 — 닿으면 저절로 받고, 실패하면 까닭과 다시 받기.
+class _OlderRow extends StatelessWidget {
+  const _OlderRow({required this.loading, required this.error, required this.onLoad});
+  final bool loading;
+  final String? error;
+  final VoidCallback onLoad;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final dim = theme.colorScheme.onSurfaceVariant;
+    final style = TextStyle(fontSize: Look.sub, color: dim);
+    if (loading) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox.square(dimension: 14, child: CircularProgressIndicator(strokeWidth: 2, color: dim)),
+            const SizedBox(width: 8),
+            Text('앞 대화를 받는 중', style: style),
+          ],
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        children: [
+          if (error != null)
+            Text(error!, textAlign: TextAlign.center, maxLines: 3, overflow: TextOverflow.ellipsis, style: style),
+          TextButton.icon(
+            style: TextButton.styleFrom(minimumSize: const Size(0, Look.tap)),
+            onPressed: onLoad,
+            icon: const Icon(Icons.expand_less, size: Look.iconSize),
+            label: Text(error == null ? '앞 대화 보기' : '다시 받기'),
           ),
         ],
       ),

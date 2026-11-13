@@ -124,6 +124,31 @@ void main() {
     await close(tester, session);
   });
 
+  testWidgets('답을 고른 뒤 다음 질문이 서면 접기를 기다리지 않고 곧바로 보인다', (tester) async {
+    final session = await open(tester, claudeQuestionTabsFirst, litRow: '✔ Submit  →', lit: ' ☐ 언어 ');
+    final first = find.widgetWithText(OutlinedButton, '1. 러스트');
+    await tester.ensureVisible(first);
+    await tester.tap(first);
+    await tester.pump();
+    expect(first, findsNothing, reason: '고른 창은 화면이 바뀔 때까지 접는다');
+    session.setRows(claudeQuestionTabsSecond, litRow: '✔ Submit  →', lit: ' ☐ 테스트 ');
+    await tester.pump();
+    expect(find.widgetWithText(OutlinedButton, '1. 단위'), findsOneWidget);
+    await close(tester, session);
+  });
+
+  testWidgets('화면이 멈춰 있어도 접기가 끝나면 같은 창을 다시 그린다', (tester) async {
+    final session = await open(tester, claudeQuestionTabsFirst, litRow: '✔ Submit  →', lit: ' ☐ 언어 ');
+    final first = find.widgetWithText(OutlinedButton, '1. 러스트');
+    await tester.ensureVisible(first);
+    await tester.tap(first);
+    await tester.pump();
+    expect(first, findsNothing);
+    await tester.pump(const Duration(milliseconds: 1300));
+    expect(first, findsOneWidget, reason: '답을 기다리는 TUI 는 화면을 다시 보내지 않는다');
+    await close(tester, session);
+  });
+
   testWidgets('질문 여러 개 — 탭을 누르면 Tab 으로 옮긴다', (tester) async {
     final session = await open(tester, claudeQuestionTabsFirst, litRow: '✔ Submit  →', lit: ' ☐ 언어 ');
     final chip = find.text('테스트');
