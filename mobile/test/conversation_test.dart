@@ -25,6 +25,36 @@ Map<String, Object?> assistant(List<Object> blocks) => {
 };
 
 void main() {
+  test('all emitted report states retain the sender in live, queued, Codex and archived history', () {
+    for (final mark in ['완료', '실패', '막힘', '재시작 필요', '승인 필요']) {
+      final report = '[$mark] 시즈코(%13) — 끝난 것: 검사 완료.\n남은 것: 최종 판단.';
+      final events = [
+        user(report),
+        {'type':'queue-operation', 'operation':'enqueue', 'content':report},
+        {'type':'event_msg', 'payload':{'type':'user_message', 'message':report}},
+        user('The kasaterm-bridge plugin sent a message:\n$report'),
+      ];
+      for (final archived in [false, true]) {
+        for (final event in events) {
+          final c = Conversation(archived: archived);
+          final echo = c.echo('검사 완료');
+          c.apply(lines([event]), reset:true, next:100);
+          final bubble = c.items.whereType<ChatBubble>().single;
+          expect(bubble.mine, isFalse, reason:'$mark: $event');
+          expect(bubble.from, '시즈코');
+          expect(bubble.via, '$mark 보고');
+          expect(bubble.text, '끝난 것: 검사 완료.\n남은 것: 최종 판단.');
+          expect(c.echoes, contains(echo));
+        }
+      }
+      expect(relayedMessage('[$mark] (%13) — 이름 없음')?.name, '%13');
+      expect(relayedMessage('[$mark] 표시만 적은 말'), isNull);
+      expect(relayedMessage('[$mark] 사람(13번) — 일반 문장'), isNull);
+    }
+    expect(relayedMessage('[미정] 시즈코(%13) — 알 수 없는 표식'), isNull);
+    expect(relayedMessage('승인 필요 시즈코(%13) — 괄호 없는 표식'), isNull);
+  });
+
   test('queued tell and Codex delivery retain the sender without settling my echo', () {
     final c = Conversation();
     final echo = c.echo('report');

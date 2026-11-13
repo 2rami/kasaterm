@@ -1475,11 +1475,15 @@ pub(crate) fn done_report_line(row: &[GridCell]) -> Option<String> {
         .collect();
     let rest = flat
         .strip_prefix('❯')
+        .or_else(|| flat.strip_prefix('›'))
         .or_else(|| flat.strip_prefix('>'))
         .unwrap_or(&flat);
     let tail = rest
         .strip_prefix("[완료]")
-        .or_else(|| rest.strip_prefix("[실패]"))?;
+        .or_else(|| rest.strip_prefix("[실패]"))
+        .or_else(|| rest.strip_prefix("[막힘]"))
+        .or_else(|| rest.strip_prefix("[재시작필요]"))
+        .or_else(|| rest.strip_prefix("[승인필요]"))?;
     let open = tail.find('(')?;
     let close = tail[open..].find(')')? + open;
     if !tail[open + 1..close].starts_with('%') {
@@ -6980,6 +6984,18 @@ This came from another Claude session";
 
     /// 완료 보고 줄(`[완료] 미도리(%4) — …`)은 두 스페이서 경로('\0'/' ') 모두에서
     /// 캐릭터명을 뽑아야 한다 — 색칠이 이 이름으로 학생을 찾는다.
+    #[test]
+    fn all_report_states_are_recognized_in_terminal_rows() {
+        for mark in ["완료", "실패", "막힘", "재시작 필요", "승인 필요"] {
+            for prompt in ["", "❯ ", "› ", "> "] {
+                let row = row_from(&format!("{prompt}[{mark}] 시즈코(%13) — 검사 완료"), 80);
+                assert_eq!(done_report_line(&row).as_deref(), Some("시즈코"));
+            }
+            assert!(done_report_line(&row_from(&format!("[{mark}] 일반 문장"), 80)).is_none());
+        }
+        assert!(done_report_line(&row_from("[미정] 시즈코(%13)", 80)).is_none());
+    }
+
     #[test]
     fn done_report_line_survives_wide_spacers() {
         // 실제 그리드처럼 wide 글리프 뒤에 스페이서 셀을 끼운 행.

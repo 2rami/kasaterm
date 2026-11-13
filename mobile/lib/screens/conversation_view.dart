@@ -691,7 +691,7 @@ class _ConversationViewState extends State<ConversationView> {
     Object? sender(int j) {
       if (j < 0 || j >= list.length) return null;
       final r = list[j];
-      return r is ChatBubble ? (r.mine ? '' : (r.from ?? '\u0000')) : null;
+      return r is ChatBubble ? (r.mine ? '' : (r.from ?? '\u0000'), r.via) : null;
     }
 
     final me = sender(at);

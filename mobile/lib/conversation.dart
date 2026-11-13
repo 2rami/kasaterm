@@ -679,11 +679,12 @@ bool isInjection(String text) => _injection.hasMatch(text);
     final name = tell[1]!.trim();
     return name.isEmpty ? null : (name: name, via: '쪽지', body: tell[2]!.trim());
   }
-  final done = RegExp(r'^\[(완료|실패)\]\s*([^(\n]+)\((%[^)]*)\)\s*(?:—\s*)?([\s\S]*)$').firstMatch(t);
+  final done = RegExp(r'^\[(완료|실패|막힘|재시작 필요|승인 필요)\][ \t]*([^()\r\n]*)\((%[^()\s]+)\)\s*(?:—\s*)?([\s\S]*)$').firstMatch(t);
   if (done != null) {
-    return (name: done[2]!.trim(), via: '${done[1]} 보고', body: done[4]!.trim());
+    final name = done[2]!.trim();
+    return (name: name.isEmpty ? done[3]! : name, via: '${done[1]} 보고', body: done[4]!.trim());
   }
-  if (t.startsWith('[완료]') || t.startsWith('[실패]')) return null;
+  if (RegExp(r'^\[(완료|실패|막힘|재시작 필요|승인 필요)\]').hasMatch(t)) return null;
   if (t.startsWith('[쪽지 확인 못 함]')) {
     return (name: '카사텀', via: '쪽지 확인 못 함', body: t.substring('[쪽지 확인 못 함]'.length).trim());
   }

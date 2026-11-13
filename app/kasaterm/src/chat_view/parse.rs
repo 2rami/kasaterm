@@ -577,12 +577,15 @@ pub(crate) fn relayed(text: &str) -> Option<(Sender, String)> {
         return ok.then(|| (sender(name, "쪽지"), body.trim().to_string()));
     }
     // 학생의 `done` 을 연 칸에 알리는 줄 — `[완료] 이름(%N) — 요약`(socket.rs `pane_done`).
-    for (mark, via) in [("[완료]", "완료 보고"), ("[실패]", "실패 보고")] {
+    for (mark, via) in [("[완료]", "완료 보고"), ("[실패]", "실패 보고"),
+        ("[막힘]", "막힘 보고"), ("[재시작 필요]", "재시작 필요 보고"), ("[승인 필요]", "승인 필요 보고")] {
         let Some(rest) = t.strip_prefix(mark) else { continue };
         let rest = rest.trim_start();
         let open = rest.find('(')?;
         let close = open + rest[open..].find(')')?;
-        if !rest[open + 1..close].starts_with('%') {
+        let pane = &rest[open + 1..close];
+        if !pane.starts_with('%') || pane.len() <= 1 || pane.contains(['(', ')']) || pane.contains(char::is_whitespace)
+            || rest[..open].chars().any(char::is_control) || rest[..open].contains(')') {
             return None;
         }
         // 캐릭터가 빈 칸의 보고는 `[실패] (%1)` 로 남아 있다 — 이름 대신 칸 번호로 단다.
@@ -1100,6 +1103,32 @@ mod tests {
     }
 
     /// tell·완료 보고는 사람 말풍선이 아니라 보낸 쪽 이름을 단 말이다.
+    #[test]
+    fn every_emitted_done_status_retains_its_sender_in_each_harness_and_queue() {
+        for (outcome, note, mark) in [("succeeded", "", "완료"), ("failed", "", "실패"),
+            ("failed", "막힘: ", "막힘"), ("failed", "재시작 필요: ", "재시작 필요"),
+            ("failed", "승인 필요: ", "승인 필요")] {
+            let body = "검사 완료.\n최종 판단 대기.";
+            let summary = format!("{note}{body}");
+            let (emitted, summary) = kasa_socket::cli::done_mark(outcome, &summary);
+            assert_eq!(emitted, mark);
+            let report = format!("[{emitted}] 시즈코(%13) — {summary}");
+            for event in [
+                serde_json::json!({"type":"user","message":{"content":report}}),
+                serde_json::json!({"type":"queue-operation","operation":"enqueue","content":report}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":report}}),
+            ] {
+                let raw = event.to_string();
+                let parsed = conv(&[&raw]);
+                assert!(matches!(&parsed.items[0], Item::Bubble { from:Some(sender), text, .. }
+                    if sender.name == "시즈코" && sender.via == format!("{mark} 보고") && text == body));
+            }
+            assert!(relayed(&format!("[{mark}] 표시만 적은 말")).is_none());
+            assert!(relayed(&format!("[{mark}] 사람(13번) — 일반 문장")).is_none());
+        }
+        assert!(relayed("[미정] 시즈코(%13) — 모르는 표식").is_none());
+    }
+
     #[test]
     fn relayed_turns_name_who_put_them_in() {
         let c = conv(&[
