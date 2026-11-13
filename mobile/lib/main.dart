@@ -575,9 +575,9 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     );
   }
 
-  /// 앱이 앞에 있는 동안 새 요청 — 위쪽 띠 하나. 보고 있는 승인 화면이 있으면 띄우지 않는다.
+  /// 앱이 앞에 있는 동안 새 요청 — 위쪽 띠 하나. 보고 있는 승인 화면이나 그 칸의 대화(제자리 카드)가 있으면 띄우지 않는다.
   void _announceApproval(Approval a) {
-    if (_approvalShown != null || !mounted) return;
+    if (_approvalShown != null || !mounted || ApprovalCenter.instance.shownInPlace(a)) return;
     final overlay = navigatorKey.currentState?.overlay;
     if (overlay == null) return;
     _approvalBanner?.remove();

@@ -210,7 +210,7 @@ class _Body extends StatelessWidget {
               ],
               if (a.isSecret) ...[
                 const SizedBox(height: Look.groupGap),
-                _Band(
+                ApprovalBand(
                   key: const Key('approval-secret-note'),
                   text: a.secretValid
                       ? '허락하면 이 항목을 맥에서 이번 한 번만 꺼내요. 값은 이 폰과 관문을 지나지 않고 요청한 프로세스에만 가요.'
@@ -219,13 +219,13 @@ class _Body extends StatelessWidget {
                 ),
                 if (onMakeKey case final make?) ...[
                   const SizedBox(height: Look.rowGap * 2),
-                  _Band(
+                  ApprovalBand(
                     key: const Key('approval-no-key'),
                     text: '이 폰이 아직 비밀 승인에 연결되지 않았어요. 「Face ID 로 연결」을 한 번 누르면 맥까지 이어져 허락할 수 있어요.',
                     color: scheme.error,
                   ),
                   const SizedBox(height: Look.rowGap * 2),
-                  _Button(
+                  ApprovalButton(
                     key: const Key('approval-make-key'),
                     label: 'Face ID 로 연결',
                     fill: scheme.primary.withValues(alpha: 0.14),
@@ -236,7 +236,7 @@ class _Body extends StatelessWidget {
               ],
               if (a.truncated) ...[
                 const SizedBox(height: Look.groupGap),
-                _Band(
+                ApprovalBand(
                   key: const Key('approval-truncated'),
                   text: '원문이 길어 앞부분만 실렸어요. 허락은 원래 창에서만 할 수 있어요.',
                   color: scheme.error,
@@ -277,7 +277,7 @@ class _Body extends StatelessWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: _Button(
+                        child: ApprovalButton(
                           key: const Key('approval-deny'),
                           label: '거절',
                           fill: scheme.error.withValues(alpha: Look.dangerTint),
@@ -287,7 +287,7 @@ class _Body extends StatelessWidget {
                       ),
                       const SizedBox(width: Look.cardGap),
                       Expanded(
-                        child: _Button(
+                        child: ApprovalButton(
                           key: const Key('approval-allow'),
                           label: a.isSecret ? 'Face ID 로 허락' : '허락',
                           fill: scheme.primary,
@@ -299,7 +299,7 @@ class _Body extends StatelessWidget {
                     ],
                   ),
                 ] else
-                  _Band(
+                  ApprovalBand(
                     key: const Key('approval-closed'),
                     text: a.pending ? '2분이 지나 원래 창으로 돌아갔어요' : a.closedLine,
                     color: a.state == 'allowed'
@@ -340,8 +340,9 @@ class _Chip extends StatelessWidget {
   );
 }
 
-class _Band extends StatelessWidget {
-  const _Band({super.key, required this.text, required this.color});
+/// 승인 화면·대화 안 카드의 알림 띠 — 그 색 12% 바탕에 그 색 글자.
+class ApprovalBand extends StatelessWidget {
+  const ApprovalBand({super.key, required this.text, required this.color});
   final String text;
   final Color color;
 
@@ -355,8 +356,9 @@ class _Band extends StatelessWidget {
   );
 }
 
-class _Button extends StatelessWidget {
-  const _Button({
+/// 승인 화면·대화 안 카드의 단추 — 높이 44, 모서리 12, 테 없음. [busy] 면 도는 표시.
+class ApprovalButton extends StatelessWidget {
+  const ApprovalButton({
     super.key,
     required this.label,
     required this.fill,

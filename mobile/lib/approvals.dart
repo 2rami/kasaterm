@@ -196,6 +196,11 @@ class ApprovalCenter extends ChangeNotifier {
   final Map<String, Approval> _items = {};
   final Set<String> _announced = {};
 
+  /// 요청한 기기 id → 그 기계의 `~<machine_id>` 경로. 대화 보기의 칸(`Pane.machine`)과 맞춰 보는 데 쓴다.
+  final Map<String, String> _routes = {};
+  final Set<String> _routeTried = {};
+  final Map<Object, ({String pane, String machine, bool Function() visible})> _inPlace = {};
+
   /// 앱이 앞에 있을 때 새 요청이 오면 — 알림 띠를 세우는 자리.
   void Function(Approval)? onNew;
 
@@ -203,6 +208,21 @@ class ApprovalCenter extends ChangeNotifier {
   List<Approval> get pending =>
       _items.values.where((a) => a.pending).toList()..sort((a, b) => a.created.compareTo(b.created));
   Approval? byId(String id) => _items[id];
+
+  /// [a] 가 그 기계([machine], `~<id>` 또는 옛 판의 표시 이름)의 칸 [pane] 에서 나온 요청인가.
+  bool fromPane(Approval a, {required String pane, required String? machine}) {
+    if (machine == null || machine.isEmpty || a.pane != pane) return false;
+    return _routes[a.device] == machine || a.machine == machine;
+  }
+
+  /// 대화 보기가 그 칸의 요청을 제자리 카드로 보이는 동안 — 위쪽 알림 띠를 겹쳐 세우지 않는다.
+  void showInPlace(Object owner, {required String pane, required String machine, required bool Function() visible}) =>
+      _inPlace[owner] = (pane: pane, machine: machine, visible: visible);
+
+  void hideInPlace(Object owner) => _inPlace.remove(owner);
+
+  bool shownInPlace(Approval a) =>
+      _inPlace.values.any((v) => v.visible() && fromPane(a, pane: v.pane, machine: v.machine));
 
   /// 관문 시계로 남은 시간 — 폰 시계가 틀려도 만료를 같은 순간에 본다.
   int remainingMs(Approval a) => a.expires - (_clock().millisecondsSinceEpoch + _skew);
@@ -212,6 +232,8 @@ class ApprovalCenter extends ChangeNotifier {
     _session = session;
     _items.clear();
     _announced.clear();
+    _routes.clear();
+    _routeTried.clear();
     _rev = null;
     notifyListeners();
     _restart();
@@ -241,6 +263,8 @@ class ApprovalCenter extends ChangeNotifier {
           final asked = DateTime.now();
           final json = await api.approvals(since: first ? null : _rev, wait: first ? 0 : 25);
           if (gen != _gen) return;
+          await _learnRoutes(api, json);
+          if (gen != _gen) return;
           _apply(json, announce: true);
           // 관문이 붙들지 않고 바로 답하면(다른 계정의 변화로 판이 넘어갔을 때) 잠깐 쉰다 — 헛도는 고리를 막는다.
           if (!first && DateTime.now().difference(asked) < _minRound) {
@@ -266,11 +290,33 @@ class ApprovalCenter extends ChangeNotifier {
     if (session == null) return;
     final api = _api(session);
     try {
-      _apply(await api.approvals(), announce: false);
+      final json = await api.approvals();
+      await _learnRoutes(api, json);
+      _apply(json, announce: false);
     } on AccountException {
       // 다음 긴 폴링이 다시 받는다.
     } finally {
       api.close();
+    }
+  }
+
+  /// 처음 보는 기기의 요청이면 계정 기기 목록에서 그 기계 경로를 배운다 — 알림 띠를 세울지 정하기 전에.
+  /// 기기마다 한 번만 묻고, 못 받아도 요청은 승인 화면으로 그대로 볼 수 있다.
+  Future<void> _learnRoutes(RelayAccountApi api, Map<String, dynamic> json) async {
+    final unknown = <String>{
+      for (final raw in json['approvals'] is List ? json['approvals'] as List : const [])
+        if (raw is Map && raw['device'] is String && (raw['device'] as String).isNotEmpty) raw['device'] as String,
+    }.where((d) => !_routes.containsKey(d) && !_routeTried.contains(d)).toSet();
+    if (unknown.isEmpty) return;
+    _routeTried.addAll(unknown);
+    try {
+      for (final d in await api.devices()) {
+        final id = d['device_id'];
+        final machine = d['machine_id'];
+        if (id is String && machine is String && machine.isNotEmpty) _routes[id] = '~$machine';
+      }
+    } on AccountException {
+      // 다음에 처음 보는 기기가 오면 다시 묻는다.
     }
   }
 
@@ -346,11 +392,12 @@ class ApprovalCenter extends ChangeNotifier {
   }
 
   @visibleForTesting
-  void debugSeed(List<Approval> items, {int skew = 0}) {
+  void debugSeed(List<Approval> items, {int skew = 0, Map<String, String> routes = const {}}) {
     _items
       ..clear()
       ..addEntries(items.map((a) => MapEntry(a.id, a)));
     _skew = skew;
+    _routes.addAll(routes);
     notifyListeners();
   }
 }

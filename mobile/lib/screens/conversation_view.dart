@@ -20,6 +20,7 @@ import '../term_session.dart';
 import '../look.dart';
 import '../twins_loading.dart';
 import 'controls.dart';
+import 'conversation_asks.dart';
 
 /// 학생 화면의 두 얼굴 — 격자 그대로(터미널)와 다시 그린 쪽(대화, 셸 칸은 명령 묶음). 웹이 「웹 터미널」과
 /// 「대화 보기」를 주소 둘로 가른 것(2026-08-25)을 한 화면 안의 전환으로 옮겼다.
@@ -380,6 +381,20 @@ class _ConversationViewState extends State<ConversationView> {
     }
   }
 
+  /// 대화 안 카드가 사람 대신 칸에 넣는 말(로그인 돌아온 주소) — 입력칸으로 보낸 말과 같은 길로 간다.
+  Future<void> _sendText(String text) async {
+    final echo = _conv.echo(text);
+    setState(() {});
+    _toBottom();
+    try {
+      await widget.session.reply(text, chat: true);
+    } on ServerException {
+      _conv.withdraw(echo);
+      if (mounted) setState(() {});
+      rethrow;
+    }
+  }
+
   Future<void> _poll() async {
     if (_polling || !mounted || widget.readOnly) return;
     _polling = true;
@@ -530,6 +545,13 @@ class _ConversationViewState extends State<ConversationView> {
               color: Theme.of(context).colorScheme.onSurfaceVariant)),
         ),
         Expanded(child: DismissKeyboard(child: _body(context))),
+        ConversationAsks(
+          pane: widget.pane,
+          rows: _loaded ? rows : const [],
+          active: widget.active && !widget.readOnly,
+          toolsAsked: menu != null || (!connected && decidable) || held,
+          onSend: _sendText,
+        ),
         if (menu != null)
           _MenuCard(
             menu: menu,

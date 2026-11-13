@@ -20,6 +20,7 @@ import os
   private var lastToken: String?
   private var pushEnabled = UserDefaults.standard.bool(forKey: "kasaLegacyPushEnabled")
   private var webAuth: ASWebAuthenticationSession?
+  private var webAuthGen = 0
   private var backgroundChannel: FlutterMethodChannel?
   private var graceTask: UIBackgroundTaskIdentifier = .invalid
   private var networkChannel: FlutterMethodChannel?
@@ -150,6 +151,12 @@ import os
     // 계정 로그인 시스템 창. 관문이 kasaterm:// 로 돌려보낸 주소(일회용 code)를 다트에 준다 — 확인 코드 입력이 없다.
     let auth = FlutterMethodChannel(name: "kasaterm/web_auth", binaryMessenger: messenger)
     auth.setMethodCallHandler { [weak self] call, result in
+      // 학생 로그인 돌아온 주소를 이 앱의 루프백에서 먼저 받았을 때 창을 거둔다 — 그 창의 처리기는 취소(nil)로 답한다.
+      if call.method == "cancel" {
+        self?.webAuth?.cancel()
+        result(nil)
+        return
+      }
       guard call.method == "authenticate", let self,
             let args = call.arguments as? [String: String],
             let url = args["url"].flatMap(URL.init(string:)),
@@ -159,9 +166,12 @@ import os
         return
       }
       self.webAuth?.cancel()
+      self.webAuthGen += 1
+      let gen = self.webAuthGen
       let session = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { [weak self] back, error in
         DispatchQueue.main.async {
-          self?.webAuth = nil
+          // 앞 창을 거둔 처리기가 늦게 와도 새로 연 창을 놓지 않는다.
+          if let self, self.webAuthGen == gen { self.webAuth = nil }
           if let back {
             result(back.absoluteString)
           } else if (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin {

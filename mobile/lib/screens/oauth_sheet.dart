@@ -21,6 +21,9 @@ Future<Uri?> systemWebAuthenticate(Uri url, String scheme) async {
   return back == null ? null : Uri.tryParse(back);
 }
 
+/// 열린 시스템 로그인 창을 거둔다 — 그 창의 [systemWebAuthenticate] 는 null 로 끝난다.
+Future<void> cancelSystemWebAuthenticate() => _webAuth.invokeMethod<void>('cancel');
+
 /// Google·GitHub 로그인(또는 [link] 면 지금 계정에 연결). 관문이 앱 리다이렉트를 알고 이 기기가 시스템 로그인 창을
 /// 띄울 수 있으면([authenticate]) 확인 코드 없이 그 창에서 끝낸다. 아니면 옛 길 — 관문 확인 화면을 Safari 로 열고,
 /// 이 앱에만 보이는 확인 코드를 거기 넣게 한 뒤, 끝날 때까지 관문에 묻는다. 데스크톱(`device_oauth.rs`)과 같은 흐름이다.
