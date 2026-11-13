@@ -3606,6 +3606,8 @@ struct Workspace {
     /// board)은 `App.windows` 를 못 봐서 인덱스+1 을 찍었고, 보기 방이 끼면 화면 ⌘N 과 하나씩 밀려
     /// 사람이 부른 「2번방」이 엉뚱한 방이 됐다(2026-10-09).
     room_numbers: Vec<RoomNumber>,
+    /// 방마다 사이드바 이름과 작업 폴더 — `room_numbers` 와 같은 이유로 미러해 `/windows` 가 싣는다.
+    room_labels: Vec<(String, String)>,
 }
 
 /// 사이드바가 그 방에 다는 번호(⌘N 과 같다, 1부터)와, 다른 기기 방의 보기 창이면 그 기기 이름.
@@ -3636,6 +3638,7 @@ impl Default for Workspace {
             window_layouts: HashMap::new(),
             grid_aspect: None,
             room_numbers: Vec::new(),
+            room_labels: Vec::new(),
         }
     }
 }

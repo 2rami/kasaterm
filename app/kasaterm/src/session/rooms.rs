@@ -669,6 +669,8 @@ impl App {
             out.push((name, cwd));
         }
         drop(ws);
+        // 이름 바꾸는 중인 글자는 덮기 전 것으로 — 폰에 반쯤 친 이름이 흘러가지 않게.
+        let mirrored = out.clone();
         self.window_labels = out;
         self.window_labels_at = Some(now);
         self.overlay_room_rename_label();
@@ -680,6 +682,9 @@ impl App {
         let mut ws = self.ws.lock().unwrap();
         if ws.room_numbers != numbers {
             ws.room_numbers = numbers;
+        }
+        if ws.room_labels != mirrored {
+            ws.room_labels = mirrored;
         }
     }
 

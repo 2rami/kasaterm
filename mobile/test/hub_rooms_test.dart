@@ -57,6 +57,28 @@ void main() {
     expect(rooms[1].paneOf('%9'), isNull);
   });
 
+  test('원격 기계 방도 배치가 실어 온 데스크톱 방 이름으로 선다', () {
+    final layouts = [
+      WindowLayout.fromJson({
+        'idx': 0,
+        'name': 'kasaterm',
+        'cwd': '~/Desktop/kasaterm',
+      }),
+      WindowLayout.fromJson({'idx': 1, 'name': '', 'cwd': ''}),
+      WindowLayout.fromJson({'idx': 2, 'name': 'notes'}),
+    ];
+    final rooms = HubModel.rooms(
+      [pane('%1', 0), pane('%2', 1), pane('%3', 2)],
+      const [],
+      layouts,
+    );
+    expect(rooms.map((r) => r.title), [
+      'kasaterm · ~/Desktop/kasaterm',
+      '방 2',
+      'notes',
+    ]);
+  });
+
   test('칸에도 탭에도 안 앉은 학생은 unplaced 로 따로 선다', () {
     final layouts = [
       WindowLayout.fromJson({

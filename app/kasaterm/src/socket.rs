@@ -2286,6 +2286,7 @@ impl Backend for PtyBackend {
             .map(|(i, l)| (*i, rects_of(l)))
             .collect();
         let aspect = ws.grid_aspect;
+        let labels = ws.room_labels.clone();
         // 자리마다 탭 줄 — 탭이 둘 이상인 pane 만. 보조 탭의 pid 는 `pid_to_pane` 으로
         // 방에는 실리지만 배치도 칸은 바깥 pane 하나라, 폰에서는 탭 학생이 어디 있는지
         // 알 길이 없었다.
@@ -2335,6 +2336,8 @@ impl Backend for PtyBackend {
                     })),
                     surfaces,
                     aspect,
+                    name: labels.get(idx).map(|l| l.0.clone()).unwrap_or_default(),
+                    cwd: labels.get(idx).map(|l| l.1.clone()).unwrap_or_default(),
                 }
             })
             .collect())

@@ -535,6 +535,12 @@ pub struct WindowOverview {
     /// 창 모양과 무관한 납작한 상자가 된다. 창이 없으면(헤드리스) 생략.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aspect: Option<f32>,
+    /// 사이드바가 그 방에 다는 이름과 작업 폴더. 폰이 원격 기계 방을 이름 없이 「방 N」으로 그리던
+    /// 것을 같은 이름으로 맞춘다 — `/sessions` 라벨은 폰이 붙은 기계 것뿐이다.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cwd: String,
 }
 
 /// 어느 방에 세울까 — 새 방, 또는 번호로.

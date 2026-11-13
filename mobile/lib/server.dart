@@ -296,6 +296,8 @@ class WindowLayout {
     required this.active,
     required this.rects,
     this.aspect,
+    this.name = '',
+    this.cwd = '',
   });
 
   final int idx;
@@ -305,6 +307,17 @@ class WindowLayout {
   /// 데스크톱 pane 영역의 가로÷세로. 없으면(옛 서버) 흔한 창 모양으로 그린다.
   final double? aspect;
 
+  /// 데스크톱 사이드바의 방 이름과 작업 폴더. 옛 서버는 비워 보낸다.
+  final String name;
+  final String cwd;
+
+  /// 방 머리 글 — `/sessions` 라벨과 같은 「이름 · 폴더」 꼴. 이름이 없으면 빈 글.
+  String get title => name.isEmpty
+      ? ''
+      : cwd.isEmpty
+      ? name
+      : '$name · $cwd';
+
   static WindowLayout fromJson(Map<String, Object?> j) {
     final panes = j['panes'];
     final a = (j['aspect'] as num?)?.toDouble();
@@ -312,6 +325,8 @@ class WindowLayout {
       idx: (j['idx'] as num?)?.toInt() ?? 0,
       active: j['active'] == true,
       aspect: a != null && a > 0 ? a : null,
+      name: j['name'] as String? ?? '',
+      cwd: j['cwd'] as String? ?? '',
       rects: [
         if (panes is List)
           for (final p in panes)

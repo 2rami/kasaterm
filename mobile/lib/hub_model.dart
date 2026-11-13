@@ -775,7 +775,10 @@ class HubModel extends ChangeNotifier {
     return [
       for (final w in windows)
         HubRoom(
-          title: w < labels.length && labels[w].isNotEmpty
+          // 배치가 실어 온 이름이 먼저다 — 원격 기계는 `/sessions` 라벨이 없어 「방 N」으로 떨어졌다.
+          title: (layoutOf[w]?.title ?? '').isNotEmpty
+              ? layoutOf[w]!.title
+              : w < labels.length && labels[w].isNotEmpty
               ? labels[w]
               : '방 ${w + 1}',
           rects: layoutOf[w]?.rects ?? const [],
