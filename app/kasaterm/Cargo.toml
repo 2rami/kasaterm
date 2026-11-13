@@ -153,6 +153,8 @@ windows-sys = { workspace = true, features = [
     # no lsof on Windows, so walk the target's PEB → ProcessParameters →
     # CurrentDirectory via NtQueryInformationProcess + ReadProcessMemory.
     "Win32_System_Threading",
+    # 클립보드가 바뀐 때만 열기(clipboard.rs GetClipboardSequenceNumber).
+    "Win32_System_DataExchange",
     "Win32_System_Diagnostics_Debug",
     # LoadLibraryW/GetProcAddress — WinSparkle.dll 런타임 로드(win_sparkle.rs).
     "Win32_System_LibraryLoader",

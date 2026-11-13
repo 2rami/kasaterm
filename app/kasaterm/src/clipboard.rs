@@ -196,11 +196,18 @@ pub(crate) fn json_list() -> Vec<serde_json::Value> {
 /// 다시 그리면 노는 화면이 계속 깨어난다.
 pub(crate) fn poll() -> bool {
     if isolated_probe() { return false; }
+    let token = change_token();
+    if token.is_some_and(|t| t == LOOKED.load(std::sync::atomic::Ordering::Relaxed)) { return false; }
     let Ok(mut cb) = arboard::Clipboard::new() else {
         return false;
     };
+    let read = cb.get_text();
+    // 다른 앱이 쥐고 있어 못 연 번호는 적지 않는다 — 다음 틱에 다시 연다.
+    if let Some(t) = token.filter(|_| !matches!(read, Err(arboard::Error::ClipboardOccupied))) {
+        LOOKED.store(t, std::sync::atomic::Ordering::Relaxed);
+    }
     // 글이 없는 클립보드(그림만 있거나 빈 것)는 조용히 넘긴다 — 오류가 아니다.
-    let Ok(text) = cb.get_text() else {
+    let Ok(text) = read else {
         return false;
     };
     if text.trim().is_empty() || already_seen(&text) {
@@ -211,6 +218,22 @@ pub(crate) fn poll() -> bool {
     let item = remember_as(&text, None);
     share(&text, item.is_some_and(|i| i.secret));
     true
+}
+
+/// 마지막으로 읽은 클립보드 번호(0 = 아직 없음).
+static LOOKED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Windows 는 클립보드를 열 때마다 다른 앱과 다투고(열기 실패면 arboard 가 잠깐씩 쉬며 다시 연다), 소유자가 늦게
+/// 내주는 글이면 읽기가 그 앱을 기다린다. 이 일은 메인 스레드 틱에서 300ms 마다 돌아 타자를 밀었다 — 클립보드가 바뀐
+/// 번호가 달라졌을 때만 연다. 번호를 못 얻으면(0) 예전처럼 매번 연다.
+#[cfg(windows)]
+fn change_token() -> Option<u32> {
+    Some(unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() }).filter(|t| *t != 0)
+}
+
+#[cfg(not(windows))]
+fn change_token() -> Option<u32> {
+    None
 }
 
 /// 이 기계에서 새로 담긴 것을 다른 기계에 나눈다 — 폰과는 이미 나누고 있었고(폰이 붙은
