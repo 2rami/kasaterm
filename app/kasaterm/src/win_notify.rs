@@ -478,8 +478,9 @@ fn text_coverage(label: &str, size: i32) -> Option<Vec<u8>> {
         }
         SelectObject(dc, old);
         let _ = DeleteObject(font.into());
-        let _ = DeleteObject(bitmap.into());
+        // DC 에 붙어 있는 비트맵은 DeleteObject 가 거절한다 — DC 를 먼저 지워야 배지를 갈 때마다 하나씩 새지 않는다.
         let _ = DeleteDC(dc);
+        let _ = DeleteObject(bitmap.into());
     }
     Some(recenter(&raw, n))
 }
