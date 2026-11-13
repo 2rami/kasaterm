@@ -266,7 +266,6 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         },
         "collab.transcript" => collab_transcript(backend, id, &req.params),
         "collab.activity" => collab_activity(backend, id, &req.params),
-        "surface.notify" => surface_notify(backend, id, &req.params),
         "surface.attention" => surface_attention(backend, id, &req.params),
         "surface.done" => surface_done(backend, id, &req.params),
         "surface.agent_status" => surface_agent_status(backend, id, &req.params),
@@ -417,7 +416,6 @@ fn system_capabilities(id: Value) -> Response {
                 "collab.bind_transcript",
                 "collab.transcript",
                 "collab.activity",
-                "surface.notify",
                 "surface.attention",
                 "surface.done",
                 "clipboard.set",
@@ -616,19 +614,6 @@ fn clipboard_pick(backend: &dyn Backend, id: Value, params: &Value) -> Response 
     };
     match backend.clipboard_pick(item) {
         Ok(text) => Response::success(id, json!({"ok": true, "chars": text.chars().count()})),
-        Err(e) => backend_err(id, e),
-    }
-}
-
-fn surface_notify(backend: &dyn Backend, id: Value, params: &Value) -> Response {
-    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return param_err(id, "surface.notify requires `surface_id` (string)"),
-    };
-    let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
-    let body = params.get("body").and_then(|v| v.as_str()).unwrap_or("");
-    match backend.notify(surface_id, title, body) {
-        Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
 }

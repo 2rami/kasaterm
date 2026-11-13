@@ -236,7 +236,7 @@ class HubModel extends ChangeNotifier {
   /// 떴다. 서버가 말하는 지금 수가 늘 맞고, 목록이 길 때 위에서 한눈에 보인다.
   int waiting = 0;
 
-  /// 나쵸가 남긴 학생 쪽지 — 모든 기계 것을 합쳐 최근 것부터. 종 아이콘 목록.
+  /// 종 아이콘 목록 — 사람에게 간 알림(고를 것·끝냄)의 기록. 모든 기계 것을 합쳐 최근 것부터.
   List<Note> notes = const [];
   int get unread => notes.where((n) => !n.read).length;
 

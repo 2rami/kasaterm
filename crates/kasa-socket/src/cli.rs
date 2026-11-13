@@ -2065,7 +2065,7 @@ fn print_help() {
             "app-restart plan|run|status …            기기 앱 재시작 계획·실행",
         ]),
         ("훅 (claude 훅이 부른다)", &[
-            "bind-transcript <path> · notify [--surface %N] <제목> [본문] · attention [--surface %N] [사유]",
+            "bind-transcript <path> · attention [--surface %N] [사유]",
             "agent-status <start|end|clear> <subagent|background> [key] [라벨] · identify(내 칸 번호)",
         ]),
     ];
@@ -2789,32 +2789,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 params["screen_lines"] = json!(lines);
             }
             ("collab.board", params)
-        }
-        "notify" => {
-            // notify [--surface <id>] <title> [body...] — fire a "work
-            // complete" notification for a pane. A claude Stop hook runs this;
-            // --surface defaults to $KASATERM_PANE_ID (the pane it fired in).
-            let (surface, rest): (String, &[String]) =
-                if args.first().is_some_and(|a| a == "--surface") {
-                    let s = args
-                        .get(1)
-                        .ok_or_else(|| anyhow!("--surface needs an id"))?
-                        .clone();
-                    (s, args.get(2..).unwrap_or(&[]))
-                } else {
-                    let s = std::env::var("KASATERM_PANE_ID")
-                        .map_err(|_| anyhow!("notify needs --surface <id> or $KASATERM_PANE_ID"))?;
-                    (s, &args[..])
-                };
-            let title = rest
-                .first()
-                .ok_or_else(|| anyhow!("notify needs a <title>"))?
-                .clone();
-            let body = rest.get(1..).map(|s| s.join(" ")).unwrap_or_default();
-            (
-                "surface.notify",
-                json!({ "surface_id": surface, "title": title, "body": body }),
-            )
         }
         "attention" => {
             // attention [--surface <id>] [reason...] — flag a pane as blocked

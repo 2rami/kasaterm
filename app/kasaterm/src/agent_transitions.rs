@@ -25,6 +25,11 @@ pub(crate) enum Transition {
     CompactEnd,
 }
 
+/// 하네스 없이 셸만 남은 칸의 판정 근거(`agent_state::resolve`).
+const SHELL: &str = "shell";
+/// 팅긴 세션의 알림 말 — 「선생님, 막혔어요. 세션이 꺼졌어요」.
+const CRASHED: &str = "세션이 꺼졌어요";
+
 /// 하네스가 스스로 다시 시도하는 오류(`screenread::connection_trouble_in` 의 연결·서버 쪽 라벨).
 /// 대개 몇 초 안에 풀리므로 바로 알리면 알림이 소음이 된다 — 부르는 쪽이 붙들었다가 오래
 /// 가면 그때 알린다. 한도·잔액처럼 사람이 손써야 풀리는 것은 여기 없다(바로 알린다).
@@ -76,6 +81,8 @@ pub(crate) struct Observer {
 struct Seen {
     source: Option<String>,
     state: AgentState,
+    /// 하네스(claude·codex)가 칸에서 돌고 있었다 — 셸만 남은 칸은 `resolve` 가 「shell」로 판정한다.
+    alive: bool,
     finish: Finish,
     questions: HashSet<String>,
 }
@@ -122,6 +129,11 @@ impl Observer {
             let old = self.panes.remove(id);
             let same = old.as_ref().filter(|old| old.source == next.source);
             let mut out = transitions(same.map(|old| &old.state), &next.state);
+            // 일하거나 사람을 기다리던 하네스가 사라졌다 — 세션이 팅겼다. 세션이 스스로 알릴 수 없으니 앱이 알린다.
+            // 쉬던 칸을 사람이 끝낸 것(/exit·Ctrl-C 두 번)은 쉬는 중을 거치므로 여기 안 걸린다.
+            if next.reason == SHELL && old.as_ref().is_some_and(|old| old.alive && (old.state.is_busy() || old.state.needs_you())) {
+                out.push(Transition::Error { label: CRASHED.to_string() });
+            }
             if !next.questions.is_empty() {
                 out.retain(|event| !matches!(event, Transition::Waiting { kind: WaitKind::Question, .. }));
             }
@@ -138,7 +150,7 @@ impl Observer {
                 None => {}
             }
             self.panes.insert(id.clone(), Seen { source: next.source.clone(), state: next.state.clone(),
-                finish, questions: next.questions.iter().map(|q| q.id.clone()).collect() });
+                alive: next.reason != SHELL, finish, questions: next.questions.iter().map(|q| q.id.clone()).collect() });
             if !out.is_empty() { events.push((id.clone(), out)); }
         }
         events
@@ -315,6 +327,23 @@ mod tests {
         observer.update_at(&panes, now).into_iter()
             .chain(observer.update_at(&panes, now + ring::SETTLE))
             .flat_map(|(_, e)| e).collect()
+    }
+
+    #[test]
+    fn a_session_that_dies_mid_work_rings_but_one_that_quits_while_resting_does_not() {
+        let shell = || Resolved { reason: SHELL, ..fact(AgentState::Idle, None) };
+        let crashed = || vec![Transition::Error { label: CRASHED.into() }];
+        for before in [AgentState::Working, AgentState::Waiting { kind: WaitKind::Permission, reason: String::new() }] {
+            let mut observer = Observer::default();
+            step(&mut observer, fact(AgentState::Idle, None));
+            step(&mut observer, fact(before.clone(), None));
+            assert_eq!(step(&mut observer, shell()), crashed(), "{before:?}");
+            assert!(step(&mut observer, shell()).is_empty(), "한 번만");
+        }
+        let mut observer = Observer::default();
+        step(&mut observer, fact(AgentState::Working, None));
+        step(&mut observer, fact(AgentState::Idle, None));
+        assert!(step(&mut observer, shell()).iter().all(|e| !matches!(e, Transition::Error { .. })), "쉬다 끝낸 것은 사람이 끝낸 것");
     }
 
     #[test]

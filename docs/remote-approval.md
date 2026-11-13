@@ -1,31 +1,19 @@
-# 원격 승인 — Claude Code 권한 요청을 폰·다른 맥에서
+# 원격 승인 — 관문의 승인 창구(지금은 키체인 비밀 요청만)
 
-학생(claude) 칸이 도구 권한을 물으면 같은 계정의 폰과 다른 맥에도 그 요청이 뜨고, 어디서든 [허락]·[거절] 할 수 있다.
-요청마다 한 번이고 「항상 허락」·규칙 추가는 없다. 엔진의 권한 창은 처음부터 함께 떠 있어 자리의 사람은 늘 거기서 답할 수
-있고, 먼저 온 답이 이긴다(mod 쪽 계약 [claude-mod-bridge.md](claude-mod-bridge.md) 「권한 요청」).
-
-## 길
-
-```
-mod(tool.check · classic.PermissionRequest)
-  → 앱 브로커 kasa_students::claude_mod (loopback, 인증 없음)
-  → 앱 다리 kasa_students::approval_bridge — 비밀을 가려 관문에 올린다
-  → 관문 /relay/approvals (계정 기기 토큰) ─┬→ 폰: APNs 푸시 + 승인 화면
-                                          └→ 다른 PC: OS 알림 클릭 → 원문 시트
-  ← 결정(지문 동봉) → 관문 → 다리 → claude_mod::decide → mod 가 { decision } 으로 엔진에
-```
+> **2026-11-13 바뀜** — 학생의 **도구 권한 요청은 관문에 올리지 않는다.** 한 승인에 폰 알림이 두 통(칸의 승인 대기 알림 +
+> 관문 원격 승인) 오던 것을 하나로 줄였다(「겹치는거 지우고 하나씩만 남겨야돼」). 도구 승인은 칸의 승인 대기 알림 하나로 오고,
+> 고르기는 그 칸(데스크톱 엔진 창·폰 대화 보기·폰 종 목록의 고를 것)에서 한다 — 폰은 mod 요청 id 로 바로 답한다
+> (`/term/mod-decide`, [claude-mod-bridge.md](claude-mod-bridge.md) 「권한 요청」). 다른 맥에 뜨던 원격 승인 알림·시트도 함께 걷었다.
+> 아래 관문 창구·지문·감사 규칙은 그대로이고, 지금 이 창구를 쓰는 것은 **키체인 비밀 요청**(`kind:"secret"`)뿐이다 — 폰만,
+> Secure Enclave 키 서명이 있어야 허락된다. 설계·창구·검사는 [secret-faceid-approval.md](secret-faceid-approval.md).
+> 관문은 옛 데스크톱이 올리는 도구 요청도 여전히 받는다.
 
 | 자리 | 파일 |
 |---|---|
 | 관문 창구·푸시 | `crates/kasa-gateway/src/gateway_approvals.rs` |
 | 표시 칸·비밀 가리기·지문 | `crates/kasa-identity/src/approval_text.rs` |
-| 데스크톱 관문 호출(결정은 앱 화면만) | `crates/kasa-device/src/device_approvals.rs` |
-| 브로커 ↔ 관문 다리 | `crates/kasa-students/src/approval_bridge.rs` |
-| 데스크톱 알림·시트 | `app/kasaterm/src/remote_approval.rs` |
+| 데스크톱 관문 호출(비밀 요청 올리기·기다리기·닫기) | `crates/kasa-device/src/device_approvals.rs` |
 | 폰 | `mobile/lib/approvals.dart` · `mobile/lib/screens/approval_screen.dart` · `mobile/lib/push.dart` |
-
-같은 창구에 **키체인 비밀 요청**(`kind:"secret"`)도 오른다 — 폰만, Secure Enclave 키 서명이 있어야 허락된다.
-설계·창구·검사는 [secret-faceid-approval.md](secret-faceid-approval.md). 다른 맥은 이 요청을 띄우지 않는다.
 
 ## 관문 창구
 
@@ -66,9 +54,8 @@ mod(tool.check · classic.PermissionRequest)
   깃발 값, `Authorization: Bearer …`, 공급자 머리(`sk-`·`ghp_`·`xoxb-`·`AKIA` …)가 붙은 토큰, JWT, URL 비밀번호, 개인키
   블록을 `••••••` 로 바꾼다. 나머지 글자는 한 글자도 바꾸지 않는다. 데스크톱이 가린 뒤 관문이 한 번 더 가린다. 관문은 요청을
   메모리에만 둔다.
-- **결정은 사람이 누른 화면에서만.** 결정 창구는 앱 실행 동안만 메모리에 있는 승인 열쇠를 요구한다. 데스크톱은 시트의 단추만
-  그 열쇠로 보낸다 — 소켓·`kasaterm-cli` 에는 결정 동작이 없다. (같은 사용자 권한으로 도는 프로그램은 `device.json` 을
-  읽어 스스로 열쇠를 맡길 수 있다. 이 장치는 정해진 길로 새는 것을 막을 뿐이고, 같은 기계의 키 입력 흉내와 같은 급의 한계다.)
+- **결정은 사람이 누른 화면에서만.** 결정 창구는 승인 열쇠를 요구한다. 데스크톱에는 결정 동작이 없다 — 비밀 요청은 폰의
+  Face ID 서명으로만 허락된다.
 - **감사.** 관문 `relay-approvals-audit.jsonl`(0600, 2MB 에서 한 번 돌림) — 요청·허락·거절·만료·닫힘마다 시각·계정·요청 id·
   도구·가린 첫 줄 160자·지문·요청한 기기·결정한 기기(id·이름·종류)·출처 IP. 브로커도 자기 감사 줄을 남긴다.
 
@@ -80,8 +67,6 @@ mod(tool.check · classic.PermissionRequest)
   시뮬레이터) 반대쪽에 한 번 더 보내고 맞는 쪽으로 고쳐 적는다. 앱이 앞에 있으면 시스템 배너 대신 앱의 위쪽 띠가 선다.
   알림을 누르면 승인 화면 — 기기·학생·도구, 폴더, 입력 칸 전부(고정폭, 고를 수 있음), 남은 시간, [거절]·[허락].
   그 학생의 대화 보기를 보고 있으면 띠 대신 대화 안 카드에서 바로 답한다([conversation-asks.md](conversation-asks.md)).
-- **다른 PC**: OS 알림에 학생·기기·도구·요청 첫 줄을 표시한다. 알림을 클릭하면 해당 요청 ID가 아직 대기 중인지 확인한 뒤 원문 시트를 연다. 시트의 Return은 **거절**이다. 다른 곳에서 처리되면 열린 시트를 거두고 OS 알림으로 결과를 알린다. 이 기기의 요청과 폰 Face ID가 필요한 비밀 요청은 이 시트에서 처리하지 않는다.
-- Windows도 같은 흐름이며 원문은 본창에 붙은 네이티브 결정 시트로 연다. 앱 위 [보기][나중에] 카드와 별도 배너 창은 없다.
 
 ## 검증 리그
 
@@ -91,11 +76,9 @@ mod(tool.check · classic.PermissionRequest)
 ```bash
 KASATERM_DEVICE_FILE=/tmp/<리그>/device.json   # {relay, account, device_id, token}
 KASATERM_GATEWAY=http://127.0.0.1:<p>          # 리그도 업링크를 시험 관문으로
-KASATERM_AUTOSHEET=allow|deny                  # 검증 실행에서만: 시트가 선 뒤 그 단추를 누른다
-KASATERM_AUTOSHEET_MS=6000  KASATERM_AUTOSHEET_SHOT=/tmp/<리그>/sheet.png
 ```
 
-mod 는 `POST /claude-mod/permission`(리그 앱의 HTTP 포트)로 흉내 낸다. 폰은 가상 아이폰에서 「고급 설정 → 계정 서버 주소」를
+폰은 가상 아이폰에서 「고급 설정 → 계정 서버 주소」를
 `http://127.0.0.1:<p>` 로 두고 로그인한다(시뮬레이터 자판이 한글이면 `xcrun simctl pbcopy` 로 붙여 넣는다). 시뮬레이터도
 APNs 샌드박스 토큰을 받아 실제 푸시가 온다.
 

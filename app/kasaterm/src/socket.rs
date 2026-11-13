@@ -4175,18 +4175,6 @@ impl Backend for PtyBackend {
         Ok(board)
     }
 
-    fn notify(&self, surface_id: &str, title: &str, body: &str) -> Result<()> {
-        // Explicit messages and OSC notifications do not prove that an agent's turn ended.
-        // Hand off to the GUI thread — the desktop alert (objc/osascript) and
-        // any pane/sidebar flash both need App state we can't touch here.
-        let _ = self.proxy.send_event(UserEvent::Notify {
-            surface_id: surface_id.to_string(),
-            title: title.to_string(),
-            body: body.to_string(),
-        });
-        Ok(())
-    }
-
     fn clipboard_set(&self, text: &str) -> Result<()> {
         self.clipboard_set_opts(text, false)
     }

@@ -1,5 +1,7 @@
-//! 폰 푸시(APNs) — 학생이 승인·질문을 기다리거나 일을 끝냈을 때, 쪽지가 왔을 때
-//! 아이폰 앱으로 알린다(2026-09-09 지시 「알림기능도 돼? … 만들어」).
+//! 폰 푸시(APNs) — 학생이 고를 것을 내밀었거나(승인·질문·막힘·한도·팅김) 일을 정말 끝냈을 때 아이폰 앱으로
+//! 알린다(2026-09-09 지시 「알림기능도 돼? … 만들어」, 2026-11-13 「진짜 완료알림이나 진짜 내가 선택해야하는거만」).
+//! 그 밖에는 학생이 「이 폰」으로 연 페이지([`page_shown_blocking`])와 카사브라우저 깨우기뿐이고, 둘은 소리 없이 온다
+//! (소리는 폰 알림 확장이 종류로 고른다).
 //!
 //! 재료 셋: ①폰이 `POST /term/push-token` 으로 맡긴 기기 토큰(`push_tokens.json`,
 //! 0600) ②애플 푸시 열쇠(`~/.config/kasaterm/apns/key.json` — key_id·team_id·p8,
@@ -505,34 +507,6 @@ pub async fn send_to(env: &str, token: &str, payload: &Value, collapse: &str) ->
         .map_err(|(status, text)| (status.as_u16(), text))
 }
 
-/// 쪽지 중 폰을 울릴 것 — 끝냄·실패·고를 것·브라우저에서 사람 손 기다림(`docs/chrome-mirror.md`),
-/// 그리고 「이 폰」으로 보낸 페이지(울리지 않으면 종 목록을 열기 전엔 못 본다). 나머지는 종 목록에만 남는다.
-fn note_rings(kind: &str) -> bool {
-    matches!(kind, "done_ok" | "done_fail" | "browser" | "link") || call::wait_rings(kind)
-}
-
-/// 쪽지가 들어왔을 때 — `notes::add` 뒤에서 부른다.
-pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) {
-    if !note_rings(kind) {
-        return;
-    }
-    let alert = note_alert(character, kind, summary, pane, url);
-    tokio::spawn(async move {
-        send(&alert).await;
-    });
-}
-
-/// 런타임 밖(GUI 스레드)에서 — `open` 이 폰으로 갈 때. 자기 런타임을 하나 세워 보낸다.
-pub fn note_arrived_blocking(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) {
-    if !note_rings(kind) {
-        return;
-    }
-    let alert = note_alert(character, kind, summary, pane, url);
-    if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        rt.block_on(send(&alert));
-    }
-}
-
 /// GUI 스레드에서 기다리지 않고 보낸다 — 앱의 판정(맥 알림과 같은 사건)이 이 기계 칸의 알림을 폰에도 낼 때.
 pub fn send_detached(alert: Alert) {
     let _ = std::thread::Builder::new().name("kasa-push".into()).spawn(move || {
@@ -542,30 +516,24 @@ pub fn send_detached(alert: Alert) {
     });
 }
 
-/// 쪽지도 보낸 학생이 하는 말로 — 제목은 학생 이름, 본문은 쪽지 요약.
-fn note_alert(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) -> Alert {
-    let who = if character.is_empty() { "학생" } else { character };
-    let said = call::spoken(summary);
-    let body = match kind {
-        _ if !said.is_empty() => said,
-        "link" => "선생님, 이 페이지 봐 주세요.".to_string(),
-        "permission" => call::ask("", None),
-        "question" => call::question(""),
-        "done_fail" => "선생님, 잘 안 됐어요.".to_string(),
-        _ => "선생님, 다 끝났어요.".to_string(),
-    };
-    Alert {
-        title: who.to_string(),
-        body,
+/// 학생이 사람에게 보여 주려 연 페이지를 이 기기에 맡긴 폰으로 — 누르면 그 주소가 열린다. 런타임 밖(GUI 스레드의
+/// 일꾼)에서 부른다. 고를 것도 끝남도 아니라 종 목록엔 안 남고, 폰은 소리 없이 띄운다. 종류 이름 `note:link` 는 옛
+/// 관문이 받는 이름 그대로다(관문은 모르는 종류를 거절한다).
+pub fn page_shown_blocking(character: &str, pane: &str, url: &str) {
+    let alert = Alert {
+        title: if character.is_empty() { "학생" } else { character }.to_string(),
+        body: "선생님, 이 페이지 봐 주세요.".to_string(),
         machine: None,
         pane: pane.to_string(),
-        kind: format!("note:{kind}"),
-        // 페이지는 한 장씩 다 보여야 한다 — 같은 pane 의 두 번째 링크가 첫 번째를 덮으면
-        // 사람은 하나만 받은 줄 안다.
-        collapse: (kind != "link").then(|| format!("note-{pane}")),
+        kind: "note:link".to_string(),
+        // 페이지는 한 장씩 다 보여야 한다 — 같은 칸의 두 번째 링크가 첫 번째를 덮으면 사람은 하나만 받은 줄 안다.
+        collapse: None,
         sender: (!character.is_empty()).then(|| character.to_string()),
         avatar_slug: kasa_characters::character::slug_for_any(character),
-        url: url.filter(|u| !u.is_empty()).map(str::to_string),
+        url: Some(url.to_string()),
+    };
+    if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        rt.block_on(send(&alert));
     }
 }
 
@@ -630,13 +598,14 @@ impl RemoteRows {
             }
             let said = row.get("last_reply").and_then(Value::as_str);
             match watch.finish.update(&call::row_facts(&row), now) {
-                Some(call::Ring::Finished { report, .. }) => {
-                    out.push(alert(call::finished(report.as_ref(), said), "done", format!("done-{key}")));
+                // 보고 없는 턴 끝은 알리지 않는다 — 끝남 알림은 세션이 `kasaterm-cli done` 으로 보낸 것뿐이다.
+                Some(call::Ring::Finished { report: Some(report), .. }) => {
+                    out.push(alert(call::finished(Some(&report), said), "done", format!("done-{key}")));
                 }
                 Some(call::Ring::Blocked { report }) => {
                     out.push(alert(call::blocked(&report, said), "waiting:blocked", format!("blocked-{key}")));
                 }
-                None => {}
+                Some(call::Ring::Finished { report: None, .. }) | None => {}
             }
         }
         self.seen.retain(|key, _| alive.contains(key));
@@ -691,18 +660,6 @@ mod tests {
         assert_ne!(local, super::notification_thread(&alert));
     }
 
-    #[test]
-    fn only_done_and_choices_ring() {
-        for kind in ["done_ok", "done_fail", "permission", "question", "browser", "link"] {
-            assert!(super::note_rings(kind), "{kind}");
-        }
-        for kind in ["waiting", "idle", "dead", "note", ""] {
-            assert!(!super::note_rings(kind), "{kind}");
-        }
-        let note = super::note_alert("시로코", "done_ok", "## 결과\n**빌드** 끝났어요.", "%3", None);
-        assert_eq!((note.title.as_str(), note.body.as_str()), ("시로코", "빌드 끝났어요."));
-    }
-
     fn row(status: &str, end: Option<(&str, bool)>) -> serde_json::Value {
         let mut row = serde_json::json!({"id": "%3", "name": "시로코", "status": status});
         if let Some((completion, background)) = end {
@@ -733,10 +690,19 @@ mod tests {
         assert!(feed(&mut rows, row("idle", Some(("0a", true))), at(12)).is_empty());
         assert!(feed(&mut rows, row("idle", Some(("0a", true))), at(30)).is_empty(), "bg 가 도는 동안은 끝이 아니다");
         assert!(feed(&mut rows, row("idle", Some(("0a", false))), at(34)).is_empty());
-        let done = feed(&mut rows, row("idle", Some(("0a", false))), at(40));
+        assert!(feed(&mut rows, row("idle", Some(("0a", false))), at(40)).is_empty(), "보고 없는 턴 끝은 알리지 않는다");
+
+        // 끝남은 세션이 보낸 완료 보고뿐이다.
+        let mut reported = row("idle", Some(("0c", false)));
+        reported["done_outcome"] = "succeeded".into();
+        reported["done_summary"] = "배포까지 끝냈어요".into();
+        reported["done_at_ms"] = 98.into();
+        assert!(feed(&mut rows, reported.clone(), at(44)).is_empty());
+        let done = feed(&mut rows, reported.clone(), at(50));
         assert_eq!(done.len(), 1);
-        assert_eq!((done[0].kind.as_str(), done[0].body.as_str()), ("done", "선생님, 다 끝났어요."));
-        assert!(feed(&mut rows, row("idle", Some(("0a", false))), at(50)).is_empty());
+        assert_eq!(done[0].kind, "done");
+        assert!(done[0].body.contains("배포까지 끝냈어요"), "{}", done[0].body);
+        assert!(feed(&mut rows, reported, at(56)).is_empty());
 
         // 막힘은 그 턴이 끝난 뒤 학생의 답 글로 — 행의 `last_reply` 가 없으면 보고에서.
         let mut stuck = row("idle", Some(("0b", false)));

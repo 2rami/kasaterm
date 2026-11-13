@@ -1052,14 +1052,6 @@ pub trait Backend: Send + Sync {
     fn active_agent(&self) -> Option<String> {
         None
     }
-    /// Fire a "work complete" notification for a surface. The push half of
-    /// the board (which is pull-only): a claude `Stop` hook runs
-    /// `kasaterm-cli notify`, the host decides whether to raise a desktop
-    /// alert (suppressed when that pane is already focused, cmux-style) and
-    /// flashes the pane / sidebar. Default unsupported.
-    fn notify(&self, _surface_id: &str, _title: &str, _body: &str) -> Result<()> {
-        anyhow::bail!("notify unsupported by this backend")
-    }
     /// 클립보드에 글을 넣는다 — **캐릭터가 사람 대신 복사해 주는 문**이다.
     ///
     /// 사람이 직접 끌어서 복사하는 길은 노플리커를 끈 claude 앞에서 막힌다: 그 하네스가

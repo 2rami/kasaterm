@@ -30,8 +30,9 @@ final class NotificationService: UNNotificationServiceExtension {
     let info = request.content.userInfo
     // 소리는 종류로 고른다 — 파일은 앱 본체(Runner/Sounds)에 있고 서버는 "default" 만
     // 실어 보낸다. 확장이 못 돌면 그 기본음이 남는다(2026-09-17 「알림음 바꾸자」).
-    mutable.sound = UNNotificationSound(
-      named: UNNotificationSoundName(Self.soundFile(for: info["kind"] as? String)))
+    mutable.sound = Self.soundFile(for: info["kind"] as? String).map {
+      UNNotificationSound(named: UNNotificationSoundName($0))
+    }
     let sender = (info["sender"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     let avatar = (info["avatar"] as? String).flatMap(URL.init(string:))
     guard let sender else {
@@ -43,12 +44,13 @@ final class NotificationService: UNNotificationServiceExtension {
     }
   }
 
-  /// 기다림(승인·질문)은 또렷한 상승 3음, 끝냄은 부드러운 2음, 나머지(쪽지·주소)는 가벼운 1음.
-  static func soundFile(for kind: String?) -> String {
+  /// 소리는 둘뿐이다(2026-11-13 「진짜 완료알림이나 진짜 내가 선택해야하는거만」) — 고를 것(승인·질문·막힘·한도·
+  /// 팅김)은 또렷한 상승 3음, 끝냄은 부드러운 2음. 그 밖(학생이 연 페이지·카사브라우저 깨우기)은 소리 없이 띄운다.
+  static func soundFile(for kind: String?) -> String? {
     let k = kind ?? ""
     if k.hasPrefix("waiting") { return "kasa-wait.caf" }
     if k == "done" { return "kasa-done.caf" }
-    return "kasa-note.caf"
+    return nil
   }
 
   override func serviceExtensionTimeWillExpire() {

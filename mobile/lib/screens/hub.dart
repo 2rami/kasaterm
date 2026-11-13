@@ -270,7 +270,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
                   icon: const Icon(Icons.manage_accounts_outlined),
                 ),
               ] else ...[
-              // 종 = 나쵸가 남긴 학생 쪽지. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
+              // 종 = 사람에게 간 알림(고를 것·끝냄)의 기록. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
               // 전엔 기다리는 학생 수만 세고 눌러도 아무것도 없었다).
               IconButton(
                 tooltip: '학생 쪽지',

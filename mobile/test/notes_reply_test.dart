@@ -14,18 +14,15 @@ import 'package:kasaterm_mobile/term_session.dart';
 
 import 'inline_result_fonts.dart';
 
-Note _note(int id, {String pane = '%3', String kind = 'done_ok', bool read = false, String? machine, String summary = '한 줄'}) => Note(
+Note _note(int id, {String pane = '%3', String kind = 'done', bool read = false, String? machine, String summary = '한 줄'}) => Note(
   id: id,
   pane: pane,
   character: '유우카',
   kind: kind,
   summary: summary,
-  asked: '',
-  did: '',
   // 「N분 전」이 시험 시각에 따라 안 바뀌게 지금에 묶는다.
   when: DateTime.now().subtract(Duration(minutes: 10 - id)),
   read: read,
-  image: false,
   machine: machine,
 );
 
@@ -65,6 +62,7 @@ class _Rig {
       }
       if (path.endsWith('term/mod-decide')) return json({'ok': true});
       if (path.endsWith('term/notes/read')) return json({'ok': true});
+      if (path.endsWith('/cmd')) return json({'ok': true});
       return http.Response('', 404);
     }),
   );
@@ -195,9 +193,23 @@ void main() {
     expect(model.notes.single.read, isFalse);
   });
 
+  testWidgets('「데스크톱에서 보기」는 그 기기 앱의 초점을 그 칸으로 옮기고, 닿지 않는 칸엔 없다', (tester) async {
+    final rig = _Rig();
+    final model = _model(rig.server, [_note(3), _note(2, pane: '%9', kind: 'blocked')], [_pane('%3')]);
+    await _show(tester, model, rig.server);
+
+    expect(find.byTooltip('데스크톱에서 보기'), findsOneWidget, reason: '닫힌 칸 쪽지엔 없다');
+    await tester.tap(find.byTooltip('데스크톱에서 보기'));
+    await tester.pump(const Duration(milliseconds: 200));
+    final focus = rig.requests.where((r) => r.$1.endsWith('/cmd')).single.$2;
+    expect(focus['method'], 'surface.focus');
+    expect((focus['params'] as Map)['surface_id'], '%3');
+    expect(model.notes.firstWhere((n) => n.id == 3).read, isFalse, reason: '쪽지는 그대로 둔다');
+  });
+
   testWidgets('닫힌 칸 쪽지는 답 칸 대신 까닭', (tester) async {
     final rig = _Rig();
-    final model = _model(rig.server, [_note(3, kind: 'dead')], const []);
+    final model = _model(rig.server, [_note(3, kind: 'blocked')], const []);
     await _show(tester, model, rig.server);
 
     await tester.tap(find.byTooltip('답'));
@@ -241,7 +253,7 @@ void main() {
         ],
       },
     );
-    final notes = [_note(5, kind: 'permission', summary: 'Bash 허락 기다림'), _note(4, kind: 'permission', summary: '앞 승인')];
+    final notes = [_note(5, kind: 'permission', summary: '선생님, git push 해도 될까요?'), _note(4, kind: 'permission', summary: '앞 승인')];
     final model = _model(rig.server, notes, [_pane('%3', status: 'waiting', kind: 'permission')]);
     await _show(tester, model, rig.server);
     await tester.pump(const Duration(milliseconds: 200));
@@ -272,7 +284,7 @@ void main() {
         _note(6, summary: '폰 상태줄 한 줄로 맞추고 커밋'),
         _note(5, pane: '%7', read: true, summary: '미니맵 탭 줄 굽기 끝'),
         _note(4, read: true, summary: '상태줄 두 줄 → 한 줄 시안'),
-        _note(2, pane: '%9', kind: 'dead', summary: '칸 닫힘'),
+        _note(2, pane: '%9', kind: 'blocked', summary: '선생님, 막혔어요. 세션이 꺼졌어요'),
       ],
       [_pane('%3'), _pane('%7')],
     );

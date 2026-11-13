@@ -773,12 +773,6 @@ impl Ask {
 
 static REQUESTS: LazyLock<Mutex<HashMap<String, Ask>>> = LazyLock::new(Default::default);
 static REQUESTS_WAKE: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
-static OPENED: LazyLock<tokio::sync::broadcast::Sender<Value>> = LazyLock::new(|| tokio::sync::broadcast::channel(64).0);
-
-/// 새 승인 요청이 열릴 때마다 그 요청(`permissions()` 의 한 줄)을 받는다 — 푸시 알림을 붙이는 자리.
-pub fn subscribe() -> tokio::sync::broadcast::Receiver<Value> {
-    OPENED.subscribe()
-}
 
 fn sweep_requests(map: &mut HashMap<String, Ask>) {
     let now = Instant::now();
@@ -892,7 +886,7 @@ pub async fn open_and_wait(surface: &str, session: &str, body: &Value, hold: Dur
         let mut map = REQUESTS.lock().unwrap();
         sweep_requests(&mut map);
         if map.contains_key(&id) {
-            None
+            false
         } else {
             let (input, input_truncated) = cap_input(body.get("input").cloned().unwrap_or(Value::Null));
             let created_ms = body.get("created_at_ms").and_then(Value::as_u64).unwrap_or_else(now_ms);
@@ -912,14 +906,12 @@ pub async fn open_and_wait(surface: &str, session: &str, body: &Value, hold: Dur
                 decision: None,
                 closed: false,
             };
-            let view = request.view();
             map.insert(id.clone(), request);
-            Some(view)
+            true
         }
     };
-    if let Some(view) = opened {
+    if opened {
         apply(surface, session, &[json!({"kind": "permission", "phase": "ask", "id": id, "tool": text(body, "tool")})]);
-        let _ = OPENED.send(view);
     }
     let deadline = tokio::time::Instant::now() + hold;
     loop {

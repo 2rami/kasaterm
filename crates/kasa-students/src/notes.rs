@@ -1,13 +1,17 @@
-//! 학생 쪽지 — 나쵸가 학생 알림마다 남기는 「시킨 것 → 한 것」 한 줄(2026-09-08 지시
-//! 「알림기능에 나쵸네코가 내가 뭘 시켰고 어떻게 했는지 한줄요약하게 하자」).
+//! 학생 쪽지 — 폰 허브 종 목록. 사람에게 간 알림 두 가지의 기록이다(2026-11-13 「진짜 완료알림이나 진짜 내가
+//! 선택해야하는거만」): 고를 것(승인·질문·막힘·한도·팅김)과 완료. 앱이 폰·맥 알림을 내는 바로 그 자리
+//! (`chrome.rs ring_phone`)에서 한 줄 남겨 알림과 목록이 어긋나지 않는다. 다른 입구는 없다 — 나쵸가 넣던
+//! `POST /term/notes` 는 나쵸 오케스트레이션과 함께 끊겨 걷었다.
 //!
-//! 나쵸는 `POST /term/notes` 로 넣고, 폰 허브의 종 목록이 `GET /term/notes` 로 읽는다.
-//! 저장은 `~/.config/kasaterm/notes.json` — 앱을 껐다 켜도 남고, 최근 200건만 둔다.
-//! 검증용 앱은 `KASATERM_NOTES_FILE` 로 다른 파일을 가리켜 사람 것을 안 건드린다.
+//! 폰 허브의 종 목록이 `GET /term/notes` 로 읽는다. 저장은 `~/.config/kasaterm/notes.json` — 앱을 껐다 켜도
+//! 남고, 최근 200건만 둔다. 검증용 앱은 `KASATERM_NOTES_FILE` 로 다른 파일을 가리켜 사람 것을 안 건드린다.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+/// 쪽지 종류 — 폰 알림 종류(`waiting:permission`·`waiting:question`·`waiting:blocked`·`done`)의 뒷말과 같다.
+pub const KINDS: [&str; 4] = ["permission", "question", "blocked", "done"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Note {
@@ -17,47 +21,12 @@ pub struct Note {
     pub character: String,
     #[serde(default)]
     pub kind: String,
+    /// 알림 본문 — 학생이 선생님께 하는 말.
     pub summary: String,
-    #[serde(default)]
-    pub asked: String,
-    #[serde(default)]
-    pub did: String,
     pub when: u64,
     #[serde(default)]
     pub read: bool,
-    /// 사진이 딸렸는가 — `/term/notes/<id>.png`.
-    #[serde(default)]
-    pub image: bool,
-    /// 학생이 사람에게 보여 주려 연 페이지 — 폰이 「이 폰」으로 고른 동안 `open` 이
-    /// 브라우저 대신 여기로 온다(kind=`link`). 폰은 누르면 사파리로 연다.
-    #[serde(default)]
-    pub url: String,
 }
-
-/// 나쵸가 보내는 본문 — id·읽음은 서버가 붙인다.
-#[derive(Debug, Clone, Deserialize)]
-pub struct NoteInput {
-    pub pane: String,
-    #[serde(default)]
-    pub character: String,
-    #[serde(default)]
-    pub kind: String,
-    pub summary: String,
-    #[serde(default)]
-    pub asked: String,
-    #[serde(default)]
-    pub did: String,
-    #[serde(default)]
-    pub when: Option<u64>,
-    /// pane 사진 PNG 를 base64 로. 나쵸가 DM 에 붙이는 그 사진.
-    #[serde(default)]
-    pub image: Option<String>,
-    #[serde(default)]
-    pub url: String,
-}
-
-/// 사진 상한 — 폰 목록의 썸네일이지 원본 보관이 아니다.
-const IMAGE_MAX: usize = 3 * 1024 * 1024;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct FileBody {
@@ -100,69 +69,39 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// 두 가지 알림만 — 옛 나쵸 쪽지·페이지 쪽지가 파일에 남아 있어도 목록엔 안 선다.
 fn list_from(path: &Path) -> Vec<Note> {
     let mut notes = load(path).notes;
+    notes.retain(|n| KINDS.contains(&n.kind.as_str()));
     notes.sort_by(|a, b| b.when.cmp(&a.when).then(b.id.cmp(&a.id)));
     notes
 }
 
-fn image_path(path: &Path, id: u64) -> PathBuf {
-    path.with_extension("").join(format!("{id}.png"))
-}
-
-fn decode_image(b64: &str) -> Option<Vec<u8>> {
-    use base64::Engine;
-    let raw = b64.trim();
-    let raw = raw.rsplit_once(',').map(|(_, d)| d).unwrap_or(raw);
-    let bytes = base64::engine::general_purpose::STANDARD.decode(raw).ok()?;
-    (bytes.len() <= IMAGE_MAX && bytes.starts_with(b"\x89PNG")).then_some(bytes)
-}
-
-fn add_to(path: &Path, input: NoteInput) -> Option<Note> {
-    let summary = input.summary.trim();
-    if summary.is_empty() || input.pane.trim().is_empty() {
+fn add_to(path: &Path, pane: &str, character: &str, kind: &str, summary: &str) -> Option<Note> {
+    let summary = summary.trim();
+    if summary.is_empty() || pane.trim().is_empty() || !KINDS.contains(&kind) {
         return None;
     }
-    let image = input.image.as_deref().and_then(decode_image);
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut body = load(path);
     body.next_id = body.next_id.max(1);
     let note = Note {
         id: body.next_id,
-        pane: input.pane.trim().to_string(),
-        character: input.character.trim().to_string(),
-        kind: input.kind.trim().to_string(),
+        pane: pane.trim().to_string(),
+        character: character.trim().to_string(),
+        kind: kind.to_string(),
         summary: summary.to_string(),
-        asked: input.asked.trim().to_string(),
-        did: input.did.trim().to_string(),
-        when: input.when.unwrap_or_else(now_secs),
+        when: now_secs(),
         read: false,
-        image: image.is_some(),
-        url: input.url.trim().to_string(),
     };
     body.next_id += 1;
     body.notes.push(note.clone());
     if body.notes.len() > KEEP {
         let drop = body.notes.len() - KEEP;
-        for old in body.notes.drain(..drop) {
-            if old.image {
-                let _ = std::fs::remove_file(image_path(path, old.id));
-            }
-        }
-    }
-    if let Some(bytes) = image {
-        let ip = image_path(path, note.id);
-        if let Some(dir) = ip.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(ip, bytes);
+        body.notes.drain(..drop);
     }
     save(path, &body).ok()?;
     Some(note)
-}
-
-fn image_from(path: &Path, id: u64) -> Option<Vec<u8>> {
-    std::fs::read(image_path(path, id)).ok()
 }
 
 fn mark_read_in(path: &Path, ids: &[u64], all: bool) -> usize {
@@ -181,22 +120,15 @@ fn mark_read_in(path: &Path, ids: &[u64], all: bool) -> usize {
     n
 }
 
-/// 지우기 — `all` 이면 전부. 딸린 사진도 함께. 돌려주는 값은 지운 개수.
+/// 지우기 — `all` 이면 전부. 돌려주는 값은 지운 개수.
 fn remove_in(path: &Path, ids: &[u64], all: bool) -> usize {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut body = load(path);
     let before = body.notes.len();
-    let (gone, keep): (Vec<Note>, Vec<Note>) =
-        body.notes.drain(..).partition(|n| all || ids.contains(&n.id));
-    body.notes = keep;
+    body.notes.retain(|n| !(all || ids.contains(&n.id)));
     let n = before - body.notes.len();
     if n > 0 && save(path, &body).is_err() {
         return 0;
-    }
-    for old in gone {
-        if old.image {
-            let _ = std::fs::remove_file(image_path(path, old.id));
-        }
     }
     n
 }
@@ -206,17 +138,14 @@ pub fn list() -> Vec<Note> {
     path().map(|p| list_from(&p)).unwrap_or_default()
 }
 
-pub fn add(input: NoteInput) -> Option<Note> {
-    add_to(&path()?, input)
+/// 사람에게 간 알림 한 건을 남긴다 — [`KINDS`] 밖의 종류·빈 본문은 안 받는다.
+pub fn add(pane: &str, character: &str, kind: &str, summary: &str) -> Option<Note> {
+    add_to(&path()?, pane, character, kind, summary)
 }
 
 /// 읽음 표시 — `all` 이면 전부. 돌려주는 값은 새로 읽음이 된 개수.
 pub fn mark_read(ids: &[u64], all: bool) -> usize {
     path().map(|p| mark_read_in(&p, ids, all)).unwrap_or(0)
-}
-
-pub fn image_bytes(id: u64) -> Option<Vec<u8>> {
-    image_from(&path()?, id)
 }
 
 /// 폰이 옆으로 밀어 지우거나 「모두 읽음」으로 비운 것 — 돌려주는 값은 지운 개수.
@@ -234,49 +163,33 @@ mod tests {
         dir.join("notes.json")
     }
 
-    fn input(pane: &str, summary: &str, when: u64) -> NoteInput {
-        NoteInput {
-            pane: pane.into(),
-            character: "유우카".into(),
-            kind: "done_ok".into(),
-            summary: summary.into(),
-            asked: String::new(),
-            did: String::new(),
-            when: Some(when),
-            image: None,
-            url: String::new(),
-        }
+    fn add(p: &Path, pane: &str, summary: &str) -> Option<Note> {
+        add_to(p, pane, "유우카", "done", summary)
     }
 
     #[test]
-    fn image_is_stored_beside_the_file_and_dropped_with_the_note() {
-        use base64::Engine;
-        let p = tmp("image");
-        let png = b"\x89PNG\r\n\x1a\nfake".to_vec();
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
-        let mut i = input("%3", "사진 있음", 5);
-        i.image = Some(format!("data:image/png;base64,{b64}"));
-        let n = add_to(&p, i).unwrap();
-        assert!(n.image);
-        assert_eq!(image_from(&p, n.id).unwrap(), png);
-        let mut bad = input("%3", "png 아님", 6);
-        bad.image = Some(base64::engine::general_purpose::STANDARD.encode(b"hello"));
-        assert!(!add_to(&p, bad).unwrap().image, "PNG 가 아니면 사진 없이 받는다");
-        for k in 0..KEEP as u64 {
-            add_to(&p, input("%1", "x", 10 + k)).unwrap();
+    fn only_the_two_alert_kinds_are_kept_or_listed() {
+        let p = tmp("kinds");
+        assert!(add_to(&p, "%3", "유우카", "link", "페이지").is_none(), "알림 두 가지 밖은 안 받는다");
+        for kind in KINDS {
+            assert!(add_to(&p, "%3", "유우카", kind, "본문").is_some(), "{kind}");
         }
-        assert!(image_from(&p, n.id).is_none(), "쪽지가 밀려나면 사진도 같이 지운다");
+        let mut body = load(&p);
+        body.notes.push(Note { id: 99, pane: "%1".into(), character: String::new(), kind: "done_ok".into(),
+            summary: "옛 나쵸 쪽지".into(), when: 1, read: false });
+        save(&p, &body).unwrap();
+        assert_eq!(list_from(&p).len(), KINDS.len(), "옛 종류는 파일에 남아도 목록엔 안 선다");
     }
 
     #[test]
     fn add_lists_newest_first_and_marks_read() {
         let p = tmp("basic");
-        assert!(add_to(&p, input("%3", "", 1)).is_none(), "빈 요약은 안 받는다");
-        let a = add_to(&p, input("%3", "폰 상태줄 한 줄로 → 폴더부터 빼서 맞춤", 10)).unwrap();
-        let b = add_to(&p, input("%7", "종 아이콘 → 눌러도 반응 없음 보고", 20)).unwrap();
+        assert!(add(&p, "%3", "").is_none(), "빈 본문은 안 받는다");
+        let a = add(&p, "%3", "폰 상태줄 한 줄로 맞췄어요").unwrap();
+        let b = add(&p, "%7", "종 아이콘 고쳤어요").unwrap();
         assert_eq!((a.id, b.id), (1, 2));
         let l = list_from(&p);
-        assert_eq!(l.iter().map(|n| n.id).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(l.iter().map(|n| n.id).collect::<Vec<_>>(), vec![2, 1], "같은 초면 나중 것이 위");
         assert!(l.iter().all(|n| !n.read));
         assert_eq!(mark_read_in(&p, &[1], false), 1);
         assert_eq!(mark_read_in(&p, &[1], false), 0, "이미 읽은 건 다시 안 센다");
@@ -287,8 +200,8 @@ mod tests {
     #[test]
     fn keeps_only_the_latest_two_hundred() {
         let p = tmp("cap");
-        for i in 0..(KEEP as u64 + 5) {
-            add_to(&p, input("%1", "x", i)).unwrap();
+        for _ in 0..(KEEP as u64 + 5) {
+            add(&p, "%1", "x").unwrap();
         }
         let l = list_from(&p);
         assert_eq!(l.len(), KEEP);

@@ -7,21 +7,20 @@ import 'package:flutter/services.dart';
 import '../hub_model.dart';
 import '../look.dart';
 import '../server.dart';
-import '../server_image.dart';
 import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
 import 'conversation_view.dart';
-import 'dev_server.dart';
 
-/// 종 아이콘을 누르면 뜨는 학생 쪽지 목록 — 나쵸가 알림마다 남긴 「시킨 것 → 한 것」
-/// 한 줄(2026-09-08 지시). 안 읽은 것만 선다: 누르면 그 학생 화면으로 가며 읽음,
+/// 종 아이콘을 누르면 뜨는 학생 쪽지 목록 — 사람에게 간 알림 두 가지(고를 것·끝냄)의 기록이다. 데스크톱이 폰·맥
+/// 알림을 낼 때 같은 자리에서 한 줄 남긴다(2026-11-13). 안 읽은 것만 선다: 누르면 그 학생 화면으로 가며 읽음,
 /// 왼쪽으로 밀면 빨간 바탕이 드러나며 지움, 「모두 읽음」은 한 장씩 스르륵 밀려
 /// 나간다(2026-09-10 지시). 열어 본 것만으로는 읽음이 안 된다 — 그러면 다음에 열었을
 /// 때 목록이 비어 있어 뭘 놓쳤는지 모른다.
 ///
 /// 학생 화면으로 가지 않고 그 자리에서 답한다(2026-11-13 「그 종 아이콘에서 바로 답 가능하게 하자, 창 안 가도」):
 /// 오른쪽으로 밀거나 「답」을 누르면 답 칸이 열리고, 승인·질문을 기다리는 쪽지는 고를 것이 쪽지 안에 선다.
+/// 「데스크톱에서 보기」는 그 기기 앱의 초점을 그 칸으로 옮긴다.
 class NotesSheet extends StatefulWidget {
   const NotesSheet({
     super.key,
@@ -104,6 +103,18 @@ class _NotesSheetState extends State<NotesSheet> {
         if (_replying == n.key) _replying = null;
       }
     });
+  }
+
+  /// 데스크톱에서 그 칸으로 — 그 기기 앱이 그 칸의 방으로 넘어가 초점을 준다(`surface.focus`). 폰 화면은 그대로다.
+  Future<void> _focusDesktop(Note n) async {
+    final messenger = ScaffoldMessenger.of(context);
+    HapticFeedback.selectionClick();
+    try {
+      await widget.server.cmd('surface.focus', {'surface_id': n.pane}, machine: n.machine);
+      messenger.showSnackBar(const SnackBar(content: Text('데스크톱에서 그 칸을 열었어요')));
+    } on ServerException catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('데스크톱을 못 옮겼어요 · ${e.message}')));
+    }
   }
 
   Future<void> _readAll(List<Note> notes) async {
@@ -222,10 +233,7 @@ class _NotesSheetState extends State<NotesSheet> {
                                       replying: _replying == n.key,
                                       onReply: () => _toggleReply(n),
                                       onOpen: open,
-                                      onLink: (u) {
-                                        model.markRead(n);
-                                        openShownLink(Navigator.of(context), widget.server, u, machine: n.machine);
-                                      },
+                                      onDesk: p != null && online ? () => unawaited(_focusDesktop(n)) : null,
                                     ),
                                   ),
                                   if (p != null && online && p.needsYou && asking.contains(n.key))
@@ -459,17 +467,13 @@ class _DeleteBackground extends StatelessWidget {
   }
 }
 
-/// 쪽지 종류 → 말·색. 상태 칩과 같은 색 체계다.
+/// 쪽지 종류 → 말·색. 상태 칩과 같은 색 체계 — 고를 것은 주의색, 끝냄은 성공색.
 (String, Color) noteKindStyle(String kind, ColorScheme scheme) =>
     switch (kind) {
-      'permission' => ('승인 기다림', StatusStyle.attention),
+      'permission' => ('승인', StatusStyle.attention),
       'question' => ('질문', StatusStyle.attention),
-      'waiting' => ('답 기다림', StatusStyle.attention),
-      'idle' => ('오래 기다림', StatusStyle.attention),
-      'done_ok' => ('끝냄', StatusStyle.success),
-      'done_fail' => ('실패', scheme.error),
-      'dead' => ('사라짐', scheme.outline),
-      'link' => ('페이지', scheme.primary),
+      'blocked' => ('막힘', StatusStyle.attention),
+      'done' => ('끝냄', StatusStyle.success),
       _ => (kind, scheme.onSurfaceVariant),
     };
 
@@ -490,8 +494,8 @@ class _NoteRow extends StatelessWidget {
     required this.pane,
     required this.server,
     required this.onOpen,
-    required this.onLink,
     required this.onReply,
+    this.onDesk,
     this.sent,
     this.before,
     this.replying = false,
@@ -501,8 +505,10 @@ class _NoteRow extends StatelessWidget {
   final Pane? pane;
   final Server server;
   final void Function(Pane) onOpen;
-  final void Function(Uri) onLink;
   final VoidCallback onReply;
+
+  /// 데스크톱에서 그 칸으로 초점을 옮긴다. 닿지 않는 칸이면 null.
+  final VoidCallback? onDesk;
 
   /// 이 쪽지에서 보낸 답.
   final NoteReply? sent;
@@ -517,19 +523,8 @@ class _NoteRow extends StatelessWidget {
     final scheme = theme.colorScheme;
     final (label, color) = noteKindStyle(note.kind, scheme);
     final p = pane;
-    final detail = [
-      if (note.asked.isNotEmpty) note.asked,
-      if (note.did.isNotEmpty) note.did,
-    ].join('  →  ');
-    final link = Uri.tryParse(note.url);
-    final hasLink =
-        link != null && (link.scheme == 'http' || link.scheme == 'https');
     return ListTile(
-      // 페이지 쪽지는 학생 화면이 아니라 그 주소로 — 「폰」을 골라 둔 동안 학생이
-      // 보여 주려 연 것이다. 앱 안 Safari 화면으로 — 데스크톱 localhost 면 입구를 세워서.
-      onTap: hasLink
-          ? () => onLink(link)
-          : p == null
+      onTap: p == null
           ? () => ScaffoldMessenger.of(
               context,
             ).showSnackBar(const SnackBar(content: Text('그 pane 은 이제 없다')))
@@ -537,11 +532,17 @@ class _NoteRow extends StatelessWidget {
               Navigator.of(context).pop();
               onOpen(p);
             },
-      // 「답」은 오른쪽 끝 — 엄지가 닿는 자리. 페이지 쪽지는 여는 표시가 그 앞에 선다.
+      // 「답」은 오른쪽 끝 — 엄지가 닿는 자리. 데스크톱으로 옮기기는 그 앞.
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (hasLink) const Icon(Icons.open_in_new, size: 18),
+          if (onDesk != null)
+            IconButton(
+              tooltip: '데스크톱에서 보기',
+              onPressed: onDesk,
+              icon: const Icon(Icons.desktop_windows_outlined, size: Look.iconSize),
+              color: scheme.onSurfaceVariant,
+            ),
           IconButton(
             tooltip: replying ? '답 칸 닫기' : '답',
             onPressed: onReply,
@@ -602,51 +603,16 @@ class _NoteRow extends StatelessWidget {
           if (before case final r?) _ReplyQuote(reply: r, earlier: true),
           Text(
             note.summary,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
             style: theme.textTheme.bodyMedium?.copyWith(
               fontWeight: note.read ? FontWeight.w400 : FontWeight.w600,
             ),
           ),
-          if (detail.isNotEmpty)
-            Text(
-              detail,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          if (note.image)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: GestureDetector(
-                onTap: () => showDialog<void>(
-                  context: context,
-                  builder: (_) => Dialog(
-                    child: InteractiveViewer(
-                      child: ServerImage(
-                        server: server,
-                        uri: server.noteImage(note.id, machine: note.machine),
-                      ),
-                    ),
-                  ),
-                ),
-                child: ClipRRect(
-                  borderRadius: Look.smallCorners,
-                  child: ServerImage(
-                    server: server,
-                    uri: server.noteImage(note.id, machine: note.machine),
-                    height: 72,
-                    width: 128,
-                    fit: BoxFit.cover,
-                    alignment: Alignment.topLeft,
-                  ),
-                ),
-              ),
-            ),
           if (sent case final r?) _ReplyQuote(reply: r, earlier: false),
         ],
       ),
-      isThreeLine: detail.isNotEmpty || note.image || sent != null || before != null,
+      isThreeLine: true,
     );
   }
 }

@@ -7,7 +7,8 @@
 
 ## 승인 카드 — 비밀·도구 권한
 
-원격 승인 창구([remote-approval.md](remote-approval.md))에 오른 요청 중 **이 칸에서 나온 것**만 세운다.
+원격 승인 창구([remote-approval.md](remote-approval.md))에 오른 요청 중 **이 칸에서 나온 것**만 세운다. 지금 그 창구에 오르는 것은
+키체인 비밀 요청뿐이다 — 도구 권한은 관문에 올리지 않고 아래 「화면 선택지 카드」·mod 요청 카드로만 묻는다(2026-11-13).
 
 - 칸 맞추기: 요청의 `pane` 이 그 칸 id 이고, 요청한 기기(`device`)가 그 칸의 기계여야 한다. 폰은 관문의
   `GET /relay/devices` 로 기기 id → `machine_id` 를 배워 칸의 경로(`Pane.machine` = `~<machine_id>`)와 맞춘다. 옛 판 칸은

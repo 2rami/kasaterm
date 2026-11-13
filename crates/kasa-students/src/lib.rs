@@ -4,7 +4,6 @@ pub mod dispatch;
 pub mod team;
 pub mod claude_mod;
 pub mod notes;
-pub mod approval_bridge;
 pub mod proxy;
 pub mod messages;
 pub mod http;

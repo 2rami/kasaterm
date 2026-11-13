@@ -678,12 +678,18 @@ impl App {
                 // 본문은 그 학생이 선생님께 하는 말이다 — 마지막 답 글의 첫머리, 못 찾으면 보고 요약. 상태 낱말(「응답
                 // 완료」)을 제목에 박으면 대화 알림이 제목 자리에 보낸 사람 이름을 그려 그 낱말이 사라졌고, 이름과 상태만
                 // 오는 알림은 열어 봐야 알았다(2026-09-21 「캐릭터랑 세션 이름만 오던데」).
-                let body = kasa_agents::ring::finished(report.as_ref(), self.pane_last_words(id).as_deref());
-                let dedup = format!("done:{id}:{key:016x}");
-                self.ring_phone(id, &heading, character.as_deref(), &body, "done", format!("done-/{id}"), &dedup);
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
-                    notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
+                }
+                // 턴 끝만으로는 알리지 않는다 — 끝남 알림은 세션이 `kasaterm-cli done` 으로 직접 보낸 보고뿐이다
+                // (2026-11-13 「진짜 완료알림이나 진짜 내가 선택해야하는거만」). 칸의 반짝임·읽지 않음은 그대로다.
+                if let Some(report) = report.as_ref() {
+                    let body = kasa_agents::ring::finished(Some(report), self.pane_last_words(id).as_deref());
+                    let dedup = format!("done:{id}:{key:016x}");
+                    self.ring_phone(id, &heading, character.as_deref(), &body, "done", format!("done-/{id}"), &dedup);
+                    if !(self.window_focused && is_active_pane) {
+                        notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
+                    }
                 }
             }
             Transition::Blocked { report } => {
@@ -824,11 +830,11 @@ impl App {
             eprintln!("[state] remote {key} {event:?}");
         }
         let said = Some(seat.detail.as_str()).filter(|s| !s.trim().is_empty());
-        let (body, dedupe) = match &event {
-            Transition::Finished { key: done, report } => {
-                (kasa_agents::ring::finished(report.as_ref(), said), format!("done:{key}:{done:016x}"))
-            }
-            Transition::Blocked { report } => (kasa_agents::ring::blocked(report, said), format!("blocked:{key}:{}", report.key)),
+        // 보고 없는 턴 끝은 칸만 반짝이고 알리지 않는다 — 이 기기 칸과 같은 규칙(`apply_transition_event`).
+        let alert = match &event {
+            Transition::Finished { key: done, report } => report.as_ref()
+                .map(|r| (kasa_agents::ring::finished(Some(r), said), format!("done:{key}:{done:016x}"))),
+            Transition::Blocked { report } => Some((kasa_agents::ring::blocked(report, said), format!("blocked:{key}:{}", report.key))),
             _ => return,
         };
         let now = std::time::Instant::now();
@@ -855,9 +861,7 @@ impl App {
             col.remote_unread.remove(key);
         }
         self.chrome_dirty = true;
-        if looking {
-            return;
-        }
+        let Some((body, dedupe)) = alert.filter(|_| !looking) else { return };
         let who = if seat.name.is_empty() { "pane" } else { seat.name.as_str() };
         notify_desktop(
             &format!("{} ({})", kasa_agents::ring::title(who, &seat.session), seat.label),
@@ -1001,6 +1005,11 @@ impl App {
     fn ring_phone(&self, id: &str, heading: &str, character: Option<&str>, body: &str, kind: &str, collapse: String, dedup: &str) {
         if kasa_remote::remote::is_remote_pane(id) || crate::lite_mode() || !notify_dedup_passes(&format!("phone:{dedup}")) {
             return;
+        }
+        // 종 목록은 폰 알림과 같은 자리에서 한 줄 — 둘이 어긋나지 않게(kasa_students::notes 머리말). 격리 실행은
+        // 쪽지 파일을 따로 준 때만 남긴다(사람 것을 안 건드린다).
+        if !crate::verification_run() || std::env::var_os("KASATERM_NOTES_FILE").is_some() {
+            let _ = kasa_students::notes::add(id, character.unwrap_or(""), kind.strip_prefix("waiting:").unwrap_or(kind), body);
         }
         // 격리 실행은 사람의 폰을 울리지 않는다 — 시험이 볼 수 있게 탐침 파일에만 남긴다.
         if crate::verification_run() {
@@ -4761,12 +4770,10 @@ mod notify_path_tests {
     }
 
     #[test]
-    fn notification_actions_preserve_the_request_and_version() {
-        for (action, key) in [(crate::remote_approval::ACTION, "request-123"),
-                              (crate::update_notice::ACTION, "0.2.167")] {
-            assert_eq!(notify_route(&notify_ident(8, Some((action, Some(key))))),
-                       Some((action.into(), Some(key.into()))));
-        }
+    fn notification_actions_preserve_the_version() {
+        let (action, key) = (crate::update_notice::ACTION, "0.2.167");
+        assert_eq!(notify_route(&notify_ident(8, Some((action, Some(key))))),
+                   Some((action.into(), Some(key.into()))));
     }
 
     #[test]

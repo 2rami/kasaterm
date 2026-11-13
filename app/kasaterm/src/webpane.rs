@@ -581,10 +581,8 @@ impl App {
         self.open_url_here(&url, None);
     }
 
-    /// 폰 쪽지로 — 누르면 사파리로 열린다. 이 기계의 쪽지 파일에 남고 푸시는 여기
-    /// 등록된 폰으로만 간다(본진에서 열렸으면 폰 목록엔 그 기계 칸으로 뜬다).
-    /// 이 기계 주소(localhost·사설망)는 폰이 못 여니 쪽지에 넣기 전에 임시 터널로
-    /// 바깥 주소를 받는다 — 터널이 서는 수 초는 스레드에서 기다린다.
+    /// 폰으로 — 소리 없는 알림이 가고 누르면 그 주소가 열린다. 이 기계 주소(localhost·사설망)는 폰이 못 여니
+    /// 보내기 전에 임시 터널로 바깥 주소를 받는다 — 터널이 서는 수 초는 스레드에서 기다린다.
     fn open_url_to_phone(&mut self, url: &str, target: Option<&str>) {
         let pane = target
             .filter(|t| *t != "__local_browser__")
@@ -603,36 +601,21 @@ impl App {
         std::thread::spawn(move || {
             // 새 판 폰 앱은 이 기기 localhost 를 앱 안 웹뷰로 연다 — 임시 터널을 세우지 않는다.
             let in_app = kasa_device::quicktunnel::in_app_url(&url_owned);
-            let (public, did) = if let Some(local) = in_app.clone() {
-                (local, "이 기기 localhost — 폰 앱 안에서 연다".to_string())
+            let (public, why) = if let Some(local) = in_app.clone() {
+                (local, None)
             } else {
                 match kasa_device::quicktunnel::public_url(&url_owned) {
-                    Ok(p) if p != url_owned => (p, format!("원래 주소 {url_owned}")),
-                    Ok(p) => (p, String::new()),
-                    // 터널을 못 세워도 쪽지는 보낸다 — 같은 와이파이면 열릴 수 있고, 이유가 남아야 고친다.
-                    Err(e) => (url_owned.clone(), format!("바깥 주소를 못 만들었어요: {e}")),
+                    Ok(p) => (p, None),
+                    // 터널을 못 세워도 보낸다 — 같은 와이파이면 열릴 수 있고, 까닭은 토스트에 남아야 고친다.
+                    Err(e) => (url_owned.clone(), Some(format!("바깥 주소를 못 만들었어요: {e}"))),
                 }
             };
-            let input = kasa_students::notes::NoteInput {
-                pane: if pane.is_empty() { "-".to_string() } else { pane.clone() },
-                character: character.clone(),
-                kind: "link".to_string(),
-                summary: public.clone(),
-                asked: String::new(),
-                did,
-                when: None,
-                image: None,
-                url: public.clone(),
-            };
-            if let Some(n) = kasa_students::notes::add(input) {
-                kasa_device::push::note_arrived_blocking(&n.character, &n.kind, &n.summary, &n.pane, Some(&public));
-            }
-            let toast = if in_app.is_some() {
-                "폰 쪽지로 보냈어요 · 앱 안에서 열림".to_string()
-            } else if public == url_owned {
-                "폰 쪽지로 보냈어요".to_string()
-            } else {
-                format!("폰 쪽지로 보냈어요 · {}", public.trim_start_matches("https://"))
+            kasa_device::push::page_shown_blocking(&character, &pane, &public);
+            let toast = match (in_app.is_some(), why) {
+                (true, _) => "폰으로 보냈어요 · 앱 안에서 열림".to_string(),
+                (false, Some(why)) => format!("폰으로 보냈어요 · {why}"),
+                (false, None) if public == url_owned => "폰으로 보냈어요".to_string(),
+                (false, None) => format!("폰으로 보냈어요 · {}", public.trim_start_matches("https://")),
             };
             let _ = proxy.send_event(UserEvent::SocketToast(toast));
         });

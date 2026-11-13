@@ -199,23 +199,6 @@ async fn term_notes_get() -> impl IntoResponse {
     Json(serde_json::json!(kasa_students::notes::list()))
 }
 
-/// 나쵸가 쪽지를 넣는다 — 본문은 notes.rs 의 NoteInput.
-async fn term_notes_post(body: Bytes) -> impl IntoResponse {
-    let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
-    let input: kasa_students::notes::NoteInput = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(e) => return err(format!("쪽지 본문을 못 읽었어요: {e}")),
-    };
-    match kasa_students::notes::add(input) {
-        Some(n) => {
-            // 쪽지는 사람이 자리에 없을 때 오는 것이라 폰에도 같이 알린다.
-            kasa_device::push::note_arrived(&n.character, &n.kind, &n.summary, &n.pane, Some(&n.url));
-            Json(serde_json::json!({ "ok": true, "id": n.id }))
-        }
-        None => err("pane 과 summary 는 비면 안 돼요".into()),
-    }
-}
-
 /// 폰이 애플에서 받은 기기 토큰을 맡긴다 — `{token, env: prod|dev}`. 주소의 slug 로
 /// 누구 폰인지 안다(없으면 로컬 = 주인).
 async fn term_push_token_post(req: axum::extract::Request) -> axum::response::Response {
@@ -332,22 +315,6 @@ async fn term_clipboard_pick(backend: Arc<dyn Backend>, body: Bytes) -> impl Int
     }
 }
 
-/// 쪽지에 딸린 pane 사진.
-async fn term_notes_image(AxPath(name): AxPath<String>) -> impl IntoResponse {
-    let id = name
-        .strip_suffix(".png")
-        .and_then(|s| s.parse::<u64>().ok());
-    match id.and_then(kasa_students::notes::image_bytes) {
-        Some(bytes) => (
-            axum::http::StatusCode::OK,
-            [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "private, max-age=86400")],
-            bytes,
-        )
-            .into_response(),
-        None => axum::http::StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
 /// 이 모듈 창구의 라우트. `router` 가 한 표로 합친 뒤 공통 레이어(Origin·토큰 가드)를 두른다.
 pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let gitcol_backend = backend.clone();
@@ -374,8 +341,8 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         .route("/term/tree", get(term_tree_get))
         .route("/term/file", get(term_file_get))
         .route("/term/path", get(term_path_get))
-        // 학생 쪽지 — 나쵸가 넣고 폰 종 목록이 읽는다(notes.rs 머리말).
-        .route("/term/notes", get(term_notes_get).post(term_notes_post))
+        // 학생 쪽지 — 앱이 알림을 낼 때 남기고 폰 종 목록이 읽는다(notes.rs 머리말).
+        .route("/term/notes", get(term_notes_get))
 .route("/term/push-token", post(term_push_token_post))
         .route("/term/notes/read", post(term_notes_read_post))
         .route("/term/notes/delete", post(term_notes_delete_post))
@@ -405,7 +372,6 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
                 move |p| term_clipboard_item(b.clone(), p)
             }),
         )
-        .route("/term/notes/{name}", get(term_notes_image))
 }
 
 #[cfg(test)]

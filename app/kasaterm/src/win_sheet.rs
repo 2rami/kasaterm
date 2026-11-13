@@ -1,5 +1,4 @@
-//! Windows 의 결정 시트 — macOS `NSAlert` 시트 자리(원격 승인 `remote_approval.rs`, 폰 열쇠 믿기
-//! `native_op_approval.rs`).
+//! Windows 의 결정 시트 — macOS `NSAlert` 시트 자리(폰 열쇠 믿기 `native_op_approval.rs`).
 //!
 //! 본창에 붙은 소유 창이다. 열린 동안 본창을 막아 시트처럼 굴고, 메시지는 winit 루프가 그대로 펌프하므로 앱은
 //! 계속 그린다 — TaskDialog 처럼 자체 모달 루프를 돌면 그동안 칸 화면이 멎는다. 답은 단추 차례로 돌려준다:

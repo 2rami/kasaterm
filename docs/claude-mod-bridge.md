@@ -144,8 +144,8 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 - 거울(다른 기기·폰)은 `/term/mod-live`·`/term/mod-decide` 로 같은 요청을 보고 답한다 — `/term/*` 처럼 서버 관문(원격이면
   토큰)을 탄다. 그 거울은 이미 `/send` 로 이 칸에 무엇이든 칠 수 있어 새 권한이 아니다. 감사 줄의 `by` 는 `mirror:<곳>`.
   규칙은 `docs/mirror-render.md` 「구현 자리」.
-- 이 두 경로는 loopback 전용이다. 폰·다른 기기의 원격 승인은 **그 기기를 계정 주인 기기로 확인하는 쪽**(관문·릴레이)이
-  인증한 뒤 앱 안에서 `kasa_students::claude_mod::permissions()`·`decide()` 를 부른다. 이 계약은 인증을 하지 않는다.
+- 이 두 경로는 loopback 전용이다. 이 계약은 인증을 하지 않는다. 폰·다른 기기는 위 거울 경로로만 답한다 — 관문 원격 승인
+  창구에 올리던 다리(`approval_bridge`)는 걷었다(2026-11-13, 한 승인에 폰 알림 두 통 — [remote-approval.md](remote-approval.md)).
 - 요청마다 한 번 결정한다. 규칙 추가·모드 전환·「항상 허락」은 원격에 없다.
 - 결정마다 감사 기록 한 줄(`<collab root>/claude-mod/permission-audit.jsonl`: 시각·칸·세션·id·도구·입력 지문·결정·by).
 - 새 요청이 열리면 `kasa_students::claude_mod::subscribe()` 가 알린다(푸시 알림을 붙이는 자리).

@@ -9,26 +9,25 @@ void main() {
       'id': 7,
       'pane': '%3',
       'character': '유우카',
-      'kind': 'done_ok',
-      'summary': '폰 상태줄 한 줄로 → 폴더부터 빼서 맞춤',
+      'kind': 'done',
+      'summary': '폰 상태줄 한 줄로 맞췄어요',
       'when': 1700000000,
       'read': false,
-      'image': true,
     }, machine: '맥미니');
     expect(n.id, 7);
     expect(n.machine, '맥미니');
     expect(n.key, '맥미니|7');
     expect(n.when.millisecondsSinceEpoch, 1700000000 * 1000);
-    expect(n.image, isTrue);
     expect(n.copyWith(read: true).read, isTrue);
-    expect(n.asked, '', reason: '빠진 칸은 빈 문자열');
+    expect(Note.kinds, {'permission', 'question', 'blocked', 'done'}, reason: '알림 두 가지 — 고를 것과 끝냄');
   });
 
   test('쪽지 종류 → 말·색은 상태 칩과 같은 체계', () {
     const scheme = ColorScheme.dark();
-    expect(noteKindStyle('done_ok', scheme).$1, '끝냄');
-    expect(noteKindStyle('permission', scheme).$2, const Color(0xffFA8C2A));
-    expect(noteKindStyle('done_fail', scheme).$2, scheme.error);
+    expect(noteKindStyle('done', scheme).$1, '끝냄');
+    for (final kind in ['permission', 'question', 'blocked']) {
+      expect(noteKindStyle(kind, scheme).$2, const Color(0xffFA8C2A), reason: '$kind 은 고를 것');
+    }
     expect(noteKindStyle('weird', scheme).$1, 'weird');
   });
 

@@ -16,7 +16,6 @@
 		6C0AD132BDF35C11060F2FA1 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 60437653E401C7DA107FF39B /* Pods_Runner.framework */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */; };
-		83BC7B4B7D068E0B777B0A4C /* kasa-note.caf in Resources */ = {isa = PBXBuildFile; fileRef = 1366546EBE2AC92BA59B70D8 /* kasa-note.caf */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
@@ -67,7 +66,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		1366546EBE2AC92BA59B70D8 /* kasa-note.caf */ = {isa = PBXFileReference; includeInIndex = 1; path = "kasa-note.caf"; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
 		30997E8E29A5480C78553112 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
@@ -151,7 +149,6 @@
 			isa = PBXGroup;
 			children = (
 				9C0B40976F33B12002526861 /* kasa-done.caf */,
-				1366546EBE2AC92BA59B70D8 /* kasa-note.caf */,
 				EA70A8B92ADE1D2BA55F4F5C /* kasa-wait.caf */,
 			);
 			name = Sounds;
@@ -374,7 +371,6 @@
 				97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */,
 				97C146FC1CF9000F007C117D /* Main.storyboard in Resources */,
 				1B468BF4819854908B52EB27 /* kasa-done.caf in Resources */,
-				83BC7B4B7D068E0B777B0A4C /* kasa-note.caf in Resources */,
 				EF28C067A29A22F9C86E33C1 /* kasa-wait.caf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

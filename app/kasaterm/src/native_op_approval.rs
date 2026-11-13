@@ -244,7 +244,7 @@ impl App {
                 if let Ok(path) = std::env::var("KASATERM_OP_AUTOTRUST_SHOT") {
                     shot_alert(handle, &path);
                 }
-                crate::remote_approval::press_sheet(handle, 0);
+                press_sheet(handle, 0);
                 self.device_account.op.auto = Some((0, at + std::time::Duration::from_secs(86_400)));
             }
             None => {
@@ -515,3 +515,28 @@ mod tests {
         assert!(readable("gateway_unreachable").contains("관문"));
     }
 }
+
+/// 검증 실행이 시트 단추를 누른다 — 0 믿기, 1 취소.
+#[cfg(target_os = "macos")]
+pub(crate) fn press_sheet(alert: usize, index: usize) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    unsafe {
+        let alert = alert as *mut AnyObject;
+        let buttons: *mut AnyObject = msg_send![alert, buttons];
+        if buttons.is_null() {
+            return;
+        }
+        let button: *mut AnyObject = msg_send![buttons, objectAtIndex: index];
+        let nil: *mut AnyObject = std::ptr::null_mut();
+        let _: () = msg_send![button, performClick: nil];
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn press_sheet(alert: usize, index: usize) {
+    crate::win_sheet::press(alert, index);
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(crate) fn press_sheet(_alert: usize, _index: usize) {}

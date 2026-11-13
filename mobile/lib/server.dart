@@ -1808,13 +1808,13 @@ class Server {
   Uri characterFace(String slug, String themeId) =>
       uri('character-face', query: {'slug': slug, if (themeId.isNotEmpty) 'theme': themeId});
 
-  /// 학생 쪽지 — 나쵸가 남긴 「시킨 것 → 한 것」 한 줄. 최근 것부터.
+  /// 종 목록 — 사람에게 간 알림의 기록. 최근 것부터. 옛 데스크톱이 주는 나쵸 쪽지·페이지 쪽지는 뺀다.
   Future<List<Note>> notes({String? machine}) async {
     final j = await _getJson('term/notes', machine: machine);
     return [
       if (j is List)
         for (final e in j)
-          if (e is Map)
+          if (e is Map && Note.kinds.contains(e['kind']))
             Note.fromJson(e.cast<String, Object?>(), machine: machine),
     ];
   }
@@ -1868,9 +1868,6 @@ class Server {
     }
   }
 
-  Uri noteImage(int id, {String? machine}) =>
-      uri('term/notes/$id.png', machine: machine);
-
   void close() {
     if (_closed) return;
     _closed = true;
@@ -1904,6 +1901,7 @@ class BrowserTarget {
   final bool phone;
 }
 
+/// 종 목록 한 줄 — 사람에게 간 알림 하나(데스크톱 `kasa_students::notes`).
 class Note {
   const Note({
     required this.id,
@@ -1911,32 +1909,23 @@ class Note {
     required this.character,
     required this.kind,
     required this.summary,
-    required this.asked,
-    required this.did,
     required this.when,
     required this.read,
-    required this.image,
     this.machine,
-    this.url = '',
   });
+
+  /// 알림 두 가지 — 고를 것(permission · question · blocked)과 완료(done). 데스크톱 `notes::KINDS`.
+  static const kinds = {'permission', 'question', 'blocked', 'done'};
 
   final int id;
   final String pane;
   final String character;
-
-  /// kind=`link` — 누르면 사파리로 여는 주소.
-  final String url;
-
-  /// permission · question · waiting · idle · done_ok · done_fail · dead
   final String kind;
+
+  /// 알림 본문 — 학생이 선생님께 하는 말.
   final String summary;
-  final String asked;
-  final String did;
   final DateTime when;
   final bool read;
-
-  /// pane 사진이 딸렸는가 — `Server.noteImage`.
-  final bool image;
   final String? machine;
 
   String get key => '${machine ?? ''}|$id';
@@ -1947,13 +1936,9 @@ class Note {
     character: character,
     kind: kind,
     summary: summary,
-    asked: asked,
-    did: did,
     when: when,
     read: read ?? this.read,
-    image: image,
     machine: machine,
-    url: url,
   );
 
   static Note fromJson(Map<String, Object?> j, {String? machine}) => Note(
@@ -1962,15 +1947,11 @@ class Note {
     character: j['character'] as String? ?? '',
     kind: j['kind'] as String? ?? '',
     summary: j['summary'] as String? ?? '',
-    asked: j['asked'] as String? ?? '',
-    did: j['did'] as String? ?? '',
     when: DateTime.fromMillisecondsSinceEpoch(
       ((j['when'] as num?)?.toInt() ?? 0) * 1000,
     ),
     read: j['read'] == true,
-    image: j['image'] == true,
     machine: machine,
-    url: j['url'] as String? ?? '',
   );
 }
 

@@ -900,11 +900,10 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::NotifyFocus { pane, sid } => {
-                if pane == crate::remote_approval::ACTION || pane == crate::update_notice::ACTION {
+                if pane == crate::update_notice::ACTION {
                     if let Some(w) = self.window.as_ref() { w.focus_window(); }
                     if let Some(key) = sid.as_deref() {
-                        if pane == crate::remote_approval::ACTION { self.open_remote_notification(key); }
-                        else { self.open_update_notification(key); }
+                        self.open_update_notification(key);
                     }
                     return;
                 }
@@ -7668,7 +7667,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.drain_pending_web_hosts(event_loop);
         self.sync_web_hosts();
         self.tick_update_notice();
-        self.tick_remote_approval();
         // gif 애니: 멀티프레임 이미지 pane 의 현재 프레임이 delay 를 넘겼으면 다음 프레임으로
         // 넘기고 redraw. gif 가 있을 때만 WaitUntil(다음 전환 시각)로 타이머를 잡아 부드럽게
         // 돈다(사용자: 이미지 pane gif 도 재생). 정지 이미지(frames==1)엔 영향 없음.
@@ -8540,8 +8538,7 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// 턴이 끝났다는 깃발. claude 의 Stop hook 이 `kasaterm-cli notify` 로 들어오면
-/// GUI(`handle_notify`)가 여기 세우고, 사용량 폴러가 5초 슬라이스마다 보고 **자던
+/// 턴이 끝났다는 깃발. 학생 턴이 끝나면 GUI(`apply_transition_event` 의 Finished)가 여기 세우고, 사용량 폴러가 5초 슬라이스마다 보고 **자던
 /// 나머지를 건너뛴다**.
 ///
 /// 사용량이 실제로 움직이는 계기는 턴이 끝날 때뿐이다. 그런데 폴러는 그와 무관하게
