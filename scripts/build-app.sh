@@ -620,3 +620,11 @@ if [[ "$INSTALL" -eq 1 ]]; then
   [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$HOME/Applications/kasaterm.app" \
     && echo "re-registered with LaunchServices (.md handler)"
 fi
+
+# 사람·학생이 이 맥에서 구운 판이면 쌓인 cargo target 을 상한(15GiB) 밑으로 줄인다 — 디스크가 0 이 되자 카사텀이
+# 죽었다(2026-11-13). 지금 쓰는 target 은 건드리지 않고, 뒤에서 돌아 이 굽기를 늦추지 않는다. 릴리스 도구는
+# 격리 target(CARGO_TARGET_DIR)으로 굽고 제 정리가 따로 있어 건너뛴다. 끄기: KASATERM_PRUNE_BUILDS=0.
+if [[ -z "${CARGO_TARGET_DIR:-}" && "${KASATERM_PRUNE_BUILDS:-1}" != "0" ]]; then
+  mkdir -p "$HOME/Library/Logs"
+  nohup python3 "$ROOT/scripts/prune-build-outputs.py" >>"$HOME/Library/Logs/kasaterm-prune-builds.log" 2>&1 &
+fi

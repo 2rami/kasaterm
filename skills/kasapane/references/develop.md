@@ -8,6 +8,7 @@
 - 화면 수정은 `docs/design.md`의 공통 배치 계약과 해당 화면 절을 읽는다. 공통 토큰·부품을 사용하고 그리기·레이아웃·클릭 영역을 함께 맞춘다. 새 기준은 문서와 코드에 함께 반영한다. 전면 개편 요청은 기존 값을 재검토할 수 있다.
 - 시안도 PC는 Rust/wgpu, 폰은 Flutter 실제 화면으로 만든다. HTML 대체 시안은 만들지 않는다. 레이아웃·가독성은 px로 확인한다.
 - 남의 미완성 변경을 포함하지 않는다. 공유 트리의 브랜치 전환·강제 푸시·이력 재작성은 임의로 하지 않고, 필요하면 격리 worktree를 쓴다.
+- 격리 빌드의 target 은 `~/Library/Caches/kasaterm-builds/<일>/` 이나 `/private/tmp/kt-*` 에 둔다. `scripts/build-app.sh` 가 끝나면 `scripts/prune-build-outputs.py` 가 뒤에서 돌아, 이 자리와 레포 `target` 의 합이 15GiB(`KASATERM_BUILD_CAP_GIB`)를 넘을 때 30분 넘게 안 쓰고 도는 빌드가 없는 것부터 지운다. 손으로는 `--dry-run` 으로 먼저 본다.
 
 ## 검증
 
