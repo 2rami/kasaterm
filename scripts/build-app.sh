@@ -621,10 +621,11 @@ if [[ "$INSTALL" -eq 1 ]]; then
     && echo "re-registered with LaunchServices (.md handler)"
 fi
 
-# 사람·학생이 이 맥에서 구운 판이면 쌓인 cargo target 을 상한(15GiB) 밑으로 줄인다 — 디스크가 0 이 되자 카사텀이
-# 죽었다(2026-11-13). 지금 쓰는 target 은 건드리지 않고, 뒤에서 돌아 이 굽기를 늦추지 않는다. 릴리스 도구는
-# 격리 target(CARGO_TARGET_DIR)으로 굽고 제 정리가 따로 있어 건너뛴다. 사용 중 판정을 보완하기 전까지는 KASATERM_PRUNE_BUILDS=1 일 때만 돈다.
-if [[ -z "${CARGO_TARGET_DIR:-}" && "${KASATERM_PRUNE_BUILDS:-0}" == "1" ]]; then
-  mkdir -p "$HOME/Library/Logs"
-  nohup python3 "$ROOT/scripts/prune-build-outputs.py" >>"$HOME/Library/Logs/kasaterm-prune-builds.log" 2>&1 &
+# 구운 뒤 디스크 지키기 한 바퀴 — 디스크가 0 이 되자 카사텀이 죽었다(2026-11-13, docs/disk-guard.md). 이 레포를 기억해
+# 앱의 정기 정리도 이 레포의 target·mobile 빌드 결과를 보게 하고, 다시 만들 수 있는 빌드 산출물 중 30분 넘게 안 쓰고
+# 아무도 열지 않은 것을 상한(설정 disk_build_cap_gib, 기본 15GB) 밑으로 줄인다. 뒤에서 돌아 이 굽기를 늦추지 않는다.
+# 릴리스 도구는 격리 target(CARGO_TARGET_DIR)으로 굽고 제 정리가 따로 있어 건너뛴다. 끄려면 KASATERM_PRUNE_BUILDS=0
+# 이나 설정 disk_auto_prune=false.
+if [[ -z "${CARGO_TARGET_DIR:-}" && "${KASATERM_PRUNE_BUILDS:-1}" != "0" && -x "$BINDIR/kasaterm-cli" ]]; then
+  nohup "$BINDIR/kasaterm-cli" disk prune --after-build --repo "$ROOT" >/dev/null 2>&1 &
 fi

@@ -122,6 +122,11 @@ pub(super) fn paint(
     #[cfg(target_os = "macos")]
     paint_lid_away(g, s, hits, x, y, w);
     *y += 12.0;
+    #[cfg(unix)]
+    {
+        paint_disk_guard(g, s, hits, x, y, w);
+        *y += 12.0;
+    }
     if !disclosure(
         g,
         s,

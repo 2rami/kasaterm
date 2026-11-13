@@ -864,6 +864,18 @@ impl App {
                 #[cfg(target_os = "macos")]
                 crate::lid_away::forget_config();
             }
+            SettingsAction::DiskWarnGib(gib) => {
+                socket::write_setting("disk_warn_free_gib", serde_json::json!(gib));
+                crate::disk_warning::forget_config();
+            }
+            SettingsAction::DiskBuildCapGib(gib) => {
+                socket::write_setting("disk_build_cap_gib", serde_json::json!(gib));
+                crate::disk_warning::forget_config();
+            }
+            SettingsAction::DiskAutoPrune(on) => {
+                socket::write_setting("disk_auto_prune", serde_json::json!(on));
+                crate::disk_warning::forget_config();
+            }
             #[cfg(target_os = "macos")]
             SettingsAction::LidHotspot(on) => {
                 if !on { crate::lid_away::hotspot::cancel(); }

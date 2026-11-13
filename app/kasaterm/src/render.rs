@@ -2310,6 +2310,8 @@ impl App {
         // 트레이 기하는 `&self` 메서드라 아래 `self.gpu.as_mut()` 빌림 안에서는
         // 못 부른다 — 다른 chrome rect 들과 같이 여기서 미리 읽는다.
         let sidebar_tray = self.sidebar_tray_rects(win_h_logical);
+        self.disk_warning.card = sidebar_tray.as_ref().and_then(|t| t.disk);
+        let disk_card = self.disk_card();
         let file_tree_toggle = self.file_tree_toggle_rect();
         let sidebar_toggle = self.sidebar_toggle_rect();
         // 타이틀바 제목을 가운데 세울 때 오른쪽 한계로 쓴다 — 같은 이유로 여기서
@@ -3425,6 +3427,7 @@ impl App {
                         drag_target: win_drag_target,
                         menu_open,
                         tray: sidebar_tray.as_ref(),
+                        disk: disk_card.as_ref(),
                     },
                 );
                 // pane 행 우클릭 메뉴 — 이 칼럼에서 **마지막**에 그린다(다른 것 위에
@@ -4709,6 +4712,13 @@ impl App {
             {
                 Self::draw_hover_tip(g, "기기 추가", sb_plus.0, sb_plus.1,
                     win_px.0 / scale, sb_win_h);
+            }
+            if let (Some((dx, dy, dw, dh)), Some(card)) = (self.disk_warning.card, disk_card.as_ref()) {
+                if !self.tabs_on_top && !menu_open && self.info.machine_menu.is_none()
+                    && sb_cursor.0 >= dx && sb_cursor.0 <= dx + dw && sb_cursor.1 >= dy && sb_cursor.1 <= dy + dh
+                {
+                    Self::draw_hover_tip(g, &card.tip, dx, dy, win_px.0 / scale, sb_win_h);
+                }
             }
             crate::sidebar_navigation::draw_device_drag(g, &self.info, sb_cursor);
             if !self.tabs_on_top && self.info.machine_menu.is_none() && self.info.navigation.room_menu.is_none()

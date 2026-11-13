@@ -53,6 +53,7 @@ pub mod tell;
 pub mod private_store;
 #[cfg(target_os = "macos")]
 pub mod lid_away;
+pub mod disk_guard;
 #[cfg(feature = "app-update")]
 pub mod app_restart;
 #[cfg(feature = "app-update")]

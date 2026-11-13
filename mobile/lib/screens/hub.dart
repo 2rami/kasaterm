@@ -385,6 +385,8 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
               : null,
         ),
       );
+      final disk = s.online ? _model.diskOf(s.machine == null ? null : s.route) : null;
+      if (disk != null) children.add(_DiskWarning(disk: disk));
       if (folded) continue;
       if (s.online && s.rooms.isEmpty) {
         children.add(
@@ -587,6 +589,66 @@ class _ViewMenu extends StatelessWidget {
 /// 기기 머리글 — 기기색 물 동그라미 안 아이콘 · 이름(16/600) · 「기준 기기 · N명」 두 줄과 그 아래 기기색 2px 알약 선.
 /// 데스크톱 사이드바 기기 머리(기기색 아이콘 + 굵은 이름 + 사정 한 줄)와 같은 모양이고, 선이 기기 경계다 — 흐린 묶음
 /// 제목 한 줄로는 어디서 다른 기기 학생이 시작하는지 안 보였다(2026-10-01 지적). 기준 기기 칸도 같은 머리를 단다.
+/// 기기 머리 밑 디스크 경고 — 문턱 아래(주의색)·곧 멈출 만큼(위험색). 캐시·앱 데이터는 지우지 않고 큰 곳만 알린다.
+class _DiskWarning extends StatelessWidget {
+  const _DiskWarning({required this.disk});
+
+  final DiskStatus disk;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final tone = disk.critical ? scheme.error : StatusStyle.attention;
+    final ink = disk.critical ? scheme.error : machineInk(StatusStyle.attention, scheme.surface);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Look.cardGap),
+      child: Semantics(
+        container: true,
+        label: '${disk.headline}. ${disk.detail}',
+        child: Container(
+          padding: const EdgeInsets.all(Look.cardPad),
+          decoration: BoxDecoration(
+            color: tone.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(Look.radius),
+            border: Border.all(color: tone.withValues(alpha: 0.55), width: Look.border),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.warning_amber_rounded, size: Look.iconSize, color: ink),
+              const SizedBox(width: Look.cardGap),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      disk.headline,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontSize: Look.body,
+                        fontWeight: FontWeight.w700,
+                        color: ink,
+                      ),
+                    ),
+                    const SizedBox(height: Look.rowGap * 2),
+                    Text(
+                      disk.detail,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontSize: Look.sub,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({
     required this.title,

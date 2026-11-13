@@ -324,6 +324,8 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     axum::Router::new()
         .route("/term/cd", post(move |req| term_cd_post(cd_backend.clone(), req)))
         .route("/term/changes", get(term_changes_handler))
+        // 디스크 지키기 — 폰 허브가 기기마다 남은 공간·큰 곳을 읽는다(docs/disk-guard.md).
+        .route("/term/disk", get(|| async { Json(kasa_socket::disk_guard::snapshot()) }))
         .route("/term/gitop", post(term_gitop_post))
         .route(
             "/term/gitcol",

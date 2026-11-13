@@ -313,6 +313,7 @@ class HubModel extends ChangeNotifier {
   final Map<String, List<Pane>> _remotePanes = {};
   final Map<String, List<WindowLayout>> _remoteLayouts = {};
   final Map<String, List<Note>> _notesBy = {};
+  final Map<String, DiskStatus> _diskBy = {};
   final Map<String, DateTime> _seenAt = {};
 
   /// 명부를 잇달아 못 받은 횟수 — 두 번이면 원격 기기가 붙어 있는지도 모르는 것이라 끊김으로 보인다.
@@ -512,8 +513,8 @@ class HubModel extends ChangeNotifier {
     }
   }
 
-  Future<void> _loadRoot() =>
-      Future.wait([_loadRootPanes(), _loadMachines(), _loadNotes(null)]);
+  Future<void> _loadRoot() => Future.wait(
+      [_loadRootPanes(), _loadMachines(), _loadNotes(null), _loadDisk(null)]);
 
   Future<void> _loadRootPanes() async {
     try {
@@ -603,6 +604,7 @@ class HubModel extends ChangeNotifier {
       _orNull(server.panes(machine: route)),
       _layoutsOf(route),
       _loadNotes(route),
+      _loadDisk(route),
     ]);
     if (_disposed) return;
     final panes = results[0] as List<Pane>?;
@@ -625,6 +627,32 @@ class HubModel extends ChangeNotifier {
       return await f.timeout(listTimeout);
     } catch (_) {
       return null;
+    }
+  }
+
+  /// 그 기기의 디스크 경고 — 문턱 아래일 때만 기기 머리 밑에 선다. 곁들이라 못 받으면 직전 것을 둔다.
+  DiskStatus? diskOf(String? route) {
+    final d = _diskBy[route ?? _rootKey];
+    return d != null && d.warn ? d : null;
+  }
+
+  Future<void> _loadDisk(String? machine) async {
+    final key = machine ?? _rootKey;
+    final DiskStatus? d;
+    try {
+      d = await server.disk(machine: machine).timeout(listTimeout);
+    } catch (_) {
+      return;
+    }
+    if (_disposed) return;
+    final before = _diskBy[key];
+    if (d == null) {
+      _diskBy.remove(key);
+    } else {
+      _diskBy[key] = d;
+    }
+    if (before?.warn != d?.warn || before?.headline != d?.headline || before?.detail != d?.detail) {
+      notifyListeners();
     }
   }
 

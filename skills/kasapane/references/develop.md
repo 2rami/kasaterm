@@ -8,7 +8,7 @@
 - 화면 수정은 `docs/design.md`의 공통 배치 계약과 해당 화면 절을 읽는다. 공통 토큰·부품을 사용하고 그리기·레이아웃·클릭 영역을 함께 맞춘다. 새 기준은 문서와 코드에 함께 반영한다. 전면 개편 요청은 기존 값을 재검토할 수 있다.
 - 시안도 PC는 Rust/wgpu, 폰은 Flutter 실제 화면으로 만든다. HTML 대체 시안은 만들지 않는다. 레이아웃·가독성은 px로 확인한다.
 - 남의 미완성 변경을 포함하지 않는다. 공유 트리의 브랜치 전환·강제 푸시·이력 재작성은 임의로 하지 않고, 필요하면 격리 worktree를 쓴다.
-- 격리 빌드의 target 은 `~/Library/Caches/kasaterm-builds/<일>/` 이나 `/private/tmp/kt-*` 에 둔다. `scripts/prune-build-outputs.py` 가 이 자리와 레포 `target` 의 합이 15GiB(`KASATERM_BUILD_CAP_GIB`)를 넘을 때, 30분 넘게 안 바뀌고 어느 프로세스도 그 target·작업 공간을 쓰지 않는(실제 경로로 본 작업 폴더·실행 파일·열린 파일·`CARGO_TARGET_DIR`) 것부터 지운다. 다른 target 의 심볼릭 링크가 가리키는 것은 남긴다. 지금은 `KASATERM_PRUNE_BUILDS=1` 일 때만 `scripts/build-app.sh` 끝에서 돈다. 손으로는 `--dry-run` 으로 먼저 본다.
+- 격리 빌드의 target 은 `~/Library/Caches/kasaterm-builds/<일>/` 이나 `/private/tmp/kt-*` 에 둔다. 앱의 디스크 지키기가 이 자리와 `scripts/build-app.sh` 로 구운 레포의 cargo target·flutter 빌드 결과·Xcode DerivedData 를 정기(한 시간)·문턱 아래(10분)·빌드 직후에 정리한다 — 30분 넘게 안 바뀌고 어느 프로세스도 그 산출물·작업 공간을 쓰지 않는 것만. 규칙·설정·기록은 `docs/disk-guard.md`, 손으로는 `kasaterm-cli disk prune --dry-run` 으로 먼저 본다.
 
 ## 검증
 

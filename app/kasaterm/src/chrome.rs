@@ -1002,7 +1002,7 @@ impl App {
     /// 이 기계 칸의 알림을 폰에도 — 맥 알림과 같은 사건·같은 말이다(`kasa_agents::ring`). 폰은 사람이 자리에 없을 때 보는
     /// 것이라 이 칸을 보고 있어도 보낸다. 다른 기계 칸은 그 기계가 스스로 보낸다.
     #[allow(clippy::too_many_arguments)]
-    fn ring_phone(&self, id: &str, heading: &str, character: Option<&str>, body: &str, kind: &str, collapse: String, dedup: &str) {
+    pub(crate) fn ring_phone(&self, id: &str, heading: &str, character: Option<&str>, body: &str, kind: &str, collapse: String, dedup: &str) {
         if kasa_remote::remote::is_remote_pane(id) || crate::lite_mode() || !notify_dedup_passes(&format!("phone:{dedup}")) {
             return;
         }
@@ -2525,6 +2525,10 @@ impl App {
             });
             return true;
         }
+        if self.disk_warning.card.is_some_and(|r| inside(&r)) {
+            self.open_disk_biggest();
+            return true;
+        }
         if self
             .room_list_add_rect
             .map(|r| inside(&r))
@@ -2586,7 +2590,7 @@ impl App {
         // 오지 않는다 — 상태줄을 직접 빼야 트레이가 그 밑에 깔리지 않는다.
         let bottom_h = self.status_h();
         let line_y = (win_h - bottom_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
-        Some(sidebar_tray_layout(line_y, self.tab_strip_w()))
+        Some(sidebar_tray_layout(line_y, self.tab_strip_w(), self.disk_card_h()))
     }
     /// 사이드바 토글 버튼 rect(논리 px).
     ///
@@ -4554,15 +4558,19 @@ pub(crate) fn side_column_should_toggle(
 pub(crate) struct SidebarTray {
     pub(crate) line_y: f32,
     pub(crate) plus: (f32, f32, f32, f32),
+    /// 디스크 경고 카드 — 트레이 선 바로 위. 경고가 없거나 창이 너무 낮으면 없다.
+    pub(crate) disk: Option<(f32, f32, f32, f32)>,
 }
 
-pub(crate) fn sidebar_tray_layout(line_y: f32, strip: f32) -> SidebarTray {
+pub(crate) fn sidebar_tray_layout(line_y: f32, strip: f32, disk_h: f32) -> SidebarTray {
     let strip = strip.max(0.0);
     let inset = (SIDEBAR_TAB_INSET + 4.0).min(strip * 0.1);
     let available = (strip - inset * 2.0).max(0.0);
     let h = 28.0_f32.min(available);
     let y = line_y + (SIDEBAR_TRAY_H - h) / 2.0;
-    SidebarTray { line_y, plus: (inset, y, available, h) }
+    let disk = (disk_h > 0.0 && line_y - disk_h >= TITLE_HEIGHT + SIDEBAR_TAB_H && available >= 64.0)
+        .then_some((inset, line_y - disk_h + 6.0, available, disk_h - 12.0));
+    SidebarTray { line_y, plus: (inset, y, available, h), disk }
 }
 
 #[cfg(test)]
@@ -4572,11 +4580,21 @@ mod sidebar_tray_tests {
     #[test]
     fn device_button_fills_the_tray_even_in_a_narrow_sidebar() {
         for width in [0.0, 32.0, 64.0, SIDEBAR_W_AUTO_MIN, 160.0, SIDEBAR_W, 380.0] {
-            let tray = sidebar_tray_layout(500.0, width);
+            let tray = sidebar_tray_layout(500.0, width, 0.0);
             let (x, _, w, h) = tray.plus;
             assert!(x >= 0.0 && w >= 0.0 && h <= 28.0);
             assert!(x + w <= width + 0.01);
+            assert!(tray.disk.is_none());
         }
+    }
+
+    #[test]
+    fn disk_card_sits_above_the_tray_line_inside_the_strip() {
+        let tray = sidebar_tray_layout(500.0, SIDEBAR_W, crate::disk_warning::CARD_H);
+        let (x, y, w, h) = tray.disk.expect("card");
+        assert!(y + h <= tray.line_y - 5.0 && y >= tray.line_y - crate::disk_warning::CARD_H);
+        assert_eq!((x, w), (tray.plus.0, tray.plus.2));
+        assert!(sidebar_tray_layout(TITLE_HEIGHT + 20.0, SIDEBAR_W, crate::disk_warning::CARD_H).disk.is_none());
     }
 }
 

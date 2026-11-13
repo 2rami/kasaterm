@@ -55,6 +55,7 @@
 - `win_notify.rs` — Windows 알림센터 토스트(HKCU AUMID 등록·COM 활성화기 → `UserEvent::NotifyFocus`)와 작업표시줄 배지(`set_taskbar_badge`). `chrome::notify_desktop` 이 OS 토스트로 보내고, OS가 막으면 자체 배너로 우회하지 않는다.
 - `account_brand.rs` — 실제 이메일 도메인으로 계정의 Gmail·NAVER·Sionic 표지를 고르는 공통 판정과 네이티브 그리기. 설정·계정 팝오버·상태줄이 같은 폭과 자산을 쓴다.
 - `render/status_bar/accounts.rs` — 제공된 사용량 창만 폭에 맞춰 표시하는 계정 칩. `statusbar/devices.rs`는 기기 연결·버전·업데이트 판과 기기마다 지금 Claude 계정·막힌 사유 줄(`device_accounts.rs`가 그 기기 `/settings/values` 계정 칸을 팝오버가 열린 동안만 읽는다), `statusbar/usage.rs`는 실행별 사용량 상세를 그린다.
+- `disk_warning.rs` — 디스크 지키기의 앱 쪽: 지키미 이벤트를 받아 값을 들고(`State`), 문턱을 새로 넘으면 맥 알림·폰 푸시, 사이드바 트레이 위 경고 카드(`paint_card`, 배치는 `chrome::sidebar_tray_layout`), 설정 「디스크 지키기」 값. 재기·정리는 `kasa_socket::disk_guard` 뒤 스레드 몫이고 그리기 경로에서 부르지 않는다([disk-guard.md](disk-guard.md)).
 - `process_usage.rs` — PID·시작 시각과 PTY 세대로 실행 신원을 고정하고 개별 종료한다. 숨긴 다중 셸의 복원 기록을 나누고, 문서가 함께 숨겨졌으면 먼저 열어 개별 종료하게 한다. `screen_pump`의 EOF도 같은 PTY 세대일 때만 칸을 걷는다.
 - `session/accounts/sync.rs` — 다른 기기의 Claude 계정 선택: 검증 신원 일치·중복 별명 판정, 최신 선택 직렬 전파와 기기별 적용 확인. 계약은 `docs/agent-account-selection.md`.
 - `info.rs` — 오른쪽 Info 열. 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)
@@ -128,6 +129,7 @@
 - `win_sheet.rs` — Windows 결정 시트(맥 `NSAlert` 시트 자리): 본창에 붙은 소유 창, 고정폭 원문 칸·[주 동작][기본 동작], Enter=기본·Esc=결정 없음. `remote_approval`·`native_op_approval` 의 `cfg(windows)` 시트가 부른다 — 값은 `docs/design.md` 「결정 시트」
 - `update_notice.rs` — 새 판 알림: Windows에서 찾은 판은 OS 알림으로 알리고, 클릭하면 WinSparkle 표준 확인 창을 연다. 설치 직전 끊길 일 확인은 유지한다. Sparkle 쪽 확인·받기·즉시 설치는 `macos_sparkle.rs` — `docs/automatic-preview-updates.md`
 - `app_restart.rs` — 앱 재시작 계획용 사실을 GUI 스레드에서 잰다(바쁜 학생·미저장 편집기·자기설치 예정). 계약·도우미는 `kasa_socket::app_restart`, 절차 `docs/app-restart.md`
+- `crates/kasa-socket/src/disk_guard.rs` — 디스크 지키기 본체: 지키미 스레드(`spawn`, 1분마다 `statfs`, 정기·문턱 아래 정리, 큰 곳 `du`, 알림 판정 `next_alert`), 정리 한 바퀴(`run_pass` — 계획 `plan`·다시 재기·기록), 설정(`Config`)·값(`status`·`snapshot`). 찾기·지우기 가드는 `disk_guard/outputs.rs`, 쓰는 중 판정(`ps -E`·`lsof`)은 `disk_guard/in_use.rs`. 앱(`disk_warning.rs`)·HTTP `/term/disk`·CLI `kasaterm-cli disk`(`cli/disk.rs`)가 같이 쓴다 — [disk-guard.md](disk-guard.md)
 - `app_update.rs` — 앱 업데이트 창구의 이 기기 쪽: 수락(나쵸 승인·지금 사실), 받기·확인·준비·적용 스레드(한 번에 한 작업), 부팅 표식. 계약·검증·도우미는 `kasa_socket::app_update`, 절차 `docs/app-update.md`
 - `machinescol.rs` — 기기 절의 재료(`refresh_machines_col`, `machines::snapshot` 을 기기·방 줄로)와 이사·화면 보기 동작, 하단바 기기 연결 요약. 끊긴 기기의 이유·마지막으로 닿은 때·연결 기록 글도 여기서 짓는다 — 판정과 기록 본체는 `kasa-device/src/machines/link.rs`([machine-link.md](machine-link.md))
 - `mirror_follow.rs` — 원본 격자는 마지막으로 만진 쪽을 따른다(tmux `window-size latest`). 다시 그릴 수 없는 거울(`mirror_needs_source`)만: 사람 손(키·IME·왼클릭·SGR 누름·확대)이 닿거나 보기 시작하면(`ViewHold` — 1.2초 판정 유지, 안 보면 놓고 되찾기면 비킨다) `remote::touch_source` 로 원본을 그 칸 크기로 잡고, 원본 칸을 만지면 `reclaim_viewer_sizes` 로 되찾는다. 잡기 전 거울은 `mirror_view` 가 뷰어 쪽에서 다시 접는다. 호스트가 `viewport_latest` 를 모르면(옛 판) 확대 때만 키우는 옛 규칙(`layout.rs fit_zoomed_mirror`). 폰까지 묶은 칸 크기 규칙은 `docs/webterm-handoff.md` 「원본 크기는 쓰는 쪽이 쥔다」

@@ -153,7 +153,7 @@ impl App {
         // 사이드바는 클립을 안 세우므로 **잘리지 않고 그대로 덮어 그려진다** — 화면은
         // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
         let bottom_h = self.status_h();
-        (win_h - bottom_h - top - SIDEBAR_TRAY_H - 24.0).max(SIDEBAR_TAB_H + SIDEBAR_TAB_GAP)
+        (win_h - bottom_h - top - SIDEBAR_TRAY_H - self.disk_card_h() - 24.0).max(SIDEBAR_TAB_H + SIDEBAR_TAB_GAP)
     }
 
     /// 방 목록 스크롤 기하 — `(view_top, viewport_h, content_h, scrolled_px)`.

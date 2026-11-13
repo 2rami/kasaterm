@@ -28,6 +28,7 @@ mod gpu;
 mod handler;
 mod homeaccounts;
 mod device_accounts;
+mod disk_warning;
 mod input;
 mod shell_edit;
 mod process_usage;
@@ -4312,6 +4313,8 @@ enum UserEvent {
         generation: u64,
     },
     ClaudeQuotaWarning(quota_alerts::QuotaAlert),
+    /// 디스크 지키기 — 참이면 문턱을 새로 넘어 사람을 부를 일(disk_warning.rs).
+    DiskGuard(bool),
     /// 관문 사슬로 도는 Claude 로그인이 곧 끊기거나 끊겼다(`kasa_device::agent_chains`). (제목, 본문)
     AgentChainAlert(String, String),
     /// macOS `.md` 더블클릭(odoc Apple Event) 또는 argv → 새 워크스페이스에
@@ -4821,6 +4824,12 @@ pub(crate) enum SettingsAction {
     LidAway(bool),
     /// 덮인 뒤 깨어 있을 최대 분.
     LidAwayMinutes(u64),
+    /// 디스크 경고 문턱(GB) — disk_warning.rs.
+    DiskWarnGib(u64),
+    /// 빌드 산출물 상한(GB).
+    DiskBuildCapGib(u64),
+    /// 빌드 산출물 자동 정리 켬·끔.
+    DiskAutoPrune(bool),
     #[cfg(target_os = "macos")]
     LidHotspot(bool),
     #[cfg(target_os = "macos")]
@@ -5876,6 +5885,8 @@ struct App {
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
     /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
     statusbar: state::StatusbarState,
+    /// 디스크 경고 카드의 값·자리(disk_warning.rs).
+    disk_warning: disk_warning::State,
     /// 거울 칸의 질문 자리 이동 목적지. 본체는 turnjump.rs — 여기 필드 한 줄만
     /// 두는 것도 statusbar 와 같은 이유다(CLAUDE.md 병렬 규칙).
     turn: turnjump::TurnJump,
@@ -6481,6 +6492,7 @@ impl App {
                 ..Default::default()
             },
             statusbar: Default::default(),
+            disk_warning: Default::default(),
             turn: Default::default(),
             pane_cwd_check: None,
             // Alt 를 누르는 동안만 뜨는 오버레이라 헤드리스로는 찍을 길이 없다.

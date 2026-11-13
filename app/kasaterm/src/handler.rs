@@ -2021,6 +2021,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::DiskGuard(alert) => {
+                self.on_disk_guard(*alert);
+                self.render_frame();
+                return;
+            }
             UserEvent::ClaudeQuotaWarning(alert) => {
                 if alert.account != self.set_claude_account { return; }
                 let account = self.claude_account_display(&alert.account);
@@ -2482,6 +2487,14 @@ impl ApplicationHandler<UserEvent> for App {
             self.git.col_wake.clone(),
         );
         crate::git_panel::spawn_remote_watcher(self.git.col_context.clone(), self.git.col_wake.clone());
+        // 디스크 지키기 — 뒤 스레드가 남은 공간을 재고 빌드 산출물을 치운다(docs/disk-guard.md). 리그도 남은 공간은
+        // 재지만(경고 카드를 그려 본다) 정리는 `KASATERM_DISK_ROOTS` 없이는 하지 않는다.
+        if !self.lite {
+            let disk_proxy = self.proxy.clone();
+            kasa_socket::disk_guard::spawn(move |event| {
+                let _ = disk_proxy.send_event(UserEvent::DiskGuard(event == kasa_socket::disk_guard::Event::Alert));
+            });
+        }
         // claude 한도 폴러 — 로컬 /claude-usage(oauth/usage 프록시)를 조회해 **가장 먼저
         // 닫히는 창**의 사용률을 채운다. Info 탭 머리 계정 행의 소스. curl 로 로컬
         // 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 값이 바뀔 때만

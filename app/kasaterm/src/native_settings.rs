@@ -754,6 +754,7 @@ fn take_paint_feedback() -> PaintFeedback {
 pub(crate) struct Snapshot {
     #[cfg(target_os = "macos")]
     pub(crate) lid_away: crate::lid_away::View,
+    pub(crate) disk: crate::disk_warning::SettingsView,
     pub(crate) weather: crate::weather::model::WeatherSettings,
     pub(crate) weather_os: crate::weather::model::OsMotion,
     pub(crate) device_account: device_account::View,
@@ -1008,6 +1009,7 @@ impl App {
         let mut snapshot = Snapshot {
             #[cfg(target_os = "macos")]
             lid_away: crate::lid_away::view(),
+            disk: crate::disk_warning::settings_view(),
             weather: self.weather.settings.clone(),
             weather_os: self.weather.os(),
             device_account: self.device_account.view(),
@@ -4839,6 +4841,40 @@ fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
         "먼저 macOS Wi-Fi 메뉴에서 폰에 한 번 연결한 뒤 등록해 주세요. iPhone의 자동 활성화는 macOS의 ‘핫스팟 자동 연결’을 사용합니다. 연결 실패가 잠자기 시간을 늘리지는 않습니다"
     } else { &lid.hotspot.status };
     for line in wrap_words(g, hotspot_note, w, 10.5) {
+        draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
+        *y += 15.0;
+    }
+    *y += 11.0;
+}
+
+/// 디스크 지키기 — 문턱 아래면 알리고, 다시 만들 수 있는 빌드 산출물만 스스로 치운다(docs/disk-guard.md).
+#[cfg(unix)]
+fn paint_disk_guard(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
+    use kasa_socket::disk_guard::{CAP_CHOICES_GIB, WARN_CHOICES_GIB};
+    section_title(g, x, *y, "디스크 지키기", "");
+    *y += 54.0;
+    let disk = &s.disk;
+    let warn: Vec<String> = WARN_CHOICES_GIB.iter().map(|gb| format!("{gb}GB")).collect();
+    let warn_cells: Vec<(&str, bool, SettingsAction)> = WARN_CHOICES_GIB
+        .iter()
+        .zip(&warn)
+        .map(|(gb, text)| (text.as_str(), disk.warn_gib == *gb, SettingsAction::DiskWarnGib(*gb)))
+        .collect();
+    seg_row(g, s, hits, x, y, w, "남은 공간 경고", &warn_cells);
+    toggle_row_hint(g, s, hits, x, y, w, "빌드 산출물 자동 정리",
+        "cargo target·flutter build·Xcode DerivedData 중 30분 넘게 안 쓰고 아무도 열지 않은 것만 지웁니다",
+        disk.auto_prune, SettingsAction::DiskAutoPrune(!disk.auto_prune));
+    if disk.auto_prune {
+        let cap: Vec<String> = CAP_CHOICES_GIB.iter().map(|gb| format!("{gb}GB")).collect();
+        let cap_cells: Vec<(&str, bool, SettingsAction)> = CAP_CHOICES_GIB
+            .iter()
+            .zip(&cap)
+            .map(|(gb, text)| (text.as_str(), disk.cap_gib == *gb, SettingsAction::DiskBuildCapGib(*gb)))
+            .collect();
+        seg_row(g, s, hits, x, y, w, "빌드 산출물 상한", &cap_cells);
+    }
+    *y += 6.0;
+    for line in wrap_words(g, &disk.note, w, 10.5) {
         draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
         *y += 15.0;
     }

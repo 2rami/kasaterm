@@ -56,6 +56,7 @@ pub(super) struct Edges<'a> {
     pub drag_target: Option<usize>,
     pub menu_open: bool,
     pub tray: Option<&'a crate::chrome::SidebarTray>,
+    pub disk: Option<&'a crate::disk_warning::Card>,
 }
 
 pub(super) struct RowMenu<'a> {
@@ -1023,6 +1024,7 @@ pub(super) fn paint_edges(g: &mut gpu::GpuRenderer, s: &Strip, e: &Edges<'_>) {
         drag_target: win_drag_target,
         menu_open,
         tray: sidebar_tray,
+        disk,
     } = *e;
     // Device creation lives below the shared device list; each device header owns room creation.
     let (px, py, pw, ph) = sb_plus;
@@ -1146,6 +1148,9 @@ pub(super) fn paint_edges(g: &mut gpu::GpuRenderer, s: &Strip, e: &Edges<'_>) {
     // 그린다는 관례).
     if !menu_open {
         if let Some(tray) = sidebar_tray {
+            if let (Some(rect), Some(card)) = (tray.disk, disk) {
+                crate::disk_warning::paint_card(g, rect, card, sb_cursor);
+            }
             let line_y = tray.line_y;
             g.rect(
                 SIDEBAR_TAB_INSET,

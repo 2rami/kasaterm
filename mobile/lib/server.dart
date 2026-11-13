@@ -1808,6 +1808,17 @@ class Server {
   Uri characterFace(String slug, String themeId) =>
       uri('character-face', query: {'slug': slug, if (themeId.isNotEmpty) 'theme': themeId});
 
+  /// 그 기기의 디스크 지키기 상태(`/term/disk`). 그 길이 없는 옛 판이면 null.
+  Future<DiskStatus?> disk({String? machine}) async {
+    try {
+      final j = await _getJson('term/disk', machine: machine);
+      return j is Map ? DiskStatus.fromJson(j.cast<String, Object?>()) : null;
+    } on ServerException catch (e) {
+      if (e.status == 404) return null;
+      rethrow;
+    }
+  }
+
   /// 종 목록 — 사람에게 간 알림의 기록. 최근 것부터. 옛 데스크톱이 주는 나쵸 쪽지·페이지 쪽지는 뺀다.
   Future<List<Note>> notes({String? machine}) async {
     final j = await _getJson('term/notes', machine: machine);
@@ -1899,6 +1910,63 @@ class BrowserTarget {
   /// 그 기계가 명부에서 불리는 이름 — 다른 기계에 같은 선택을 전할 때 쓴다.
   final String local;
   final bool phone;
+}
+
+/// 기기의 남은 공간과 큰 곳 — 데스크톱 디스크 지키기(docs/disk-guard.md)가 낸 값.
+class DiskStatus {
+  const DiskStatus({
+    required this.free,
+    required this.level,
+    required this.warnFree,
+    this.big = const [],
+    this.freed = 0,
+  });
+
+  factory DiskStatus.fromJson(Map<String, Object?> j) {
+    int n(Object? v) => (v as num?)?.toInt() ?? 0;
+    final pass = j['last_pass'];
+    return DiskStatus(
+      free: n(j['free']),
+      level: j['level'] as String? ?? 'ok',
+      warnFree: n(j['warn_free']),
+      big: [
+        for (final p in (j['big'] as List?) ?? const [])
+          if (p is Map && p['label'] is String) (label: p['label'] as String, bytes: n(p['bytes'])),
+      ],
+      freed: pass is Map ? n(pass['freed']) : 0,
+    );
+  }
+
+  final int free;
+
+  /// `ok` · `low`(문턱 아래) · `critical`(곧 앱이 멈출 만큼).
+  final String level;
+  final int warnFree;
+
+  /// 크기만 잰 큰 곳 — 자동으로 지우지 않는다.
+  final List<({String label, int bytes})> big;
+
+  /// 마지막 정리가 지운 빌드 산출물.
+  final int freed;
+
+  bool get warn => level != 'ok';
+  bool get critical => level == 'critical';
+
+  static String size(int bytes) {
+    final gib = bytes / (1 << 30);
+    return gib >= 10 ? '${gib.toStringAsFixed(0)}GB' : '${gib.toStringAsFixed(1)}GB';
+  }
+
+  String get headline => '디스크 ${size(free)} 남음';
+
+  /// 둘째 줄 — 큰 곳이 먼저, 없으면 지운 것, 그것도 없으면 문턱.
+  String get detail {
+    final parts = <String>[
+      if (big.isNotEmpty) '큰 곳 · ${big.take(2).map((p) => '${p.label} ${size(p.bytes)}').join(' · ')}',
+      if (freed > 0) '빌드 산출물 ${size(freed)} 지움',
+    ];
+    return parts.isEmpty ? '문턱 ${size(warnFree)}' : parts.join('\n');
+  }
 }
 
 /// 종 목록 한 줄 — 사람에게 간 알림 하나(데스크톱 `kasa_students::notes`).

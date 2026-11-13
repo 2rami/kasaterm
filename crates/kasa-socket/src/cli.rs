@@ -34,6 +34,7 @@ mod account_run;
 mod app_control;
 mod session_move;
 mod summon_place;
+mod disk;
 use summon_place::SummonSpot;
 
 struct ApiTarget { base: String, token_file: Option<std::path::PathBuf> }
@@ -573,6 +574,11 @@ fn run() -> Result<Option<Response>> {
         }
         #[cfg(not(target_os = "macos"))]
         return Err(anyhow!("덮어도 마저 하기는 맥북 전용이에요"));
+    }
+    // `disk [status|prune]` — 디스크 지키기(docs/disk-guard.md). 앱 없이 돈다: build-app.sh 가 구운 뒤 부른다.
+    if cmd == "disk" {
+        println!("{}", disk::run(&args)?);
+        return Ok(None);
     }
     // `claude-trust <폴더>` — pane claude shim 이 실행 직전에 부른다(폴더 신뢰 화면 선해결).
     // 소켓을 안 거쳐 앱이 없어도 돈다. 실패는 조용히 — 화면은 앱이 한 번 넘겨 준다.
