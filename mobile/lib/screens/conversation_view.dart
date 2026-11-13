@@ -22,6 +22,7 @@ import '../look.dart';
 import '../twins_loading.dart';
 import 'controls.dart';
 import 'conversation_asks.dart';
+import 'engine_sheet.dart';
 
 /// 학생 화면의 두 얼굴 — 격자 그대로(터미널)와 다시 그린 쪽(대화, 셸 칸은 명령 묶음). 웹이 「웹 터미널」과
 /// 「대화 보기」를 주소 둘로 가른 것(2026-08-25)을 한 화면 안의 전환으로 옮겼다.
@@ -668,6 +669,11 @@ class _ConversationViewState extends State<ConversationView> {
             branch: widget.pane.branch,
             model: widget.pane.modelLabel,
             effort: widget.pane.effortLabel,
+            harness: widget.pane.harness,
+            colored: true,
+            onEngine: widget.session.canSend && !widget.pane.isShell
+                ? () => unawaited(showEngineSheet(context, server: widget.server, pane: widget.pane))
+                : null,
             style: TextStyle(
               fontFamily: 'TermMono',
               fontFamilyFallback: Look.flowMonoFallback,

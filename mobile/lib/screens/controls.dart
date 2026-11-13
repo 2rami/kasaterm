@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../claude_style.dart' show claudeBrand;
+import '../contrast.dart';
 import '../look.dart';
 import '../shell_blocks.dart' show tildePath;
 
@@ -421,7 +423,8 @@ class DismissKeyboard extends StatelessWidget {
 }
 
 /// 워프의 입력칸 위 맥락 — 지금 폴더와 브랜치. 프롬프트 대신 여기서 어디인지 말한다.
-/// 셸의 명령 쪽과 학생의 대화 쪽이 같은 줄을 쓴다.
+/// 셸의 명령 쪽과 학생의 대화 쪽이 같은 줄을 쓴다. 대화 쪽([colored])은 데스크톱 상태줄과 같은 색으로
+/// 폴더·브랜치·모델·effort 를 가르고, 모델 칸을 누르면 바꾸기 시트가 열린다.
 class PlaceLine extends StatelessWidget {
   const PlaceLine({
     super.key,
@@ -429,8 +432,11 @@ class PlaceLine extends StatelessWidget {
     this.branch,
     this.model,
     this.effort,
+    this.harness,
+    this.colored = false,
     required this.style,
     this.onTap,
+    this.onEngine,
   });
 
   final String cwd;
@@ -440,15 +446,24 @@ class PlaceLine extends StatelessWidget {
   final String? model;
   final String? effort;
 
+  /// 로고를 고르는 하네스(`claude`·`codex`). 비면 모델 이름으로 짐작한다.
+  final String? harness;
+
+  /// 데스크톱 상태줄 색을 입힌다 — 셸 칸은 판 글자색 하나로 두는 쪽이 판과 어울린다.
+  final bool colored;
+
   /// 글자색까지 — 셸은 판 글자색 40% 흐림, 대화는 테마의 흐린 글자.
   final TextStyle style;
 
   /// 있으면 줄 전체가 단추다(셸: 파일 트리 시트) — 높이 [Look.tap], 끝에 펼침 화살표.
   final VoidCallback? onTap;
 
+  /// 있으면 모델 칸이 단추다(대화: 모델·effort 바꾸기 시트).
+  final VoidCallback? onEngine;
+
   @override
   Widget build(BuildContext context) {
-    final line = _line();
+    final line = _line(context);
     final tap = onTap;
     if (tap == null) return line;
     return InkWell(
@@ -468,41 +483,151 @@ class PlaceLine extends StatelessWidget {
     );
   }
 
-  Widget _line() => Padding(
-    padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 6),
-    child: Row(
+  Widget _line(BuildContext context) {
+    final bg = Theme.of(context).colorScheme.surface;
+    final base = style.color ?? Theme.of(context).colorScheme.onSurfaceVariant;
+    Color ink(Color c) => colored ? enforceContrast(c, bg, 4.5) : base;
+    final dir = ink(placeDirColor), git = ink(placeGitColor);
+    final hasEngine = _model.isNotEmpty || _effort.isNotEmpty;
+    // 좁으면 폴더가 먼저 줄고, 모델 칸·브랜치는 제 몫 안에서 말줄임한다 — 320 폭에서 셋이 넘쳤다.
+    Widget row(double w) => Row(
       children: [
-        Icon(Icons.folder_outlined, size: 14, color: style.color),
+        Icon(Icons.folder_outlined, size: 14, color: dir),
         const SizedBox(width: 4),
         Flexible(
           child: Text(
             tildePath(cwd),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: style,
+            style: style.copyWith(color: dir),
           ),
         ),
         if (branch != null && branch!.isNotEmpty) ...[
           const SizedBox(width: 12),
-          Icon(Icons.call_split, size: 14, color: style.color),
+          Icon(Icons.call_split, size: 14, color: git),
           const SizedBox(width: 4),
-          Text(branch!, maxLines: 1, style: style),
+          ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: hasEngine ? w * .24 : w * .45),
+            child: Text(
+              branch!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: style.copyWith(color: git),
+            ),
+          ),
         ],
-        if (_engine.isNotEmpty) ...[
-          const SizedBox(width: 12),
-          Icon(Icons.auto_awesome_outlined, size: 14, color: style.color),
-          const SizedBox(width: 4),
-          Text(_engine, maxLines: 1, style: style),
+        if (hasEngine) ...[
+          const SizedBox(width: 10),
+          ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: w * .62),
+            child: _engineChip(context, bg, base),
+          ),
         ],
       ],
-    ),
-  );
+    );
+    return Padding(
+      padding: EdgeInsets.fromLTRB(Look.pagePad, onEngine == null ? 4 : 0, Look.pagePad, onEngine == null ? 6 : 0),
+      child: LayoutBuilder(
+        builder: (context, c) => onEngine == null
+            ? row(c.maxWidth)
+            : ConstrainedBox(constraints: const BoxConstraints(minHeight: Look.tap), child: row(c.maxWidth)),
+      ),
+    );
+  }
 
-  String get _engine => [
-    for (final v in [model, effort])
-      if (v != null && v.trim().isNotEmpty) v.trim(),
-  ].join(' · ');
+  Widget _engineChip(BuildContext context, Color bg, Color base) {
+    final modelInk = colored ? enforceContrast(placeModelColor, bg, 4.5) : base;
+    final effortInk = colored ? enforceContrast(effortColor(_effort), bg, 4.5) : base;
+    final logo = _logo;
+    final logoInk = logo == 'claude' ? claudeBrand : Theme.of(context).colorScheme.onSurface;
+    final chip = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (logo != null) ...[
+          Image.asset(
+            'assets/icons/$logo.png',
+            width: 13,
+            height: 13,
+            color: logoInk,
+            colorBlendMode: BlendMode.srcIn,
+            errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          ),
+          const SizedBox(width: 4),
+        ],
+        if (_model.isNotEmpty)
+          Flexible(
+            child: Text(
+              _model,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: style.copyWith(color: modelInk, fontWeight: FontWeight.w600),
+            ),
+          ),
+        if (_effort.isNotEmpty) ...[
+          const SizedBox(width: 5),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            decoration: BoxDecoration(
+              color: effortInk.withValues(alpha: colored ? 0.14 : 0.0),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              _effort,
+              maxLines: 1,
+              style: style.copyWith(color: effortInk, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+        if (onEngine != null) ...[
+          const SizedBox(width: 2),
+          Icon(Icons.expand_more, size: 14, color: modelInk),
+        ],
+      ],
+    );
+    final tap = onEngine;
+    if (tap == null) return chip;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: tap,
+        borderRadius: BorderRadius.circular(Look.radiusSm),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+          child: chip,
+        ),
+      ),
+    );
+  }
+
+  String get _model => model?.trim() ?? '';
+  String get _effort => effort?.trim() ?? '';
+
+  /// 로고 그림 이름 — 하네스가 먼저, 없으면 모델 이름(GPT 면 OpenAI 로고).
+  String? get _logo {
+    switch (harness) {
+      case 'claude':
+        return 'claude';
+      case 'codex':
+        return 'codex';
+    }
+    final m = _model.toLowerCase();
+    if (m.isEmpty) return null;
+    return m.startsWith('gpt') || m.startsWith('o3') || m.startsWith('o4') ? 'codex' : 'claude';
+  }
 }
+
+/// 데스크톱 상태줄(`SL_C_DIR`·`SL_C_GIT`·`SL_C_MODEL`·`SL_EFFORT_HEX`)과 같은 색.
+const placeDirColor = Color(0xffbb9af7);
+const placeGitColor = Color(0xff73daca);
+const placeModelColor = Color(0xff7aa2f7);
+Color effortColor(String level) => switch (level.toLowerCase()) {
+  'low' => const Color(0xff565f89),
+  'medium' => const Color(0xff7aa2f7),
+  'high' => const Color(0xffe0af68),
+  'xhigh' => const Color(0xfff7768e),
+  'max' => const Color(0xffbb9af7),
+  _ => const Color(0xff7aa2f7),
+};
 
 /// 옆으로 미는 키 줄 — 터미널 키 줄과 화면 거울 조작 줄.
 class KeyRow extends StatelessWidget {
