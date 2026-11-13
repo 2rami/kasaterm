@@ -4785,7 +4785,8 @@ mod tests {
         let reply = reply.params["body"].as_str().unwrap();
         assert!(reply.ends_with("답장 한 줄") && !reply.contains(start) && !reply.contains("kasaterm-cli done"), "제목 없는 답장엔 안 붙는다: {reply}");
         let told = super::build_request("tell", &v(&["%1", "--title", "일", "끝나면 kasaterm-cli done 으로"])).unwrap();
-        assert_eq!(told.params["body"].as_str().unwrap().matches("kasaterm-cli done").count(), 1, "이미 말한 브리프엔 겹쳐 붙이지 않는다");
+        // 시작 안내도 done 을 말하므로(start.md) 브리프 쪽 done 안내만 센다.
+        assert!(!told.params["body"].as_str().unwrap().contains(super::BRIEF_DONE_HINT), "이미 말한 브리프엔 겹쳐 붙이지 않는다");
         let dashed = super::build_request("tell", &v(&["%1", "--", "--로 시작하는 본문"])).unwrap();
         assert!(dashed.params["body"].as_str().unwrap().ends_with("--로 시작하는 본문"));
         assert!(super::build_request("tell", &v(&["%1", "옵션 --title 이야기"])).is_ok(), "한 덩어리 본문 속 낱말은 옵션이 아니다");
