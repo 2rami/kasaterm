@@ -501,6 +501,9 @@ impl App {
                         .filter(|s| s.active_agent().is_some())
                         .and(t.pid.as_deref())
                         .and_then(|p| self.display_tab_char(ws, p));
+                    if let Some(loading) = self.tab_loading_title(t, id) {
+                        return loading;
+                    }
                     let name = match (student, task) {
                         // pane id 는 안 붙인다 — 헤더가 이미 들고 있고,
                         // 한 pane 의 탭끼리는 그 값이 전부 같아 구분에

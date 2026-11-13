@@ -2100,10 +2100,9 @@ impl App {
                                     // 이름은 탭 알약과 같은 사슬이다(붙인 제목 →
                                     // OSC → 프로세스). 여기만 다른 규칙을 쓰면 같은
                                     // 탭이 자리마다 다른 이름으로 불린다.
-                                    let label = t
-                                        .title
-                                        .clone()
-                                        .filter(|s| !s.trim().is_empty())
+                                    let label = self
+                                        .tab_loading_title(t, id)
+                                        .or_else(|| t.title.clone().filter(|s| !s.trim().is_empty()))
                                         .or_else(|| {
                                             pid.and_then(|q| self.pty.get(q))
                                                 .and_then(|p| p.osc_title())
@@ -2379,7 +2378,7 @@ impl App {
                     let active_is_terminal = tab.is_some_and(|tab| tab.term().is_some());
                     let shown = pane_identity::shown_pane_id(&tab_pid, active_is_terminal);
                     let title = if self.show_pane_numbers {
-                        tab.and_then(|t| t.title.clone())
+                        self.shell_loading_title(&ws, id).or_else(|| tab.and_then(|t| t.title.clone()))
                             .filter(|s| !s.trim().is_empty())
                             .or_else(|| (tab_pid == *id && pane.title_pinned)
                                 .then(|| pane.title.clone()).flatten()
@@ -2419,6 +2418,10 @@ impl App {
                 }
                 self.display_tab_char(&ws, &tab_pid)
             })
+        };
+        let titlebar_loading = {
+            let ws = self.ws.lock().unwrap();
+            ws.active_pane.as_deref().and_then(|id| self.shell_loading_title(&ws, id))
         };
         // Focus decoration uses the same current character as terminal art.
         // Resolve before borrowing the GPU, so mirrors never fall back to an
@@ -2905,6 +2908,8 @@ impl App {
                             Some(w) => format!("{with_id}  ·  {w}"),
                             None => with_id,
                         }
+                    } else if let Some(loading) = titlebar_loading.clone() {
+                        loading
                     } else {
                         let title = active
                             .as_deref()

@@ -93,6 +93,8 @@ impl App {
         // expect 로 죽으면 호출자가 ws 락을 쥔 채 unwind 해 poison 이 GUI 전체로
         // 번진다. 프레임 하나를 버리는 쪽이 맞다.
         let Some(tp) = tab.term_mut() else { return };
+        // 펌프를 붙일 때는 아직 배치에 없는 칸이 있어, 첫 화면이 닿는 이때를 뜬 때로 본다.
+        tp.started.get_or_insert_with(Instant::now);
         tp.live_output |= update.live_output;
         if update.live_output { tp.output_generation = update.output_generation; }
         let resized = tp.cols != update.cols

@@ -142,6 +142,7 @@
 - `frame_pace.rs` — 몰려오는 그리기(PTY 출력 끝·`RedrawRequested`, `render_frame_paced`)를 화면 주사율 이상은 한 장으로 합친다. 미룬 그림은 `frame-pace` 스레드가 주기 끝에 `UserEvent::Redraw` 로 깨워 반드시 그린다. 사람 동작 직후·캡처·하네스는 `render_frame` 을 그대로 불러 미루지 않는다
 - `turn_probe.rs` — 이벤트 루프 한 바퀴의 메인 스레드 시간. 1초 넘는 바퀴는 늘 `[stall]`, `KASATERM_PROFILE` 이면 클릭 바퀴·50ms 넘는 바퀴도, `KASATERM_LAG_PROBE` 면 이벤트가 처리되기까지 줄 선 시간을 `[lag]` 로 찍는다
 - `stall_dump.rs` — (Windows) 바퀴가 10초 넘게 안 끝나면 감시 스레드가 그 순간의 미니덤프를 `%LOCALAPPDATA%\kasaterm\stall-dumps`(검증 실행은 임시 폴더)에 남긴다. 최근 5개만 둔다. `KASATERM_STALL_DUMP_MS` 로 문턱, 검증 실행의 `KASATERM_TEST_MAIN_STALL_MS` 로 일부러 멈춤
+- `shell_loading.rs` — 이 기기 셸이 첫 프롬프트(OSC 133 `prompt_end`)를 내기 전 0.4~15초 동안 창 제목·탭 이름·Alt 카드 자리에 「◐ pwsh 준비 중」. 켜진 시각은 `TerminalPane.started`(첫 화면 갱신이 닿을 때 적는다)
 - `agent_transitions.rs` — 실제 PTY·세션별 알림 관찰자와 상태 전이 순수 함수. 끝남·막힘은 폰 푸시와 같은 판정 `kasa_agents::ring`(정상 종료·완료 보고가 백그라운드·예약 없이 5초 유지, 막힘 보고는 그 턴이 끝나면)이고, 질문은 호출 ID별 한 번이다. 탭 선택이나 조용한 idle 전이는 완료가 아니다. 데스크톱 알림·토스트·펄스와 이 기기 칸의 폰 푸시는 `chrome.rs apply_transition_event` 한 곳에서 같은 말(`ring::finished`·`ask`·`blocked`, 본문은 학생의 마지막 답 글 첫머리)로 낸다. 다른 기기 칸은 `RemoteObserver` 가 원본의 `response_end`(`kasa_socket::backend::ResponseEnd`, `/term/panes`)를 새 machines 세대에서만 같은 규칙으로 보고, `chrome.rs pump_remote_completions` 가 거울 칸이나 원격 목록 읽지 않음(`MachinesColState.done_marks` → `sidebar_navigation`)으로 옮긴다
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].

@@ -145,6 +145,7 @@ mod turnjump;
 mod prompt_nav;
 mod turn_probe;
 mod stall_dump;
+mod shell_loading;
 mod frame_pace;
 // 배포 피드의 최신판 확인 — 상태줄 버전 조각과 계정 메뉴 바닥 줄이 읽는다.
 mod version;
@@ -1833,6 +1834,8 @@ struct FileTreeDrag {
 struct TerminalPane {
     live_output: bool,
     output_generation: u64,
+    /// 첫 화면 갱신이 닿은 때. 첫 프롬프트 전 「준비 중」 제목을 언제 거둘지 잰다(`shell_loading`).
+    started: Option<Instant>,
     rows: u16,
     cols: u16,
     cells: Vec<Vec<GridCell>>,
