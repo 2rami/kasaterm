@@ -808,7 +808,21 @@ $other = running {pid}
 if ($other) {{ ev 'failed' "another instance is already running (pid $other); not launching a second"; exit 1 }}
 if (cancelled) {{ exit 0 }}
 ev 'relaunching' ''
-try {{ & {program} {args} }} catch {{ ev 'failed' 'launch command failed'; exit 1 }}
+$session = (Get-Process -Id $PID).SessionId
+$shell = Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object {{ $_.SessionId -eq $session }}
+try {{
+  if ({program} -like '*\explorer.exe' -and -not $shell) {{
+    # explorer 가 없을 때 explorer.exe 를 부르면 그것이 사용자 셸(작업표시줄)로 서 버린다 — 대신 로그인 때와 같은
+    # 시스템·사용자 env 를 다시 세워 앱을 직접 띄운다(도우미의 좁힌 env 를 물려주지 않는다).
+    foreach ($scope in 'Machine', 'User') {{
+      $vars = [Environment]::GetEnvironmentVariables($scope)
+      foreach ($name in $vars.Keys) {{ if ($name -ne 'Path') {{ [Environment]::SetEnvironmentVariable($name, [Environment]::ExpandEnvironmentVariables($vars[$name]), 'Process') }} }}
+    }}
+    $env:Path = [Environment]::ExpandEnvironmentVariables([Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User'))
+    ev 'relaunching' 'no explorer in this session; starting the app with the login environment'
+    Start-Process -FilePath {exe}
+  }} else {{ & {program} {args} }}
+}} catch {{ ev 'failed' 'launch command failed'; exit 1 }}
 $j = 0
 while ($true) {{
   $new = running {pid}
@@ -1132,6 +1146,9 @@ mod tests {
         assert!(script.contains("GetProcessById(4242)") && script.contains("WaitForExit(60000)"), "pid 재사용에 안 속게 핸들로 기다린다");
         assert!(script.contains(r"'C:\it''s\kasaterm.exe'"), "작은따옴표를 PowerShell 식으로 감싼다");
         assert!(script.contains("-gt 450"), "부팅 상한 90초 = 0.2초 × 450");
+        assert!(script.contains("Get-Process -Name explorer") && script.contains("GetEnvironmentVariables($scope)")
+                && script.contains(r"Start-Process -FilePath 'C:\Program Files\kasaterm\bin\kasaterm.exe'"),
+            "explorer 가 없는 세션에서 explorer.exe 를 부르면 그것이 셸로 선다 — 로그인 env 로 앱을 직접 띄운다");
         for forbidden in ["Stop-Process", "taskkill", ".Kill(", "Remove-Item"] {
             assert!(!script.contains(forbidden), "{forbidden}");
         }

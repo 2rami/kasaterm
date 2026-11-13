@@ -100,6 +100,9 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
   로 재는 기다림은 상한까지 헛돈다. 같은 앱은 실행 파일 경로가 `…\kasaterm\bin\kasaterm.exe` 인 프로세스로만 센다.
 - 재기동은 `explorer.exe <설치본 실행 파일>` — 사용자 셸이 띄우므로 새 앱은 도우미의 좁힌 env 가 아니라 사용자 세션의 env 로 뜬다.
   explorer 는 띄우고도 1 로 끝나 종료 코드로 성공을 못 가리므로, 새 프로세스가 90초 안에 보이는지로 잰다.
+- 그 세션에 explorer 가 없으면(다른 셸로 바꾼 PC) explorer.exe 를 부르는 순간 그것이 사용자 셸(작업표시줄)로 선다. 그래서 그땐
+  레지스트리의 시스템·사용자 env 를 다시 세우고(PATH 는 둘을 이어 붙임) 앱을 `Start-Process` 로 직접 띄운다 — 도우미의 좁힌 env 를
+  물려주지 않는다. 상태 줄에 `relaunching no explorer in this session…` 이 한 번 더 남는다.
 - 도우미 env 허용목록: `SystemRoot`·`PATH`(System32·Windows·PowerShell 폴더로 고정)·`SystemDrive`·`windir`·`ComSpec`·
   `USERPROFILE`·`USERNAME`·`USERDOMAIN`·`HOMEDRIVE`·`HOMEPATH`·`APPDATA`·`LOCALAPPDATA`·`TEMP`·`TMP`·`ProgramData`·
   `ProgramFiles`·`PROCESSOR_ARCHITECTURE`.
