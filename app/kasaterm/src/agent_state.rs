@@ -503,6 +503,17 @@ pub(crate) struct StateHub {
     transcript: Mutex<HashMap<String, TurnObservation>>,
     resolved: Mutex<(Option<Instant>, HashMap<String, Resolved>)>,
     notifications: Mutex<crate::agent_transitions::Observer>,
+    /// 지금 판정을 다시 짜고 있는 호출 수 — GUI 틱이 그 뒤에 서지 않게 본다(`refresh_from_gui`).
+    refreshing: std::sync::atomic::AtomicUsize,
+}
+
+/// 갱신 중 표시를 끝에서(일찍 돌아가거나 panic 해도) 내린다.
+struct Refreshing<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for Refreshing<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 /// 같은 틱 안에서 두 번 읽어도 파일은 한 번만 본다.
@@ -591,6 +602,16 @@ impl StateHub {
         matches!(self.state(surface), AgentState::Working | AgentState::Compacting | AgentState::Unknown)
     }
 
+    /// GUI 틱용 갱신. 보드 빌더·HTTP 스레드가 같은 판정을 다시 짜는 동안(기록 꼬리를 최대 2MB 읽고 그동안 기록 맵을
+    /// 쥔다) 메인 스레드가 그 뒤에 서면 타자·클릭이 같이 멈췄다(Windows 실측) — 그땐 지난 판정을 그대로 쓴다. 그 갱신이
+    /// 곧 새 판정을 내놓고, 다음 틱이 그것을 읽는다.
+    pub(crate) fn refresh_from_gui(&self) {
+        if self.refreshing.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            return;
+        }
+        self.refresh();
+    }
+
     /// 재료를 모아 판정을 갱신한다. 250ms 안에 또 부르면 그대로 둔다.
     pub(crate) fn refresh(&self) {
         let now = Instant::now();
@@ -600,6 +621,8 @@ impl StateHub {
                 return;
             }
         }
+        self.refreshing.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let _refreshing = Refreshing(&self.refreshing);
         let live = kasa_pty::live_sessions();
         // 닫힌 pane 의 재료는 여기서 잊는다 — 훅은 닫힘을 알려 주지 않는다.
         self.turn_hooks.lock().unwrap().retain(|id, _| live.contains(id));
@@ -851,6 +874,18 @@ fn completion_evidence(e: &Evidence) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gui_tick_does_not_wait_behind_another_refresh() {
+        let hub = StateHub::default();
+        hub.refreshing.store(1, std::sync::atomic::Ordering::Release);
+        hub.refresh_from_gui();
+        assert!(hub.resolved.lock().unwrap().0.is_none(), "another thread is rebuilding — the GUI keeps the last snapshot");
+        hub.refreshing.store(0, std::sync::atomic::Ordering::Release);
+        hub.refresh_from_gui();
+        assert!(hub.resolved.lock().unwrap().0.is_some());
+        assert_eq!(hub.refreshing.load(std::sync::atomic::Ordering::Acquire), 0, "the busy mark is lowered when a refresh ends");
+    }
 
     /// 마지막 답 뒤에 큰 첨부 줄이 붙은 기록도 처음 보는 순간 턴이 끝난 것으로 읽는다.
     #[test]

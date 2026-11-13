@@ -1531,7 +1531,7 @@ impl App {
             }
             out
         };
-        self.collab.hub.refresh();
+        self.collab.hub.refresh_from_gui();
 
         let claude_error_sids = crate::socket::agents_error_sids_cached();
         // 어느 pane 이든 판정이 달라졌으면 보드도 바로 따라오게 관측을 깨운다 — 훅이 없는
