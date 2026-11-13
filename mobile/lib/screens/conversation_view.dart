@@ -10,6 +10,7 @@ import '../chat_markdown.dart';
 import '../inline_result.dart';
 import '../conversation.dart';
 import '../conversation_cache.dart';
+import '../my_prompts.dart' show ConversationJump;
 import '../file_link.dart';
 import '../grid.dart' show DefaultColor, flagInverse;
 import '../server.dart';
@@ -180,6 +181,7 @@ class ConversationView extends StatefulWidget {
     this.draft,
     this.conversation,
     this.readOnly = false,
+    this.jump,
   });
 
   final Server server;
@@ -187,6 +189,9 @@ class ConversationView extends StatefulWidget {
   /// 화면이 쥔 기록 — 보낸 말을 기록보다 먼저 세운다([Conversation.echo]). 없으면 제 것을 쓴다.
   final Conversation? conversation;
   final bool readOnly;
+
+  /// Info 시트의 「내 프롬프트」가 이 보기를 그 말 자리로 옮기는 손잡이.
+  final ConversationJump? jump;
 
   final Pane pane;
   final TermSession session;
@@ -214,6 +219,10 @@ class _ConversationViewState extends State<ConversationView> {
 
   late final _conv = widget.conversation ?? Conversation();
   final _scroll = ScrollController();
+
+  /// 기록 칸(말풍선·답한 질문 등)마다의 열쇠 — 「내 프롬프트」가 그 칸을 찾아 맨 위에 세운다. 도구 묶음은
+  /// 받을 때마다 새로 묶여 열쇠가 바뀌니 달지 않는다.
+  final _rowKeys = Expando<GlobalKey>();
   final _open = Set<Object>.identity();
   List<Object> _rows = const [];
   int _rowsVersion = -1;
@@ -247,6 +256,7 @@ class _ConversationViewState extends State<ConversationView> {
     super.initState();
     BackgroundGrace.instance.addListener(_graceChanged);
     _scroll.addListener(_onScroll);
+    widget.jump?.attach(toTop: _rowToTop, topOf: _topOf);
     _loaded = widget.readOnly || _conv.items.isNotEmpty;
     unawaited(_bootstrap());
   }
@@ -281,6 +291,10 @@ class _ConversationViewState extends State<ConversationView> {
       _toBottom();
       Timer(const Duration(milliseconds: 400), _poll);
     }
+    if (old.jump != widget.jump) {
+      old.jump?.detach();
+      widget.jump?.attach(toTop: _rowToTop, topOf: _topOf);
+    }
   }
 
   @override
@@ -289,6 +303,7 @@ class _ConversationViewState extends State<ConversationView> {
     _liveRetry?.cancel();
     if (_liveWake?.isCompleted == false) _liveWake!.complete();
     BackgroundGrace.instance.removeListener(_graceChanged);
+    widget.jump?.detach();
     _scroll.dispose();
     super.dispose();
   }
@@ -463,6 +478,71 @@ class _ConversationViewState extends State<ConversationView> {
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOut,
     );
+  }
+
+  /// 붙어 있는(그려진) 칸의 차례 범위. 하나도 없으면 null.
+  (int, int)? _mountedSpan(List<Object> list) {
+    int? lo, hi;
+    for (final (i, r) in list.indexed) {
+      if (r is! ChatItem || _rowKeys[r]?.currentContext == null) continue;
+      lo ??= i;
+      hi = i;
+    }
+    return lo == null ? null : (lo, hi!);
+  }
+
+  /// 그 칸의 위 끝을 화면 맨 위에 붙여 세운다. 목록은 게으르게 그려 먼 칸은 아직 없다 — 그려진 칸과 차례를
+  /// 견줘 그쪽으로 화면 한 장부터 두 배씩 성큼 걷고, 지나치면 돌아서 반씩 걷다가 그 칸이 서면 맞춘다.
+  Future<bool> _rowToTop(Object row) async {
+    final list = rows;
+    final target = list.indexWhere((r) => identical(r, row));
+    if (target < 0 || row is! ChatItem || !_scroll.hasClients) return false;
+    final key = _rowKeys[row] ??= GlobalKey();
+    final page = _scroll.position.viewportDimension;
+    var step = page;
+    int? lastWay;
+    for (var tries = 0; tries < 80 && mounted && _scroll.hasClients; tries++) {
+      final ctx = key.currentContext;
+      if (ctx != null && ctx.mounted) {
+        // 거꾸로 선 목록(맨 아래가 0)이라 칸의 위 끝은 끝쪽 가장자리다 — 1.0 이 화면 맨 위.
+        await Scrollable.ensureVisible(ctx, alignment: 1.0, duration: const Duration(milliseconds: 240), curve: Curves.easeOut);
+        return true;
+      }
+      final span = _mountedSpan(list);
+      if (span == null) return false;
+      final way = target < span.$1 ? 1 : -1;
+      if (lastWay != null) step = way == lastWay ? (step * 2).clamp(page, page * 8) : (step / 2).clamp(page / 2, page * 8);
+      lastWay = way;
+      final pos = _scroll.position;
+      final next = (pos.pixels + way * step).clamp(pos.minScrollExtent, pos.maxScrollExtent);
+      if (next == pos.pixels) return false;
+      _scroll.jumpTo(next);
+      await WidgetsBinding.instance.endOfFrame;
+    }
+    return false;
+  }
+
+  /// [wanted] 가운데 화면 맨 위 줄을 품은 칸 — 맨 위 줄의 칸에서 거슬러 올라가 처음 만나는 것.
+  Object? _topOf(Set<Object> wanted) {
+    if (!_scroll.hasClients || !mounted) return null;
+    final view = context.findRenderObject();
+    if (view is! RenderBox || !view.attached) return null;
+    final top = view.localToGlobal(Offset.zero).dy + 2;
+    final list = rows;
+    int? start;
+    for (final (i, r) in list.indexed) {
+      final box = r is ChatItem ? _rowKeys[r]?.currentContext?.findRenderObject() : null;
+      if (box is! RenderBox || !box.attached) continue;
+      final y = box.localToGlobal(Offset.zero).dy;
+      if (y + box.size.height <= top) continue;
+      // 맨 위를 덮은 칸이 열쇠 없는 도구 묶음이면 그 앞 칸부터.
+      start = y <= top ? i : i - 1;
+      break;
+    }
+    for (var i = start ?? -1; i >= 0; i--) {
+      if (wanted.any((w) => identical(w, list[i]))) return list[i];
+    }
+    return null;
   }
 
   List<Object> get rows {
@@ -764,7 +844,9 @@ class _ConversationViewState extends State<ConversationView> {
                   );
                 }
                 final at = list.length - 1 - (i - extra);
-                return _row(context, list, at, face, md, maxBubble);
+                final row = list[at];
+                final built = _row(context, list, at, face, md, maxBubble);
+                return row is ChatItem ? KeyedSubtree(key: _rowKeys[row] ??= GlobalKey(), child: built) : built;
               },
             ),
             if (_awayFromBottom)

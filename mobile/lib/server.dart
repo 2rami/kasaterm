@@ -11,6 +11,7 @@ import 'conversation.dart' show ModLive;
 import 'kasanet.dart';
 import 'kasanet_native.dart';
 import 'machine_look.dart';
+import 'pane_info.dart' show PaneInfoAnswer, paneInfoSchema;
 import 'relay_account.dart';
 import 'shell_blocks.dart' show TreeEntry;
 
@@ -1456,6 +1457,30 @@ class Server {
       rethrow;
     }
     return body is Map ? ModLive.fromJson(body) : null;
+  }
+
+  /// 그 칸의 「지금」(데스크톱 Info 맨 위 카드) — 거울 기기와 같은 `/term/pane-info`. [since] 가 직전 답의 seq 면
+  /// 바뀌거나 [waitMs](원본 상한 8초)가 지날 때까지 쥔다. 이 길이 없는 옛 데스크톱(404)은 `update_needed`.
+  Future<PaneInfoAnswer> paneInfo(Pane pane, {String? since, int waitMs = 8000}) async {
+    final Object? body;
+    try {
+      body = await _getJson(
+        'term/pane-info',
+        query: {
+          'schema': paneInfoSchema,
+          'pane': pane.id,
+          'surface_key': pane.surfaceKey ?? '',
+          'wait_ms': '$waitMs',
+          'since': ?since,
+        },
+        machine: pane.machine,
+        timeout: Duration(milliseconds: waitMs + 15000),
+      );
+    } on ServerException catch (e) {
+      if (e.status == 404) return const PaneInfoAnswer(error: 'update_needed');
+      rethrow;
+    }
+    return PaneInfoAnswer.fromJson(body);
   }
 
   /// 승인 요청에 답한다 — 원격 승인 계약과 같은 요청 id 로 그 칸 mod 에 닿는다. 거절이면 [message] 가 까닭.

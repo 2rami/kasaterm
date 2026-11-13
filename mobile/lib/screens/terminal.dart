@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 
 import '../claude_style.dart';
 import '../conversation.dart';
+import '../my_prompts.dart';
 import '../copy_notice.dart';
 import '../grid_canvas.dart';
 import '../file_link.dart';
@@ -27,6 +28,7 @@ import '../term_session.dart';
 import '../theme_prefs.dart';
 import '../weather/scene.dart';
 import 'conversation_view.dart';
+import 'pane_info_sheet.dart';
 import 'shell_blocks_view.dart';
 import 'controls.dart';
 
@@ -87,6 +89,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   /// 대화 보기의 기록 — 보낸 말을 기록보다 먼저 세우려고 화면이 쥔다.
   final _conversation = Conversation();
+
+  /// Info 시트의 「내 프롬프트」가 대화 보기를 그 말 자리로 옮기는 손잡이.
+  final _jump = ConversationJump();
 
   /// 지금의 pane — 열 때 받은 것으로 시작해 목록을 다시 받아 갈아 끼운다. 셸에서
   /// claude 를 띄우면 이름·얼굴·상태가 따라오고, 사진 버튼도 그때 켜진다(2026-09-17
@@ -550,6 +555,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   void _showTerminal() => _choose(PaneView.terminal);
 
+  void _showInfo(Pane pane) => unawaited(showPaneInfoSheet(
+        context,
+        server: widget.server,
+        pane: pane,
+        prompts: () => myPrompts(groupRows(_conversation.items)),
+        jump: _jump,
+        onTerminal: _showTerminal,
+      ));
+
   /// 닫기 옆 단추·「터미널로 보기」 — 쪽은 [_followView] 가 옮긴다.
   void _choose(PaneView v) => _facing.value = v;
 
@@ -774,8 +788,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
             // 보기 단추와 닫기 둘뿐이다. 글자는 터미널을 길게 눌러 바로 고른다 — 앱바의 「글자 선택·복사」 시트와
             // 「격자 그대로 보기」는 걷었다(2026-10-07 「상단 버튼은 전환 버튼만 남겨 두자」).
             actions: [
+              // 대화 쪽은 데스크톱 Info 처럼 그 칸의 지금·내 프롬프트를 여는 단추 — 터미널로 가는 길은 그 시트 안에 있다.
+              if (chat && canChat)
+                IconButton(
+                  tooltip: '칸 정보',
+                  onPressed: () => _showInfo(pane),
+                  icon: const Icon(Icons.info_outline),
+                )
               // 닫기 바로 옆 — 아이콘은 누르면 갈 쪽이다. 앱바 밑 전환 줄 44 를 걷어 그만큼 글이 더 보인다.
-              if (second)
+              else if (second)
                 IconButton(
                   tooltip: chat
                       ? '터미널로 보기'
@@ -863,6 +884,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                     child: ConversationView(
                                       server: widget.server,
                                       conversation: _conversation,
+                                      jump: _jump,
                                       pane: pane,
                                       session: s,
                                       accent: accent,

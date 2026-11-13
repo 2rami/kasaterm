@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/grid_select.dart';
 import 'package:kasaterm_mobile/screens/conversation_view.dart';
+import 'package:kasaterm_mobile/screens/pane_info_sheet.dart';
 import 'package:kasaterm_mobile/screens/shell_blocks_view.dart';
 import 'package:kasaterm_mobile/screens/terminal.dart';
 import 'package:kasaterm_mobile/server.dart';
@@ -178,6 +179,14 @@ Future<void> _open(
   await tester.pumpAndSettle();
 }
 
+/// 대화 쪽에서 터미널로 — 앱바의 칸 정보 시트 안 「터미널로 보기」.
+Future<void> _toTerminal(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('칸 정보'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.descendant(of: find.byType(PaneInfoSheet), matching: find.text('터미널로 보기')));
+  await tester.pumpAndSettle();
+}
+
 Future<void> _close(WidgetTester tester) async {
   await tester.pumpWidget(const SizedBox());
   await tester.pump(const Duration(seconds: 3));
@@ -215,7 +224,7 @@ void main() {
     await _swipe(tester, const Offset(300, 400), const Offset(-220, 0));
     expect(_page(tester), 1);
     expect(find.byType(ChatComposer), findsOneWidget);
-    expect(_actions(tester), ['터미널로 보기', 'pane 닫기']);
+    expect(_actions(tester), ['칸 정보', 'pane 닫기']);
 
     await _swipe(tester, const Offset(100, 400), const Offset(220, 0));
     expect(_page(tester), 0);
@@ -549,28 +558,23 @@ void main() {
     await tester.tap(find.byTooltip('대화로 보기'));
     await tester.pumpAndSettle();
     expect(_page(tester), 1);
-    expect(find.byTooltip('터미널로 보기'), findsOneWidget);
+    expect(find.byTooltip('칸 정보'), findsOneWidget);
     await _close(tester);
   });
 
-  testWidgets('학생 칸은 열면 대화가 먼저, 닫기 옆 터미널 단추로 오간다', (tester) async {
+  testWidgets('학생 칸은 열면 대화가 먼저, 닫기 옆 칸 정보 시트의 「터미널로 보기」로 오간다', (tester) async {
     await _open(tester, view: null);
     expect(_page(tester), 1);
     expect(find.byType(ChatComposer), findsOneWidget);
-    expect(_actions(tester), ['터미널로 보기', 'pane 닫기']);
-    final toggle = tester.widget<IconButton>(
-      find.widgetWithIcon(IconButton, Icons.terminal),
-    );
-    expect(toggle.tooltip, '터미널로 보기');
-    final r = tester.getRect(find.widgetWithIcon(IconButton, Icons.terminal));
+    expect(_actions(tester), ['칸 정보', 'pane 닫기']);
+    final r = tester.getRect(find.widgetWithIcon(IconButton, Icons.info_outline));
     expect(r.width, greaterThanOrEqualTo(44));
     expect(r.height, greaterThanOrEqualTo(44));
     // 닫기 바로 왼쪽.
     final close = tester.getRect(find.widgetWithIcon(IconButton, Icons.close));
     expect(close.left, closeTo(r.right, 1));
 
-    await tester.tap(find.byTooltip('터미널로 보기'));
-    await tester.pumpAndSettle();
+    await _toTerminal(tester);
     expect(_page(tester), 0);
     expect(find.byType(ChatComposer), findsNothing);
     expect(_actions(tester), ['대화로 보기', 'pane 닫기']);
@@ -585,15 +589,14 @@ void main() {
 
   testWidgets('고른 쪽은 다음 칸으로 넘어가지 않는다 — 다시 열면 대화부터', (tester) async {
     await _open(tester, view: null);
-    await tester.tap(find.byTooltip('터미널로 보기'));
-    await tester.pumpAndSettle();
+    await _toTerminal(tester);
     expect(_page(tester), 0);
     await tester.pageBack();
     await tester.pumpAndSettle();
     await tester.tap(find.text('열기'));
     await tester.pumpAndSettle();
     expect(_page(tester), 1);
-    expect(find.byTooltip('터미널로 보기'), findsOneWidget);
+    expect(find.byTooltip('칸 정보'), findsOneWidget);
     await _close(tester);
   });
 

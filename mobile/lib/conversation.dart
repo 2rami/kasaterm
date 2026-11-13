@@ -85,6 +85,9 @@ class ChatAnswered extends ChatItem {
   ChatAnswered(this.questions);
   final List<String> questions;
   List<(String, String)>? pairs;
+
+  /// 고른 때(답 줄의 시각) — 물은 때가 아니다. 자리를 비운 사이 몇 시간 묵기도 한다.
+  DateTime? at;
 }
 
 /// 서브에이전트·워크플로를 띄웠다는 한 줄.
@@ -315,7 +318,7 @@ class Conversation {
         case 'tool_use':
           _toolUse(block);
         case 'tool_result':
-          _toolResult(block);
+          _toolResult(block, at);
       }
     }
     return null;
@@ -387,7 +390,7 @@ class Conversation {
     if (id != null) _byToolId[id] = item;
   }
 
-  void _toolResult(Map<Object?, Object?> b) {
+  void _toolResult(Map<Object?, Object?> b, DateTime? at) {
     final id = b['tool_use_id'];
     final item = id is String ? _byToolId[id] : null;
     final text = _resultText(b['content']);
@@ -396,6 +399,7 @@ class Conversation {
       item.error = b['is_error'] == true;
     } else if (item is ChatAnswered) {
       item.pairs = answeredPairs(text, item.questions);
+      item.at = at;
     }
   }
 
