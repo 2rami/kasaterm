@@ -28,6 +28,7 @@ fn remote_seat(route: &str, label: &str, row: &serde_json::Value) -> Option<crat
         surface_key,
         name: text("name").unwrap_or_default(),
         detail: text("last_reply").unwrap_or_default(),
+        session: text("title").unwrap_or_default(),
     })
 }
 
@@ -661,6 +662,7 @@ impl App {
         }
         let character = self.notification_character(id);
         let who = character.clone().unwrap_or_else(|| "pane".to_string());
+        let heading = self.notification_heading(id, &who);
         let sid = self.pane_claude_sid.get(id).cloned();
         let is_active_pane = self.notification_surface_is_visible(id);
         let background_window = self.window_of_pane(id).filter(|wi| *wi != self.active_window);
@@ -678,10 +680,10 @@ impl App {
                 // 오는 알림은 열어 봐야 알았다(2026-09-21 「캐릭터랑 세션 이름만 오던데」).
                 let body = kasa_agents::ring::finished(report.as_ref(), self.pane_last_words(id).as_deref());
                 let dedup = format!("done:{id}:{key:016x}");
-                self.ring_phone(id, character.as_deref(), &body, "done", format!("done-/{id}"), &dedup);
+                self.ring_phone(id, &heading, character.as_deref(), &body, "done", format!("done-/{id}"), &dedup);
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
-                    notify_desktop(&who, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
+                    notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
                 }
             }
             Transition::Blocked { report } => {
@@ -695,8 +697,8 @@ impl App {
                 }
                 let body = kasa_agents::ring::blocked(&report, self.pane_last_words(id).as_deref());
                 let dedup = format!("blocked:{id}:{}", report.key);
-                self.ring_phone(id, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup);
-                notify_desktop(&who, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
+                self.ring_phone(id, &heading, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup);
+                notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
             }
             // 60초 방치는 알릴 일이 아니다 — 학생이 답을 마치고 서 있는 것뿐이고, 그건 완료 알림과
             // 입력창 위 손 흔들기가 이미 말했다. 여기서 토스트·알림·읽지 않음을 세우면 승인처럼
@@ -717,8 +719,8 @@ impl App {
                     _ => (kasa_agents::ring::question(&reason), "waiting:question"),
                 };
                 let key = key.map(|key| format!("question:{id}:{key}")).unwrap_or_else(|| format!("approval:{id}"));
-                self.ring_phone(id, character.as_deref(), &body, push_kind, format!("wait-/{id}"), &key);
-                notify_desktop(&who, &body, character.as_deref(), Some(&key), Some((id, sid.as_deref())));
+                self.ring_phone(id, &heading, character.as_deref(), &body, push_kind, format!("wait-/{id}"), &key);
+                notify_desktop(&heading, &body, character.as_deref(), Some(&key), Some((id, sid.as_deref())));
             }
             // 스스로 다시 시도하는 오류는 붙들어 둔다 — 하루에도 몇 번 스쳐 가는 끊김마다 알림이
             // 오면 진짜 멈춘 것까지 안 보게 된다(2026-09-29 「가끔 연결 끊기면 알림 오는 것」).
@@ -858,7 +860,7 @@ impl App {
         }
         let who = if seat.name.is_empty() { "pane" } else { seat.name.as_str() };
         notify_desktop(
-            &format!("{who} ({})", seat.label),
+            &format!("{} ({})", kasa_agents::ring::title(who, &seat.session), seat.label),
             &body,
             (!seat.name.is_empty()).then_some(seat.name.as_str()),
             Some(&dedupe),
@@ -967,6 +969,7 @@ impl App {
         let character = self.notification_character(id);
         let who = character.clone().unwrap_or_else(|| "pane".to_string());
         let body = kasa_agents::ring::trouble(label);
+        let heading = self.notification_heading(id, &who);
         let sid = self.pane_claude_sid.get(id).cloned();
         let is_active_pane = self.notification_surface_is_visible(id);
         self.wake_blink(id);
@@ -978,24 +981,34 @@ impl App {
         }
         // 저절로 안 풀리는 오류는 막힘이다 — 폰에도 같은 말로 간다.
         let dedup = format!("error:{id}");
-        self.ring_phone(id, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup);
-        notify_desktop(&who, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
+        self.ring_phone(id, &heading, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup);
+        notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
+    }
+
+    /// 알림 제목 — 「학생 이름: 그 칸의 세션 이름」(`kasa_agents::ring::title`). 세션 이름은 칸 머리가 보이는 그 제목(탭의 OSC 제목)이다.
+    fn notification_heading(&self, id: &str, who: &str) -> String {
+        let session = self.ws.lock().ok().and_then(|ws| {
+            ws.panes.values().flat_map(|pane| pane.tabs.iter())
+                .find(|tab| tab.pid.as_deref() == Some(id))
+                .and_then(|tab| tab.title.clone())
+        });
+        kasa_agents::ring::title(who, session.as_deref().unwrap_or_default())
     }
 
     /// 이 기계 칸의 알림을 폰에도 — 맥 알림과 같은 사건·같은 말이다(`kasa_agents::ring`). 폰은 사람이 자리에 없을 때 보는
     /// 것이라 이 칸을 보고 있어도 보낸다. 다른 기계 칸은 그 기계가 스스로 보낸다.
-    fn ring_phone(&self, id: &str, character: Option<&str>, body: &str, kind: &str, collapse: String, dedup: &str) {
+    #[allow(clippy::too_many_arguments)]
+    fn ring_phone(&self, id: &str, heading: &str, character: Option<&str>, body: &str, kind: &str, collapse: String, dedup: &str) {
         if kasa_remote::remote::is_remote_pane(id) || crate::lite_mode() || !notify_dedup_passes(&format!("phone:{dedup}")) {
             return;
         }
-        let who = character.unwrap_or("학생");
         // 격리 실행은 사람의 폰을 울리지 않는다 — 시험이 볼 수 있게 탐침 파일에만 남긴다.
         if crate::verification_run() {
-            notification_probe(&serde_json::json!({"phone": kind, "title": who, "body": body, "pane": id}));
+            notification_probe(&serde_json::json!({"phone": kind, "title": heading, "body": body, "pane": id}));
             return;
         }
         kasa_device::push::send_detached(kasa_device::push::Alert {
-            title: who.to_string(),
+            title: heading.to_string(),
             body: body.to_string(),
             machine: None,
             pane: id.to_string(),

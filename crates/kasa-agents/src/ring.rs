@@ -356,6 +356,22 @@ fn host(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or(rest)
 }
 
+/// 칸 제목 상한(글자) — 이름과 합쳐 잠금화면 한 줄에 들게.
+const SESSION_MAX: usize = 40;
+
+/// 알림 제목 — 「학생 이름: 그 칸의 세션 이름」. 같은 학생이 여러 칸에서 일하면 이름만으론 어느 일인지 몰랐다. 칸 제목이
+/// 비었거나 이름과 같거나 하네스 기본 제목(「Claude Code」)이면 이름만. 하네스가 제목 앞에 붙이는 일하는 중 표시(✳·점자 스피너)는 뗀다.
+pub fn title(name: &str, session: &str) -> String {
+    let session = session
+        .trim_start_matches(|c: char| !c.is_alphanumeric() && !matches!(c, '「' | '(' | '[' | '"' | '\''))
+        .trim();
+    let generic = ["claude code", "claude", "codex"].contains(&session.to_lowercase().as_str());
+    if session.is_empty() || generic || session == name.trim() {
+        return name.trim().to_string();
+    }
+    format!("{}: {}", name.trim(), clip(session, SESSION_MAX))
+}
+
 /// 승인을 구하는 말 — 무엇을 하려는지가 드러나게(도구 이름이 아니라 그 도구로 할 일).
 pub fn ask(tool: &str, input: Option<&serde_json::Value>) -> String {
     let field = |keys: &[&str]| {
@@ -588,6 +604,19 @@ mod tests {
         assert_eq!(finished(Some(&yuzu), None), "맥북·미니 0.2.223 교체·복원·이어가기 완료, 옛 0.2.221 백업 정리.",
             "답 글을 못 찾을 때만 보고 요약");
         assert_eq!(finished(None, None), "선생님, 다 끝났어요.");
+    }
+
+    #[test]
+    fn the_title_is_the_student_and_the_session_of_that_pane() {
+        assert_eq!(title("유즈", "폰 대화 복사"), "유즈: 폰 대화 복사");
+        assert_eq!(title("유즈", "✳ 폰 대화 복사"), "유즈: 폰 대화 복사", "일하는 중 표시는 뗀다");
+        assert_eq!(title("유즈", "⠂ 세션 요약"), "유즈: 세션 요약");
+        for plain in ["", "  ", "유즈", "✳ Claude Code", "codex"] {
+            assert_eq!(title("유즈", plain), "유즈", "{plain:?}");
+        }
+        let long = title("유즈", &"가".repeat(80));
+        assert_eq!(long.chars().count(), "유즈: ".chars().count() + SESSION_MAX);
+        assert_eq!(title("마키", "「kontext-jp」 페이지"), "마키: 「kontext-jp」 페이지");
     }
 
     #[test]

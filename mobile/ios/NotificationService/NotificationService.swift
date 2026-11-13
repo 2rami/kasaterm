@@ -8,7 +8,7 @@ import UserNotifications
 /// 열린다(`/relay/push/face/<id>.png`, 주소가 곧 자격).
 ///
 /// 대화 알림은 제목 자리에 보낸 사람 이름을 그려 원래 제목을 버린다. 그래서 displayName 에
-/// 알림 제목을 그대로 준다 — 새 데스크톱은 제목이 곧 학생 이름이고, 옛 데스크톱의
+/// 알림 제목을 그대로 준다 — 새 데스크톱은 제목이 곧 「학생 이름: 세션 이름」이고, 옛 데스크톱의
 /// 「시로코 · 끝냄」도 상태를 잃지 않는다. 같은 학생끼리 묶는 건 이름이 아니라 handle 이다
 /// (맥 `macos_notify.rs` `with_character_avatar` 와 같다).
 final class NotificationService: UNNotificationServiceExtension {

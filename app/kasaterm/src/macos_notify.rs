@@ -96,9 +96,9 @@ pub(crate) fn with_character_avatar(
     let slug = crate::theme::character_slug_any(character)?;
     let remote = crate::mirror_theme::asset(slug, "profile", 0);
     let png = remote.as_deref().or_else(|| crate::render::student_profile_png(slug))?;
-    // 대화 알림은 제목 자리에 보낸 사람 이름을 그려 원래 제목을 버린다. 알림 제목이 곧 말하는 학생(다른 기기 칸이면
-    // 기기 이름까지)이라 제목을 그대로 이름으로 준다 — 무엇을 알리는지는 본문, 학생이 하는 말이 맡는다
-    // (`kasa_agents::ring`). 같은 학생끼리 묶는 건 이름이 아니라 handle 이다.
+    // 대화 알림은 제목 자리에 보낸 사람 이름을 그려 원래 제목을 버린다. 알림 제목이 곧 「학생: 세션 이름」이라 제목을
+    // 그대로 이름으로 준다 — 무엇을 알리는지는 본문, 학생이 하는 말이 맡는다(`kasa_agents::ring`). 같은 학생끼리 묶는 건
+    // 이름이 아니라 handle, 칸끼리 가르는 건 thread 다.
     let title = content.title().to_string();
     let name = NSString::from_str(if title.is_empty() { character } else { &title });
     let identity = NSString::from_str(&format!("kasaterm:{slug}"));

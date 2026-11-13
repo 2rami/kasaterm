@@ -610,8 +610,9 @@ impl RemoteRows {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .or_else(|| kasa_characters::character::slug_for_any(name));
+            let session = row.get("title").and_then(Value::as_str).unwrap_or("");
             let alert = |body: String, kind: &str, collapse: String| Alert {
-                title: format!("{name} ({route})"),
+                title: format!("{} ({route})", call::title(name, session)),
                 body,
                 machine: Some(route.clone()),
                 pane: id.to_string(),
@@ -722,10 +723,11 @@ mod tests {
         let mut waiting = row("waiting", Some(("", false)));
         waiting["kind"] = "permission".into();
         waiting["waiting_for"] = "Bash 승인 대기".into();
+        waiting["title"] = "✳ 폰 대화 복사".into();
         let asked = feed(&mut rows, waiting.clone(), at(4));
         assert_eq!(asked.len(), 1);
         assert_eq!((asked[0].title.as_str(), asked[0].body.as_str(), asked[0].kind.as_str()),
-            ("시로코 (mini)", "선생님, 명령을 실행해도 될까요?", "waiting:permission"));
+            ("시로코: 폰 대화 복사 (mini)", "선생님, 명령을 실행해도 될까요?", "waiting:permission"));
         assert!(feed(&mut rows, waiting, at(8)).is_empty(), "같은 대기는 한 번");
 
         assert!(feed(&mut rows, row("idle", Some(("0a", true))), at(12)).is_empty());

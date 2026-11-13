@@ -351,6 +351,8 @@ pub(crate) struct RemoteSeat {
     pub(crate) name: String,
     /// 알림 본문 재료 — 그 칸 학생이 마지막에 한 말(원본 행의 `last_reply`).
     pub(crate) detail: String,
+    /// 알림 제목 재료 — 그 칸의 세션 이름(원본 행의 `title`).
+    pub(crate) session: String,
 }
 
 impl MachinesColState {
