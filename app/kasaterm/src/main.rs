@@ -6727,6 +6727,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         install_pty_host_policy();
         #[cfg(windows)]
         bootstrap::preload_bundled_conpty();
+        #[cfg(windows)]
+        bootstrap::shut_down_before_children();
         kasa_http::install_collab_env();
         socket::prepare_session_storage();
     // 기기 이름 수집은 첫 화면을 준비하는 동안 끝낸다. Info를 열어야

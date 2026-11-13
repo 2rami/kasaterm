@@ -336,6 +336,17 @@ pub(crate) fn install_pty_host_policy() {
     });
 }
 
+/// OS 가 꺼지거나 다시 켜질 때 이 앱을 칸 안 프로그램보다 먼저 끝내게 한다. 기본 순서(0x280)에선
+/// 학생(claude·codex)이 먼저 끝나고, 아직 살아 있는 앱이 그 칸을 「대화가 끝난 셸」로 저장해
+/// 다음 부팅의 복원이 그 학생을 이어 켜지 않았다(Windows 업데이트 재시작 실측). 0x3FF 는 앱이 쓸 수
+/// 있는 가장 이른 순서다.
+#[cfg(windows)]
+pub(crate) fn shut_down_before_children() {
+    if unsafe { windows_sys::Win32::System::Threading::SetProcessShutdownParameters(0x3FF, 0) } == 0 {
+        eprintln!("[shutdown] 종료 순서를 앞당기지 못했다: {}", std::io::Error::last_os_error());
+    }
+}
+
 /// 칸 ConPTY 를 동봉한 MS OpenConsole(`bin\conpty\conpty.dll`+`OpenConsole.exe`)로 연다. 시스템 ConPTY 는 kitty
 /// 그림(APC)을 걸러 내고 OSC 1337 도 글과 순서가 어긋나지만, 동봉판(1.24)은 모르는 VT 를 그대로 넘겨 칸 안 그림이
 /// 제자리에 선다(2026-10-23 실측). portable-pty 는 `conpty.dll` 을 이름으로 싣는데, 같은 이름 모듈이 이미 실려 있으면
