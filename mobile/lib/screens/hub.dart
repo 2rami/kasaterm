@@ -17,6 +17,7 @@ import '../server.dart';
 import '../shared_rooms_repository.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import '../student_walk.dart';
 import '../twins_loading.dart';
 import '../weather/card.dart';
 import '../weather/model.dart';
@@ -1148,6 +1149,27 @@ class _MiniCellState extends State<_MiniCell> {
         final roomy = box.maxWidth >= 64 && ch >= 44;
         final dots = tabbed && ch >= 36;
         final face = math.min((ch - (dots ? 8 : 0)) * 0.55, 30.0);
+        Widget portrait(Pane q) {
+          final still = StudentFace(
+            server: widget.server,
+            slug: q.slug,
+            url: q.slug == null
+                ? null
+                : widget.server.avatar(q.slug!, machine: q.machine),
+            shell: q.isShell,
+            size: face,
+          );
+          // 하는 중인 학생은 데스크톱 배치도 칸처럼 얼굴과 같은 상자에서 걷는다.
+          return busy && q.slug != null && !q.isShell
+              ? StudentWalk(
+                  server: widget.server,
+                  slug: q.slug!,
+                  machine: q.machine,
+                  size: face,
+                  fallback: still,
+                )
+              : still;
+        }
         Widget student(Pane? q) => Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -1160,16 +1182,7 @@ class _MiniCellState extends State<_MiniCell> {
                   size: face * 0.6,
                   color: scheme.outline.withValues(alpha: 0.7),
                 ),
-              if (q != null && face >= 14)
-                StudentFace(
-                  server: widget.server,
-                  slug: q.slug,
-                  url: q.slug == null
-                      ? null
-                      : widget.server.avatar(q.slug!, machine: q.machine),
-                  shell: q.isShell,
-                  size: face,
-                ),
+              if (q != null && face >= 14) portrait(q),
               if (q != null && roomy)
                 Padding(
                   padding: const EdgeInsets.only(top: 2),

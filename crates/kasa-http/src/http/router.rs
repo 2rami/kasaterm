@@ -166,7 +166,7 @@ pub fn spawn_http_server_opts(
                     .merge(pane_read::routes(&backend))
                     .merge(panes::routes(&backend))
                     .merge(settings::routes(&backend))
-                    .merge(term_assets::routes())
+                    .merge(term_assets::routes(&backend))
                     .merge(term_api::routes(&backend))
                     .merge(term_files::routes(&backend))
                     .merge(socket::routes(&backend))

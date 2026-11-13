@@ -2744,6 +2744,10 @@ impl Backend for PtyBackend {
         character_sprite_bytes(slug, motion, frame)
     }
 
+    fn student_walk_sheet(&self, slug: &str) -> Option<(Vec<u8>, usize, u32)> {
+        safe_path_component(slug).then(|| crate::sprites::student_walk_sheet(slug)).flatten()
+    }
+
     fn claude_mod_face(&self, name: &str) -> Option<serde_json::Value> {
         if !crate::theme::character_appearance() {
             return None;

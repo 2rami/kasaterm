@@ -223,8 +223,38 @@ async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> 
     }
 }
 
+/// `GET /term/walk/<slug>.png` — 일하는 학생의 걷는 그림. 프레임을 가로로 이은 한 장이고
+/// 프레임 수·간격은 헤더로 준다 — 폰이 PC 상수를 따로 들면 PC 가 바뀔 때 조용히 갈린다.
+/// 그림이 없으면 404 이고, 폰은 그때(이 길이 없는 옛 서버도) 얼굴로 선다.
+async fn term_walk(
+    backend: Arc<dyn Backend>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let Some((png, frames, frame_ms)) = backend.student_walk_sheet(slug.trim_end_matches(".png")) else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            [(header::CACHE_CONTROL, "no-store")],
+            Vec::new(),
+        )
+            .into_response();
+    };
+    (
+        axum::http::StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/png".to_string()),
+            // 테마를 갈아입으면 같은 주소가 다른 학생 그림이 된다 — 얼굴의 디스크 그림과 같은 짧은 캐시.
+            (header::CACHE_CONTROL, "public, max-age=60".to_string()),
+            (axum::http::HeaderName::from_static("x-kasa-walk-frames"), frames.to_string()),
+            (axum::http::HeaderName::from_static("x-kasa-walk-ms"), frame_ms.to_string()),
+        ],
+        png,
+    )
+        .into_response()
+}
+
 /// 이 모듈 창구의 라우트. `router` 가 한 표로 합친 뒤 공통 레이어(Origin·토큰 가드)를 두른다.
-pub(super) fn routes() -> axum::Router {
+pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
+    let walk_backend = backend.clone();
     axum::Router::new()
         // 웹 터미널 — 브라우저에서 독립으로 여는 셸.
         .route("/term", get(term_page_handler))
@@ -240,4 +270,49 @@ pub(super) fn routes() -> axum::Router {
         .route("/term/grid.css", get(term_grid_css))
         .route("/term/font.woff2", get(term_asset_font))
         .route("/term/avatar/{slug}", get(term_avatar))
+        .route(
+            "/term/walk/{slug}",
+            get(move |slug: axum::extract::Path<String>| term_walk(walk_backend.clone(), slug)),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    struct WalkDesk;
+
+    impl Backend for WalkDesk {
+        fn list_workspaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
+        fn current_workspace(&self) -> anyhow::Result<Option<kasa_socket::backend::WorkspaceInfo>> { Ok(None) }
+        fn list_surfaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::SurfaceInfo>> { Ok(vec![]) }
+        fn focus_surface(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> anyhow::Result<kasa_socket::backend::SurfaceInfo> { anyhow::bail!("unexpected") }
+        fn send_key(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn send_text(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn student_walk_sheet(&self, slug: &str) -> Option<(Vec<u8>, usize, u32)> {
+            (slug == "arisu").then(|| (b"\x89PNG-sheet".to_vec(), 6, 140))
+        }
+    }
+
+    async fn get(path: &str) -> axum::response::Response {
+        let backend: Arc<dyn Backend> = Arc::new(WalkDesk);
+        let request = axum::http::Request::builder().uri(path).body(axum::body::Body::empty()).unwrap();
+        routes(&backend).oneshot(request).await.unwrap()
+    }
+
+    /// 폰은 시트 폭을 헤더의 프레임 수로 나눠 자른다 — 헤더가 빠지면 PC 와 다른 박자로 걷거나
+    /// 프레임이 섞인다. 그림이 없는 학생은 404 여야 폰이 얼굴로 돌아간다.
+    #[tokio::test]
+    async fn walk_sheet_carries_frame_count_and_pace() {
+        let response = get("/term/walk/arisu.png").await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(response.headers()["x-kasa-walk-frames"], "6");
+        assert_eq!(response.headers()["x-kasa-walk-ms"], "140");
+        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"\x89PNG-sheet");
+        assert_eq!(get("/term/walk/nobody.png").await.status(), axum::http::StatusCode::NOT_FOUND);
+    }
 }

@@ -15,6 +15,7 @@ import '../server.dart';
 import '../server_image.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import '../student_walk.dart';
 import '../term_session.dart';
 import '../look.dart';
 import '../twins_loading.dart';
@@ -639,8 +640,18 @@ class _ConversationViewState extends State<ConversationView> {
               itemCount: list.length + extra,
               itemBuilder: (context, i) {
                 if (i < extra) {
+                  final slug = pane.slug;
                   return _Typing(
-                    face: face,
+                    // 하는 중 줄의 학생은 데스크톱 사이드바처럼 얼굴 상자에서 걷는다.
+                    face: widget.readOnly || slug == null || pane.isShell
+                        ? face
+                        : StudentWalk(
+                            server: widget.server,
+                            slug: slug,
+                            machine: pane.machine,
+                            size: 30,
+                            fallback: face,
+                          ),
                     accent: widget.accent,
                     detail: live.doing ?? pane.busyDetail,
                   );

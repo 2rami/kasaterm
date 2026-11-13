@@ -1001,6 +1001,31 @@ pub(crate) fn draw_student_walk(
     true
 }
 
+/// 폰이 받는 걷기 그림 — `draw_student_walk` 가 올리는 프레임을 가로 한 줄로 이은 PNG.
+///
+/// 같은 `student_sprite_frames` 를 거쳐야 고른 테마·덮어쓴 그림·번들의 순서와 합집합 크롭이
+/// PC 와 갈리지 않는다. 프레임별 원본(`/character-sprite`)을 폰이 따로 자르면 둘이 어긋나도
+/// 오류 없이 다른 학생·다른 크기로 걷는다.
+pub(crate) fn student_walk_sheet(slug: &str) -> Option<(Vec<u8>, usize, u32)> {
+    if !theme::character_appearance() {
+        return None;
+    }
+    let frames = student_sprite_frames(slug, "walk")?;
+    Some((walk_sheet_png(&frames)?, frames.len(), STUDENT_WALK_FRAME_MS as u32))
+}
+
+fn walk_sheet_png(frames: &[(Vec<u8>, u32, u32)]) -> Option<Vec<u8>> {
+    let &(_, w, h) = frames.first()?;
+    let mut sheet = image::RgbaImage::new(w * frames.len() as u32, h);
+    for (i, (rgba, fw, fh)) in frames.iter().enumerate() {
+        let frame = image::RgbaImage::from_raw(*fw, *fh, rgba.clone())?;
+        image::imageops::replace(&mut sheet, &frame, i as i64 * w as i64, 0);
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    sheet.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(png.into_inner())
+}
+
 /// 앱 아이콘 → RGBA. 켤 때의 스플래시가 쓴다.
 ///
 /// 원본이 1024² 라 그리는 크기 언저리로 줄여서 올린다. 1024 를 그대로 GPU 에
@@ -1282,6 +1307,21 @@ mod student_asset_tests {
         // 로스터가 통째로 비면 위 루프는 조용히 0바퀴 돌고 전부 통과한다. 실측 79명을
         // 하한으로 박아 그 침묵을 막는다.
         assert!(with_art >= 79, "아트 있는 학생이 {with_art}명뿐 — 에셋이 빠졌나");
+    }
+
+    /// 폰이 받는 걷기 시트는 사이드바가 올리는 프레임을 순서·크기 그대로 이어야 한다 — 폰은
+    /// 시트 폭을 프레임 수로 나눠 자르므로 한 칸만 어긋나도 이웃 프레임이 섞여 보인다.
+    #[test]
+    fn walk_sheet_lays_sidebar_frames_side_by_side() {
+        let frames = student_sprite_frames("mika", "walk").expect("번들 걷기");
+        let sheet = image::load_from_memory(&walk_sheet_png(&frames).expect("시트")).unwrap().to_rgba8();
+        let (_, w, h) = frames[0];
+        assert_eq!(sheet.dimensions(), (w * STUDENT_WALK_FRAMES as u32, h));
+        for (i, (rgba, fw, fh)) in frames.iter().enumerate() {
+            let frame = image::RgbaImage::from_raw(*fw, *fh, rgba.clone()).unwrap();
+            let cut = image::imageops::crop_imm(&sheet, i as u32 * w, 0, w, h).to_image();
+            assert!(cut == frame, "{i}번째 프레임이 시트 제자리에 없다");
+        }
     }
 
     /// 프사도 같은 계약이다 — 스프라이트만 79명이고 프사가 12명 수동 목록으로

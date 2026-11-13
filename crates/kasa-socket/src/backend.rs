@@ -1463,6 +1463,15 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// 일하는 학생의 걷는 그림 — `(PNG, 프레임 수, 프레임 간격 ms)`. PNG 는 사이드바가 그리는
+    /// 프레임(같은 크기)을 가로로 이은 한 장이다. 폰이 칸·대화 보기에서 PC 와 같은 그림으로
+    /// 걷게 하려는 것이라, 프레임별 원본(`character_sprite`)이 아니라 화면이 실제로 쓰는 벌을 준다.
+    ///
+    /// `slug` 은 경로 조각이 되므로 구현이 탈출을 막아야 한다. 기본 None = 404 — 폰은 얼굴로 선다.
+    fn student_walk_sheet(&self, _slug: &str) -> Option<(Vec<u8>, usize, u32)> {
+        None
+    }
+
     /// 모션별 상태 — 프레임 수와 지금 쓰는 그림의 출처(`user`/`bundled`/`none`).
     ///
     /// 프레임 수를 화면이 아니라 여기서 주는 이유는 그 수가 로더의 규약이기

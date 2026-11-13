@@ -786,7 +786,9 @@ class Server {
     return response.bodyBytes;
   }
 
-  Future<Uint8List> imageBytes(Uri uri) async {
+  Future<Uint8List> imageBytes(Uri uri) async => (await _image(uri)).bodyBytes;
+
+  Future<http.Response> _image(Uri uri) async {
     if (!isDirect(uri) && (!sameOrigin(root, uri) || !uri.path.startsWith(root.path))) {
       throw const ServerException('이미지 주소를 확인하지 못했어요.');
     }
@@ -795,12 +797,28 @@ class Server {
       if (response.statusCode != 200) {
         throw ServerException('이미지를 불러오지 못했어요.', status: response.statusCode);
       }
-      return response.bodyBytes;
+      return response;
     } on ServerException {
       rethrow;
     } catch (_) {
       throw const ServerException('이미지를 불러오지 못했어요.');
     }
+  }
+
+  /// 일하는 학생의 걷는 그림 — 데스크톱 사이드바가 그리는 프레임을 가로로 이은 PNG 와 그 프레임 수·간격.
+  /// 수·간격을 헤더로 받는 것은 PC 상수를 폰이 따로 들지 않으려는 것이다. 길이 없는 옛 서버(404)·외형을 끈
+  /// 데스크톱·헤더가 깨진 답은 null — 부르는 쪽은 얼굴로 선다.
+  Future<({Uint8List png, int frames, int frameMs})?> walkSheet(String slug, {String? machine}) async {
+    final http.Response res;
+    try {
+      res = await _image(walk(slug, machine: machine));
+    } on ServerException {
+      return null;
+    }
+    final frames = int.tryParse(res.headers['x-kasa-walk-frames'] ?? '') ?? 0;
+    final frameMs = int.tryParse(res.headers['x-kasa-walk-ms'] ?? '') ?? 0;
+    if (frames < 1 || frameMs < 1) return null;
+    return (png: res.bodyBytes, frames: frames, frameMs: frameMs);
   }
 
   /// 대화에 박힌 소리·영상(`[[km:…]]`)의 정보 JSON. 블록을 낸 기기에만 묻는다 — 다른 기기의 같은 id 는
@@ -1726,6 +1744,10 @@ class Server {
 
   Uri avatar(String slug, {String? machine}) =>
       uri('term/avatar/${Uri.encodeComponent(slug)}.png', machine: machine);
+
+  /// 걷는 그림 시트 주소 — 받는 것은 [walkSheet].
+  Uri walk(String slug, {String? machine}) =>
+      uri('term/walk/${Uri.encodeComponent(slug)}.png', machine: machine);
 
   /// 학생이 서 있는 움직임 — 그 데스크톱이 지금 입힌 테마의 idle 그림(GIF). 없으면 404.
   Uri standing(String slug, {String? machine}) =>
