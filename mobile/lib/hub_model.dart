@@ -8,6 +8,24 @@ import 'hub_snapshot.dart';
 import 'machine_look.dart';
 import 'server.dart';
 
+/// 쪽지에서 그 학생에게 보낸 답 — 앱이 도는 동안만 기억한다.
+class NoteReply {
+  const NoteReply({required this.text, required this.at, required this.after, this.error});
+  final String text;
+  final DateTime at;
+
+  /// 보낼 때 그 기계에서 본 가장 큰 쪽지 번호. 같은 칸에서 이보다 큰 쪽지가 학생의 다음 답이다 — 쪽지 시각은
+  /// 데스크톱 시계라 폰 시계와 견주면 어긋난다.
+  final int after;
+
+  /// 못 보낸 까닭. null 이면 보냈다.
+  final String? error;
+  bool get sent => error == null;
+}
+
+/// 종 목록 한 줄 — 쪽지, 그 쪽지에서 보낸 답, 이 쪽지가 이어 받은 앞 쪽지의 답.
+typedef NoteLine = ({Note note, NoteReply? sent, NoteReply? before});
+
 class HubRoom {
   const HubRoom({
     required this.title,
@@ -221,6 +239,70 @@ class HubModel extends ChangeNotifier {
   /// 나쵸가 남긴 학생 쪽지 — 모든 기계 것을 합쳐 최근 것부터. 종 아이콘 목록.
   List<Note> notes = const [];
   int get unread => notes.where((n) => !n.read).length;
+
+  final Map<String, NoteReply> _replies = {};
+  @visibleForTesting
+  Map<String, NoteReply> get replies => _replies;
+
+  /// 종 목록에 설 줄 — [noteLines].
+  List<NoteLine> get noteList => noteLines(notes, _replies);
+
+  /// 안 읽은 쪽지와 이번에 답한 쪽지. 답한 칸에서 다음 쪽지가 오면 답한 쪽지는 빠지고 새 쪽지가 그 답을 앞에 달아
+  /// 한 흐름으로 이어진다 — 같은 학생 줄이 「답한 것」「새로 온 것」 둘로 갈라져 서지 않게.
+  @visibleForTesting
+  static List<NoteLine> noteLines(List<Note> notes, Map<String, NoteReply> replies) {
+    String place(Note n) => '${n.machine ?? ''}|${n.pane}';
+    final answeredBy = <String, NoteReply>{};
+    final answered = <String>{};
+    for (final n in notes) {
+      final r = replies[n.key];
+      if (r == null || !r.sent) continue;
+      Note? next;
+      for (final m in notes) {
+        if (place(m) == place(n) && m.id > r.after && (next == null || m.id < next.id)) next = m;
+      }
+      if (next == null) continue;
+      answered.add(n.key);
+      final had = answeredBy[next.key];
+      if (had == null || r.at.isAfter(had.at)) answeredBy[next.key] = r;
+    }
+    return [
+      for (final n in notes)
+        if (!answered.contains(n.key) && (!n.read || replies.containsKey(n.key)))
+          (note: n, sent: replies[n.key], before: answeredBy[n.key]),
+    ];
+  }
+
+  /// 쪽지의 기계에 지금 닿는가.
+  bool noteOnline(Note n) {
+    for (final s in sections) {
+      if (s.route == n.machine) return s.online;
+    }
+    return false;
+  }
+
+  /// 쪽지에서 그 학생에게 답한다 — 대화 입력과 같은 `/term/chat-send` 길로, 그 쪽지의 기계에. 보냈으면 쪽지는 읽음.
+  Future<NoteReply> replyToNote(Note n, String text) async {
+    var after = n.id;
+    for (final m in notes) {
+      if (m.machine == n.machine && m.id > after) after = m.id;
+    }
+    String? error;
+    try {
+      await server.chatSend(n.pane, text, machine: n.machine);
+    } on ServerException catch (e) {
+      error = e.message;
+    }
+    final r = NoteReply(text: text, at: DateTime.now(), after: after, error: error);
+    if (_disposed) return r;
+    _replies[n.key] = r;
+    if (r.sent) {
+      await markRead(n);
+    } else {
+      notifyListeners();
+    }
+    return r;
+  }
 
   // 조각마다 따로 받고 따로 고친다 — 느린 기계 하나가 나머지를 붙잡지 않게.
   static const _rootKey = '';
@@ -650,14 +732,15 @@ class HubModel extends ChangeNotifier {
     ];
     _noteWaiting(next);
     sections = next;
-    final live = {
-      if (rootLive) _rootKey,
+    // 끊긴 기기 것도 둔다 — 답 칸을 쓰던 쪽지가 끊기는 순간 사라지지 않고 「끊겼다」를 말하게. 명부에서 빠진 기기 것만 뺀다.
+    final known = {
+      if (root != null) _rootKey,
       for (final s in next)
-        if (s.online && s.route != null) s.route!,
+        if (s.route != null) s.route!,
     };
     notes = [
       for (final e in _notesBy.entries)
-        if (live.contains(e.key)) ...e.value,
+        if (known.contains(e.key)) ...e.value,
     ]..sort((a, b) => b.when.compareTo(a.when));
     _save();
     if (!_disposed) notifyListeners();
@@ -744,6 +827,7 @@ class HubModel extends ChangeNotifier {
         await server.markNotesRead(all: true, machine: m);
       } catch (_) {}
     }
+    _replies.clear();
     _editNotes((l) => [for (final n in l) n.copyWith(read: true)]);
   }
 
@@ -760,6 +844,7 @@ class HubModel extends ChangeNotifier {
   /// 옆으로 밀어 지움. 목록에서 먼저 빼야 Dismissible 이 빈 자리를 안 찾는다 —
   /// 서버가 늦거나 실패하면 다음 폴링에 되돌아온다.
   Future<void> deleteNote(Note n) async {
+    _replies.remove(n.key);
     _editNotes(
       (l) => [
         for (final x in l)

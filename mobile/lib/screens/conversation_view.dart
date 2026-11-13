@@ -44,7 +44,13 @@ class ChatComposer extends StatelessWidget {
     this.hint = '메시지 보내기',
     this.stopTip = '멈추기 (esc)',
     this.command = false,
+    this.busy = false,
+    this.autofocus = false,
   });
+
+  /// 보내는 중 — 단추가 돌고 두 번 안 보낸다.
+  final bool busy;
+  final bool autofocus;
 
   final String hint;
   final String stopTip;
@@ -87,6 +93,7 @@ class ChatComposer extends StatelessWidget {
           controller: controller,
           focusNode: focusNode,
           enabled: enabled,
+          autofocus: autofocus,
           minLines: 1,
           maxLines: Look.inputMaxLines,
           textInputAction: TextInputAction.newline,
@@ -112,6 +119,7 @@ class ChatComposer extends StatelessWidget {
         listenable: controller,
         builder: (context, _) => SendButton(
           ready: controller.text.trim().isNotEmpty || photos.isNotEmpty,
+          busy: busy,
           onPressed: enabled ? onSend : null,
           round: true,
         ),
@@ -183,10 +191,15 @@ class ConversationView extends StatefulWidget {
     this.draft,
     this.conversation,
     this.readOnly = false,
+    this.asksOnly = false,
     this.jump,
   });
 
   final Server server;
+
+  /// 대화 없이 묻는 카드(승인·선택지)만 세운다 — 쪽지 시트가 대화 화면으로 가지 않고 그 자리에서 답하게 한다.
+  /// 고르기 판정·키 보내기·mod 결정을 두 곳에 두지 않으려고 같은 보기를 쓴다.
+  final bool asksOnly;
 
   /// 화면이 쥔 기록 — 보낸 말을 기록보다 먼저 세운다([Conversation.echo]). 없으면 제 것을 쓴다.
   final Conversation? conversation;
@@ -267,7 +280,7 @@ class _ConversationViewState extends State<ConversationView> {
   }
 
   Future<void> _bootstrap() async {
-    if (!widget.readOnly && _conv.items.isEmpty) {
+    if (!widget.readOnly && !widget.asksOnly && _conv.items.isEmpty) {
       try { await _hydrate().timeout(const Duration(milliseconds: 150)); }
       on TimeoutException { /* A slow disk must not delay the source request. */ }
     }
@@ -324,8 +337,10 @@ class _ConversationViewState extends State<ConversationView> {
 
   void _start() {
     if (widget.readOnly || _bootstrapping) return;
-    _poll();
-    _timer ??= Timer.periodic(_pollEvery, (_) => _poll());
+    if (!widget.asksOnly) {
+      _poll();
+      _timer ??= Timer.periodic(_pollEvery, (_) => _poll());
+    }
     unawaited(_liveLoop());
   }
 
@@ -422,7 +437,7 @@ class _ConversationViewState extends State<ConversationView> {
   }
 
   Future<void> _poll() async {
-    if (_polling || !mounted || widget.readOnly) return;
+    if (_polling || !mounted || widget.readOnly || widget.asksOnly) return;
     _polling = true;
     var again = false;
     try {
@@ -697,6 +712,52 @@ class _ConversationViewState extends State<ConversationView> {
         ? StatusStyle.attention
         : widget.accent;
     final held = DateTime.now().isBefore(_menuHold);
+    final cards = <Widget>[
+      ConversationAsks(
+        pane: widget.pane,
+        rows: _loaded ? rows : const [],
+        active: widget.active && !widget.readOnly,
+        toolsAsked: menu != null || (!connected && decidable) || held,
+        onSend: _sendText,
+      ),
+      if (menu != null)
+        _MenuCard(
+          // 다른 창(다른 질문·다른 탭)이면 펼친 줄과 쓰던 글 칸을 새로 시작한다.
+          key: ValueKey('${menu.title}\u0000${menu.currentTab}'),
+          menu: menu,
+          accent: accent,
+          reasonFor: [
+            for (var i = 0; i < menu.options.length; i++)
+              if (live.decisionFor(menu, i)?.$1 == false) menu.options[i].label,
+          ].firstOrNull,
+          onPick: (i, text) => _pick(menu, i, text: text),
+          onTab: (j) => _tab(menu, j),
+          onReveal: (up) => _reveal(menu, up: up),
+          onDismiss: _dismiss,
+          onTerminal: widget.onTerminal,
+        )
+      // 화면을 아직 못 받았으면 mod 의 요청만으로 묻는다 — 도구와 입력 원문, 허락·거절.
+      else if (!connected && decidable && !held)
+        _MenuCard(
+          menu: PromptMenu(
+            '허락할까요?',
+            const [
+              PromptOption(1, '허락', current: false),
+              PromptOption(2, '거절', current: false),
+            ],
+            context: [toolLabel(live.permissions.first.tool), ...live.permissions.first.lines],
+          ),
+          accent: accent,
+          reasonFor: '거절',
+          numbered: false,
+          onPick: (i, _) => unawaited(_decide(live.permissions.first, i == 0)),
+          onDismiss: null,
+          onTerminal: widget.onTerminal,
+        ),
+    ];
+    if (widget.asksOnly) {
+      return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: cards);
+    }
     return Column(
       children: [
         if (_cached) Padding(
@@ -706,47 +767,7 @@ class _ConversationViewState extends State<ConversationView> {
         ),
         // 고르는 카드가 높아 대화 쪽이 낮아지면 빈 화면 그림이 넘친다 — 카드를 덮어 그리지 않게 자른다.
         Expanded(child: ClipRect(child: DismissKeyboard(child: _body(context)))),
-        ConversationAsks(
-          pane: widget.pane,
-          rows: _loaded ? rows : const [],
-          active: widget.active && !widget.readOnly,
-          toolsAsked: menu != null || (!connected && decidable) || held,
-          onSend: _sendText,
-        ),
-        if (menu != null)
-          _MenuCard(
-            // 다른 창(다른 질문·다른 탭)이면 펼친 줄과 쓰던 글 칸을 새로 시작한다.
-            key: ValueKey('${menu.title}\u0000${menu.currentTab}'),
-            menu: menu,
-            accent: accent,
-            reasonFor: [
-              for (var i = 0; i < menu.options.length; i++)
-                if (live.decisionFor(menu, i)?.$1 == false) menu.options[i].label,
-            ].firstOrNull,
-            onPick: (i, text) => _pick(menu, i, text: text),
-            onTab: (j) => _tab(menu, j),
-            onReveal: (up) => _reveal(menu, up: up),
-            onDismiss: _dismiss,
-            onTerminal: widget.onTerminal,
-          )
-        // 화면을 아직 못 받았으면 mod 의 요청만으로 묻는다 — 도구와 입력 원문, 허락·거절.
-        else if (!connected && decidable && !held)
-          _MenuCard(
-            menu: PromptMenu(
-              '허락할까요?',
-              const [
-                PromptOption(1, '허락', current: false),
-                PromptOption(2, '거절', current: false),
-              ],
-              context: [toolLabel(live.permissions.first.tool), ...live.permissions.first.lines],
-            ),
-            accent: accent,
-            reasonFor: '거절',
-            numbered: false,
-            onPick: (i, _) => unawaited(_decide(live.permissions.first, i == 0)),
-            onDismiss: null,
-            onTerminal: widget.onTerminal,
-          ),
+        ...cards,
         // 셸 명령 쪽과 같은 맥락 줄 — 앱바엔 경로가 들어갈 폭이 없다.
         if (widget.pane.cwd.isNotEmpty)
           PlaceLine(
