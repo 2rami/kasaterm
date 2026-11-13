@@ -866,47 +866,178 @@ String? _workflowName(Map<String, Object?> input) {
 // ── 화면에서 읽는 선택지 ────────────────────────────────────────────────────
 
 class PromptOption {
-  const PromptOption(this.index, this.label, {required this.current, this.note = ''});
+  const PromptOption(
+    this.index,
+    this.label, {
+    required this.current,
+    this.note = '',
+    int? row,
+    this.checked,
+    this.input = false,
+    bool? entry,
+  })  : row = row ?? index - 1,
+        entry = entry ?? input;
 
-  /// 화면에 적힌 번호(1부터).
+  /// 화면에 적힌 번호(1부터). 번호 없는 줄(여러 개 고르기의 「Submit」)은 0.
   final int index;
   final String label;
   final bool current;
 
-  /// 이름 밑에 딸린 설명 줄(질문 창의 선택지 설명). 없으면 빈 글.
+  /// 이름 밑에 딸린 설명 줄(질문 창의 선택지 설명)이나 이름 옆 칸(`/model` 의 모델 설명). 없으면 빈 글.
   final String note;
+
+  /// TUI 목록 안의 차례(0부터) — 굴러서 숨은 선택지와 번호 없는 줄까지 센 자리. ↑↓ 수는 이 차이다.
+  final int row;
+
+  /// 여러 개 고르기의 체크 상자. 상자 없는 선택지는 null.
+  final bool? checked;
+
+  /// 글을 쳐서 답하는 칸(질문의 「Type something」, 계획의 「Tell Claude what to change」). 빈 채로 Enter 를
+  /// 보내면 답이 아니라 질문 전체 거절(「User declined to answer questions」)이 된다(2.1.323 실측).
+  final bool input;
+
+  /// 글 칸 자리 — 이미 글을 쳐 이름이 그 글로 바뀐 칸까지. 커서가 여기 있으면 Tab 이 탭을 안 옮긴다.
+  final bool entry;
+}
+
+/// 질문 여러 개 창의 머리 탭 하나(`←  ☒ 언어  ☐ 테스트  ✔ Submit  →`).
+class PromptTab {
+  const PromptTab(this.label, {required this.done, required this.current});
+  final String label;
+
+  /// 답한 질문(☒).
+  final bool done;
+
+  /// 지금 탭 — 글자로는 안 갈리고 배경색으로만 칠해져 있어 화면이 준 색 칸([parsePromptMenu] 의 `lit`)으로 안다.
+  final bool current;
 }
 
 class PromptMenu {
-  const PromptMenu(this.title, this.options, {this.context = const []});
+  const PromptMenu(
+    this.title,
+    this.options, {
+    this.context = const [],
+    this.tabs = const [],
+    this.hiddenAbove,
+    this.hiddenBelow,
+  });
   final String title;
   final List<PromptOption> options;
 
-  /// 제목 위 창 안의 줄들, 화면 차례 그대로 — 도구 이름·설명·명령 원문. 데스크톱 `PromptMenu::context` 와 같은 규칙.
+  /// 제목 위 창 안의 줄들, 화면 차례 그대로 — 도구 이름·설명·명령 원문·계획. 데스크톱 `PromptMenu::context` 와 같은 재료.
   final List<String> context;
 
+  final List<PromptTab> tabs;
+
+  /// 창이 낮아 굴러서 숨은 선택지 바로 그 자리(row). 커서를 거기 옮기면 TUI 가 목록을 굴려 보여 준다.
+  final int? hiddenAbove;
+  final int? hiddenBelow;
+
   int get cursor => options.indexWhere((o) => o.current);
+  bool get multi => options.any((o) => o.checked != null);
+  int get currentTab => tabs.indexWhere((t) => t.current);
+
+  PromptMenu withContext(List<String> lines) => PromptMenu(
+        title,
+        options,
+        context: lines,
+        tabs: tabs,
+        hiddenAbove: hiddenAbove,
+        hiddenBelow: hiddenBelow,
+      );
 }
 
-/// 창을 가르는 가로줄(`────`) — 창 머리 위나 질문 창 아래 칸막이.
-bool _isRule(String t) => RegExp('[─━]').allMatches(t).length >= 8;
+/// 메뉴에서 한 번 할 일 — 커서에서 [moves] 칸(+면 ↓) 옮기고, [text] 를 치고, [enter] 면 Enter.
+typedef MenuStep = ({int moves, String text, bool enter});
 
-/// A selected chevron distinguishes live choices from numbered response text.
-PromptMenu? parsePromptMenu(List<String> screen) {
-  final opts = <(PromptOption, int)>[];
-  final re = RegExp(r'^\s*[│|]?\s*([❯›●]?)\s*(\d+)\.\s+(.+?)\s*[│|]?\s*$');
+/// 선택지 [i] 를 고르는 키. 글 칸은 [text] 가 있어야 답이다 — 빈 글이면 null(빈 Enter 는 거절이 된다).
+/// 여러 개 고르기의 글 칸은 치기만 해도 골라지니 Enter 를 안 보낸다(Enter 는 고름을 푼다).
+MenuStep? menuStep(PromptMenu menu, int i, {String text = ''}) {
+  if (i < 0 || i >= menu.options.length || menu.cursor < 0) return null;
+  final o = menu.options[i];
+  final moves = o.row - menu.options[menu.cursor].row;
+  if (!o.input) return (moves: moves, text: '', enter: true);
+  final typed = text.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
+  if (typed.isEmpty) return null;
+  return (moves: moves, text: typed, enter: o.checked == null);
+}
+
+/// 숨은 선택지 쪽으로 커서를 옮기는 칸 수. 그쪽에 숨은 것이 없으면 null.
+int? menuReveal(PromptMenu menu, {required bool up}) {
+  final target = up ? menu.hiddenAbove : menu.hiddenBelow;
+  if (target == null || menu.cursor < 0) return null;
+  return target - menu.options[menu.cursor].row;
+}
+
+/// 창을 가르는 가로줄(`────`·`▔▔▔▔`) — 창 머리 위나 질문 창 아래 칸막이.
+bool _isRule(String t) => RegExp('[─━▔]').allMatches(t).length >= 8;
+
+final _optionRe = RegExp(r'^\s*[│|]?\s*((?:[❯›●↑↓]\s*){0,2})(\d+)\.\s+(.+?)\s*[│|]?\s*$');
+final _submitRe = RegExp(r'^\s*([❯›]?)\s*Submit\s*$');
+final _checkboxRe = RegExp(r'^\[([ ✔✓xX×])\]\s+');
+final _inputLabels = {'Type something.', 'Type something', 'Tell Claude what to change'};
+
+/// `/model` 이 굴린 목록 끝에 다는 「… +2 models」 — 그쪽에 숨은 칸이 있다는 표식.
+final _moreRe = RegExp(r'^\s*…\s*\+\d+');
+
+/// 터미널 칸 수 — 한글·한자·전각은 두 칸. 접힌 줄을 가르는 데만 쓴다.
+int _cells(String s) {
+  var n = 0;
+  for (final r in s.runes) {
+    final wide = (r >= 0x1100 && r <= 0x115F) || (r >= 0x2E80 && r <= 0xA4CF) ||
+        (r >= 0xAC00 && r <= 0xD7A3) || (r >= 0xF900 && r <= 0xFAFF) ||
+        (r >= 0xFE30 && r <= 0xFE4F) || (r >= 0xFF00 && r <= 0xFF60) || (r >= 0xFFE0 && r <= 0xFFE6);
+    n += wide ? 2 : 1;
+  }
+  return n;
+}
+
+/// 창 테(`│`)와 줄 끝의 굴림 표식(계획 상자 오른쪽 끝 `↓`)을 걷는다.
+String _unframe(String line) =>
+    line.replaceAll(RegExp(r'^[\s│|]+|[\s│|]+$'), '').replaceFirst(RegExp(r'\s{2,}[↑↓]$'), '');
+
+/// A selected chevron distinguishes live choices from numbered response text. [lit] 은 줄 번호 → 그 줄에서
+/// 배경색이 칠해진 글(질문 탭의 지금 탭을 가르는 데만 쓴다).
+PromptMenu? parsePromptMenu(List<String> screen, {Map<int, String> lit = const {}}) {
+  // (선택지, 줄, 굴림 표식 ↑/↓/'', 이름 옆 칸)
+  final opts = <(PromptOption, int, String, String)>[];
   // Match the native bottom-anchored approval scan, not old choices in history.
   final last = screen.lastIndexWhere((line) => line.trim().isNotEmpty);
   if (last < 0) return null;
   final lines = [for (final line in screen) _leftOfPreview(line)];
   final start = _questionTop(screen, last) ?? (last - 13).clamp(0, last);
   for (var i = start; i <= last; i++) {
-    final m = re.firstMatch(lines[i]);
-    if (m == null) continue;
-    final label = m[3]!.replaceFirst(RegExp(r'\s{2,}.*$'), '').trim();
+    final m = _optionRe.firstMatch(lines[i]);
+    if (m == null) {
+      // 여러 개 고르기의 번호 없는 「Submit」 — 체크 상자 선택지 바로 밑에만 선다.
+      final s = _submitRe.firstMatch(lines[i]);
+      if (s != null && opts.isNotEmpty && opts.last.$1.checked != null) {
+        opts.add((PromptOption(0, 'Submit', current: s[1]!.isNotEmpty), i, '', ''));
+      }
+      continue;
+    }
+    final marks = m[1]!;
+    final full = m[3]!;
+    final gap = RegExp(r'\s{2,}').firstMatch(full);
+    var label = (gap == null ? full : full.substring(0, gap.start)).trim();
+    final side = gap == null ? '' : full.substring(gap.end).trim();
+    bool? checked;
+    final box = _checkboxRe.firstMatch(label);
+    if (box != null) {
+      checked = box[1] != ' ';
+      label = label.substring(box.end);
+    }
     opts.add((
-      PromptOption(int.parse(m[2]!), label, current: m[1]!.isNotEmpty),
+      PromptOption(
+        int.parse(m[2]!),
+        label,
+        current: marks.contains(RegExp('[❯›●]')),
+        checked: checked,
+        input: _inputLabels.contains(label),
+      ),
       i,
+      marks.contains('↑') ? '↑' : (marks.contains('↓') ? '↓' : ''),
+      side,
     ));
   }
   if (opts.length < 2 || !opts.any((o) => o.$1.current)) return null;
@@ -920,57 +1051,168 @@ PromptMenu? parsePromptMenu(List<String> screen) {
     }
   }
   if (lines.skip(opts.last.$2 + 1).any((line) =>
-      RegExp(r'^\s*[│|]?\s*[❯›]').hasMatch(line) && !re.hasMatch(line))) {
+      RegExp(r'^\s*[│|]?\s*[❯›]').hasMatch(line) && !_optionRe.hasMatch(line))) {
     return null;
   }
   // 흩어진 번호 줄은 메뉴가 아니다. 다만 AskUserQuestion 은 선택지마다 설명 줄이 딸려
-  // 벌어지므로, 번호가 1부터 빈틈없이 이어지면 선택지당 서너 줄까지 봐준다.
-  final ordered = [
-    for (final (i, o) in opts.indexed) o.$1.index == i + 1,
-  ].every((b) => b);
+  // 벌어지므로, 번호가 1부터 빈틈없이 이어지면 선택지당 서너 줄까지 봐준다. 창이 낮아 굴린 목록은
+  // 앞이 숨어 2부터 서거나, 굴러가는 칸 밖에 남은 「Chat about this」 앞이 빈다. ↑·↓ 표식은 커서(❯)가
+  // 그 가장자리에 서면 덮여 안 보이니(2.1.323 실측) 질문 창이면 표식 없이도 빈틈을 봐준다.
+  final scrolled = opts.any((o) => o.$3.isNotEmpty) || opts.any((o) => o.$1.label == 'Chat about this');
+  final numbers = [for (final o in opts) if (o.$1.index > 0) o.$1.index];
+  var ordered = numbers.isNotEmpty && (numbers.first == 1 || scrolled);
+  for (var k = 1; k < numbers.length && ordered; k++) {
+    ordered = scrolled ? numbers[k] > numbers[k - 1] : numbers[k] == numbers[k - 1] + 1;
+  }
   final spread = opts.last.$2 - opts.first.$2;
   if (spread > (ordered ? opts.length * 4 : opts.length + 2)) return null;
+  final width = lines.fold<int>(0, (w, l) => _cells(l.trimRight()) > w ? _cells(l.trimRight()) : w);
   final first = opts.first.$2;
   var title = '';
   var titleAt = first;
   for (var i = first - 1; i >= 0 && i >= first - 6; i--) {
-    final t = lines[i].replaceAll(RegExp(r'^[\s│|]+|[\s│|]+$'), '');
-    if (t.isEmpty || RegExp(r'^[─—\-╭╰╮╯>❯›●]').hasMatch(t)) continue;
+    final t = _unframe(lines[i]);
+    if (t.isEmpty || _isRule(t) || RegExp(r'^[─—\-╭╰╮╯>❯›●]').hasMatch(t)) continue;
     title = t;
     titleAt = i;
     break;
   }
-  final width = lines.fold<int>(0, (w, l) => l.trimRight().runes.length > w ? l.trimRight().runes.length : w);
+  // 창 폭에서 접힌 제목(`/model` 의 안내문, 좁은 칸의 긴 질문)은 윗줄이 폭 끝까지 찼다 — 이어 붙인다.
+  while (title.isNotEmpty && titleAt > 0) {
+    final above = _unframe(lines[titleAt - 1]);
+    if (above.isEmpty || _isRule(above) || RegExp(r'^[─—\-╭╰╮╯>❯›●←╌┄┈·]').hasMatch(above)) break;
+    final firstWord = title.split(' ').first;
+    if (_cells(lines[titleAt - 1].trimRight()) + 1 + _cells(firstWord) <= width - 4) break;
+    title = '$above $title';
+    titleAt--;
+  }
+  // 글 칸 자리: 질문 창은 「Chat about this」 바로 앞(여러 개 고르기면 Submit 앞), 계획 승인은 「shift+tab」 설명이 딸린 칸.
+  final chat = opts.indexWhere((o) => o.$1.label == 'Chat about this');
+  var slot = chat - 1;
+  if (slot >= 0 && opts[slot].$1.index == 0) slot--;
+  var row = -1;
   final options = <PromptOption>[];
+  int? hiddenAbove;
+  int? hiddenBelow;
   for (var k = 0; k < opts.length; k++) {
-    final (o, at) = opts[k];
+    final (o, at, scroll, side) = opts[k];
+    // 번호 없는 줄은 바로 앞 줄 다음 자리, 번호 줄은 번호에서 — 숨은 선택지를 건너뛰어도 자리가 맞는다.
+    final submitsAbove = options.where((p) => p.index == 0).length;
+    final before = row;
+    row = o.index == 0 ? row + 1 : o.index - 1 + submitsAbove;
+    // 앞에 건너뛴 자리가 있으면 거기 숨은 선택지가 있다 — 첫 줄 위면 위쪽, 줄 사이면 앞 줄 바로 밑.
+    if (scroll == '↑' || (k == 0 && row > 0)) hiddenAbove = row - 1;
+    if (k > 0 && row > before + 1) hiddenBelow ??= before + 1;
+    if (scroll == '↓') hiddenBelow = row + 1;
     final end = k + 1 < opts.length ? opts[k + 1].$2 : (at + 5).clamp(0, lines.length);
     final numberCol = lines[at].indexOf(RegExp(r'\d'));
     final more = <String>[];
-    for (var i = at + 1; i < end; i++) {
+    for (var i = at + 1; i < end && o.index > 0; i++) {
       final line = lines[i];
       final indent = line.length - line.trimLeft().length;
       final t = line.trim();
-      if (t.isEmpty || indent <= numberCol || _isRule(t)) break;
+      if (t.isEmpty || indent <= numberCol || _isRule(t) || _moreRe.hasMatch(line)) break;
       more.add(t);
     }
-    if (more.isEmpty) {
-      options.add(o);
-    } else if (previewing || lines[at].trimRight().runes.length + 4 >= width) {
+    var label = o.label;
+    var note = side;
+    if (more.isNotEmpty) {
       // 이름이 줄 끝까지 찼으면 다음 줄은 접힌 이름의 나머지다(Claude 의 긴 「Yes, and …」).
-      options.add(PromptOption(o.index, '${o.label} ${more.join(' ')}', current: o.current));
-    } else {
-      options.add(PromptOption(o.index, o.label, current: o.current, note: more.join(' ')));
+      if (previewing || _cells(lines[at].trimRight()) + 4 >= width) {
+        label = '$label ${more.join(' ')}';
+      } else {
+        note = more.join(' ');
+      }
+    }
+    options.add(PromptOption(
+      o.index,
+      label,
+      current: o.current,
+      note: note,
+      row: row,
+      checked: o.checked,
+      input: o.input,
+      entry: o.input || (k == slot && o.index > 0) || note == 'shift+tab to approve with this feedback',
+    ));
+  }
+  final lastAt = opts.last.$2;
+  if (lines.skip(lastAt + 1).take(2).any(_moreRe.hasMatch)) hiddenBelow ??= options.last.row + 1;
+  if (lines.sublist((first - 2).clamp(0, first), first).any(_moreRe.hasMatch) && options.first.row > 0) {
+    hiddenAbove ??= options.first.row - 1;
+  }
+  // 질문 여러 개(와 여러 개 고르기)의 머리 탭 줄 — 창 맨 위 칸막이 바로 밑.
+  var tabs = const <PromptTab>[];
+  var tabsAt = -1;
+  for (var i = titleAt - 1; i >= 0 && i >= titleAt - 12; i--) {
+    final t = _unframe(lines[i]);
+    if (_isRule(t)) break;
+    final found = _parseTabs(t, lit[i]);
+    if (found.isNotEmpty) {
+      tabs = found;
+      tabsAt = i;
+      break;
     }
   }
-  final context = <String>[];
-  for (var i = titleAt - 1; i >= 0 && i >= titleAt - 16; i--) {
-    final t = lines[i].replaceAll(RegExp(r'^[\s│|]+|[\s│|]+$'), '');
-    if (t.isEmpty || RegExp(r'^[╌┄┈·]+$').hasMatch(t)) continue;
-    if (_isRule(t) || RegExp(r'^[╭╰•⏺●❯›>⎿✻✢✽]').hasMatch(t)) break;
-    context.add(t);
+  if (tabs.isNotEmpty && !tabs.any((t) => t.current) && title == 'Ready to submit your answers?') {
+    tabs = [
+      for (final (k, t) in tabs.indexed)
+        PromptTab(t.label, done: t.done, current: k == tabs.length - 1 && t.label == 'Submit'),
+    ];
   }
-  return PromptMenu(title, options, context: context.reversed.toList());
+  // 탭 창은 탭 줄 밑이 다 창 안이다 — 검토 창의 「● 질문」「→ 답」까지 싣는다.
+  final context = tabsAt >= 0
+      ? [
+          for (var i = tabsAt + 1; i < titleAt; i++)
+            if (_unframe(lines[i]).isNotEmpty) _unframe(lines[i]),
+        ]
+      : _windowContext(lines, titleAt);
+  return PromptMenu(
+    title,
+    options,
+    context: context,
+    tabs: tabs,
+    hiddenAbove: hiddenAbove,
+    hiddenBelow: hiddenBelow,
+  );
+}
+
+List<PromptTab> _parseTabs(String line, String? lit) {
+  final m = RegExp(r'^←\s+(.+?)\s+→$').firstMatch(line);
+  if (m == null) return const [];
+  final on = lit?.trim() ?? '';
+  final tabs = <PromptTab>[];
+  for (final part in m[1]!.split(RegExp(r'\s{2,}'))) {
+    final t = RegExp(r'^([☐☒✔✓])\s+(.+)$').firstMatch(part.trim());
+    if (t == null) return const [];
+    final label = t[2]!;
+    tabs.add(PromptTab(
+      label,
+      done: t[1] == '☒',
+      current: on.isNotEmpty && (on == part.trim() || on == label),
+    ));
+  }
+  return tabs.length >= 2 ? tabs : const [];
+}
+
+/// 제목 위 창 안의 줄. 제목 바로 위가 칸막이면(계획 승인 — 계획 상자가 제목 위 칸막이 사이에 선다) 한 번 건너
+/// 다음 칸막이까지 싣는다. 그 칸막이를 못 만나면 창이 아니니 아무것도 안 싣는다.
+List<String> _windowContext(List<String> lines, int top) {
+  final out = <String>[];
+  var crossed = false;
+  for (var i = top - 1; i >= 0 && i >= top - (crossed ? 40 : 16); i--) {
+    final t = _unframe(lines[i]);
+    if (t.isEmpty || RegExp(r'^[╌┄┈·]+$').hasMatch(t) || RegExp(r'^[↑↓]$').hasMatch(t)) continue;
+    if (_isRule(t)) {
+      if (out.isEmpty && !crossed) {
+        crossed = true;
+        continue;
+      }
+      return out.reversed.toList();
+    }
+    if (RegExp(r'^[╭╰•⏺●❯›>⎿✻✢✽]').hasMatch(t)) break;
+    out.add(t);
+  }
+  return crossed ? const [] : out.reversed.toList();
 }
 
 /// 선택지 이름 뒤 두 칸 넘는 틈에 이어 선 상자(미리보기 그림)를 떼어 낸다. 글자 칸으로 자르지 않는다 — 한글은

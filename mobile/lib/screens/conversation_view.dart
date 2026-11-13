@@ -11,6 +11,7 @@ import '../inline_result.dart';
 import '../conversation.dart';
 import '../conversation_cache.dart';
 import '../file_link.dart';
+import '../grid.dart' show DefaultColor, flagInverse;
 import '../server.dart';
 import '../server_image.dart';
 import '../status_style.dart';
@@ -225,6 +226,10 @@ class _ConversationViewState extends State<ConversationView> {
   String? _error;
   bool _awayFromBottom = false;
   DateTime _menuHold = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 창이 남는 누름(상자 켜기·탭 옮기기·굴리기) 직후의 메뉴 — 화면이 바뀌기 전 두 번째 누름은 옛 커서로 셈하게 되니 막는다.
+  PromptMenu? _busyMenu;
+  DateTime _busyUntil = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// 그 칸 mod 의 지금. 옛 데스크톱·mod 없는 칸이면 비어 있다.
   ModLive _live = const ModLive();
@@ -467,36 +472,91 @@ class _ConversationViewState extends State<ConversationView> {
     return _rows;
   }
 
-  /// 화면에서 읽은 메뉴의 한 칸을 고른다 — 지금 커서 자리에서 그만큼 ↑↓ 옮기고 Enter.
+  /// 화면에서 읽은 메뉴의 한 칸을 고른다 — 지금 커서 자리에서 그만큼 ↑↓ 옮기고(글 칸이면 [text] 를 치고) Enter.
   /// 번호 단축키는 AskUserQuestion 의 다중 선택에서 뜻이 달라 쓰지 않는다.
-  void _pick(PromptMenu menu, int i) {
-    final s = widget.session;
-    final current = _menu;
-    if (current == null || !_sameMenu(menu, current) ||
-        i < 0 || i >= current.options.length) {
-      return;
-    }
+  void _pick(PromptMenu menu, int i, {String text = ''}) {
+    final current = _menuToAct(menu);
+    if (current == null || i < 0 || i >= current.options.length) return;
     // 승인 창의 「Yes」·「No」는 요청 id 로 답한다 — 화면 키는 그사이 다른 창이 뜨면 그것을 고른다.
     final decision = _liveNow.decisionFor(current, i);
     if (decision != null) {
       unawaited(_decide(decision.$2, decision.$1));
       return;
     }
-    if (!s.canSend) return;
-    final delta = i - (menu.cursor < 0 ? 0 : menu.cursor);
-    for (var k = 0; k < delta.abs(); k++) {
-      s.arrow(delta > 0 ? 'B' : 'A');
+    final step = menuStep(current, i, text: text);
+    if (step == null || !widget.session.canSend) return;
+    // 여러 개 고르기의 상자 켜고 끄기는 창이 그대로 남는다 — 카드를 접지 않고 화면이 바뀔 때까지만 막는다.
+    _sendMenuKeys(current, step, stays: current.options[i].checked != null);
+  }
+
+  /// 질문 탭을 옮긴다 — Tab·Shift+Tab. 글 칸 자리에 커서가 있으면 Tab 이 안 먹어 한 칸 위로 먼저 뺀다.
+  void _tab(PromptMenu menu, int j) {
+    final current = _menuToAct(menu);
+    if (current == null || !widget.session.canSend) return;
+    final from = current.currentTab;
+    if (from < 0 || j < 0 || j >= current.tabs.length || j == from) return;
+    final s = widget.session;
+    final cursor = current.cursor;
+    if (cursor >= 0 && current.options[cursor].entry) s.arrow('A');
+    for (var k = 0; k < (j - from).abs(); k++) {
+      s.sendText(j > from ? '\t' : '\x1b[Z');
     }
     HapticFeedback.selectionClick();
-    setState(() => _menuHold = DateTime.now().add(_menuHoldFor));
-    _toBottom();
-    // 화살표 바로 뒤의 Enter 는 질문 창이 커서를 옮기기 전에 읽혀 앞 칸을 고른 적이 있다(가상 아이폰 실측).
-    if (delta == 0) {
-      s.sendText('\r');
+    _markBusy(current);
+  }
+
+  /// 창이 낮아 굴러 숨은 선택지 쪽으로 커서를 옮긴다 — TUI 가 목록을 굴려 다음 화면에 보인다.
+  void _reveal(PromptMenu menu, {required bool up}) {
+    final current = _menuToAct(menu);
+    if (current == null || !widget.session.canSend) return;
+    final moves = menuReveal(current, up: up);
+    if (moves == null) return;
+    _sendMenuKeys(current, (moves: moves, text: '', enter: false), stays: true);
+  }
+
+  /// 누른 카드가 지금 화면의 메뉴와 같을 때만 그 메뉴를 준다. 직전 누름이 아직 화면에 안 닿았으면 null.
+  PromptMenu? _menuToAct(PromptMenu menu) {
+    final current = _menu;
+    if (current == null || !_sameMenu(menu, current)) return null;
+    final busy = _busyMenu;
+    if (busy != null && DateTime.now().isBefore(_busyUntil) && _sameMenu(busy, current)) return null;
+    return current;
+  }
+
+  void _sendMenuKeys(PromptMenu menu, MenuStep step, {required bool stays}) {
+    final s = widget.session;
+    for (var k = 0; k < step.moves.abs(); k++) {
+      s.arrow(step.moves > 0 ? 'B' : 'A');
+    }
+    HapticFeedback.selectionClick();
+    if (stays) {
+      _markBusy(menu);
     } else {
-      Timer(TermSession.enterGap, () => s.sendText('\r'));
+      setState(() => _menuHold = DateTime.now().add(_menuHoldFor));
+      _toBottom();
+    }
+    unawaited(_typeAndEnter(step));
+  }
+
+  Future<void> _typeAndEnter(MenuStep step) async {
+    final s = widget.session;
+    // 화살표 바로 뒤의 Enter 는 질문 창이 커서를 옮기기 전에 읽혀 앞 칸을 고른 적이 있다(가상 아이폰 실측).
+    var moved = step.moves != 0;
+    try {
+      if (step.text.isNotEmpty) {
+        moved ? await s.sendTextAfter(step.text, TermSession.enterGap) : s.sendText(step.text);
+        moved = true;
+      }
+      if (step.enter) moved ? await s.sendTextAfter('\r', TermSession.enterGap) : s.sendText('\r');
+    } on ServerException {
+      // 그사이 끊겼다 — 창이 그대로 남아 있으니 다시 누르면 된다.
     }
   }
+
+  void _markBusy(PromptMenu menu) => setState(() {
+        _busyMenu = menu;
+        _busyUntil = DateTime.now().add(_menuHoldFor);
+      });
 
   void _dismiss() {
     if (!widget.session.canSend || _menu == null) return;
@@ -509,20 +569,34 @@ class _ConversationViewState extends State<ConversationView> {
 
   bool _sameMenu(PromptMenu a, PromptMenu b) => a.title == b.title &&
     a.options.length == b.options.length &&
+    a.currentTab == b.currentTab &&
     a.options.indexed.every((entry) {
       final other = b.options[entry.$1];
       final option = entry.$2;
       return option.index == other.index && option.label == other.label &&
-        option.current == other.current;
+        option.current == other.current && option.checked == other.checked &&
+        option.row == other.row;
     });
 
   PromptMenu? get _menu {
     if (DateTime.now().isBefore(_menuHold)) return null;
-    final lines = [
-      for (final row in widget.session.grid.lines)
-        row.map((r) => r.text).join(),
-    ];
-    return parsePromptMenu(lines);
+    final lines = <String>[];
+    // 질문 탭의 지금 탭은 배경색으로만 칠해진다 — 그 줄의 칠한 글을 함께 넘긴다.
+    final lit = <int, String>{};
+    for (final (i, row) in widget.session.grid.lines.indexed) {
+      lines.add(row.map((r) => r.text).join());
+      final on = [for (final r in row) if (r.bg is! DefaultColor || r.flags & flagInverse != 0) r.text].join();
+      if (on.trim().isNotEmpty) lit[i] = on;
+    }
+    final menu = parsePromptMenu(lines, lit: lit);
+    // 화면의 계획 상자는 창 높이에서 잘린다 — mod 가 알린 계획 원문이 더 길면 그것을 싣는다.
+    final live = _liveNow;
+    if (menu != null && live.live && live.permissions.isNotEmpty &&
+        live.permissions.first.tool == 'ExitPlanMode' && menu.options.any((o) => o.input)) {
+      final plan = live.permissions.first.lines;
+      if (plan.length > menu.context.length) return menu.withContext(['계획', ...plan]);
+    }
+    return menu;
   }
 
   @override
@@ -544,7 +618,8 @@ class _ConversationViewState extends State<ConversationView> {
           child: Text('저장된 대화 · 연결 확인 중', style: TextStyle(fontSize: Look.sub,
               color: Theme.of(context).colorScheme.onSurfaceVariant)),
         ),
-        Expanded(child: DismissKeyboard(child: _body(context))),
+        // 고르는 카드가 높아 대화 쪽이 낮아지면 빈 화면 그림이 넘친다 — 카드를 덮어 그리지 않게 자른다.
+        Expanded(child: ClipRect(child: DismissKeyboard(child: _body(context)))),
         ConversationAsks(
           pane: widget.pane,
           rows: _loaded ? rows : const [],
@@ -554,13 +629,17 @@ class _ConversationViewState extends State<ConversationView> {
         ),
         if (menu != null)
           _MenuCard(
+            // 다른 창(다른 질문·다른 탭)이면 펼친 줄과 쓰던 글 칸을 새로 시작한다.
+            key: ValueKey('${menu.title}\u0000${menu.currentTab}'),
             menu: menu,
             accent: accent,
             reasonFor: [
               for (var i = 0; i < menu.options.length; i++)
                 if (live.decisionFor(menu, i)?.$1 == false) menu.options[i].label,
             ].firstOrNull,
-            onPick: (i) => _pick(menu, i),
+            onPick: (i, text) => _pick(menu, i, text: text),
+            onTab: (j) => _tab(menu, j),
+            onReveal: (up) => _reveal(menu, up: up),
             onDismiss: _dismiss,
             onTerminal: widget.onTerminal,
           )
@@ -578,7 +657,7 @@ class _ConversationViewState extends State<ConversationView> {
             accent: accent,
             reasonFor: '거절',
             numbered: false,
-            onPick: (i) => unawaited(_decide(live.permissions.first, i == 0)),
+            onPick: (i, _) => unawaited(_decide(live.permissions.first, i == 0)),
             onDismiss: null,
             onTerminal: widget.onTerminal,
           ),
@@ -1547,20 +1626,31 @@ class _Empty extends StatelessWidget {
 }
 
 /// 화면에 뜬 선택 메뉴 — 입력줄 바로 위에 붙어 대화를 읽다가 엄지로 고른다.
-class _MenuCard extends StatelessWidget {
+class _MenuCard extends StatefulWidget {
   const _MenuCard({
+    super.key,
     required this.menu,
     required this.accent,
     required this.onPick,
     required this.onDismiss,
     required this.onTerminal,
+    this.onTab,
+    this.onReveal,
     this.reasonFor,
     this.numbered = true,
   });
 
   final PromptMenu menu;
   final Color accent;
-  final ValueChanged<int> onPick;
+
+  /// 고른 선택지 차례와 글 칸에 쓴 글(글 칸이 아니면 빈 글).
+  final void Function(int i, String text) onPick;
+
+  /// 질문 탭 옮기기. 지금 탭을 모르면 탭은 보이기만 한다.
+  final ValueChanged<int>? onTab;
+
+  /// 굴러 숨은 선택지 쪽으로 커서 옮기기 — true 면 위.
+  final ValueChanged<bool>? onReveal;
   final VoidCallback? onDismiss;
   final VoidCallback onTerminal;
 
@@ -1568,11 +1658,45 @@ class _MenuCard extends StatelessWidget {
   final String? reasonFor;
   final bool numbered;
 
-  /// 카드에 펴는 원문 줄 상한 — 그 뒤는 「… N줄 더」로 접고 전부는 터미널에서 본다(데스크톱 `CTX_MAX`).
+  /// 처음 펴는 창 안 줄 상한(데스크톱 `CTX_MAX`) — 그 뒤는 「N줄 더 보기」로 접었다가 누르면 다 편다.
   static const _contextMax = 8;
 
   @override
+  State<_MenuCard> createState() => _MenuCardState();
+}
+
+class _MenuCardState extends State<_MenuCard> {
+  bool _expanded = false;
+  final _typed = TextEditingController();
+
+  @override
+  void dispose() {
+    _typed.dispose();
+    super.dispose();
+  }
+
+  void _answer(int i) {
+    final text = _typed.text.trim();
+    if (text.isEmpty) return;
+    widget.onPick(i, text);
+    _typed.clear();
+  }
+
+  String _label(PromptOption o) => widget.numbered && o.index > 0 ? '${o.index}. ${o.label}' : o.label;
+
+  Widget _box(bool checked, Color accent, ColorScheme scheme) => Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: Icon(
+          checked ? Icons.check_box : Icons.check_box_outline_blank,
+          size: Look.iconSize,
+          color: checked ? accent : scheme.onSurfaceVariant,
+        ),
+      );
+
+  @override
   Widget build(BuildContext context) {
+    final menu = widget.menu;
+    final accent = widget.accent;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final mono = TextStyle(
@@ -1581,16 +1705,16 @@ class _MenuCard extends StatelessWidget {
       height: 1.4,
       color: scheme.onSurfaceVariant,
     );
-    var lines = menu.context;
-    if (lines.length > _contextMax) {
-      lines = [
-        ...lines.take(_contextMax - 1),
-        '… ${lines.length - (_contextMax - 1)}줄 더',
-      ];
-    }
+    final all = menu.context;
+    final folded = !_expanded && all.length > _MenuCard._contextMax;
+    final lines = folded ? all.take(_MenuCard._contextMax - 1).toList() : all;
+    final media = MediaQuery.of(context);
+    final note = theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
+    final canTab = widget.onTab != null && menu.currentTab >= 0;
     return Container(
+      // 글 칸을 누르면 자판이 올라온다 — 자판을 뺀 높이로 재야 대화가 다 가려지지 않는다.
       constraints: BoxConstraints(
-        maxHeight: MediaQuery.sizeOf(context).height * 0.45,
+        maxHeight: (media.size.height - media.viewInsets.bottom) * 0.45,
       ),
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
       decoration: BoxDecoration(
@@ -1603,6 +1727,21 @@ class _MenuCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (menu.tabs.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Wrap(
+                  spacing: 6,
+                  children: [
+                    for (final (j, t) in menu.tabs.indexed)
+                      _TabChip(
+                        tab: t,
+                        accent: accent,
+                        onTap: canTab && !t.current ? () => widget.onTab!(j) : null,
+                      ),
+                  ],
+                ),
+              ),
             // TUI 창 안의 줄 그대로 — 머리(도구·질문 이름)는 굵게, 원문은 고정폭으로.
             for (final (i, line) in lines.indexed)
               Text(
@@ -1610,6 +1749,14 @@ class _MenuCard extends StatelessWidget {
                 style: i == 0
                     ? theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)
                     : mono,
+              ),
+            if (folded)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  onPressed: () => setState(() => _expanded = true),
+                  child: Text('${all.length - lines.length}줄 더 보기'),
+                ),
               ),
             if (lines.isNotEmpty) const SizedBox(height: 8),
             if (menu.title.isNotEmpty)
@@ -1622,62 +1769,159 @@ class _MenuCard extends StatelessWidget {
                       : theme.textTheme.bodyMedium,
                 ),
               ),
-            for (final (i, o) in menu.options.indexed)
+            // 「더 보기」는 숨은 자리에 — 굴러가는 칸 밖에 남은 「Chat about this」 앞이 숨을 수 있다.
+            for (final (i, o) in menu.options.indexed) ...[
+              if (widget.onReveal != null && o.row - 1 == menu.hiddenAbove) _reveal(up: true),
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
-                child: OutlinedButton(
-                  onPressed: () => onPick(i),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size.fromHeight(Look.buttonH),
-                    alignment: Alignment.centerLeft,
-                    side: BorderSide(
-                      color: o.current ? accent : scheme.outline,
-                    ),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        numbered ? '${o.index}. ${o.label}' : o.label,
-                        style: TextStyle(
-                          fontSize: Look.body,
-                          color: o.current ? accent : scheme.onSurface,
-                          fontWeight: o.current ? FontWeight.w600 : null,
-                        ),
-                      ),
-                      if (o.note.isNotEmpty)
-                        Text(
-                          o.note,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
+                child: o.input ? _inputRow(i, o, accent, scheme) : _optionRow(i, o, accent, scheme, note),
               ),
-            if (reasonFor != null)
+              if (widget.onReveal != null && o.row + 1 == menu.hiddenBelow) _reveal(up: false),
+            ],
+            if (widget.reasonFor != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
-                child: Text(
-                  '「$reasonFor」는 입력칸에 쓴 글을 까닭으로 함께 보내요',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
+                child: Text('「${widget.reasonFor}」는 입력칸에 쓴 글을 까닭으로 함께 보내요', style: note),
               ),
             Row(
               children: [
-                if (onDismiss != null)
-                  TextButton(onPressed: onDismiss, child: const Text('취소 (esc)')),
+                if (widget.onDismiss != null)
+                  TextButton(onPressed: widget.onDismiss, child: const Text('취소 (esc)')),
                 const Spacer(),
                 TextButton(
-                  onPressed: onTerminal,
+                  onPressed: widget.onTerminal,
                   child: const Text('터미널에서 보기'),
                 ),
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _optionRow(int i, PromptOption o, Color accent, ColorScheme scheme, TextStyle? note) => Semantics(
+        checked: o.checked,
+        child: OutlinedButton(
+          onPressed: () => widget.onPick(i, ''),
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size.fromHeight(Look.buttonH),
+            alignment: Alignment.centerLeft,
+            side: BorderSide(color: o.current ? accent : scheme.outline),
+          ),
+          child: Row(
+            children: [
+              if (o.checked != null) _box(o.checked!, accent, scheme),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _label(o),
+                      style: TextStyle(
+                        fontSize: Look.body,
+                        color: o.current ? accent : scheme.onSurface,
+                        fontWeight: o.current ? FontWeight.w600 : null,
+                      ),
+                    ),
+                    if (o.note.isNotEmpty) Text(o.note, style: note),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  /// 글을 쳐서 답하는 칸 — 단추로 두면 빈 Enter 가 가서 질문 전체가 거절된다.
+  Widget _inputRow(int i, PromptOption o, Color accent, ColorScheme scheme) => Row(
+        children: [
+          if (o.checked != null) _box(o.checked!, accent, scheme),
+          Expanded(
+            child: TextField(
+              controller: _typed,
+              minLines: 1,
+              maxLines: 3,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _answer(i),
+              style: const TextStyle(fontSize: Look.body),
+              decoration: InputDecoration(
+                hintText: _label(o),
+                enabledBorder: o.current
+                    ? OutlineInputBorder(borderRadius: Look.corners, borderSide: BorderSide(color: accent))
+                    : null,
+                suffixIcon: ValueListenableBuilder(
+                  valueListenable: _typed,
+                  builder: (context, value, _) => IconButton(
+                    tooltip: '이 글로 답하기',
+                    onPressed: value.text.trim().isEmpty ? null : () => _answer(i),
+                    icon: const Icon(Icons.arrow_upward, size: Look.iconSize),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+
+  Widget _reveal({required bool up}) => Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          onPressed: () => widget.onReveal!(up),
+          icon: Icon(up ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down, size: Look.iconSize),
+          label: Text(up ? '위 선택지 더 보기' : '아래 선택지 더 보기'),
+        ),
+      );
+}
+
+/// 질문 탭 하나 — 보이는 알약은 낮아도 누름 영역은 44.
+class _TabChip extends StatelessWidget {
+  const _TabChip({required this.tab, required this.accent, required this.onTap});
+  final PromptTab tab;
+  final Color accent;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final on = tab.current;
+    return Semantics(
+      button: onTap != null,
+      selected: on,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: Look.corners,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: Look.tap, minWidth: Look.tap),
+          child: Center(
+            widthFactor: 1,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: Look.chipPadX + 2, vertical: 4),
+              decoration: BoxDecoration(
+                color: on ? accent.withValues(alpha: 0.18) : null,
+                border: Border.all(color: on ? accent : scheme.outline),
+                borderRadius: BorderRadius.circular(Look.radiusSm),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (tab.done)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Icon(Icons.check, size: 14, color: accent),
+                    ),
+                  Text(
+                    tab.label,
+                    style: TextStyle(
+                      fontSize: Look.sub,
+                      color: on ? accent : scheme.onSurface,
+                      fontWeight: on ? FontWeight.w600 : null,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
