@@ -101,6 +101,12 @@ mod tests {
         assert!(validate_selection(&v,&account).is_err());
         v["claude"]["accounts"][0]["usage_state"]=json!("logged_out");
         assert!(validate_resume(&v,&account).is_err());
+        assert!(resume_substitute(&v,"claude").is_none(),"no other Claude slot to stand in");
+        v["claude"]["accounts"].as_array_mut().unwrap().push(row("standby",30.0));
+        let substitute=resume_substitute(&v,"claude").expect("a logged-in Claude slot stands in");
+        assert_ne!(substitute.account_id,account.account_id);
+        assert!(validate_resume(&v,&substitute).is_ok());
+        assert!(resume_substitute(&v,"other").is_none());
     }
 
     #[test]
@@ -219,10 +225,20 @@ pub fn validate_selection(values: &Value, selected: &Selection) -> Result<(), &'
 
 pub fn choose(values: &Value) -> Result<Choice, &'static str> {
     let preferred = if values["agents"]["preferred_agent"] == "codex" {"codex"} else {"claude"};
-    let providers = if preferred=="claude" {["claude","codex"]} else {["codex","claude"]};
+    choose_among(values, if preferred=="claude" {&["claude","codex"]} else {&["codex","claude"]})
+}
+
+/// 이어 갈 대화의 저장 계정이 로그아웃됐을 때 같은 하네스에서 쓸 수 있는 계정. 대화 기록은 계정마다 따로가
+/// 아니라(Claude 는 프로젝트 폴더, Codex 는 원본 sessions 에 이어 건다) 다른 계정으로 그대로 이어진다.
+pub fn resume_substitute(values: &Value, provider: &str) -> Option<Selection> {
+    let provider = ["claude","codex"].into_iter().find(|p|*p==provider)?;
+    choose_among(values,&[provider]).ok().map(|choice|Selection {provider:provider.into(),account_id:choice.account_id})
+}
+
+fn choose_among(values: &Value, providers: &[&'static str]) -> Result<Choice, &'static str> {
     let mut known = Vec::new();
     let mut fallback = None;
-    for (rank,provider) in providers.into_iter().enumerate() {
+    for (rank,&provider) in providers.iter().enumerate() {
         for row in rows(values,provider) {
             let Some(id) = row["id"].as_str() else { continue };
             let selected = Selection {provider:provider.into(),account_id:id.into()};

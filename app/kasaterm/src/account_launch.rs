@@ -35,6 +35,20 @@ pub(crate) fn remote_plan(plan: &Value, machine: Option<&str>) -> anyhow::Result
     Ok(plan.clone())
 }
 
+/// 이어 가기인데 저장 계정이 로그아웃이면 같은 하네스의 쓸 수 있는 계정으로 잇는다 — 복원 때 학생이 「saved
+/// account is logged out」 한 줄로 안 뜨고 남던 칸(2026-11-14 집 PC)을 막는다. 새로 띄우기는 고른 계정 그대로다.
+pub(crate) fn resolve_or_substitute(values: &Value, selected: &Selection, resuming: bool) -> anyhow::Result<(Selection,BTreeMap<String,String>)> {
+    match resolve(values,selected,resuming) {
+        Ok(env) => Ok((selected.clone(),env)),
+        Err(error) if resuming && agent_choice::validate_resume(values,selected)==Err("saved account is logged out") => {
+            let substitute=agent_choice::resume_substitute(values,&selected.provider).ok_or(error)?;
+            let env=resolve(values,&substitute,true)?;
+            Ok((substitute,env))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn resolve(values: &Value, selected: &Selection, resuming: bool) -> anyhow::Result<BTreeMap<String,String>> {
     if resuming {agent_choice::validate_resume(values,selected)} else {agent_choice::validate_selection(values,selected)}
         .map_err(anyhow::Error::msg)?;
@@ -104,6 +118,22 @@ mod tests {
         assert!(remote_plan(&values,Some("different")).is_err());
         let mut old=values;old["account_selection"]=json!(0);
         assert!(remote_plan(&old,Some("target")).is_err());
+    }
+
+    #[test]
+    fn a_logged_out_saved_slot_resumes_on_another_slot_of_the_same_harness() {
+        let values=json!({"claude":{"account":"a","codex_account":"",
+            "accounts":[{"id":"a","logged_in":false,"usage_state":"logged_out"},
+                {"id":"b","label":"b","logged_in":true,"usage":10.0,"usage_stale":false,"usage_state":"ready"}],
+            "codex_accounts":[{"id":"","logged_in":true,"usage":0.0,"usage_stale":false,"usage_state":"ready"}]}});
+        let saved=Selection {provider:"claude".into(),account_id:"a".into()};
+        let substitute=|resuming|resolve_or_substitute(&values,&saved,resuming).map(|(s,_)|s);
+        assert!(substitute(false).is_err(),"a fresh launch keeps the chosen slot");
+        if let Ok(selected)=substitute(true) {
+            assert_eq!((selected.provider.as_str(),selected.account_id.as_str()),("claude","b"));
+        } else {
+            assert!(crate::claude_auth::runtime_dir_for("b",&crate::socket::read_claude_account()).is_none(),"only storage may refuse the stand-in");
+        }
     }
 
     #[test]

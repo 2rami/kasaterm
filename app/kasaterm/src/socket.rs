@@ -2947,13 +2947,14 @@ impl Backend for PtyBackend {
         anyhow::ensure!(kasa_socket::server::peer_pid()==Some(pid),"account launch process identity does not match the socket client");
         selected.validate().map_err(anyhow::Error::msg)?;
         anyhow::ensure!(!kasa_remote::remote::is_remote_pane(surface),"account launch must run on the source machine");
-        let binding=crate::account_launch::Binding::new(pid,selected.clone())?;
         let pane=kasa_pty::lookup_session(surface).ok_or_else(||anyhow::anyhow!("launch pane disappeared"))?;
         anyhow::ensure!(crate::account_launch::hosts(&pane,pid),"account launcher is not in this pane");
         let (tx,rx)=std::sync::mpsc::channel();
         self.proxy.send_event(UserEvent::AgentAccountsSnapshot(tx)).map_err(|_|anyhow::anyhow!("app event loop gone"))?;
         let values=rx.recv_timeout(std::time::Duration::from_secs(8)).map_err(|_|anyhow::anyhow!("account snapshot timed out"))?;
-        let env=crate::account_launch::resolve(&values,selected,resuming)?;
+        let (selected,env)=crate::account_launch::resolve_or_substitute(&values,selected,resuming)?;
+        let selected=&selected;
+        let binding=crate::account_launch::Binding::new(pid,selected.clone())?;
         anyhow::ensure!(crate::account_launch::hosts(&pane,pid),"launch pane changed");
         anyhow::ensure!(kasa_pty::lookup_session(surface).is_some_and(|current|Arc::ptr_eq(&pane,&current)),"launch pane was replaced");
         let mut ws=self.ws.lock().unwrap();

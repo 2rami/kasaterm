@@ -16,8 +16,13 @@ fn parse(args: &[String]) -> Result<(Selection,&[String])> {
     Ok((selected,command))
 }
 
-fn checked_env(value: &Value, selected: &Selection) -> Result<BTreeMap<String,String>> {
-    if value["provider"]!=selected.provider || value["account_id"]!=selected.account_id { return Err(anyhow!("account selection changed")); }
+/// 앱이 잇는 계정을 돌려준다. 이어 가기에서 저장 계정이 로그아웃이면 앱이 같은 하네스의 다른 계정을 고르니, 그때만
+/// 계정이 달라도 받는다.
+fn checked_env(value: &Value, selected: &Selection, resuming: bool) -> Result<(Selection,BTreeMap<String,String>)> {
+    if value["provider"]!=selected.provider || (!resuming && value["account_id"]!=selected.account_id) { return Err(anyhow!("account selection changed")); }
+    let selected=Selection {provider:selected.provider.clone(),account_id:value["account_id"].as_str().context("account selection changed")?.into()};
+    selected.validate().map_err(anyhow::Error::msg)?;
+    let selected=&selected;
     let env: BTreeMap<String,String>=serde_json::from_value(value["env"].clone()).context("invalid account environment")?;
     let account_key=if selected.provider=="claude" {"CLAUDE_SECURESTORAGE_CONFIG_DIR"} else {"KASATERM_CODEX_ACCOUNT_DIR"};
     if env.len()!=3 || !env.contains_key(account_key)
@@ -26,7 +31,7 @@ fn checked_env(value: &Value, selected: &Selection) -> Result<BTreeMap<String,St
         || env.values().any(|v|v.chars().any(char::is_control)) {
         return Err(anyhow!("unexpected account environment"));
     }
-    Ok(env)
+    Ok((selected.clone(),env))
 }
 
 fn shim_program(shim: &Path, name: &str) -> std::path::PathBuf {
@@ -47,7 +52,7 @@ pub(super) fn run(args: &[String]) -> Result<Option<Response>> {
     let reply=roundtrip(&resolve_socket_path()?, &Request {id:json!("account-run"),method:"agent.account_env".into(),
         params:json!({"surface_id":pane,"pid":std::process::id(),"selection":selected,"resuming":resuming})})?;
     if !reply.ok { return Err(anyhow!("{}",reply.error.map(|e|e.message).unwrap_or_else(||"selected account unavailable".into()))); }
-    let mut env=checked_env(&reply.result.unwrap_or_default(),&selected)?;
+    let (selected,mut env)=checked_env(&reply.result.unwrap_or_default(),&selected,resuming)?;
     let shim=std::env::var_os("KASATERM_TMUX_SHIM_DIR").map(std::path::PathBuf::from).context("account launch requires the pane launcher")?;
     let mut program=Path::new(&args[0]).to_path_buf();
     if args[0]==selected.provider {
@@ -98,10 +103,16 @@ mod tests {
     fn environment_cannot_change_provider_or_inject_credentials() {
         let selection=Selection{provider:"claude".into(),account_id:"acct-1".into()};
         let mut v=json!({"provider":"claude","account_id":"acct-1","env":{"KASATERM_AUTO_ACCOUNT_PROVIDER":"claude","KASATERM_AUTO_ACCOUNT_ID":"acct-1","CLAUDE_SECURESTORAGE_CONFIG_DIR":"/fixture/account"}});
-        assert_eq!(checked_env(&v,&selection).unwrap()["CLAUDE_SECURESTORAGE_CONFIG_DIR"],"/fixture/account");
+        assert_eq!(checked_env(&v,&selection,false).unwrap().1["CLAUDE_SECURESTORAGE_CONFIG_DIR"],"/fixture/account");
+        let stand_in=json!({"provider":"claude","account_id":"acct-2","env":{"KASATERM_AUTO_ACCOUNT_PROVIDER":"claude","KASATERM_AUTO_ACCOUNT_ID":"acct-2","CLAUDE_SECURESTORAGE_CONFIG_DIR":"/fixture/other"}});
+        assert!(checked_env(&stand_in,&selection,false).is_err(),"a fresh launch keeps the chosen slot");
+        assert_eq!(checked_env(&stand_in,&selection,true).unwrap().0.account_id,"acct-2","resume may continue on a stand-in slot");
+        let mut other_harness=stand_in.clone();
+        other_harness["provider"]=json!("codex");
+        assert!(checked_env(&other_harness,&selection,true).is_err());
         v["env"]["ANTHROPIC_API_KEY"]=json!("must-not-be-accepted");
-        assert!(checked_env(&v,&selection).is_err());
+        assert!(checked_env(&v,&selection,true).is_err());
         v["account_id"]=json!("other");
-        assert!(checked_env(&v,&selection).is_err());
+        assert!(checked_env(&v,&selection,false).is_err());
     }
 }
