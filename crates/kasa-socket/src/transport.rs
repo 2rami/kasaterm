@@ -135,14 +135,14 @@ mod imp {
     use std::ptr;
     use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, ERROR_PIPE_CONNECTED,
+        CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
         GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, ReadFile, WriteFile, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
     };
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId, WaitNamedPipeW,
         PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
@@ -313,23 +313,33 @@ mod imp {
     impl LocalStream {
         pub fn connect(path: &Path) -> Result<Self> {
             let name_wide = pipe_name_to_wide(path);
-            let h = unsafe {
-                CreateFileW(
-                    name_wide.as_ptr(),
-                    GENERIC_READ | GENERIC_WRITE,
-                    0,
-                    ptr::null(),
-                    OPEN_EXISTING,
-                    0,
-                    ptr::null_mut(),
-                )
-            };
-            if h.is_null() || h == INVALID_HANDLE_VALUE {
-                return Err(io::Error::last_os_error());
+            // 서버는 받을 자리(인스턴스)를 하나씩 연다. 복원처럼 여러 칸이 한꺼번에 붙으면 나머지는 「모든 파이프
+            // 인스턴스가 사용 중」(231)을 받고 곧장 실패해, 학생이 안 뜬 칸이 남았다(2026-11-14 집 PC). 자리가 날
+            // 때까지 기다렸다 다시 붙는다(최대 5초).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let h = unsafe {
+                    CreateFileW(
+                        name_wide.as_ptr(),
+                        GENERIC_READ | GENERIC_WRITE,
+                        0,
+                        ptr::null(),
+                        OPEN_EXISTING,
+                        0,
+                        ptr::null_mut(),
+                    )
+                };
+                if !h.is_null() && h != INVALID_HANDLE_VALUE {
+                    return Ok(Self {
+                        handle: std::sync::Arc::new(OwnedHandle::new(h)),
+                    });
+                }
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) || std::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                unsafe { WaitNamedPipeW(name_wide.as_ptr(), 250) };
             }
-            Ok(Self {
-                handle: std::sync::Arc::new(OwnedHandle::new(h)),
-            })
         }
 
         /// 붙은 클라이언트 프로세스의 pid — 커널이 준 값이라 요청 본문보다 믿을 만하다(칸 안 `claude -p` 가드·
