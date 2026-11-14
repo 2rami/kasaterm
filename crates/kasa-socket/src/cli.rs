@@ -2016,7 +2016,7 @@ fn print_help() {
         ("학생·협업", &[
             "tell <이름|이름@기계|%N|--address JSON> [--title \"지금 일\"] <글|--stdin>   안전 전달, 영수증 ID 를 준다. 새 일이면 --title",
             "tell --status ID                          전달 영수증 조회",
-            "tell --raw [%N|%N@기계|--address JSON] <글> · tell --key [같은 대상] <enter|tab|escape|up|ctrl+x|alt+b|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
+            "tell --raw [%N|%N@기계|--address JSON] [--stdin|--] <글> · tell --key [같은 대상] <enter|tab|escape|up|ctrl+x|alt+b|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
             "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
             "summon [--machine 기계] --beside 칸 [--tab] [--cwd 폴더] [--json] …   지정한 작업방에 학생(답: 그 칸 주소)",
             "summon [--machine 기계] --new-room '작업방 이름' [--cwd 폴더] …   새 작업방의 첫 학생(--name 은 학생의 작업명)",
@@ -2689,7 +2689,24 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 _ => (None, &args[..]),
             };
             let what = if cmd == "tell:raw" { "text" } else { "key" };
-            let value = rest.join(" ");
+            // 옵션 자리의 글자를 본문으로 이으면 칸 입력줄에 그 글자가 그대로 남는다 — `--stdin` 을 주자 「--stdincall」
+            // 이 쳐져 학생이 안 떴다(2026-11-14). `--stdin` 은 표준입력을 본문으로, `--` 뒤는 글자 그대로, 그 밖의
+            // `--…` 는 거절한다.
+            let (from_stdin, rest) = match rest.first().map(String::as_str) {
+                Some("--stdin") if cmd == "tell:raw" => (true, rest.get(1..).unwrap_or(&[])),
+                Some("--") => (false, rest.get(1..).unwrap_or(&[])),
+                Some(flag) if flag.starts_with("--") && flag.len() > 2 => return Err(anyhow!(
+                    "tell --{}: 모르는 옵션 {flag} — `--` 로 시작하는 글을 그대로 보내려면 `--` 뒤에 쓰세요", &cmd[5..])),
+                _ => (false, rest),
+            };
+            let value = if from_stdin {
+                anyhow::ensure!(rest.is_empty(), "tell --raw --stdin 은 본문을 표준입력에서만 받아요");
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+                text
+            } else {
+                rest.join(" ")
+            };
             if value.is_empty() {
                 return Err(anyhow!("tell --{} needs a {what}", &cmd[5..]));
             }
@@ -4870,6 +4887,9 @@ mod tests {
         let key = super::build_request("tell:key", &v(&["--surface", a, "enter"])).unwrap();
         assert_eq!((key.params["op"].as_str(), key.params["key"].as_str()), (Some("send_key"), Some("enter")));
         assert_eq!(super::build_request("tell:raw", &v(&["%3", "ls"])).unwrap().method, "surface.send_text");
+        // 옵션 자리의 `--…` 가 입력줄에 글자로 쳐지면 안 된다(「--stdincall」).
+        assert!(super::build_request("tell:raw", &v(&["%3", "--force", "ls"])).is_err());
+        assert_eq!(super::build_request("tell:raw", &v(&["%3", "--", "--help"])).unwrap().params["text"], "--help");
         assert_eq!(super::build_request("focus", &v(&[a])).unwrap().params["op"], "focus");
         let moved = super::build_request("move", &v(&[a, b, "down"])).unwrap();
         assert_eq!((moved.params["target"]["surface_id"].as_str(), moved.params["direction"].as_str()), (Some("%4"), Some("down")));
