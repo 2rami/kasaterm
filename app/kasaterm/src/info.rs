@@ -1329,6 +1329,10 @@ pub(crate) fn listening_ports() -> Vec<(u16, u32)> {
 
 #[cfg(windows)]
 pub(crate) fn listening_ports() -> Vec<(u16, u32)> {
+    // 세션 끝 중엔 띄워도 데스크톱이 내려가 실패한다(kasa_socket::session_end).
+    if kasa_socket::session_end::is_ending() {
+        return Vec::new();
+    }
     let Ok(out) = proc::command("netstat").args(["-ano", "-p", "TCP"]).output() else {
         return Vec::new();
     };

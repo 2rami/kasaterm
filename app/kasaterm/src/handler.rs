@@ -1572,6 +1572,10 @@ impl ApplicationHandler<UserEvent> for App {
                 })));
                 return;
             }
+            UserEvent::SessionEnding(done) => {
+                self.on_session_ending(done);
+                return;
+            }
             UserEvent::AccountSyncApply(request, reply) => {
                 let _ = reply.send(self.apply_account_sync(request.clone()));
                 // After the reply: following another device may restart panes, which must not hold the sync thread.
@@ -2121,12 +2125,15 @@ impl ApplicationHandler<UserEvent> for App {
         // 자동 ssh 터널(명부의 ssh 항목)이 고아로 남지 않게.
         kasa_device::machines::stop_tunnels();
         self.close_web_hosts();
-        // Persist every session's layout + pane cwds + claude sessions so the
-        // next launch restores the full workspace (A3).
-        self.save_session_state();
-        // Persist the window size + position so the next launch restores the
-        // frame instead of the hardcoded default (껐던 크기·위치 복원).
-        self.save_window_frame();
+        // 세션 끝 중이면 칸이 살아 있을 때 이미 저장했다(`on_session_ending`) — 지금은 칸이 걷힌 뒤일 수 있다.
+        if !kasa_socket::session_end::is_ending() {
+            // Persist every session's layout + pane cwds + claude sessions so the
+            // next launch restores the full workspace (A3).
+            self.save_session_state();
+            // Persist the window size + position so the next launch restores the
+            // frame instead of the hardcoded default (껐던 크기·위치 복원).
+            self.save_window_frame();
+        }
         // lite 는 「업데이트 안 함」이 계약이다 — 설치본 경로가 달라 어차피 None 이지만
         // 코드로 못 박는다.
         if !self.lite {
@@ -2185,6 +2192,8 @@ impl ApplicationHandler<UserEvent> for App {
         // mac 메뉴 블록은 cfg(macos) 라, 여기(메뉴 밖)서 별도로 건다.
         #[cfg(windows)]
         crate::win_sparkle::init(self.proxy.clone());
+        #[cfg(windows)]
+        crate::session_end::watch(self.proxy.clone());
         // macOS menu bar: app submenu (About/Quit) + a "보기" submenu with
         // the "Git 패널" toggle. Built once (NSApp exists by resumed). Clicks
         // arrive on muda's global channel, drained in about_to_wait. Stored
@@ -7646,7 +7655,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 크래시·강제종료 때 크기·위치가 유실된다. about_to_wait 는 블링크
         // 타이머(WaitUntil)로 주기 호출되니 별도 타이머가 필요 없다.
         if let Some(due) = self.window_frame_save_due {
-            if Instant::now() >= due {
+            if Instant::now() >= due && !kasa_socket::session_end::is_ending() {
                 self.window_frame_save_due = None;
                 self.save_window_frame();
             }
@@ -8703,6 +8712,10 @@ fn fetch_claude_usage(
     dir: &str,
     read: UsageRead,
 ) -> Option<(serde_json::Value, bool, String)> {
+    // 세션 끝 중엔 띄워도 데스크톱이 내려가 실패한다(kasa_socket::session_end).
+    if kasa_socket::session_end::is_ending() {
+        return None;
+    }
     // 슬롯 경로엔 공백·한글이 들어올 수 있어 쿼리로 넘기기 전에 퍼센트 인코딩한다.
     let url = format!(
         "http://127.0.0.1:{port}/claude-usage?dir={}{}",

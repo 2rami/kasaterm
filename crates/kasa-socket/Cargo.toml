@@ -48,6 +48,15 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Time",
     # `kasaterm-cli parent-pid` — claude 안 연결 mod 가 제 claude pid 를 묻는다.
     "Win32_System_Diagnostics_ToolHelp",
+    # 끄는 중 띄운 자식의 로더 오류 창을 막는 오류 모드(session_end.rs).
+    "Win32_System_Diagnostics_Debug",
+] }
+
+# session_end 시험이 숨은 데스크톱을 만들었다 닫는다(CreateDesktopW 가 이 둘을 요구한다).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_System_StationsAndDesktops",
+    "Win32_Graphics_Gdi",
 ] }
 
 # 터미널 가로 칸 수(TIOCGWINSZ)를 읽으려고. 상수도 구조체도 OS 마다 달라 손으로

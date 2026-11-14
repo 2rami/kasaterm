@@ -176,6 +176,7 @@ mod win_dialog;
 // `.md` 더블클릭으로 뜬 두 번째 실행이 떠 있는 앱에 문서를 넘긴다(맥 odoc 자리).
 #[cfg(windows)]
 mod doc_forward;
+mod session_end;
 
 use anyhow::Result;
 use kasa_bridge::layout::{parse_layout, Layout};
@@ -3833,6 +3834,8 @@ enum UserEvent {
     /// (SocketSessionBound) 시점엔 맵이 비어 상속을 놓친다 → 맵이 채워지면 이
     /// 이벤트로 pane_claude_sid 를 다시 훑어 뒤늦게 부모를 물려준다.
     BgAgentsChanged,
+    /// Windows 세션이 끝나 간다(`session_end.rs`) — 칸이 살아 있을 때 저장하고 `Sender` 로 끝났다고 알린다.
+    SessionEnding(std::sync::mpsc::Sender<()>),
     /// A background git op (push/pull/commit) finished — clears the panel's
     /// spinner. Carries nothing: only one git op runs at a time.
     GitOpDone,
@@ -6700,6 +6703,9 @@ impl ViewerLaunch {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // 무엇이든 띄우기 전에 — 끄는 중 띄운 자식의 오류 창은 여기서 물려준 모드가 막는다.
+    #[cfg(windows)]
+    kasa_socket::session_end::quiet_loader_error_boxes();
     // Viewer mode is decided before the first logger/config/shim write. A
     // renamed bundle executable and `kasaterm --viewer` share the same code,
     // but only the terminal app may perform startup maintenance.

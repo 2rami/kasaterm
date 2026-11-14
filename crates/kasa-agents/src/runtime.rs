@@ -12,6 +12,10 @@ pub fn claude_agents_all(max_age: std::time::Duration) -> Option<std::sync::Arc<
             return Some(list.clone());
         }
     }
+    // 세션 끝 중엔 띄워도 데스크톱이 내려가 실패한다(kasa_socket::session_end) — 낡았어도 가진 것을 준다.
+    if kasa_socket::session_end::is_ending() {
+        return last.as_ref().map(|(_, list)| list.clone());
+    }
     let out = kasa_socket::process::no_window_command(claude_bin()).args(["agents", "--json", "--all"]).output().ok()?;
     if !out.status.success() {
         return None;
