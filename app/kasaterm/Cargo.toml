@@ -178,6 +178,8 @@ windows-sys = { workspace = true, features = [
     "Win32_Storage_Packaging_Appx",
     # sysmem 시험이 GlobalMemoryStatusEx 로 표본을 대조한다.
     "Win32_System_SystemInformation",
+    # 세션 끝 알림을 받는 숨은 창(session_end.rs) — RegisterClassW·WNDCLASSW 가 이 기능 뒤에 있다.
+    "Win32_Graphics_Gdi",
 ] }
 # 파일·폴더 고르기 창(win_dialog.rs) — 셸의 IFileOpenDialog·IFileSaveDialog. 데스크톱 기능은
 # 그 창을 사람 화면 밖(숨은 데스크톱)에서 띄워 보는 시험이 쓴다. GDI·HiDpi·LibraryLoader·

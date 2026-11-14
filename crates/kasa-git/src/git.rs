@@ -72,6 +72,10 @@ fn run_panel_git(
     if Instant::now() >= deadline {
         return Err("git panel snapshot timed out".into());
     }
+    // 세션 끝 중엔 띄워도 데스크톱이 내려가 실패한다(kasa_socket::session_end).
+    if kasa_socket::session_end::is_ending() {
+        return Err("session ending".into());
+    }
     let mut command = git_cmd();
     // Inherited Git state must not redirect a pane's cwd to another repository.
     for variable in [

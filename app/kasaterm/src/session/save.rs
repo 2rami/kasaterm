@@ -341,6 +341,11 @@ impl App {
     /// 곧 변경으로 보면 몇 초마다 같은 내용을 다시 쓰게 된다 — 직렬화는 하되
     /// 해시가 같으면 디스크는 건드리지 않는다.
     pub(crate) fn autosave_session(&mut self) {
+        // 세션 끝 중엔 칸 프로세스가 죽어 칸이 걷힌다 — 칸이 살아 있을 때 남긴 스냅샷
+        // (`on_session_ending`)을 무너진 배치로 덮지 않는다. touched 는 남겨 끝이 취소되면 저장한다.
+        if kasa_socket::session_end::is_ending() {
+            return;
+        }
         self.session_saved_at = std::time::Instant::now();
         self.session_touched = false;
         if self.lite {

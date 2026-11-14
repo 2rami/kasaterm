@@ -1445,7 +1445,7 @@ impl App {
             for pane in gone {
                 dropped |= self.pane_claude_sid.remove(&pane).is_some();
             }
-            if dropped {
+            if dropped && !kasa_socket::session_end::is_ending() {
                 self.save_session_state();
             }
         }
