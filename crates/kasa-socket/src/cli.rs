@@ -145,6 +145,10 @@ fn run() -> Result<Option<Response>> {
         _ if cmd.contains(':') => return Err(anyhow!("unknown command: {cmd}")),
         _ => cmd,
     };
+    if let Some(help) = command_help(&cmd, &args) {
+        eprintln!("{help}");
+        return Ok(None);
+    }
     if API_TARGET.get().is_some() {
         if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell:status"|"peek"|"capture"|"where"
             |"tell:raw"|"tell:key"|"transcript"|"focus"|"move"|"rename-window"|"window-new"|"attach"|"app"|"agent-plan") {
@@ -160,7 +164,13 @@ fn run() -> Result<Option<Response>> {
             roundtrip(&resolve_socket_path()?, request)
         }).map(Some);
     }
-    if cmd == "app" { return app_control::run(&args); }
+    if cmd == "app" {
+        // 기기 이름도 받는다 — 안정 id 만 받자 `app screen --machine nachoneko` 가 「registered stable id」로만 거절됐다.
+        if API_TARGET.get().is_none() {
+            resolve_machine_flag(&mut args, "--machine")?;
+        }
+        return app_control::run(&args);
+    }
     if cmd == "agent-plan" && API_TARGET.get().is_some() {
         let response=roundtrip(&resolve_socket_path()?,&Request{id:json!("agent-plan"),method:"agent.plan".into(),params:json!({})})?;
         if let Some(machine)=flag_value(&args,"--machine").filter(|_|response.ok) {
@@ -1999,87 +2009,90 @@ fn draw_boxes(rects: &[(String, u16, u16, u16, u16)]) -> String {
 
 
 
+// 용도별로 묶는다 — 명령이 60개를 넘자 한 줄 목록에서는 무엇을 써야 할지 못 찾았다(2026-09-29 CLI 정리).
+// 전체 도움말과 `<명령> --help` 가 같은 줄을 쓴다.
+const HELP_GROUPS: &[(&str, &[&str])] = &[
+    ("보기 — 누가 무엇을 하나, 어디 있나", &[
+        "where [찾을 말] [--json] [--machine 기계]  방마다 칸 배치도 + 칸·탭 목록. 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다",
+        "                                          「방 N」= 사이드바 ⌘N(--json 의 room_number). window 는 0부터 센 인덱스라 다를 수 있다",
+        "board [--all|--local]                     학생 상태. 연락 주소(address)는 --all 에서. 방 번호는 room_number(⌘N)",
+        "board --wait <이름|%N>… [--since ms|영수증] [--timeout 초]   done 보고까지 기다린다(0 성공·1 실패·3 시간초과·4 사라짐)",
+        "board-watch --all --json [--since CURSOR] 바뀐 것만 흘려보낸다(Monitor 용)",
+        "peek [%N | %N@기계 | 이름@기계 | --address JSON] [줄수]   pane 화면 글자(다른 기기 칸은 카사넷으로)",
+        "capture [%N | %N@기계 | 이름@기계 | --address JSON] [경로] | --window [경로]   pane 또는 창 전체 스크린샷",
+        "transcript [%N | %N@기계 | --address JSON] [N]   claude 최근 대화 N 턴(다른 기기 칸은 카사넷으로)",
+        "activity [%N | --address JSON] [N]        실제로 한 도구·인자·결과(시간순)",
+    ]),
+    ("학생·협업", &[
+        "tell <이름|이름@기계|%N|--address JSON> [--title \"지금 일\"] <글|--stdin>   안전 전달, 영수증 ID 를 준다. 새 일이면 --title",
+        "tell --status ID                          전달 영수증 조회",
+        "tell --raw [%N|%N@기계|--address JSON] [--enter] [--stdin|--] <글> · tell --key [같은 대상] <enter|tab|escape|up|ctrl+x|alt+b|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
+        "                                          --raw 는 글만 넣는다. 셸 명령을 돌리려면 --enter(글 뒤에 Enter)",
+        "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
+        "summon [--machine 기계] --beside 칸 [--tab] [--cwd 폴더] [--json] …   지정한 작업방에 학생(답: 그 칸 주소)",
+        "summon [--machine 기계] --new-room '작업방 이름' [--cwd 폴더] …   새 작업방의 첫 학생(--name 은 학생의 작업명)",
+        "done <succeeded|failed|blocked|needs_restart|needs_approval> [요약]   내 일 보고 — 판에 실리고 부른 창 입력으로 간다",
+        "sessions [N]                              최근 claude·codex 세션 목록",
+    ]),
+    ("창·칸 조작", &[
+        "split <left|right|up|down> [%N] [--focus] [--count N]   칸 나누기 — 방 전체가 같은 크기 격자로 다시 짜인다",
+        "split <방향> %N@기계 · tab %N@기계        다른 기기 칸 옆·탭에 세우기",
+        "tab [%N] [--focus]                        그 칸에 새 탭",
+        "launch %N [--cwd 폴더] '<명령>'           빈 셸 칸에서 명령 실행 — 그 칸 셸(cmd·PowerShell·zsh) 문법으로 바꿔 친다",
+        "tab --server --surface %N [--cwd 폴더] [--name 라벨] '<명령>' | --clear   서버 실행·복원 등록(비밀값 금지)",
+        "window-new [--machine 기계]               새 방(그 기계에 만들고 여기서 보기) — 사람이 보던 화면이 그 방으로 넘어간다",
+        "window-new --on 기계 [--cwd 폴더]         그 기계 자신의 새 방(거울 아님, 답: 빈 칸 주소) — 이쪽 화면은 그대로",
+        "move %N <대상> [방향] · resize %N <0..1>  칸 옮기기 · 비율 (move 는 %N@기계 둘도)",
+        "focus %N · closed [%N]                    포커스 · 되살리기 목록(%N 을 주면 진짜 끈다)",
+        "close %N… [--force]                       칸 닫기(미커밋 변경이 있으면 안 닫는다)",
+        "rename-window [%N] <이름> | rename-window [%N] --color #rrggbb   %N 이면 그 칸 이름·색, 없으면 방 이름",
+        "rename-window --room <칸> <이름>          그 칸이 든 방 이름",
+        "  다른 기기 칸: focus·close·move·rename-window 의 %N 자리에 %N@기계 · 이름@기계 · --address JSON",
+        "attach <%N@기계|주소> [--on 기계] [--into 칸] [--focus]   다른 기기 칸을 거울 탭으로(--on 그 기계 화면에)",
+    ]),
+    ("클립보드·결과물", &[
+        "copy <글> | copy --surface %N [줄수] | copy --secret(표준입력)   클립보드에 넣기",
+        "paste [--show] | paste --into [%N] | paste --env VAR -- <명령…>   읽기 · 값을 안 보고 붙이기 · 환경변수로",
+        "open <url>                                사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
+        "phone browser open <url> | shot [--out 경로] | text | url | eval <JS> | back | forward | reload [--timeout 초]   (카사브라우저 폰 앱)",
+        "                                          별도 카사브라우저 폰 앱에서 실행한다. 꺼져 있으면 카사텀 폰 앱으로 알림을 보낸다",
+    ]),
+    ("기기·네트워크", &[
+        "machines [--names|--json|--history]       명부 기계 목록과 닿는 길, 끊긴 이유와 붙음·끊김 기록",
+        "identify --machine 기계                   그 기계에 닿나(0 닿음 · 1 끊김) — 판에 칸이 없어도",
+        "machines connect <기기|http://호스트:포트> [--here] [--cwd 경로] [--run 명령]   그 기기에 새 방(보기 창은 뒤에) · --here 면 이 칸 자리를 그 기기 셸로",
+        "machines move [%N] <기기|local>            claude·codex 세션을 다른 기기로 옮기기. 생략하면 내 칸, local 은 이쪽 거울을 데려오기",
+        "  예: machines move %3 맥미니 · machines move %3 local --cwd /레포 · 상세: machines move --help",
+        "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
+        "lid-away install|uninstall|status         덮어도 마저 하기(맥북): 잠자기 막음 허락(sudo)·감시 설치",
+    ]),
+    ("계정 일 권한 (설정 → 계정에서 연결한 GitHub)", &[
+        "pr create --repo 주인/레포 --head 브랜치 [--base main] --title 제목 [--body 본문|-] [--draft]   PR 요청(사람이 앱에서 승인)",
+        "pr connections                            연결·승인 대기 목록  (--connection <id> 로 연결 고르기)",
+    ]),
+    ("키체인 비밀 (폰 Face ID 한 번으로 그 요청만)", &[
+        "secret run -e 이름=<서비스>[#계정] [-e …] -- <명령…>   이 맥 키체인의 값을 그 명령의 환경으로만, 출력에 나오면 가림",
+        "secret read <서비스>[#계정]               값을 표준출력으로(끝 줄바꿈 없음) — x=$(…) 로 담아 쓴다",
+        "secret status                             믿는 폰 열쇠(값 없음)",
+    ]),
+    ("앱", &[
+        "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·승인 필요)",
+        "agent-plan [--machine ID]                전체 로그인 계정의 사용량으로 새 세션 계획 조회",
+        "app inspect|screen|restore|restart|update-check [--machine 기계] …  현재 화면·복원·재시작 (guide panes)",
+        "app-restart plan|run|status …            기기 앱 재시작 계획·실행",
+    ]),
+    ("훅 (claude 훅이 부른다)", &[
+        "bind-transcript <path> · attention [--surface %N] [사유]",
+        "agent-status <start|end|clear> <subagent|background> [key] [라벨] · identify(내 칸 번호)",
+    ]),
+];
+
 fn print_help() {
-    // 용도별로 묶는다 — 명령이 60개를 넘자 한 줄 목록에서는 무엇을 써야 할지 못 찾았다(2026-09-29 CLI 정리).
-    let groups: &[(&str, &[&str])] = &[
-        ("보기 — 누가 무엇을 하나, 어디 있나", &[
-            "where [찾을 말] [--json] [--machine 기계]  방마다 칸 배치도 + 칸·탭 목록. 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다",
-            "                                          「방 N」= 사이드바 ⌘N(--json 의 room_number). window 는 0부터 센 인덱스라 다를 수 있다",
-            "board [--all|--local]                     학생 상태. 연락 주소(address)는 --all 에서. 방 번호는 room_number(⌘N)",
-            "board --wait <이름|%N>… [--since ms|영수증] [--timeout 초]   done 보고까지 기다린다(0 성공·1 실패·3 시간초과·4 사라짐)",
-            "board-watch --all --json [--since CURSOR] 바뀐 것만 흘려보낸다(Monitor 용)",
-            "peek [%N | %N@기계 | 이름@기계 | --address JSON] [줄수]   pane 화면 글자(다른 기기 칸은 카사넷으로)",
-            "capture [%N | %N@기계 | 이름@기계 | --address JSON] [경로] | --window [경로]   pane 또는 창 전체 스크린샷",
-            "transcript [%N | %N@기계 | --address JSON] [N]   claude 최근 대화 N 턴(다른 기기 칸은 카사넷으로)",
-            "activity [%N | --address JSON] [N]        실제로 한 도구·인자·결과(시간순)",
-        ]),
-        ("학생·협업", &[
-            "tell <이름|이름@기계|%N|--address JSON> [--title \"지금 일\"] <글|--stdin>   안전 전달, 영수증 ID 를 준다. 새 일이면 --title",
-            "tell --status ID                          전달 영수증 조회",
-            "tell --raw [%N|%N@기계|--address JSON] [--stdin|--] <글> · tell --key [같은 대상] <enter|tab|escape|up|ctrl+x|alt+b|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
-            "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
-            "summon [--machine 기계] --beside 칸 [--tab] [--cwd 폴더] [--json] …   지정한 작업방에 학생(답: 그 칸 주소)",
-            "summon [--machine 기계] --new-room '작업방 이름' [--cwd 폴더] …   새 작업방의 첫 학생(--name 은 학생의 작업명)",
-            "done <succeeded|failed|blocked|needs_restart|needs_approval> [요약]   내 일 보고 — 판에 실리고 부른 창 입력으로 간다",
-            "sessions [N]                              최근 claude·codex 세션 목록",
-        ]),
-        ("창·칸 조작", &[
-            "split <left|right|up|down> [%N] [--focus] [--count N]   칸 나누기 — 방 전체가 같은 크기 격자로 다시 짜인다",
-            "split <방향> %N@기계 · tab %N@기계        다른 기기 칸 옆·탭에 세우기",
-            "tab [%N] [--focus]                        그 칸에 새 탭",
-            "launch %N [--cwd 폴더] '<명령>'           빈 셸 칸에서 명령 실행 — 그 칸 셸(cmd·PowerShell·zsh) 문법으로 바꿔 친다",
-            "tab --server --surface %N [--cwd 폴더] [--name 라벨] '<명령>' | --clear   서버 실행·복원 등록(비밀값 금지)",
-            "window-new [--machine 기계]               새 방(그 기계에 만들고 여기서 보기)",
-            "window-new --on 기계 [--cwd 폴더]         그 기계 자신의 새 방(거울 아님, 답: 빈 칸 주소)",
-            "move %N <대상> [방향] · resize %N <0..1>  칸 옮기기 · 비율 (move 는 %N@기계 둘도)",
-            "focus %N · closed [%N]                    포커스 · 되살리기 목록(%N 을 주면 진짜 끈다)",
-            "close %N… [--force]                       칸 닫기(미커밋 변경이 있으면 안 닫는다)",
-            "rename-window [%N] <이름> | rename-window [%N] --color #rrggbb   %N 이면 그 칸 이름·색, 없으면 방 이름",
-            "rename-window --room <칸> <이름>          그 칸이 든 방 이름",
-            "  다른 기기 칸: focus·close·move·rename-window 의 %N 자리에 %N@기계 · 이름@기계 · --address JSON",
-            "attach <%N@기계|주소> [--on 기계] [--into 칸] [--focus]   다른 기기 칸을 거울 탭으로(--on 그 기계 화면에)",
-        ]),
-        ("클립보드·결과물", &[
-            "copy <글> | copy --surface %N [줄수] | copy --secret(표준입력)   클립보드에 넣기",
-            "paste [--show] | paste --into [%N] | paste --env VAR -- <명령…>   읽기 · 값을 안 보고 붙이기 · 환경변수로",
-            "open <url>                                사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
-            "phone browser open <url> | shot [--out 경로] | text | url | eval <JS> | back | forward | reload [--timeout 초]   (카사브라우저 폰 앱)",
-            "                                          별도 카사브라우저 폰 앱에서 실행한다. 꺼져 있으면 카사텀 폰 앱으로 알림을 보낸다",
-        ]),
-        ("기기·네트워크", &[
-            "machines [--names|--json|--history]       명부 기계 목록과 닿는 길, 끊긴 이유와 붙음·끊김 기록",
-            "identify --machine 기계                   그 기계에 닿나(0 닿음 · 1 끊김) — 판에 칸이 없어도",
-            "machines connect <기기|http://호스트:포트> [--here] [--cwd 경로] [--run 명령]   그 기기에 새 방(보기 창은 뒤에) · --here 면 이 칸 자리를 그 기기 셸로",
-            "machines move [%N] <기기|local>            claude·codex 세션을 다른 기기로 옮기기. 생략하면 내 칸, local 은 이쪽 거울을 데려오기",
-            "  예: machines move %3 맥미니 · machines move %3 local --cwd /레포 · 상세: machines move --help",
-            "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
-            "lid-away install|uninstall|status         덮어도 마저 하기(맥북): 잠자기 막음 허락(sudo)·감시 설치",
-        ]),
-        ("계정 일 권한 (설정 → 계정에서 연결한 GitHub)", &[
-            "pr create --repo 주인/레포 --head 브랜치 [--base main] --title 제목 [--body 본문|-] [--draft]   PR 요청(사람이 앱에서 승인)",
-            "pr connections                            연결·승인 대기 목록  (--connection <id> 로 연결 고르기)",
-        ]),
-        ("키체인 비밀 (폰 Face ID 한 번으로 그 요청만)", &[
-            "secret run -e 이름=<서비스>[#계정] [-e …] -- <명령…>   이 맥 키체인의 값을 그 명령의 환경으로만, 출력에 나오면 가림",
-            "secret read <서비스>[#계정]               값을 표준출력으로(끝 줄바꿈 없음) — x=$(…) 로 담아 쓴다",
-            "secret status                             믿는 폰 열쇠(값 없음)",
-        ]),
-        ("앱", &[
-            "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·승인 필요)",
-            "agent-plan [--machine ID]                전체 로그인 계정의 사용량으로 새 세션 계획 조회",
-            "app inspect|screen|restore|restart|update-check …  현재 화면·복원·재시작 (guide panes)",
-            "app-restart plan|run|status …            기기 앱 재시작 계획·실행",
-        ]),
-        ("훅 (claude 훅이 부른다)", &[
-            "bind-transcript <path> · attention [--surface %N] [사유]",
-            "agent-status <start|end|clear> <subagent|background> [key] [라벨] · identify(내 칸 번호)",
-        ]),
-    ];
     eprintln!("kasaterm-cli — 카사텀 조작 CLI. 대상은 %N(칸 번호)이나 학생 이름.\n");
     let topics: Vec<&str> = crate::guidance::TOPICS.iter().map(|t| t.name).collect();
     eprintln!("지침 — 필요할 때 주제 하나만(앱 없이 읽는다)");
     eprintln!("  guide [{}]   무인자면 주제 목록\n", topics.join("|"));
-    for (title, lines) in groups.iter() {
+    for (title, lines) in HELP_GROUPS.iter() {
         eprintln!("{title}");
         for line in lines.iter() {
             eprintln!("  {line}");
@@ -2088,6 +2101,50 @@ fn print_help() {
     }
     eprintln!("앞에 붙이는 것: --api BASE [--api-token-file FILE] — 다른 기기 HTTP 로 보낸다");
     eprintln!("소켓: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > 기본(/tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)");
+}
+
+/// `<명령> --help` 를 그 명령의 도움말 줄로 답한다. 하위 명령은 인자를 넓게 받아서 `--help` 를 모르는 인자로 흘려
+/// 그대로 실행됐다 — `window-new --help` 가 새 방을 만들고 사람이 보던 화면을 그 방으로 넘겼다(2026-11-16).
+/// 글을 받는 명령은 `--help` 가 맨 앞일 때만 본다 — `tell --raw %5 git --help` 의 `--help` 는 넣을 글이다.
+fn command_help(cmd: &str, args: &[String]) -> Option<String> {
+    let is_help = |a: &String| matches!(a.as_str(), "-h" | "--help");
+    let takes_text = matches!(cmd, "tell" | "tell:raw" | "tell:key" | "launch" | "copy" | "summon" | "done" | "rename-window" | "tab:server");
+    let asked = if takes_text {
+        args.first().is_some_and(is_help)
+    } else {
+        args.iter().take_while(|a| *a != "--").any(is_help)
+    };
+    if !asked {
+        return None;
+    }
+    let name = cmd.split(':').next().unwrap_or(cmd);
+    let lines = help_lines_for(name);
+    Some(if lines.is_empty() {
+        format!("{name}: 따로 적힌 도움말이 없어요 — `kasaterm-cli --help` 에서 찾으세요")
+    } else {
+        lines.join("\n")
+    })
+}
+
+/// 도움말에서 그 명령으로 시작하는 줄(` · ` 로 이은 다른 꼴 포함)과 바로 뒤 들여쓴 이음 줄.
+fn help_lines_for(name: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (_, lines) in HELP_GROUPS {
+        let mut taking = false;
+        for line in lines.iter() {
+            if line.starts_with(' ') {
+                if taking {
+                    out.push(*line);
+                }
+                continue;
+            }
+            taking = line.split(" · ").any(|part| part.split_whitespace().next() == Some(name));
+            if taking {
+                out.push(*line);
+            }
+        }
+    }
+    out
 }
 
 /// `--flag 값` 꼴의 값.
@@ -2692,6 +2749,12 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // 옵션 자리의 글자를 본문으로 이으면 칸 입력줄에 그 글자가 그대로 남는다 — `--stdin` 을 주자 「--stdincall」
             // 이 쳐져 학생이 안 떴다(2026-11-14). `--stdin` 은 표준입력을 본문으로, `--` 뒤는 글자 그대로, 그 밖의
             // `--…` 는 거절한다.
+            // `--enter` — 글만 넣고 끝나면 셸에 친 명령이 입력줄에 남는다. 글 뒤에 줄바꿈을 붙여 그 셸이 바로 돌린다
+            // (학생 세우기의 옛 길과 같은 방식).
+            let (enter, rest) = match rest.first().map(String::as_str) {
+                Some("--enter") if cmd == "tell:raw" => (true, rest.get(1..).unwrap_or(&[])),
+                _ => (false, rest),
+            };
             let (from_stdin, rest) = match rest.first().map(String::as_str) {
                 Some("--stdin") if cmd == "tell:raw" => (true, rest.get(1..).unwrap_or(&[])),
                 Some("--") => (false, rest.get(1..).unwrap_or(&[])),
@@ -2710,6 +2773,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             if value.is_empty() {
                 return Err(anyhow!("tell --{} needs a {what}", &cmd[5..]));
             }
+            let value = if enter && !value.ends_with('\n') { format!("{value}\n") } else { value };
             // 주소로 고른 칸(`%N@기계`·`--address`)은 그 칸이 사는 기기가 넣는다 — 안전장치 없는 것은 같다.
             if let Some(target) = surface.as_ref().filter(|s| s.starts_with('{')) {
                 let op = if cmd == "tell:raw" { "send_text" } else { "send_key" };
@@ -4876,6 +4940,26 @@ mod tests {
         assert_eq!(super::build_request("where", &[]).unwrap().method, "window.where");
     }
 
+    /// 하위 명령의 `--help` 는 실행하지 않고 그 명령의 도움말 줄만 — 글을 받는 명령은 맨 앞일 때만, `--` 뒤는 남의 인자.
+    #[test]
+    fn subcommand_help_answers_without_running() {
+        let v = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let help = super::command_help("window-new", &v(&["--help"])).expect("window-new --help 는 도움말");
+        assert!(help.contains("window-new --on") && help.contains("사람이 보던 화면"), "{help}");
+        assert!(super::command_help("window-new", &v(&["--on", "mini", "-h"])).is_some());
+        assert!(super::command_help("window-new", &v(&["--on", "mini"])).is_none());
+        assert!(super::command_help("tell:raw", &v(&["--help"])).unwrap().contains("--enter"));
+        assert!(super::command_help("tell:raw", &v(&["%5", "git", "--help"])).is_none(), "넣을 글의 --help 는 글이다");
+        assert!(super::command_help("secret", &v(&["run", "-e", "K=s", "--", "cmd", "--help"])).is_none());
+        let app = super::command_help("app", &v(&["--help"])).unwrap();
+        assert!(app.starts_with("app inspect") && !app.contains("app-update"), "{app}");
+        assert!(super::command_help("where", &v(&["--help"])).unwrap().contains("「방 N」"), "들여쓴 이음 줄도 함께");
+        assert!(super::command_help("net", &v(&["--help"])).unwrap().contains("net forward"));
+        for (_, lines) in super::HELP_GROUPS {
+            assert!(!lines.first().is_some_and(|l| l.starts_with(' ')), "묶음 첫 줄이 이음 줄이면 앞 명령에 안 붙는다");
+        }
+    }
+
     /// 주소로 고른 칸에 쓰는 명령은 협업 쓰기(`collab.act`)로 간다 — 이 기기 칸 번호(`%N`)는 하던 대로 `surface.*`.
     #[test]
     fn address_writes_use_the_collaboration_act() {
@@ -4890,6 +4974,12 @@ mod tests {
         // 옵션 자리의 `--…` 가 입력줄에 글자로 쳐지면 안 된다(「--stdincall」).
         assert!(super::build_request("tell:raw", &v(&["%3", "--force", "ls"])).is_err());
         assert_eq!(super::build_request("tell:raw", &v(&["%3", "--", "--help"])).unwrap().params["text"], "--help");
+        // --enter 는 글 뒤에 줄바꿈을 붙여 셸이 바로 돌린다 — 없으면 글만 입력줄에 남는다.
+        let ran = super::build_request("tell:raw", &v(&[a, "--enter", "ls", "-la"])).unwrap();
+        assert_eq!((&ran.params["op"], &ran.params["text"]), (&json!("send_text"), &json!("ls -la\n")));
+        assert_eq!(super::build_request("tell:raw", &v(&["%3", "--enter", "--", "--version"])).unwrap().params["text"], "--version\n");
+        assert_eq!(super::build_request("tell:raw", &v(&["%3", "ls"])).unwrap().params["text"], "ls");
+        assert!(super::build_request("tell:key", &v(&["%3", "--enter", "tab"])).is_err(), "--enter 는 --raw 에만");
         assert_eq!(super::build_request("focus", &v(&[a])).unwrap().params["op"], "focus");
         let moved = super::build_request("move", &v(&[a, b, "down"])).unwrap();
         assert_eq!((moved.params["target"]["surface_id"].as_str(), moved.params["direction"].as_str()), (Some("%4"), Some("down")));
