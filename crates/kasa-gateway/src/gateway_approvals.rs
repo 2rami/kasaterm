@@ -1250,7 +1250,7 @@ mod tests {
     }
 
     fn challenge(device: &str, now: u64, nonce: &str) -> String {
-        json!({"v": 1, "kind": "keychain.read", "nonce": nonce, "account": "geno", "device": device,
+        json!({"v": 1, "kind": "keychain.read", "nonce": nonce, "account": "tester", "device": device,
             "student": "유우카", "pane": "%3", "cwd": "/repo",
             "command": "kasaterm-cli secret read keychain://db.example#deploy",
             "refs": ["keychain://db.example#deploy"], "exp": now + 60_000})
@@ -1259,7 +1259,7 @@ mod tests {
 
     /// 아직 키체인 판으로 안 올린 맥이 보내는 1Password 도전값.
     fn legacy_challenge(device: &str, now: u64, nonce: &str) -> String {
-        json!({"v": 1, "kind": "op.read", "nonce": nonce, "account": "geno", "device": device,
+        json!({"v": 1, "kind": "op.read", "nonce": nonce, "account": "tester", "device": device,
             "student": "유우카", "pane": "%3", "cwd": "/repo",
             "command": "kasaterm-cli op read op://kasaterm-agents/db/password",
             "refs": ["op://kasaterm-agents/db/password"], "exp": now + 60_000})
@@ -1300,8 +1300,8 @@ mod tests {
     #[test]
     fn only_desktops_ask_and_the_request_is_masked_and_named_by_the_gateway() {
         let (s, _d) = store();
-        assert_eq!(s.create("geno", &phone("p1"), ask("ls"), 1_000).unwrap_err(), Refuse::DesktopOnly);
-        let v = s.create("geno", &desk("book"), ask("API_KEY=hunter2 cargo run"), 1_000).unwrap();
+        assert_eq!(s.create("tester", &phone("p1"), ask("ls"), 1_000).unwrap_err(), Refuse::DesktopOnly);
+        let v = s.create("tester", &desk("book"), ask("API_KEY=hunter2 cargo run"), 1_000).unwrap();
         assert_eq!(v["machine"], "book 맥");
         assert_eq!(v["state"], "pending");
         assert_eq!(v["expires"], 1_000 + TTL * 1000);
@@ -1314,21 +1314,21 @@ mod tests {
     #[test]
     fn the_first_decision_wins_and_later_ones_see_who_closed_it() {
         let (s, _d) = store();
-        let v = s.create("geno", &desk("book"), ask("rm -rf build"), 1_000).unwrap();
+        let v = s.create("tester", &desk("book"), ask("rm -rf build"), 1_000).unwrap();
         let id = v["id"].as_str().unwrap();
         let digest = v["digest"].as_str().unwrap();
         s.register_approver("p1", KEY).unwrap();
         s.register_approver("mini", KEY).unwrap();
-        assert_eq!(s.decide("geno", &phone("p1"), None, id, true, digest, None, "ip", 2_000).unwrap_err().0, Refuse::ApproverRequired);
-        assert_eq!(s.decide("geno", &phone("p1"), Some(KEY), id, true, "nope", None, "ip", 2_000).unwrap_err().0, Refuse::DigestMismatch);
-        let done = s.decide("geno", &phone("p1"), Some(KEY), id, true, digest, None, "ip", 2_000).unwrap();
+        assert_eq!(s.decide("tester", &phone("p1"), None, id, true, digest, None, "ip", 2_000).unwrap_err().0, Refuse::ApproverRequired);
+        assert_eq!(s.decide("tester", &phone("p1"), Some(KEY), id, true, "nope", None, "ip", 2_000).unwrap_err().0, Refuse::DigestMismatch);
+        let done = s.decide("tester", &phone("p1"), Some(KEY), id, true, digest, None, "ip", 2_000).unwrap();
         assert_eq!(done["state"], "allowed");
         assert_eq!(done["by"]["kind"], "phone");
-        let (r, view) = s.decide("geno", &desk("mini"), Some(KEY), id, false, digest, None, "ip", 2_100).unwrap_err();
+        let (r, view) = s.decide("tester", &desk("mini"), Some(KEY), id, false, digest, None, "ip", 2_100).unwrap_err();
         assert_eq!(r, Refuse::Closed);
         assert_eq!(view.unwrap()["by"]["device"], "p1");
         assert_eq!(s.decide("other", &phone("p1"), Some(KEY), id, true, digest, None, "ip", 2_000).unwrap_err().0, Refuse::NotFound);
-        let audit = s.audit("geno", 10);
+        let audit = s.audit("tester", 10);
         assert_eq!(audit[0]["event"], "allowed");
         assert_eq!(audit[0]["by"]["device"], "p1");
         assert_eq!(audit[0]["ip"], "ip");
@@ -1338,37 +1338,37 @@ mod tests {
     #[test]
     fn requests_expire_after_two_minutes_and_cannot_be_decided() {
         let (s, _d) = store();
-        let v = s.create("geno", &desk("book"), ask("ls"), 1_000).unwrap();
+        let v = s.create("tester", &desk("book"), ask("ls"), 1_000).unwrap();
         let id = v["id"].as_str().unwrap();
         s.register_approver("p1", KEY).unwrap();
         let late = 1_000 + TTL * 1000;
-        let (r, view) = s.decide("geno", &phone("p1"), Some(KEY), id, true, v["digest"].as_str().unwrap(), None, "ip", late).unwrap_err();
+        let (r, view) = s.decide("tester", &phone("p1"), Some(KEY), id, true, v["digest"].as_str().unwrap(), None, "ip", late).unwrap_err();
         assert_eq!(r, Refuse::Expired);
         assert_eq!(view.unwrap()["state"], "expired");
-        assert_eq!(s.audit("geno", 1)[0]["event"], "expired");
-        assert!(s.list("geno", late + KEEP_CLOSED_MS).is_empty(), "닫힌 요청이 안 걷혔다");
+        assert_eq!(s.audit("tester", 1)[0]["event"], "expired");
+        assert!(s.list("tester", late + KEEP_CLOSED_MS).is_empty(), "닫힌 요청이 안 걷혔다");
     }
 
     #[test]
     fn only_the_origin_cancels_and_truncated_requests_cannot_be_allowed() {
         let (s, _d) = store();
-        let v = s.create("geno", &desk("book"), ask("ls"), 1_000).unwrap();
+        let v = s.create("tester", &desk("book"), ask("ls"), 1_000).unwrap();
         let id = v["id"].as_str().unwrap();
-        assert_eq!(s.cancel("geno", &desk("mini"), id, "local", 1_100).unwrap_err().0, Refuse::NotOrigin);
-        let c = s.cancel("geno", &desk("book"), id, "local", 1_100).unwrap();
+        assert_eq!(s.cancel("tester", &desk("mini"), id, "local", 1_100).unwrap_err().0, Refuse::NotOrigin);
+        let c = s.cancel("tester", &desk("book"), id, "local", 1_100).unwrap();
         assert_eq!(c["state"], "cancelled");
         assert_eq!(c["reason"], "local");
 
         let mut big = ask("");
         big.tool = "Write".into();
         big.input = json!({"file_path": "/a", "content": "x".repeat(approval_text::MAX_FIELD + 10)});
-        let v = s.create("geno", &desk("book"), big, 1_000).unwrap();
+        let v = s.create("tester", &desk("book"), big, 1_000).unwrap();
         assert_eq!(v["truncated"], true);
         s.register_approver("p1", KEY).unwrap();
         let id = v["id"].as_str().unwrap();
         let digest = v["digest"].as_str().unwrap();
-        assert_eq!(s.decide("geno", &phone("p1"), Some(KEY), id, true, digest, None, "ip", 1_100).unwrap_err().0, Refuse::Truncated);
-        assert_eq!(s.decide("geno", &phone("p1"), Some(KEY), id, false, digest, None, "ip", 1_100).unwrap()["state"], "denied");
+        assert_eq!(s.decide("tester", &phone("p1"), Some(KEY), id, true, digest, None, "ip", 1_100).unwrap_err().0, Refuse::Truncated);
+        assert_eq!(s.decide("tester", &phone("p1"), Some(KEY), id, false, digest, None, "ip", 1_100).unwrap()["state"], "denied");
     }
 
     #[test]
@@ -1392,27 +1392,27 @@ mod tests {
     fn a_secret_request_is_built_from_its_challenge_and_bound_to_account_and_device() {
         let (s, _d) = store();
         let c = challenge("book", 1_000, NONCE);
-        let v = s.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let v = s.create("tester", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
         assert_eq!(v["kind"], "secret");
         assert_eq!(v["challenge"], c);
         assert_eq!(v["tool"], "키체인");
         assert_eq!(v["student"], "유우카");
         assert_eq!(v["expires"], 61_000, "도전값 만료가 더 이르면 그것이 만료다");
         assert_eq!(v["fields"][0]["text"], "keychain://db.example#deploy");
-        let old = s.create("geno", &desk("book"), secret_ask(legacy_challenge("book", 1_000, &NONCE.replace('a', "b"))), 1_000).unwrap();
+        let old = s.create("tester", &desk("book"), secret_ask(legacy_challenge("book", 1_000, &NONCE.replace('a', "b"))), 1_000).unwrap();
         assert_eq!(old["tool"], "1Password", "옛 맥의 요청도 받는다");
         // 종류와 참조 꼴이 엇갈리면 받지 않는다.
         let mixed = c.replace("keychain://db.example#deploy\"]", "op://kasaterm-agents/db/password\"]");
-        assert_eq!(s.create("geno", &desk("book"), secret_ask(mixed), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
+        assert_eq!(s.create("tester", &desk("book"), secret_ask(mixed), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
         // 다른 기기·다른 계정을 말하는 도전값, 모양이 틀린 도전값은 받지 않는다.
         let other = challenge("mini", 1_000, NONCE);
-        assert_eq!(s.create("geno", &desk("book"), secret_ask(other), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
+        assert_eq!(s.create("tester", &desk("book"), secret_ask(other), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
         assert_eq!(s.create("else", &desk("book"), secret_ask(c.clone()), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
         let stale = challenge("book", 1_000, NONCE);
-        assert_eq!(s.create("geno", &desk("book"), secret_ask(stale), 70_000).unwrap_err(), Refuse::ChallengeInvalid);
+        assert_eq!(s.create("tester", &desk("book"), secret_ask(stale), 70_000).unwrap_err(), Refuse::ChallengeInvalid);
         let bad = c.replace("keychain://db.example#deploy\"]", "https://x\"]");
-        assert_eq!(s.create("geno", &desk("book"), secret_ask(bad), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
-        assert_eq!(s.create("geno", &desk("book"), secret_ask(c.replace(NONCE, "short")), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
+        assert_eq!(s.create("tester", &desk("book"), secret_ask(bad), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
+        assert_eq!(s.create("tester", &desk("book"), secret_ask(c.replace(NONCE, "short")), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
     }
 
     #[test]
@@ -1422,18 +1422,18 @@ mod tests {
         s.register_approver("p1", KEY).unwrap();
         s.register_approver("p2", KEY).unwrap();
         s.register_approver("mini", KEY).unwrap();
-        assert_eq!(s.key_register("geno", &desk("mini"), &phone_key.public()).unwrap_err(), Refuse::PhoneOnly);
-        assert_eq!(s.key_register("geno", &phone("p1"), "AAAA").unwrap_err(), Refuse::BadRequest);
-        let reg = s.key_register("geno", &phone("p1"), &phone_key.public()).unwrap();
+        assert_eq!(s.key_register("tester", &desk("mini"), &phone_key.public()).unwrap_err(), Refuse::PhoneOnly);
+        assert_eq!(s.key_register("tester", &phone("p1"), "AAAA").unwrap_err(), Refuse::BadRequest);
+        let reg = s.key_register("tester", &phone("p1"), &phone_key.public()).unwrap();
         assert_eq!(reg["id"], phone_key.id());
 
         let c = challenge("book", 1_000, NONCE);
-        let v = s.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let v = s.create("tester", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
         let id = v["id"].as_str().unwrap();
         let digest = v["digest"].as_str().unwrap();
         let good = phone_key.sign(&c);
         let kid = phone_key.id();
-        let decide = |who: &Device, proof: Option<(&str, &str)>| s.decide("geno", who, Some(KEY), id, true, digest, proof, "ip", 2_000);
+        let decide = |who: &Device, proof: Option<(&str, &str)>| s.decide("tester", who, Some(KEY), id, true, digest, proof, "ip", 2_000);
 
         assert_eq!(decide(&desk("mini"), Some((&kid, &good))).unwrap_err().0, Refuse::PhoneOnly);
         assert_eq!(decide(&phone("p1"), None).unwrap_err().0, Refuse::SignatureRequired);
@@ -1452,12 +1452,12 @@ mod tests {
         assert_eq!(done["sig"], good);
         // 같은 서명으로 한 번 더(재사용) — 이미 닫혔다.
         assert_eq!(decide(&phone("p1"), Some((&kid, &good))).unwrap_err().0, Refuse::Closed);
-        assert_eq!(s.audit("geno", 1)[0]["key"], kid);
+        assert_eq!(s.audit("tester", 1)[0]["key"], kid);
 
         // 거절은 서명 없이 된다 — 거절은 아무것도 열지 않는다.
         let c2 = challenge("book", 1_000, "ffeeddccbbaa99887766554433221100");
-        let v2 = s.create("geno", &desk("book"), secret_ask(c2), 1_000).unwrap();
-        let denied = s.decide("geno", &phone("p2"), Some(KEY), v2["id"].as_str().unwrap(), false, v2["digest"].as_str().unwrap(), None, "ip", 2_000);
+        let v2 = s.create("tester", &desk("book"), secret_ask(c2), 1_000).unwrap();
+        let denied = s.decide("tester", &phone("p2"), Some(KEY), v2["id"].as_str().unwrap(), false, v2["digest"].as_str().unwrap(), None, "ip", 2_000);
         assert_eq!(denied.unwrap()["state"], "denied");
     }
 
@@ -1466,40 +1466,40 @@ mod tests {
         let (s, d) = store();
         let old = Signer::new();
         s.register_approver("p1", KEY).unwrap();
-        s.key_register("geno", &phone("p1"), &old.public()).unwrap();
+        s.key_register("tester", &phone("p1"), &old.public()).unwrap();
         let c = challenge("book", 1_000, NONCE);
-        let v = s.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let v = s.create("tester", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
         let (id, digest) = (v["id"].as_str().unwrap().to_string(), v["digest"].as_str().unwrap().to_string());
         let sig = old.sign(&c);
-        let (r, _) = s.decide("geno", &phone("p1"), Some(KEY), &id, true, &digest, Some((&old.id(), &sig)), "ip", 61_000).unwrap_err();
+        let (r, _) = s.decide("tester", &phone("p1"), Some(KEY), &id, true, &digest, Some((&old.id(), &sig)), "ip", 61_000).unwrap_err();
         assert_eq!(r, Refuse::Expired);
 
         let c = challenge("book", 1_000, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        let v = s.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let v = s.create("tester", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
         let id = v["id"].as_str().unwrap();
-        s.cancel("geno", &desk("book"), id, "gone", 1_500).unwrap();
-        let (r, _) = s.decide("geno", &phone("p1"), Some(KEY), id, true, v["digest"].as_str().unwrap(), Some((&old.id(), &old.sign(&c))), "ip", 2_000).unwrap_err();
+        s.cancel("tester", &desk("book"), id, "gone", 1_500).unwrap();
+        let (r, _) = s.decide("tester", &phone("p1"), Some(KEY), id, true, v["digest"].as_str().unwrap(), Some((&old.id(), &old.sign(&c))), "ip", 2_000).unwrap_err();
         assert_eq!(r, Refuse::Closed);
 
         // 새 키로 갈아 끼우면 옛 키 서명은 더 안 맞는다. 다시 켜도 키는 남는다.
         let new = Signer::new();
-        s.key_register("geno", &phone("p1"), &new.public()).unwrap();
+        s.key_register("tester", &phone("p1"), &new.public()).unwrap();
         let again = Store::open(Some(&d.path().join("relay-state.json")));
         again.register_approver("p1", KEY).unwrap();
         let c = challenge("book", 1_000, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        let v = again.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let v = again.create("tester", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
         let id = v["id"].as_str().unwrap();
         let digest = v["digest"].as_str().unwrap();
-        let (r, _) = again.decide("geno", &phone("p1"), Some(KEY), id, true, digest, Some((&old.id(), &old.sign(&c))), "ip", 2_000).unwrap_err();
+        let (r, _) = again.decide("tester", &phone("p1"), Some(KEY), id, true, digest, Some((&old.id(), &old.sign(&c))), "ip", 2_000).unwrap_err();
         assert_eq!(r, Refuse::KeyUnknown);
-        assert_eq!(again.decide("geno", &phone("p1"), Some(KEY), id, true, digest, Some((&new.id(), &new.sign(&c))), "ip", 2_000).unwrap()["state"], "allowed");
+        assert_eq!(again.decide("tester", &phone("p1"), Some(KEY), id, true, digest, Some((&new.id(), &new.sign(&c))), "ip", 2_000).unwrap()["state"], "allowed");
 
         // 폰이 키를 지우면(또는 기기가 폐기되어 목록에서 빠지면) 더는 허락이 안 된다.
-        again.key_unregister("geno", &phone("p1"));
+        again.key_unregister("tester", &phone("p1"));
         assert!(again.keys_for(&[("p1".into(), "폰".into())]).is_empty());
         let c = challenge("book", 1_000, "cccccccccccccccccccccccccccccccc");
-        let v = again.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
-        let (r, _) = again.decide("geno", &phone("p1"), Some(KEY), v["id"].as_str().unwrap(), true, v["digest"].as_str().unwrap(), Some((&new.id(), &new.sign(&c))), "ip", 2_000).unwrap_err();
+        let v = again.create("tester", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let (r, _) = again.decide("tester", &phone("p1"), Some(KEY), v["id"].as_str().unwrap(), true, v["digest"].as_str().unwrap(), Some((&new.id(), &new.sign(&c))), "ip", 2_000).unwrap_err();
         assert_eq!(r, Refuse::KeyUnknown);
     }
 

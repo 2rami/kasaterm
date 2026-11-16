@@ -653,7 +653,7 @@ mod tests {
 
     fn sent(nonce: &str) -> Sent {
         let refs = vec!["keychain://db.example#deploy".to_string()];
-        let text = challenge("geno", "book", nonce, 100_000, &origin(), "/repo", "kasaterm-cli secret read keychain://db.example#deploy", &refs);
+        let text = challenge("tester", "book", nonce, 100_000, &origin(), "/repo", "kasaterm-cli secret read keychain://db.example#deploy", &refs);
         Sent { id: "apv_1".into(), challenge: text, nonce: nonce.into(), exp: 100_000 }
     }
 
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn the_challenge_masks_other_secrets_in_the_command_but_keeps_the_refs() {
         let refs = vec!["keychain://db.example#deploy".to_string()];
-        let text = challenge("geno", "book", "n", 9, &origin(), "/repo",
+        let text = challenge("tester", "book", "n", 9, &origin(), "/repo",
             "kasaterm-cli secret run -e DB=keychain://db.example#deploy -- curl -H 'Authorization: Bearer sk-live-abcdefghijklmnop'", &refs);
         let v: Value = serde_json::from_str(&text).unwrap();
         assert!(!v["command"].as_str().unwrap().contains("sk-live"), "{}", v["command"]);

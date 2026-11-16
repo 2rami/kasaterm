@@ -4,7 +4,7 @@ import { STRINGS } from './strings';
 import type { Lang, Strings } from './strings';
 
 /// 언어를 모를 때 쓰는 값. 이 앱을 쓰는 사람이 한국어로 일하므로 **한국어가
-/// 기본**이다 — 서버 응답을 기다리는 한 프레임도 한국어로 뜬다(거노 지시
+/// 기본**이다 — 서버 응답을 기다리는 한 프레임도 한국어로 뜬다(사용자 지시
 /// 2026-08-15 「나는 한글이 기본으로」).
 const DEFAULT_LANG: Lang = 'ko';
 

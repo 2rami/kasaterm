@@ -1,7 +1,7 @@
 import React from 'react';
 
 // ANSI SGR(\x1b[…m) → 색 span. /context·bash·read 등 컬러 터미널 출력 공용 렌더
-// (거노: ls/git/test 컬러 출력이 대화 카드에서도 색으로). pre 안에 넣어 whitespace 보존.
+// (사용자: ls/git/test 컬러 출력이 대화 카드에서도 색으로). pre 안에 넣어 whitespace 보존.
 const ANSI16 = ['#3b4252', '#bf616a', '#a3be8c', '#ebcb8b', '#5e81ac', '#b48ead', '#88c0d0', '#e5e9f0', '#4c566a', '#d08770', '#a3be8c', '#ebcb8b', '#81a1c1', '#b48ead', '#8fbcbb', '#eceff4'];
 
 export function ansi256(n: number): string {

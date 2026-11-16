@@ -8,7 +8,7 @@ impl Fixture {
         drop(account_gate(&path));
         let file = path.join("relay-accounts.json");
         let mut accounts = kasa_identity::relay_auth::load_accounts(&file);
-        let sample = accounts.accounts.remove("geno").unwrap();
+        let sample = accounts.accounts.remove("tester").unwrap();
         accounts.accounts.insert("alice".into(), sample.clone());
         accounts.accounts.insert("bob".into(), sample);
         kasa_identity::relay_auth::save_accounts(&file, &accounts).unwrap();

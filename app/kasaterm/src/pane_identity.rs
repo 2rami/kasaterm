@@ -863,7 +863,7 @@ assert_eq!(normalize_device(" MACBOOK "), normalize_device("macbook"));
     /// 같은 기계를 기기마다 다른 이름으로 불러도(명부 이름·컴퓨터 이름·NBSP) id 로 한 색이다.
     #[test]
     fn one_machine_keeps_one_color_across_names() {
-        assert_eq!(super::normalize_device("건호의 MacBook\u{a0}Pro"), super::normalize_device(" 건호의 MacBook  Pro "));
+        assert_eq!(super::normalize_device("내 MacBook\u{a0}Pro"), super::normalize_device(" 내 MacBook  Pro "));
         let aliases: std::collections::HashMap<String, String> = [
             ("나쵸네코".to_string(), "id:mini".to_string()),
             ("nachoneko".to_string(), "id:mini".to_string()),
@@ -872,18 +872,18 @@ assert_eq!(normalize_device(" MACBOOK "), normalize_device("macbook"));
             "device_colors": {
                 "나쵸네코": "#548a84",
                 "nachoneko": "#e99dbe",
-                "건호의 MacBook\u{a0}Pro": "#f0dbae",
-                "건호의 MacBook Pro": "#4c86e4"
+                "내 MacBook\u{a0}Pro": "#f0dbae",
+                "내 MacBook Pro": "#4c86e4"
             },
             "device_colors_at": {
                 "nachoneko": 1790513120019u64,
-                "건호의 MacBook\u{a0}Pro": 1790513122318u64,
-                "건호의 MacBook Pro": 1790550916056u64
+                "내 MacBook\u{a0}Pro": 1790513122318u64,
+                "내 MacBook Pro": 1790550916056u64
             }
         });
         let o = read_overrides(&settings, &aliases);
         assert_eq!(o.get("id:mini"), Some(&[0xe9, 0x9d, 0xbe, 255]), "시각 없는 옛 색보다 늦게 고친 색");
-        assert_eq!(o.get("건호의 macbook pro"), Some(&[0x4c, 0x86, 0xe4, 255]), "공백 종류만 다른 두 항목은 하나");
+        assert_eq!(o.get("내 macbook pro"), Some(&[0x4c, 0x86, 0xe4, 255]), "공백 종류만 다른 두 항목은 하나");
         assert_eq!(o.len(), 2);
     }
 
@@ -892,19 +892,19 @@ assert_eq!(normalize_device(" MACBOOK "), normalize_device("macbook"));
     #[test]
     fn two_devices_converge_on_one_color_per_machine() {
         let mac_aliases: std::collections::HashMap<String, String> = [
-            ("건호의 macbook pro".to_string(), "id:book".to_string()),
+            ("내 macbook pro".to_string(), "id:book".to_string()),
             ("나쵸네코".to_string(), "id:mini".to_string()),
         ].into_iter().collect();
         let mac = serde_json::json!({
             "device_colors": { "나쵸네코": "#548a84", "nachoneko": "#e99dbe",
-                               "건호의 MacBook\u{a0}Pro": "#f0dbae", "건호의 MacBook Pro": "#4c86e4" },
-            "device_colors_at": { "nachoneko": 1790513120019u64, "건호의 MacBook\u{a0}Pro": 1790513122318u64,
-                                  "건호의 MacBook Pro": 1790550916056u64 }
+                               "내 MacBook\u{a0}Pro": "#f0dbae", "내 MacBook Pro": "#4c86e4" },
+            "device_colors_at": { "nachoneko": 1790513120019u64, "내 MacBook\u{a0}Pro": 1790513122318u64,
+                                  "내 MacBook Pro": 1790550916056u64 }
         });
         let mini = serde_json::json!({
-            "device_colors": { "nachoneko": "#e99dbe", "건호의 MacBook\u{a0}Pro": "#f0dbae", "건호의 MacBook Pro": "#4c86e4" },
-            "device_colors_at": { "nachoneko": 1790513120019u64, "건호의 MacBook\u{a0}Pro": 1790513122318u64,
-                                  "건호의 MacBook Pro": 1790550916056u64 }
+            "device_colors": { "nachoneko": "#e99dbe", "내 MacBook\u{a0}Pro": "#f0dbae", "내 MacBook Pro": "#4c86e4" },
+            "device_colors_at": { "nachoneko": 1790513120019u64, "내 MacBook\u{a0}Pro": 1790513122318u64,
+                                  "내 MacBook Pro": 1790550916056u64 }
         });
         let mini_aliases: std::collections::HashMap<String, String> = [
             ("nachoneko".to_string(), "id:mini".to_string()),
@@ -924,9 +924,9 @@ assert_eq!(normalize_device(" MACBOOK "), normalize_device("macbook"));
 
         // 맥미니가 맥북 표를 받는다 — 맥북 이름이 「맥북」과 같은 기계임을 배운다.
         let plan = super::plan_merge(&mini, mini_aliases.clone(), &table(&mac, serde_json::json!({
-            "건호의 MacBook\u{a0}Pro": "book", "건호의 MacBook Pro": "book", "나쵸네코": "mini",
+            "내 MacBook\u{a0}Pro": "book", "내 MacBook Pro": "book", "나쵸네코": "mini",
         })));
-        assert_eq!(plan.aliases.get("건호의 macbook pro").map(String::as_str), Some("id:book"), "{:?}", plan.learned);
+        assert_eq!(plan.aliases.get("내 macbook pro").map(String::as_str), Some("id:book"), "{:?}", plan.learned);
         let o = read_overrides(&mini, &plan.aliases);
         assert_eq!(o.get("id:book"), Some(&[0x4c, 0x86, 0xe4, 255]), "맥미니에서 「맥북」 칸도 맥북이 고른 파랑");
         assert_eq!(o.get("id:mini"), Some(&[0xe9, 0x9d, 0xbe, 255]));

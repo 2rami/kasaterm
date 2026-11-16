@@ -375,7 +375,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         let accounts = dir.join("relay-accounts.json");
         let mut file = kasa_identity::relay_auth::AccountsFile::default();
-        for name in ["geno", "other"] {
+        for name in ["tester", "other"] {
             file.accounts.insert(
                 name.into(),
                 kasa_identity::relay_auth::Account {
@@ -432,7 +432,7 @@ mod tests {
     async fn account_scoped_routes_authenticate_isolate_and_stay_idempotent() {
         let dir = std::env::temp_dir().join(format!("kasa-workspace-http-{}", uuid::Uuid::new_v4()));
         let addr = serve(gate_in(&dir)).await;
-        let token = login(addr, "geno", "workspace-mac").await;
+        let token = login(addr, "tester", "workspace-mac").await;
         let other = login(addr, "other", "other-mac").await;
 
         assert_eq!(call(addr, "GET", "", None, None).await.0, 401);
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(call(addr, "PUT", "/key", Some(&token), Some(json!({"expected_key_revision":1,"key":"short"}))).await.0, 400);
         assert_eq!(call(addr, "PUT", "/key", Some(&token), Some(json!({"expected_key_revision":1,"key":"sk-x","account":"other"}))).await.0, 400);
 
-        // The key is per account: the other account still has none and never sees geno's data.
+        // The key is per account: the other account still has none and never sees tester's data.
         let (_, foreign) = call(addr, "GET", "", Some(&other), None).await;
         assert_eq!(foreign["snapshot"]["status"]["key_present"], false);
         let (_, mine) = call(addr, "GET", "", Some(&token), None).await;
@@ -515,7 +515,7 @@ mod tests {
     async fn route_is_authenticated_bounded_and_unavailable_without_a_decision_adapter() {
         let dir = std::env::temp_dir().join(format!("kasa-workspace-route-{}", uuid::Uuid::new_v4()));
         let addr = serve(gate_in(&dir)).await;
-        let token = login(addr, "geno", "workspace-mac").await;
+        let token = login(addr, "tester", "workspace-mac").await;
         let body = json!({"message":"미러링 다시 봐","students":[{"id":"s0","name":"유우카","title":"미러링","latest":"","status":"waiting"}]});
         assert_eq!(call(addr, "POST", "/route", None, Some(body.clone())).await.0, 401);
         let (status, reply) = call(addr, "POST", "/route", Some(&token), Some(json!({"message":"x","students":[],"account":"other"}))).await;
@@ -532,7 +532,7 @@ mod tests {
         let mut gate = gate_in(&dir);
         gate.workspace = None;
         let addr = serve(gate).await;
-        let token = login(addr, "geno", "stateless-mac").await;
+        let token = login(addr, "tester", "stateless-mac").await;
         let (status, reply) = call(addr, "GET", "", Some(&token), None).await;
         assert_eq!((status, reply["error"].as_str()), (503, Some("storage_unavailable")));
         let _ = std::fs::remove_dir_all(&dir);

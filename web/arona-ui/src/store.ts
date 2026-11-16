@@ -62,7 +62,7 @@ export interface Agent {
   /** 마지막 사용자 프롬프트 — 대화 미리보기용. */
   lastPrompt?: string;
   /** 선생님 입력을 기다리는 진짜 이유(AskUserQuestion·권한). 있을 때만 '확인 필요'(빨강).
-   *  단순 waiting(완료 보고·응답 대기)은 이게 없다(거노: 빨강 남발 방지). */
+   *  단순 waiting(완료 보고·응답 대기)은 이게 없다(사용자: 빨강 남발 방지). */
   waitingFor?: string;
   /** 명시적 완료 보고(`kasaterm-cli done`) — "succeeded" | "failed". idle 추정과 달리
    *  학생이 직접 선언한 정본. 새 브리프로 다시 일하면 백엔드가 걷는다. */
@@ -85,7 +85,7 @@ export interface SubagentInfo {
 }
 
 /** 빨강 '확인 필요' 판정 — AskUserQuestion·권한 선택지처럼 waiting_for(질문 내용)가
- *  있는 것만. 단순 waiting(완료 보고·응답 대기)은 제외한다(거노: 빨강이 위험하게 느껴짐). */
+ *  있는 것만. 단순 waiting(완료 보고·응답 대기)은 제외한다(사용자: 빨강이 위험하게 느껴짐). */
 export function isAwaitingTeacher(a: Agent): boolean {
   return !!a.waitingFor || a.status === 'blocked';
 }

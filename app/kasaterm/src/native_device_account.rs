@@ -182,7 +182,7 @@ impl State {
     pub(crate) fn fixture_signed_in(&mut self, form: Option<profile::Form>) {
         self.fixture(false, false);
         self.status = serde_json::json!({"state":"connected","credential_saved":true,"logged_in":true,
-            "account":"fixture","display_name":"건호"});
+            "account":"fixture","display_name":"나"});
         self.pinned = true;
         self.profile.fixture(form);
     }

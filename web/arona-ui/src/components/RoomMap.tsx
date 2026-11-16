@@ -5,7 +5,7 @@ import { useIsPhone } from '@/lib/useIsPhone';
 import { SpritePortrait } from './SpritePortrait';
 import { X } from 'lucide-react';
 
-// 학생 상태 → 작은 점 색(좌측 트리). 3구분(거노: 작업중·노는중·선택지대기 구분 강화):
+// 학생 상태 → 작은 점 색(좌측 트리). 3구분(사용자: 작업중·노는중·선택지대기 구분 강화):
 // 작업중(working/thinking)=하늘, 선택지대기(waiting/blocked)=빨강, 노는중·완료=초록.
 function statusDot(status: Agent['status']): string {
   switch (status) {
@@ -16,18 +16,18 @@ function statusDot(status: Agent['status']): string {
     default: return 'var(--cth-status-success)';
   }
 }
-// 색만으론 약해(거노) 움직임을 더함: 작업중=부드러운 호흡 펄스, 대기=깜빡(주의), 그 외=정적.
+// 색만으론 약해(사용자) 움직임을 더함: 작업중=부드러운 호흡 펄스, 대기=깜빡(주의), 그 외=정적.
 function statusAnim(status: Agent['status']): string | undefined {
   if (status === 'working' || status === 'thinking') return 'cth-dot-pulse 1.3s ease-in-out infinite';
   if (status === 'waiting' || status === 'blocked') return 'cth-blink 0.9s ease-in-out infinite';
   return undefined;
 }
 
-// 방 추가 시 고를 첫 학생(거노: 처음은 아로나 고정, 새 방은 선택). leaders 풀과 일치.
+// 방 추가 시 고를 첫 학생(사용자: 처음은 아로나 고정, 새 방은 선택). leaders 풀과 일치.
 const STARTERS = ['아로나', '프라나'];
 
 /** unix secs → "방금/N분 전/N시간 전/N일 전". */
-// 작업폴더 경로 축약 — 홈은 ~, 깊으면 마지막 2 세그먼트만(거노: 최근 세션을 폴더로 구분).
+// 작업폴더 경로 축약 — 홈은 ~, 깊으면 마지막 2 세그먼트만(사용자: 최근 세션을 폴더로 구분).
 function shortPath(p?: string): string {
   if (!p) return '';
   const h = p.replace(/^\/(?:Users|home)\/[^/]+/, '~');
@@ -78,7 +78,7 @@ function loadCollapsed(): Record<string, boolean> {
 export interface RoomMapProps {
   sessions: SessionsInfo;
   onSwitch: (idx: number) => void;
-  /** 전 방 학생(board) — windowIdx 로 방별 그룹핑해 각 방 아래 중첩(거노: 방안 학생 영속). */
+  /** 전 방 학생(board) — windowIdx 로 방별 그룹핑해 각 방 아래 중첩(사용자: 방안 학생 영속). */
   agents: Agent[];
   /** 현재 선택된 학생 — 트리 하이라이트. */
   selectedId?: string;
@@ -90,7 +90,7 @@ export interface RoomMapProps {
   onCloseRoom?: (idx: number) => void;
   /** 최근 세션 클릭 — 바로 resume 하지 않고 오프라인(읽기 전용) 뷰어로 띄운다. */
   onOpenSession?: (s: RecentSession) => void;
-  /** 좌측 존 접기 — 부모(App)가 leftHidden 으로 레일 전환(거노: 가장자리 접기 일원화). */
+  /** 좌측 존 접기 — 부모(App)가 leftHidden 으로 레일 전환(사용자: 가장자리 접기 일원화). */
   onCollapse?: () => void;
 }
 
@@ -104,7 +104,7 @@ function RoomIcon({ active }: { active: boolean }) {
   );
 }
 
-// 좌측 방 네비 — 방 = kasaterm 윈도우(거노). 목록 + "+ 방 추가"(첫 학생 선택). 첫 방은
+// 좌측 방 네비 — 방 = kasaterm 윈도우(사용자). 목록 + "+ 방 추가"(첫 학생 선택). 첫 방은
 // 아로나 고정, 새 방은 아로나/프라나 중 골라 그 학생으로 스폰. × 로 방 닫기.
 export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStudent, onNewRoom, onCloseRoom, onOpenSession, onCollapse }: RoomMapProps) {
   const isPhone = useIsPhone();
@@ -139,7 +139,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
     });
   };
   // 학생 이름 → header_color(학생색). 최근 세션 행의 색 바에 쓴다 — 어느 학생의
-  // 세션인지 이름 읽기 전에 색으로 먼저 구분(거노). 펼칠 때 1회 로드.
+  // 세션인지 이름 읽기 전에 색으로 먼저 구분(사용자). 펼칠 때 1회 로드.
   const [charColor, setCharColor] = useState<Record<string, string>>({});
 
   // 최근 세션 패널을 펼칠 때(또는 펼친 채로 10초마다) 목록을 가져온다 — 항상
@@ -191,7 +191,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
     return [...m.entries()];
   }, [filtered]);
 
-  // 세션 한 줄. 학생색 좌측 바 + 이름 뒤 프사 — 어느 학생의 세션인지 즉시 구분(거노).
+  // 세션 한 줄. 학생색 좌측 바 + 이름 뒤 프사 — 어느 학생의 세션인지 즉시 구분(사용자).
   // 미바인딩 세션은 색 바 없이(투명) 이름만.
   const renderRow = (s: RecentSession) => (
     <button key={s.id} onClick={() => onPick(s)} title={`${s.label}${s.character ? `\n${s.character}` : ''}\n${s.harness ?? 'claude'} · ${s.cwd}`} style={{
@@ -282,7 +282,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
                 }}><X aria-hidden="true" size={12} /></button>
               )}
             </div>
-            {/* 방 안 학생 — windowIdx 로 그룹핑. 활성 방뿐 아니라 전 방 학생이 영속(거노). 클릭=
+            {/* 방 안 학생 — windowIdx 로 그룹핑. 활성 방뿐 아니라 전 방 학생이 영속(사용자). 클릭=
                 그 pane 포커스(다른 방이면 윈도우 전환). 프사+이름+상태점. */}
             {students.map((a) => {
               const sel = a.id === selectedId;
@@ -340,7 +340,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
 
       {/* 최근 세션 보기 — 펼치면 ~/.claude/projects 의 최근 claude 세션 목록. 클릭하면
           바로 열지 않고 그 대화를 오프라인(읽기 전용) 뷰어로 띄운다. 이어가기는 뷰어
-          하단 '현재 터미널에 입력' 버튼(거노: 먼저 보고 직접 이어가기). */}
+          하단 '현재 터미널에 입력' 버튼(사용자: 먼저 보고 직접 이어가기). */}
       <button onClick={() => setShowRecent((v) => !v)} style={{
         marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, padding: '7px 9px', borderRadius: 8,
         minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',

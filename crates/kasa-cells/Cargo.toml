@@ -10,7 +10,7 @@ documentation = "https://docs.rs/kasa-cells"
 readme = "README.md"
 keywords = ["terminal", "wgpu", "renderer", "glyph", "gpu"]
 categories = ["rendering", "graphics", "gui"]
-authors = ["2rami <goenho0613@gmail.com>"]
+authors = ["2rami"]
 # Keep target/ and stray files out of the package.
 include = [
     "src/**/*.rs",

@@ -89,7 +89,7 @@ import { WebFetchRenderer, WebSearchRenderer } from "./web";
 import { ExitPlanRenderer } from "./exitplan";
 
 // SendMessage(팀메이트 발신) — 접힌 카드에도 수신자·요약이 보이게 한다. 없으면
-// FALLBACK 이 "SendMessage {…}" JSON 만 접어 보여 뭘 보냈는지 안 보였다(거노:
+// FALLBACK 이 "SendMessage {…}" JSON 만 접어 보여 뭘 보냈는지 안 보였다(사용자:
 // "접혀보여"). 펼치면 message 전문.
 const SendMessageRenderer: ToolRenderer = {
   summary: (input) => {

@@ -176,7 +176,7 @@ impl State {
                 {"id":"con_a","provider":"github","display":"octo","features":["github.pr"],"state":"ok"},
                 {"id":"con_b","provider":"github","display":"octo-work","features":["github.pr"],"state":"reconnect_required"}],
             "pending":[
-                {"id":"pw_a","digest":"d","provider":"github","display":"octo","device_label":"건호의 MacBook Pro · 케이",
+                {"id":"pw_a","digest":"d","provider":"github","display":"octo","device_label":"내 MacBook Pro · 케이",
                  "write":{"kind":"pr","repo":"2rami/kasaterm","base":"main","head":"feat/login-first","title":"로그인 첫 화면 정리",
                  "body":"이번 판에서 한 일\n- 로그인 첫 화면 정리\n- PR 일 권한\n\n폰 화면은 다음 판에 붙입니다.","draft":false}},
                 {"id":"pw_b","digest":"d","provider":"github","display":"octo","device_label":"맥미니 · 나쵸",

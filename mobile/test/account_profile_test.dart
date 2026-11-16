@@ -16,8 +16,8 @@ Map<String, Object?> profileJson({String? login = 'kasa', Object? avatar}) => {
   'account': 'one',
   'login': login,
   'has_password': login != null,
-  'nickname': '건호',
-  'display_name': '건호',
+  'nickname': '나',
+  'display_name': '나',
   'avatar': avatar,
   'identities': [
     {'provider': 'google', 'display': 'me@example.com', 'picture': 'https://lh3.googleusercontent.com/a/face'},
@@ -58,7 +58,7 @@ void main() {
     final profile = AccountProfile.fromJson(profileJson(avatar: {'source': 'google', 'url': 'https://lh3.googleusercontent.com/a/face'}));
     expect(profile.login, 'kasa');
     expect(profile.hasPassword, isTrue);
-    expect(profile.name, '건호');
+    expect(profile.name, '나');
     expect(profile.linked(OAuthProvider.google)?.display, 'me@example.com');
     expect(profile.linked(OAuthProvider.github)?.picture, isNull, reason: 'a picture outside the provider image hosts');
     expect(profile.avatar?.source, 'google');
@@ -72,11 +72,11 @@ void main() {
   test('profile calls send JSON, raw image bytes and the current password', () async {
     final gate = FakeProfileGateway((req) => json(profileJson()));
     final api = gate.api();
-    await api.updateProfile(nickname: '건호');
+    await api.updateProfile(nickname: '나');
     await api.uploadAvatar([0x89, 0x50, 0x4e, 0x47]);
     await api.changeLogin('current-pass', ' Kasa ');
     expect(gate.requests[0].method, 'PATCH');
-    expect(jsonDecode(gate.requests[0].body), {'nickname': '건호'});
+    expect(jsonDecode(gate.requests[0].body), {'nickname': '나'});
     expect(gate.requests[1].method, 'PUT');
     expect(gate.requests[1].headers['content-type'], 'application/octet-stream');
     expect(gate.requests[1].bodyBytes, [0x89, 0x50, 0x4e, 0x47]);

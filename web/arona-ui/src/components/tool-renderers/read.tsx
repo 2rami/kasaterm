@@ -6,7 +6,7 @@ import { AnsiText } from "../AnsiText";
 import { imageFileUrl, openFile } from "@/lib/mcp";
 
 // Read 로 이미지 파일을 읽으면 결과는 base64 라 텍스트 result 엔 안 뜬다(경로만). 확장자로
-// 판별해 input 경로 아래에 실제 이미지를 백엔드 /image-file 로 미리보기(거노: 펼치면 이미지 뜨게).
+// 판별해 input 경로 아래에 실제 이미지를 백엔드 /image-file 로 미리보기(사용자: 펼치면 이미지 뜨게).
 const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
 
 export const ReadRenderer: ToolRenderer = {

@@ -963,7 +963,7 @@ mod tests {
             GatewayMachine {
                 id: "machine-book-1".to_string(),
                 machine: "맥북".to_string(),
-                aliases: vec!["geno".to_string()],
+                aliases: vec!["tester".to_string()],
             },
             GatewayMachine {
                 id: "machine-mini-1".to_string(),

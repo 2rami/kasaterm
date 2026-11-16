@@ -262,54 +262,54 @@ mod tests {
     fn a_kept_face_is_known_to_its_account_only_and_read_by_a_random_id() {
         let (faces, dir) = rig();
         let (hash, t) = ("a".repeat(64), now_secs());
-        assert!(matches!(faces.known("geno", &hash, t), Known::Unknown));
-        faces.keep("geno", &hash, b"png-1", t).unwrap();
-        let id = id_of(&faces, "geno", &hash, t + 1);
+        assert!(matches!(faces.known("tester", &hash, t), Known::Unknown));
+        faces.keep("tester", &hash, b"png-1", t).unwrap();
+        let id = id_of(&faces, "tester", &hash, t + 1);
         assert!(is_id(&id) && !hash.starts_with(&id), "주소는 내용 해시가 아니다");
         assert!(matches!(faces.known("other", &hash, t + 1), Known::Unknown));
         assert_eq!(faces.read(&id, t + 1).as_deref(), Some(b"png-1".as_slice()));
         assert_eq!(faces.read(&"0".repeat(32), t + 1), None);
         assert_eq!(faces.read("../relay-state", t + 1), None);
 
-        faces.keep("geno", &hash, b"png-1", t + 2).unwrap();
-        assert_eq!(id_of(&faces, "geno", &hash, t + 2), id, "같은 해시는 다시 안 받는다");
+        faces.keep("tester", &hash, b"png-1", t + 2).unwrap();
+        assert_eq!(id_of(&faces, "tester", &hash, t + 2), id, "같은 해시는 다시 안 받는다");
 
         let reopened = Faces::open(Some(&dir.join("relay-state.json")));
-        assert_eq!(id_of(&reopened, "geno", &hash, t + 3), id, "재시작해도 남는다");
+        assert_eq!(id_of(&reopened, "tester", &hash, t + 3), id, "재시작해도 남는다");
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn faces_expire_and_the_oldest_leave_first() {
         let (faces, dir) = rig();
-        faces.keep("geno", &"e".repeat(64), b"old", 0).unwrap();
-        let old = id_of(&faces, "geno", &"e".repeat(64), 1);
-        assert!(matches!(faces.known("geno", &"e".repeat(64), KEEP_SECS + 1), Known::Unknown));
+        faces.keep("tester", &"e".repeat(64), b"old", 0).unwrap();
+        let old = id_of(&faces, "tester", &"e".repeat(64), 1);
+        assert!(matches!(faces.known("tester", &"e".repeat(64), KEEP_SECS + 1), Known::Unknown));
         assert_eq!(faces.read(&old, KEEP_SECS + 1), None);
 
         let hash = |n: usize| format!("{n:064x}");
         let now = 100;
         for n in 0..PER_ACCOUNT + 3 {
-            faces.keep("geno", &hash(n), b"x", now + n as u64).unwrap();
+            faces.keep("tester", &hash(n), b"x", now + n as u64).unwrap();
         }
-        assert!(matches!(faces.known("geno", &hash(0), now + 200), Known::Unknown));
-        assert!(matches!(faces.known("geno", &hash(2), now + 200), Known::Unknown));
-        assert!(matches!(faces.known("geno", &hash(3), now + 200), Known::Id(_)));
+        assert!(matches!(faces.known("tester", &hash(0), now + 200), Known::Unknown));
+        assert!(matches!(faces.known("tester", &hash(2), now + 200), Known::Unknown));
+        assert!(matches!(faces.known("tester", &hash(3), now + 200), Known::Id(_)));
         let files = std::fs::read_dir(dir.join("relay-push-faces")).unwrap().count();
         assert_eq!(files, PER_ACCOUNT, "밀려난 그림 파일도 지운다");
 
         let big = vec![0u8; ACCOUNT_BYTES / 2 + 1];
-        faces.keep("geno", &hash(900), &big, now + 300).unwrap();
-        faces.keep("geno", &hash(901), &big, now + 301).unwrap();
-        assert!(matches!(faces.known("geno", &hash(900), now + 302), Known::Unknown), "용량 상한");
-        assert!(matches!(faces.known("geno", &hash(901), now + 302), Known::Id(_)));
+        faces.keep("tester", &hash(900), &big, now + 300).unwrap();
+        faces.keep("tester", &hash(901), &big, now + 301).unwrap();
+        assert!(matches!(faces.known("tester", &hash(900), now + 302), Known::Unknown), "용량 상한");
+        assert!(matches!(faces.known("tester", &hash(901), now + 302), Known::Id(_)));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn a_gateway_without_state_sends_no_face() {
         let faces = Faces::open(None);
-        assert!(matches!(faces.known("geno", &"a".repeat(64), 1), Known::Off));
-        assert_eq!(faces.keep("geno", &"a".repeat(64), b"x", 1), Err("storage_unavailable"));
+        assert!(matches!(faces.known("tester", &"a".repeat(64), 1), Known::Off));
+        assert_eq!(faces.keep("tester", &"a".repeat(64), b"x", 1), Err("storage_unavailable"));
     }
 }

@@ -9,7 +9,7 @@ export interface SpritePortraitProps {
   scale?: number;
   background?: string;
   /** 대화창(모모톡 등)용 — 프로필 사진처럼 정사각 상반신(char-<slug>-bust.png).
-   *  없으면 전신 도트로 폴백. 교실/워크는 false(전신) 유지(거노). */
+   *  없으면 전신 도트로 폴백. 교실/워크는 false(전신) 유지(사용자). */
   bust?: boolean;
 }
 
@@ -36,11 +36,11 @@ export function SpritePortrait({ character, scale = 2, background = 'transparent
 
   const raw = (character || '').trim();
   // 캐릭터명 해석 실패 시 백엔드가 pane id('%3')·숫자를 넘긴다 → 이니셜이 '%'/숫자로 떠
-  // 깨져 보였다(거노: 프사에 %). 그런 값은 사람 실루엣으로 폴백.
+  // 깨져 보였다(사용자: 프사에 %). 그런 값은 사람 실루엣으로 폴백.
   const isPaneId = raw === '' || /^%?\d+$/.test(raw);
   const initial = isPaneId ? '' : raw.charAt(0).toUpperCase();
   const w = 20 * scale;
-  // 대화창(bust)은 프로필 사진처럼 정사각 상반신, 교실/워크는 전신 도트(거노).
+  // 대화창(bust)은 프로필 사진처럼 정사각 상반신, 교실/워크는 전신 도트(사용자).
   const h = bust ? 20 * scale : 28 * scale;
 
   if (slug && step !== Step.Initial) {

@@ -10,7 +10,7 @@ const SLUG: Record<string, string> = {
   '히마리': 'himari', '아루': 'aru',
 };
 
-// 흰 외곽선(4방향) — 밝은 교실 바닥에서 캐릭터를 또렷하게(거노).
+// 흰 외곽선(4방향) — 밝은 교실 바닥에서 캐릭터를 또렷하게(사용자).
 const OUTLINE =
   'drop-shadow(1px 0 0 rgba(255,255,255,0.95)) drop-shadow(-1px 0 0 rgba(255,255,255,0.95)) drop-shadow(0 1px 0 rgba(255,255,255,0.95)) drop-shadow(0 -1px 0 rgba(255,255,255,0.95)) drop-shadow(0 5px 6px rgba(21,41,74,0.28))';
 
@@ -24,7 +24,7 @@ export interface SpriteWalkProps {
   height?: number;
   /** 측면일 때 좌우 반전(좌향). 정면/후면은 무시. */
   flip?: boolean;
-  /** 아래로=front(정면)·위로=back(후면)·좌우=side(측면). 거노 4방향. */
+  /** 아래로=front(정면)·위로=back(후면)·좌우=side(측면). 사용자 4방향. */
   facing?: Facing;
 }
 

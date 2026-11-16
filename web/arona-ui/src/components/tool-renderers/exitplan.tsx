@@ -4,7 +4,7 @@ import type { ToolRenderer } from "./index";
 import { Markdown } from "../Markdown";
 
 // ExitPlanMode — input.plan(markdown)을 그대로 렌더. REGISTRY 누락 시 FALLBACK 한줄/JSON
-// 덤프로 plan 이 깨지던 것(거노 plan mode 자주 씀). result("User approved…")는 기본 뷰.
+// 덤프로 plan 이 깨지던 것(사용자 plan mode 자주 씀). result("User approved…")는 기본 뷰.
 export const ExitPlanRenderer: ToolRenderer = {
   summary(input) {
     const plan = (input as { plan?: string })?.plan || "";

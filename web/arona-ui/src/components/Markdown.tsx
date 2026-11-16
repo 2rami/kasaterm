@@ -2,10 +2,10 @@ import React from 'react';
 import { CodeBlock } from './CodeBlock';
 
 // 대화 버블용 경량 마크다운 렌더러 — 라이브러리 없이 claude 답변에 흔한 것만:
-// GFM 표(비교용, 거노 요청)·코드블록·인라인 코드·볼드·헤딩·불릿. 과하지 않게.
+// GFM 표(비교용, 사용자 요청)·코드블록·인라인 코드·볼드·헤딩·불릿. 과하지 않게.
 
 // 인라인: **볼드**, `코드`, ~~취소선~~, [링크](url), *이탤릭*/_이탤릭_. ccsv 의
-// react-markdown+remark-gfm 인라인을 자작 정규식으로 이식(거노: 답변 속 URL 클릭·이탤릭).
+// react-markdown+remark-gfm 인라인을 자작 정규식으로 이식(사용자: 답변 속 URL 클릭·이탤릭).
 // 순서 주의 — 볼드(**)/코드를 이탤릭(*) 보다 먼저 매칭해 **를 * 가 안 먹게.
 function inline(text: string, keyBase: string): React.ReactNode[] {
   const out: React.ReactNode[] = [];
@@ -138,7 +138,7 @@ export function Markdown({ text }: { text: string }) {
       !(lines[i].includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1]))
     ) { para.push(lines[i]); i++; }
     // 문단 사이 여백 — 터미널은 빈 줄이 통째로 들어가 확 띄워지는데 웹뷰는 2px라 문단이
-    // 뭉쳐 보였다(거노: 유즈 자소서). 문단답게 띄운다.
+    // 뭉쳐 보였다(사용자: 유즈 자소서). 문단답게 띄운다.
     blocks.push(<div key={key++} style={{ margin: '0.7em 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{inline(para.join('\n'), `p${key}`)}</div>);
   }
 

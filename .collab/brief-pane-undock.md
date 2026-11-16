@@ -3,7 +3,7 @@
 오케스트레이터: 프라나(%6). 모든 보고·질문·완료 통지는 `kasaterm-cli tell %6 "..."` 로. (SendMessage 금지 — 우리는 다른 방이라 안 닿는다. tell이 정식 경로다.)
 
 ## 임무
-kasaterm의 일반 pane을 **별도 OS 창으로 분리(undock)** 하는 기능. 데몬 제거 때 빠진 미구현 항목(dock/undock)의 부활이다. 거노 원문: "그냥 pane도 별도창 기능해줘".
+kasaterm의 일반 pane을 **별도 OS 창으로 분리(undock)** 하는 기능. 데몬 제거 때 빠진 미구현 항목(dock/undock)의 부활이다. 사용자 원문: "그냥 pane도 별도창 기능해줘".
 
 ## 작업 디렉토리
 레포 = `/Users/kasa/Desktop/momewomo/kasaterm` — 네 세션 cwd가 sionic이어도 무관하게 **절대경로로** Read/Edit 해라.

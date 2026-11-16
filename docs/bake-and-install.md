@@ -11,7 +11,7 @@
 
 ## 로컬 검증과 기존 설치본의 최초 전환
 
-거노가 쓰는 건 `~/Applications/kasaterm.app` 이고, 그건 `dist/kasaterm.app` 의 **복사본**이다. `cargo build` 도 `build-app.sh` 도 그 복사를 하지 않으니, **빌드했다고 반영된 게 아니다**(설치본 mtime 을 확인하면 바로 보인다).
+사용자가 쓰는 건 `~/Applications/kasaterm.app` 이고, 그건 `dist/kasaterm.app` 의 **복사본**이다. `cargo build` 도 `build-app.sh` 도 그 복사를 하지 않으니, **빌드했다고 반영된 게 아니다**(설치본 mtime 을 확인하면 바로 보인다).
 
 로컬 검증·최초 설치용 번들은 다음으로 만든다. 이것만으로 빠른 업데이트 작업이 완료되는 것은 아니다:
 
@@ -35,12 +35,12 @@ scripts/macbook-bake.sh app       # pull → build-app.sh (다른 pane 이 Rust 
 ```
 
 - **먼저 push 해라.** 맥북은 `git pull --ff-only origin main` 으로 받으므로 안 올린 커밋은 안 구워진다.
-- **앱 껐다 켜기(자기설치)는 네가 하지 않는다** — 거노나 나쵸가 한다. `app` 을 구웠으면 「구웠다, 껐다 켜면 반영」까지만 보고한다.
+- **앱 껐다 켜기(자기설치)는 네가 하지 않는다** — 사용자나 나쵸가 한다. `app` 을 구웠으면 「구웠다, 껐다 켜면 반영」까지만 보고한다.
 - 어느 것이 필요한지는 고친 자리로 정한다: 펫의 뇌·나쵸 말투·집컴 전원(`tools/request_journal`) → `journal`, 앱 본체 → `app`.
 - 바탕화면 펫은 카사텀에서 떼어 냈다(2026-10-19) — 굽기·띄우기는 `~/Desktop/momewomo/kasapet/scripts/run.sh`.
 
-그 다음은 **거노가 앱을 껐다 켜면 끝난다.** 종료 시 `arm_self_install`(main.rs)이 도우미를 남겨, 프로세스가 완전히 사라진 뒤 `dist` 를 설치본 자리에 복사한다. 그래서 다음에 켜는 것이 새 바이너리다. 다시 띄워 주지는 않는다 — 끄려고 끈 것일 수도 있어서다. 결과는 `$TMPDIR/kasaterm-selfinstall.log`.
+그 다음은 **사용자가 앱을 껐다 켜면 끝난다.** 종료 시 `arm_self_install`(main.rs)이 도우미를 남겨, 프로세스가 완전히 사라진 뒤 `dist` 를 설치본 자리에 복사한다. 그래서 다음에 켜는 것이 새 바이너리다. 다시 띄워 주지는 않는다 — 끄려고 끈 것일 수도 있어서다. 결과는 `$TMPDIR/kasaterm-selfinstall.log`.
 
-- **`scripts/relaunch.sh` 는 이제 선택**이다(quit→설치→재실행→inode 검증까지 한 번에 하고 싶을 때). ⚠️ **pane 안에서 돌리지 마라** — 앱을 quit 하는 순간 네 PTY 째 죽는다. 거노가 `! scripts/relaunch.sh --no-build` 로 돌린다.
+- **`scripts/relaunch.sh` 는 이제 선택**이다(quit→설치→재실행→inode 검증까지 한 번에 하고 싶을 때). ⚠️ **pane 안에서 돌리지 마라** — 앱을 quit 하는 순간 네 PTY 째 죽는다. 사용자가 `! scripts/relaunch.sh --no-build` 로 돌린다.
 - 자기 설치는 **그 설치본으로 도는 앱**에서만, **빌드 트리의 번들이 더 새로울 때만** 움직인다. `cargo run` 개발 실행과 배포된 남의 머신에서는 아무 일도 안 한다.
 - ⚠️ **앱을 claude 세션 안에서 띄우지 마라**(pane 에서 `open`·relaunch). 그 앱이 claude 의 `CLAUDE_CODE_CHILD_SESSION`·`TEAMMATE_MODE`·`SESSION_ID` 를 물려받고, 그러면 그 앱이 낳는 **모든 pane** 의 claude 가 transcript 저장을 끈다. `scrub_inherited_claude_markers`(main.rs, 부팅 첫 줄)가 이제 그걸 지우지만, 애초에 안 물리는 게 낫다.

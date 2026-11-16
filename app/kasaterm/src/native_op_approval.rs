@@ -174,8 +174,8 @@ impl State {
             return;
         }
         self.status = serde_json::json!({"source": "keychain", "token": true,
-            "trusted": [{"label": "건호의 iPhone", "fingerprint": "3F2A-91C0-7D4E"}]});
-        self.untrusted = vec![serde_json::json!({"device": "dev_ipad", "label": "건호의 iPad", "id": "b81c55e0aa04",
+            "trusted": [{"label": "내 iPhone", "fingerprint": "3F2A-91C0-7D4E"}]});
+        self.untrusted = vec![serde_json::json!({"device": "dev_ipad", "label": "내 iPad", "id": "b81c55e0aa04",
             "fingerprint": "B81C-55E0-AA04", "public": ""})];
     }
 

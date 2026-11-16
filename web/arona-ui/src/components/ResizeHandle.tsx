@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 
-// 드래그 리사이즈 핸들(거노: 각 영역 크기조절) — dir='col'=세로 막대(좌우 폭 조절),
+// 드래그 리사이즈 핸들(사용자: 각 영역 크기조절) — dir='col'=세로 막대(좌우 폭 조절),
 // 'row'=가로 막대(상하 높이 조절). onDrag(delta) 는 직전 프레임 대비 이동량(px) — 호출자가
 // width/height state 에 누적. 드래그 중 전역 커서·선택 방지로 매끄럽게.
 export function ResizeHandle({ dir, onDrag }: { dir: 'col' | 'row'; onDrag: (delta: number) => void }) {

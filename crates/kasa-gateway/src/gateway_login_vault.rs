@@ -204,7 +204,7 @@ mod tests {
 
     fn signed(key: &VaultKey, puts: &[Put]) -> serde_json::Value {
         let key_id = key.key_id();
-        json!({"key_id": key_id, "puts": puts, "sig": key.sign(&put_message("geno", &key_id, puts))})
+        json!({"key_id": key_id, "puts": puts, "sig": key.sign(&put_message("tester", &key_id, puts))})
     }
 
     /// 데스크톱 둘·폰 하나로 창구 그대로 — 금고 만들기·서명된 쓰기·등록 요청 나르기, 폰과 열쇠 없는 기기는 못 쓴다.
@@ -213,7 +213,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kasa-login-vault-http-{}", uuid::Uuid::new_v4()));
         let addr = spawn_relay(account_gate(&dir)).await;
         let login = |machine: &'static str, kind: &'static str| async move {
-            post(addr, "/relay/login", None, json!({"account":"geno","password":"correct horse","machine_id":machine,"kind":kind})).await.1
+            post(addr, "/relay/login", None, json!({"account":"tester","password":"correct horse","machine_id":machine,"kind":kind})).await.1
         };
         let mac = login("vault-mac", "desktop").await;
         let pc = login("vault-pc", "desktop").await;
@@ -257,8 +257,8 @@ mod tests {
         assert_eq!(get_json(addr, "/relay/login-vault/joins", pc_token).await.1["joins"], json!([]));
         assert_eq!(get_json(addr, &format!("/relay/login-vault/joins/{join}"), pc_token).await.1["sealed"], json!(null));
         let pc_id = pc["device_id"].as_str().unwrap();
-        let sealed = serde_json::to_value(seal_for(&key, "geno", pc_id, &join, &secret.public_base64()).unwrap()).unwrap();
-        let stranger = serde_json::to_value(seal_for(&other, "geno", pc_id, &join, &secret.public_base64()).unwrap()).unwrap();
+        let sealed = serde_json::to_value(seal_for(&key, "tester", pc_id, &join, &secret.public_base64()).unwrap()).unwrap();
+        let stranger = serde_json::to_value(seal_for(&other, "tester", pc_id, &join, &secret.public_base64()).unwrap()).unwrap();
         assert_eq!(post(addr, &format!("/relay/login-vault/joins/{join}/sealed"), Some(pc_token), sealed.clone()).await.0, 403);
         assert_eq!(post(addr, &format!("/relay/login-vault/joins/{join}/sealed"), Some(mac_token), stranger).await.0, 403, "금고 열쇠 없는 봉인");
         assert_eq!(post(addr, &format!("/relay/login-vault/joins/{join}/sealed"), Some(mac_token), sealed.clone()).await.0, 200);
@@ -270,12 +270,12 @@ mod tests {
 
         // 폰 승인 창구가 등록 도전문을 받는다 — 폰에는 「로그인 금고」로 보인다.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        let text = kasa_device::login_vault::join::challenge("geno", pc_id, &"0f".repeat(16), now + 60_000, "집 PC", &[7u8; 32]);
+        let text = kasa_device::login_vault::join::challenge("tester", pc_id, &"0f".repeat(16), now + 60_000, "집 PC", &[7u8; 32]);
         let (status, created) = post(addr, "/relay/approvals", Some(pc_token), json!({"kind": "secret", "challenge": text})).await;
         assert_eq!(status, 200, "{created}");
         assert_eq!(created["approval"]["tool"], "로그인 금고");
 
-        let saved = std::fs::read_to_string(dir.join("login-vault").join("geno.json")).unwrap();
+        let saved = std::fs::read_to_string(dir.join("login-vault").join("tester.json")).unwrap();
         assert!(saved.contains("c2VhbGVk") && !saved.contains(&secret.public_base64()), "등록 요청은 디스크에 남기지 않는다");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -291,11 +291,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kasa-login-vault-e2e-{}", uuid::Uuid::new_v4()));
         let addr = spawn_relay(account_gate(&dir)).await;
         let login = |machine: &'static str| async move {
-            post(addr, "/relay/login", None, json!({"account":"geno","password":"correct horse","machine_id":machine,"kind":"desktop"})).await.1
+            post(addr, "/relay/login", None, json!({"account":"tester","password":"correct horse","machine_id":machine,"kind":"desktop"})).await.1
         };
         let cred = |v: serde_json::Value| kasa_device::device_auth::DeviceCred {
             relay: format!("http://{addr}"),
-            account: "geno".into(),
+            account: "tester".into(),
             device_id: v["device_id"].as_str().expect(&v.to_string()).into(),
             token: v["token"].as_str().unwrap().into(),
             display_name: None,
@@ -324,7 +324,7 @@ mod tests {
         .await
         .unwrap();
         assert!(synced, "지운 것도 넘어간다");
-        let saved = std::fs::read_to_string(dir.join("login-vault").join("geno.json")).unwrap();
+        let saved = std::fs::read_to_string(dir.join("login-vault").join("tester.json")).unwrap();
         assert!(!saved.contains("hunter2") && !saved.contains("mail.example"), "관문 디스크에 평문이 없다");
         let _ = std::fs::remove_dir_all(&dir);
     }

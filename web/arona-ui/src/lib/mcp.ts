@@ -152,7 +152,7 @@ interface BoardRow {
   tokens_in?: number;
   tokens_out?: number;
   /** 학생이 선생님 입력을 기다리는 진짜 이유(AskUserQuestion 질문·권한 'permission').
-   *  이게 있을 때만 '확인 필요'(빨강). 없는 waiting 은 단순 응답 대기·완료 보고다(거노). */
+   *  이게 있을 때만 '확인 필요'(빨강). 없는 waiting 은 단순 응답 대기·완료 보고다(사용자). */
   waiting_for?: string;
   /** 마지막 답변/질문 첫마디 — waiting/idle 생각 구름 텍스트 소스. */
   last_reply?: string;
@@ -173,7 +173,7 @@ interface BoardRow {
   /** claude 프로세스 실행 경로 — pid_cwd(lsof) 라이브. 내부 cd 는 안 보인다. */
   cwd?: string;
   /** statusLine 이 보고한 "현재 보는 경로"(report-cwd) — claude 내부 cd 반영.
-   *  cwd(실행 경로)와 함께 푸터에 "실행/현재 보는" 두 경로로 표시(거노). */
+   *  cwd(실행 경로)와 함께 푸터에 "실행/현재 보는" 두 경로로 표시(사용자). */
   view_cwd?: string;
   /** claude saved default effort(~/.claude/settings.json effortLevel) — resume 직후 effort 카드
    *  폴백값. ultracode 는 session-only 라 여기 안 들어온다. */
@@ -213,7 +213,7 @@ function accentFor(id: string): AccentColorName {
 function toAgent(r: BoardRow): Agent {
   const tokens = (r.tokens_in ?? 0) + (r.tokens_out ?? 0);
   // 이름표(name)는 터미널 pane 탭과 통일한 "미도리 · 작업명" 라벨. 단 character 에는
-  // 합성 라벨을 넣지 않는다(거노: 프사 안 뜸) — SpritePortrait 의 SLUG 매칭은 순수
+  // 합성 라벨을 넣지 않는다(사용자: 프사 안 뜸) — SpritePortrait 의 SLUG 매칭은 순수
   // 캐릭터명이 필요한데, 라벨이 character 로 새면 SLUG 미스 → 프사 대신 이니셜('모')이
   // 떴다. 그래서 name=라벨 / character=순수 캐릭터명(없으면 작업명·surface_id 폴백)으로 분리.
   const label = r.character
@@ -224,7 +224,7 @@ function toAgent(r: BoardRow): Agent {
   // 'active' 폴백은 tool 이름이 아니므로 버린다(말풍선엔 진짜 tool명만).
   const head = r.intent ? r.intent.split(' ')[0] : '';
   const currentTool = head && head !== 'active' ? head : undefined;
-  // working 인데 아직 도구를 안 쓴 turn = 응답 생성 중(거노: active 로딩중 = thinking).
+  // working 인데 아직 도구를 안 쓴 turn = 응답 생성 중(사용자: active 로딩중 = thinking).
   let status = toStatus(r.status);
   if (status === 'working' && !currentTool) status = 'thinking';
   return {
@@ -352,7 +352,7 @@ export interface CharacterDef {
   header_color?: string;
   persona?: string;
   greeting?: string;
-  /** 거노 아트 교체 구조 — 스프라이트 시트 경로(옵셔널). 채워지면
+  /** 사용자 아트 교체 구조 — 스프라이트 시트 경로(옵셔널). 채워지면
    *  ClassroomCharacter/SpritePortrait 가 placeholder 도트 대신 이 시트를 쓴다. */
   sprite?: string;
 }
@@ -360,7 +360,7 @@ export interface Characters {
   theme?: string;
   user_title?: string;
   leader: CharacterDef;
-  /** 리더 풀(아로나·프라나) — 학생 추가/교체 시 이들도 고를 수 있게(거노). */
+  /** 리더 풀(아로나·프라나) — 학생 추가/교체 시 이들도 고를 수 있게(사용자). */
   leaders?: CharacterDef[];
   members: CharacterDef[];
 }
@@ -463,7 +463,7 @@ export async function fetchSessions(): Promise<SessionsInfo> {
   }
 }
 
-/** POST /session-switch?idx=N — 그 방(윈도우)으로 터미널 전환(거노: 방=윈도우 클릭). */
+/** POST /session-switch?idx=N — 그 방(윈도우)으로 터미널 전환(사용자: 방=윈도우 클릭). */
 export async function switchSession(idx: number): Promise<boolean> {
   try {
     const r = await fetch(`${BASE}/session-switch?idx=${idx}`, { method: 'POST' });
@@ -473,7 +473,7 @@ export async function switchSession(idx: number): Promise<boolean> {
   }
 }
 
-/** POST /session-new?character=<name> — 새 방(윈도우) + 첫 pane 캐릭터 지정 스폰(거노). */
+/** POST /session-new?character=<name> — 새 방(윈도우) + 첫 pane 캐릭터 지정 스폰(사용자). */
 export async function newRoom(character: string): Promise<boolean> {
   try {
     const r = await fetch(`${BASE}/session-new?character=${encodeURIComponent(character)}`, { method: 'POST' });
@@ -661,7 +661,7 @@ export async function saveSession(surface?: string): Promise<boolean> {
   }
 }
 
-/** POST /session-close?idx=N — 그 방(윈도우) 닫기(거노). 마지막 윈도우는 백엔드가 거부. */
+/** POST /session-close?idx=N — 그 방(윈도우) 닫기(사용자). 마지막 윈도우는 백엔드가 거부. */
 export async function closeRoom(idx: number): Promise<boolean> {
   try {
     const r = await fetch(`${BASE}/session-close?idx=${idx}`, { method: 'POST' });
@@ -672,7 +672,7 @@ export async function closeRoom(idx: number): Promise<boolean> {
 }
 
 // 학생 생성은 백엔드(kasaterm)가 pane 생성 시 캐릭터/session-id/persona 를 직접 박는다
-// (거노: /spawn 폐기, 솔로 일관). arona-ui 는 board 폴링으로 표시만 한다 — spawnAgent 제거.
+// (사용자: /spawn 폐기, 솔로 일관). arona-ui 는 board 폴링으로 표시만 한다 — spawnAgent 제거.
 
 /** POST /focus?surface=<id> — 카드 클릭 시 해당 pane 포커스. 유우카: 쿼리 파라미터
  *  (body 아님 — 다른 POST 와 같은 preflight 회피). encodeURIComponent 가 표준 경로.
@@ -704,7 +704,7 @@ export async function closeAgent(surfaceId: string): Promise<boolean> {
 /** POST /send?surface=<id> body:{text,submit} — 특정 pane PTY에 텍스트 주입.
  *  submit=true(기본)이면 개행 추가(제출), false면 타이핑만. fail-soft(false).
  *  persist=false(`&nopersist=1`): 모모톡 단톡방에 안 남긴다 — 학생별 대화 패널의 개인
- *  지시는 그 학생 대화에만 떠야 하는데 persist 하면 모모톡에까지 노란버블로 샜다(거노). */
+ *  지시는 그 학생 대화에만 떠야 하는데 persist 하면 모모톡에까지 노란버블로 샜다(사용자). */
 export async function sendToPane(surfaceId: string, text: string, submit = true, persist = true): Promise<boolean> {
   if (!text || !surfaceId) return false;
   try {
@@ -723,7 +723,7 @@ export async function sendToPane(surfaceId: string, text: string, submit = true,
 }
 
 /** POST /send?surface=<id>&inbox=1 — 모모톡 inbox 발신. PTY 에 주입하지 않고
- *  messages.jsonl 에 read=false 로만 적는다(거노: 모모톡은 프롬프트가 아니라 에이전트
+ *  messages.jsonl 에 read=false 로만 적는다(사용자: 모모톡은 프롬프트가 아니라 에이전트
  *  inbox). 받는 에이전트는 drain_unread 로 컨텍스트에 받고, idle 이면 nudge
  *  가 깨운다. fail-soft(false). */
 export async function sendToInbox(surfaceId: string, text: string): Promise<boolean> {
@@ -829,7 +829,7 @@ export interface UsageBadge { pct: number; label: string; resetsAt: string | nul
 
 /** `limits[]` 중 percent 가 가장 높은 창. `five_hour.utilization` 만 보면 안 되는
  *  이유: 실측 세 계정 모두 그 값이 0 이고 실제 압박은 전부 weekly(95%/25%)였다 —
- *  pill 이 "다 0퍼"로 보인 원인(거노 2026-08-05). limits 가 없는 옛 응답은 five_hour 로 폴백. */
+ *  pill 이 "다 0퍼"로 보인 원인(사용자 2026-08-05). limits 가 없는 옛 응답은 five_hour 로 폴백. */
 export function usagePressure(u: ClaudeUsage | null): { pct: number; label: string; resetsAt: string | null } | null {
   if (!u) return null;
   const top = (u.limits ?? [])
@@ -1018,7 +1018,7 @@ export async function roomCd(path: string): Promise<boolean> {
 export interface Turn { role: string; text: string; images?: string[] }
 
 /** 인터랙티브 도구 호출(AskUserQuestion 등) — 캡처 프록시가 SSE tool_use 에서 재구성.
- *  peek 화면 추정 없이 질문/선택지를 API 그대로(거노). */
+ *  peek 화면 추정 없이 질문/선택지를 API 그대로(사용자). */
 export interface ConvToolUse {
   name: string;
   input: {

@@ -146,14 +146,14 @@ void main() {
             'machines': [
               {'label': '나쵸네코', 'route': '~mini', 'online': true, 'panes': []},
               {
-                'label': '건호의 MacBook Pro',
-                'route': '건호의 MacBook Pro',
+                'label': '내 MacBook Pro',
+                'route': '내 MacBook Pro',
                 'online': false,
                 'panes': [],
               },
               {
-                'label': '거노 데스크탑',
-                'route': '거노 데스크탑',
+                'label': '내 데스크탑',
+                'route': '내 데스크탑',
                 'online': false,
                 'panes': [],
               },
@@ -167,7 +167,7 @@ void main() {
               {
                 'id': 'work',
                 'machine': '맥북',
-                'aliases': ['맥북', '건호의 MacBook Pro'],
+                'aliases': ['맥북', '내 MacBook Pro'],
               },
               {'id': 'spare', 'machine': '새 맥', 'aliases': []},
             ],
@@ -185,8 +185,8 @@ void main() {
       [for (final m in list) (m.label, m.route, m.online)],
       [
         ('나쵸네코', '~mini', true),
-        ('건호의 MacBook Pro', '~work', true),
-        ('거노 데스크탑', '거노 데스크탑', false),
+        ('내 MacBook Pro', '~work', true),
+        ('내 데스크탑', '내 데스크탑', false),
         ('새 맥', '~spare', true),
       ],
     );

@@ -14,7 +14,7 @@ import 'relay_account_test.dart' show session;
 Map<String, Object?> pending({String id = 'apv_0123456789abcdef0123456789abcdef', bool truncated = false, int expires = 120000}) => {
   'id': id,
   'state': 'pending',
-  'machine': '건호의 MacBook Pro',
+  'machine': '내 MacBook Pro',
   'device': 'dev_book',
   'student': '유우카',
   'pane': '%3',
@@ -75,7 +75,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('유우카'), findsOneWidget);
-    expect(find.text('건호의 MacBook Pro · %3'), findsOneWidget);
+    expect(find.text('내 MacBook Pro · %3'), findsOneWidget);
     expect(find.text('Bash'), findsOneWidget);
     expect(find.text('rm -rf target/debug && API_KEY=•••••• cargo build --release'), findsOneWidget);
     expect(find.text('빌드 폴더를 지우고 다시 굽기'), findsOneWidget);

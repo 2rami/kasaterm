@@ -91,11 +91,11 @@ async fn profile_names_linked_logins_and_prefers_the_uploaded_picture() {
     assert_eq!(profile["avatar"]["source"], "google");
 
     let patched: Value = client.patch(format!("{base}/profile")).bearer_auth(&token)
-        .json(&json!({"nickname":"  건호\u{7} ","avatar":"github"})).send().await.unwrap().json().await.unwrap();
-    assert_eq!(patched["nickname"], "건호");
-    assert_eq!(patched["display_name"], "건호");
+        .json(&json!({"nickname":"  나\u{7} ","avatar":"github"})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(patched["nickname"], "나");
+    assert_eq!(patched["display_name"], "나");
     assert_eq!(patched["avatar"]["source"], "github");
-    assert_eq!(get(&client, format!("{base}/whoami"), &token).await.1["display_name"], "건호");
+    assert_eq!(get(&client, format!("{base}/whoami"), &token).await.1["display_name"], "나");
     let too_long = "가".repeat(MAX_NICKNAME + 1);
     let refused = client.patch(format!("{base}/profile")).bearer_auth(&token)
         .json(&json!({"nickname": too_long})).send().await.unwrap();

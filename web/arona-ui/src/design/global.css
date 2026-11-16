@@ -112,7 +112,7 @@ canvas { image-rendering: pixelated; }
   0%, 100% { transform: scale(1); }
   50% { transform: scale(0.85); }
 }
-/* 로딩 버블 점 — 통통 튀는 bounce(거노: 로딩되는 애니메이션이 약함). */
+/* 로딩 버블 점 — 통통 튀는 bounce(사용자: 로딩되는 애니메이션이 약함). */
 @keyframes cth-loading-bounce {
   0%, 70%, 100% { transform: scale(0.78); opacity: 0.45; }
   35% { transform: scale(1.05); opacity: 1; }
@@ -141,7 +141,7 @@ canvas { image-rendering: pixelated; }
   to { background-position-x: var(--walk-shift, -400%); }
 }
 
-/* 리사이즈 핸들(거노: 각 영역 크기조절) — 항상 가는 그립 막대가 보여 잡을 수 있게,
+/* 리사이즈 핸들(사용자: 각 영역 크기조절) — 항상 가는 그립 막대가 보여 잡을 수 있게,
    hover/drag 시 SCHALE 블루로 강조. (옛 6px 투명 핸들은 거기 있는지 몰라 못 잡았음) */
 .cth-resize-handle::before {
   content: ''; border-radius: 3px;

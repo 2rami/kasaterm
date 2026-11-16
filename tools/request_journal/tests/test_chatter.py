@@ -65,7 +65,7 @@ class ChatterTests(unittest.TestCase):
     def run_chatter(self, body, client=None, ctx=None):
         with patch.object(chatter, "llm_client", lambda factory: client), \
              patch.object(chatter, "context", lambda pane: ctx or {"who": ROW, "screen": "화면"}), \
-             patch.object(chatter, "machine_label", lambda: "건호의 MacBook Pro"):
+             patch.object(chatter, "machine_label", lambda: "내 MacBook Pro"):
             return chatter.chatter(object(), body)
 
     def test_a_focused_pane_is_required(self):
@@ -87,7 +87,7 @@ class ChatterTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["lines"], ["유우카가 펫을 고치는 중이다넹", "검사 91개 통과했다냥", "한번 봐 보라냥~"])
         sent = type(client).sent
-        self.assertIn("건호의 MacBook Pro", sent["messages"][0]["content"])
+        self.assertIn("내 MacBook Pro", sent["messages"][0]["content"])
         self.assertIn("유우카", sent["messages"][0]["content"])
         self.assertIn("3 줄", sent["system"])
         self.assertEqual(sent["reasoning_effort"], "low")

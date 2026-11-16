@@ -12,7 +12,7 @@ const taskRank = (s: string) => (s === 'in_progress' ? 0 : s === 'completed' ? 2
 
 // 한 pane 줄에 완료 태스크를 몇 개까지 보일지. 저장소는 **방 단위로 공유**돼서 바쁜
 // 방은 하루 이틀 만에 완료가 수십 개 쌓인다(실측 2026-08-06: 34개 중 29개 완료,
-// 전부 어제·오늘 것) — 거노: "아루 태스크는 왜 저렇게 돼 있어". 그 줄에서 봐야 할 건
+// 전부 어제·오늘 것) — 사용자: "아루 태스크는 왜 저렇게 돼 있어". 그 줄에서 봐야 할 건
 // **지금 뭘 하는가**지 오늘 끝낸 것 전부가 아니라, 열린 것은 다 보이고 완료는 최근
 // 몇 개만 남긴 뒤 나머지는 개수로 접는다. 오래된 파일 자체는 앱이 부팅 때 지운다
 // (main.rs `prune_finished_tasks`) — 그건 어제 것을 못 지우니 이 상한이 따로 필요하다.
@@ -28,7 +28,7 @@ function BellGlyph() {
   );
 }
 
-// 완료 보고 경과 — 절대 시각은 읽는 사람이 매번 뺄셈해야 한다(거노: 상대 시간으로).
+// 완료 보고 경과 — 절대 시각은 읽는 사람이 매번 뺄셈해야 한다(사용자: 상대 시간으로).
 const agoLabel = (secs?: number) => {
   if (secs == null) return '';
   if (secs < 60) return '방금';
@@ -43,7 +43,7 @@ const SectionLabel = ({ children }: { children: string }) => (
   }}>{children}</div>
 );
 
-// board = 모든 pane 작업 현황·상세(업무 흡수) + pane 간 tell 소통 피드. 모모톡·inbox 대체(거노).
+// board = 모든 pane 작업 현황·상세(업무 흡수) + pane 간 tell 소통 피드. 모모톡·inbox 대체(사용자).
 // 빨강 '확인 필요'는 waiting_for(AskUserQuestion·권한) 있는 것만 — isAwaitingTeacher 가 그 판정.
 export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: string, title: string) => void; onSaved?: (surface: string) => void }) {
   const agents = useStore((s) => s.agents);
@@ -78,7 +78,7 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
             <button className="cth-panel-action" style={{ marginLeft: 8 }} onClick={() => void refreshBoardNow()}>새로고침</button>
           </div>
         )}
-        {/* 확인 대기 — waiting_for(AskUserQuestion·권한) 있는 학생만(거노: 빨강 남발 방지) */}
+        {/* 확인 대기 — waiting_for(AskUserQuestion·권한) 있는 학생만(사용자: 빨강 남발 방지) */}
         {(() => {
           const awaiting = agents.filter(isAwaitingTeacher);
           if (!awaiting.length) return null;
@@ -194,7 +194,7 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                 <div style={{ marginLeft: 16, marginTop: 5, display: 'flex', flexDirection: 'column', gap: 2 }}>
                   {(() => {
                     // 목록은 방 하나를 여럿이 나눠 쓴다 — 그대로 그리면 같은 방 pane 카드마다
-                    // **같은 태스크 뭉치가 통째로 반복**된다(거노 2026-08-06: "각자 태스크가
+                    // **같은 태스크 뭉치가 통째로 반복**된다(사용자 2026-08-06: "각자 태스크가
                     // 있으면 좋겠네"). 남이 주인인 것은 그 사람 카드에만 두고, 여기선 개수로만
                     // 알린다. 주인 없는 것도 마찬가지 — 방 저장소엔 그 cwd 에서 돌았던 옛
                     // 세션이 전부 쌓여 있어서(실측 59개 중 55개가 주인 없는 유령) 그걸 카드에

@@ -398,20 +398,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kasa-acc-{}", uuid::Uuid::new_v4()));
         let p = dir.join("relay-accounts.json");
         let mut f = AccountsFile::default();
-        f.accounts.insert("geno".into(), Account { pbkdf2_sha256: hash_password_with("pw-1", 1000), created: 1, disabled: false, login: None });
+        f.accounts.insert("tester".into(), Account { pbkdf2_sha256: hash_password_with("pw-1", 1000), created: 1, disabled: false, login: None });
         save_accounts(&p, &f).unwrap();
         let acc = Accounts::new(Some(p.clone()));
-        assert!(acc.check("geno", "pw-1"));
-        assert!(!acc.check("geno", "pw-2"));
+        assert!(acc.check("tester", "pw-1"));
+        assert!(!acc.check("tester", "pw-2"));
         assert!(!acc.check("nobody", "pw-1"));
         std::thread::sleep(Duration::from_millis(20));
-        f.accounts.get_mut("geno").unwrap().disabled = true;
+        f.accounts.get_mut("tester").unwrap().disabled = true;
         save_accounts(&p, &f).unwrap();
         // mtime 해상도가 거친 파일시스템에서도 바뀌게 한 번 더 건드린다.
         let later = SystemTime::now() + Duration::from_secs(2);
         let _ = std::fs::File::options().write(true).open(&p).and_then(|file| file.set_modified(later));
-        assert!(!acc.check("geno", "pw-1"), "막힌 계정이 로그인됐다");
-        assert!(!acc.active("geno"));
+        assert!(!acc.check("tester", "pw-1"), "막힌 계정이 로그인됐다");
+        assert!(!acc.active("tester"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -425,29 +425,29 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kasa-acc-{}", uuid::Uuid::new_v4()));
         let p = dir.join("relay-accounts.json");
         let mut f = AccountsFile::default();
-        for name in ["geno", "other"] {
+        for name in ["tester", "other"] {
             f.accounts.insert(name.into(), Account { pbkdf2_sha256: hash_password_with("pw-1", 1000), created: 1, disabled: false, login: None });
         }
         save_accounts(&p, &f).unwrap();
         let acc = Accounts::new(Some(p.clone()));
-        assert_eq!(acc.set_login("geno", "other"), Err("login_taken"));
-        assert_eq!(acc.set_login("geno", "oauth_x1"), Err("invalid_login"));
+        assert_eq!(acc.set_login("tester", "other"), Err("login_taken"));
+        assert_eq!(acc.set_login("tester", "oauth_x1"), Err("invalid_login"));
         assert_eq!(acc.set_login("oauth_abc", "fresh"), Err("no_password"));
-        acc.set_login("geno", "kasa").unwrap();
-        assert_eq!(acc.check_login("kasa", "pw-1").as_deref(), Some("geno"));
-        assert_eq!(acc.check_login("geno", "pw-1"), None, "옛 아이디로 들어왔다");
-        assert_eq!(acc.login_of("geno").as_deref(), Some("kasa"));
-        assert_eq!(acc.set_login("other", "geno"), Err("login_taken"), "옛 아이디가 남에게 풀렸다");
+        acc.set_login("tester", "kasa").unwrap();
+        assert_eq!(acc.check_login("kasa", "pw-1").as_deref(), Some("tester"));
+        assert_eq!(acc.check_login("tester", "pw-1"), None, "옛 아이디로 들어왔다");
+        assert_eq!(acc.login_of("tester").as_deref(), Some("kasa"));
+        assert_eq!(acc.set_login("other", "tester"), Err("login_taken"), "옛 아이디가 남에게 풀렸다");
         assert_eq!(acc.set_login("other", "kasa"), Err("login_taken"));
-        acc.set_password("geno", "short").unwrap_err();
-        acc.set_password("geno", "new-password").unwrap();
+        acc.set_password("tester", "short").unwrap_err();
+        acc.set_password("tester", "new-password").unwrap();
         assert_eq!(acc.check_login("kasa", "pw-1"), None);
-        assert_eq!(acc.check_login("kasa", "new-password").as_deref(), Some("geno"));
-        acc.set_login("geno", "geno").unwrap();
-        assert_eq!(acc.check_login("geno", "new-password").as_deref(), Some("geno"));
+        assert_eq!(acc.check_login("kasa", "new-password").as_deref(), Some("tester"));
+        acc.set_login("tester", "tester").unwrap();
+        assert_eq!(acc.check_login("tester", "new-password").as_deref(), Some("tester"));
         assert_eq!(acc.check_login("kasa", "new-password"), None);
         let saved = load_accounts(&p);
-        assert!(saved.accounts["geno"].login.is_none(), "되돌린 아이디가 기록에 남았다");
+        assert!(saved.accounts["tester"].login.is_none(), "되돌린 아이디가 기록에 남았다");
         assert!(!std::fs::read_to_string(&p).unwrap().contains("new-password"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -456,10 +456,10 @@ mod tests {
     fn repeated_failures_lock_the_account_but_not_others() {
         let l = Limiter::default();
         for _ in 0..FREE_FAILURES {
-            assert!(l.allow("geno", "ip-a").is_ok());
-            l.record("geno", false);
+            assert!(l.allow("tester", "ip-a").is_ok());
+            l.record("tester", false);
         }
-        assert!(l.allow("geno", "ip-b").is_err(), "연달아 틀린 계정이 안 잠겼다");
+        assert!(l.allow("tester", "ip-b").is_err(), "연달아 틀린 계정이 안 잠겼다");
         assert!(l.allow("other", "ip-b").is_ok());
     }
 
@@ -475,9 +475,9 @@ mod tests {
 
     #[test]
     fn names_and_tokens_have_the_expected_shape() {
-        assert!(valid_account_name("geno"));
+        assert!(valid_account_name("tester"));
         assert!(valid_account_name("kasa_2"));
-        for bad in ["G", "Geno", "a", "has space", "한글"] {
+        for bad in ["G", "Tester", "a", "has space", "한글"] {
             assert!(!valid_account_name(bad), "{bad}");
         }
         let t = new_token();

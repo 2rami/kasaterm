@@ -1,6 +1,6 @@
 # ⑤ munder 메시징 · idle wake · 말풍선 조사 보고서
 
-> 거노 질문 ⑤ + 8d3f(말풍선) 대응. munder-difflin(`~/Desktop/munder-difflin`) 코드 직접 조사 +
+> 사용자 질문 ⑤ + 8d3f(말풍선) 대응. munder-difflin(`~/Desktop/munder-difflin`) 코드 직접 조사 +
 > 우리 kasacollab / board 대비 + 샬레 교실 말풍선 구현안. 인용은 munder 측 `파일:줄`.
 
 ---
@@ -74,7 +74,7 @@ read 플래그 멱등 + flock. 우리가 더 가볍고, munder가 더 프로토�
 
 ---
 
-## D. 말풍선(작업중 표시) — munder 구조 + 우리 매핑안 ★ 거노 핵심
+## D. 말풍선(작업중 표시) — munder 구조 + 우리 매핑안 ★ 사용자 핵심
 
 ### munder 말풍선 UI
 - **ThoughtBubble**(`src/renderer/src/scene/office/ThoughtBubble.ts`): pixi `Container` =
@@ -136,7 +136,7 @@ action과 동형) · `last_prompt` · `last_reply` · `status`(working/waiting/b
 
 ---
 
-## F. 에이전트 죽음 감지 · 복구 (거노 직접 질문 — munder 대비 우리 체계)
+## F. 에이전트 죽음 감지 · 복구 (사용자 직접 질문 — munder 대비 우리 체계)
 
 ### munder 복구 메커니즘
 1. **죽음/끊김 감지**: ① PTY `onExit`(node-pty, `src/main/pty.ts:179-184`) → `teardownPty`가 자동
@@ -180,7 +180,7 @@ action과 동형) · `last_prompt` · `last_reply` · `status`(working/waiting/b
 3. **sessionId 단일 영속 소스**: munder 는 hook session_id 를 registry 한 곳에 기록→resume 키로.
    우리도 pane_record 가 그 역할이나, hook 기반 자동 기록 경로를 단일화하면 resume 신뢰도 ↑.
 - **우리가 이미 더 나은 것**: 자동 재집결(leader 자동시작 + 복구 안내)·idle nudge. munder 는 복구가
-  전적으로 수동(사용자가 탭 다시 열어야). 우리 방향(자동 복원)이 거노 "열면 이어가기" 목표에 부합.
+  전적으로 수동(사용자가 탭 다시 열어야). 우리 방향(자동 복원)이 사용자 "열면 이어가기" 목표에 부합.
 
 ---
 

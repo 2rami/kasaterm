@@ -2,7 +2,7 @@
 # 맥미니(또는 어느 기계든)에서 맥북에 「구워라」 — 나쵸 역터널의 관문을 통과하는 유일한 모양으로.
 #
 #   scripts/macbook-bake.sh status          # 맥북 판 보기
-#   scripts/macbook-bake.sh app [--force]   # pull → 앱 전체 굽기(반영은 거노가 앱을 껐다 켜야)
+#   scripts/macbook-bake.sh app [--force]   # pull → 앱 전체 굽기(반영은 사용자가 앱을 껐다 켜야)
 #   scripts/macbook-bake.sh journal         # pull → 펫의 뇌 재시작
 #
 # 관문(nacho-tunnel-guard)은 argv[0] 이 맥북의 `~/.local/bin/kasaterm-remote` **절대 경로**일 때만

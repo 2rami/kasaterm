@@ -17,7 +17,7 @@ import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx';
 import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
 import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
 
-// ccsv CodeBlock 이식 — react-syntax-highlighter prism-light(필요 언어만 register). 거노
+// ccsv CodeBlock 이식 — react-syntax-highlighter prism-light(필요 언어만 register). 사용자
 // 세션 대부분 코드라 단색 pre 덤프 → 구문강조로 승격. rust 추가(kasaterm 세션).
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const LANGS: Record<string, any> = { bash, c, cpp, css, diff, go, java, javascript, json, markdown, python, rust, sql, tsx, typescript, yaml };

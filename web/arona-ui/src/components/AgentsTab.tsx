@@ -94,7 +94,7 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
   );
 }
 
-// '에이전트' 탭 본문 — pane 밖에서 도는 daemon claude 세션 목록(거노: 보드 현황에서
+// '에이전트' 탭 본문 — pane 밖에서 도는 daemon claude 세션 목록(사용자: 보드 현황에서
 // 분리해 별도 탭으로). 데이터는 App 이 store.backgroundAgents 로 채운다(3s 폴링).
 // 모모이처럼 다른 방·detach 된 세션도 cwd 무관 전체가 여기 모인다(claude agents --all).
 export function AgentsPanel({ onOpenBackground }: { onOpenBackground?: (a: BackgroundAgent) => void }) {

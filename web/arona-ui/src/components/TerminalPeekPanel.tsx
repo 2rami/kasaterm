@@ -16,7 +16,7 @@ import { accentByName, hex, type AccentColorName } from '@/design/tokens';
 import { X } from 'lucide-react';
 
 // 대화 본문 = transcript jsonl(/transcript-raw, raw SessionEvent[]). ccsv 파서·per-tool
-// 렌더를 이식해 Bash/Edit/Read 도구 호출이 카톡 버블 사이에 카드로 인터리브된다(거노:
+// 렌더를 이식해 Bash/Edit/Read 도구 호출이 카톡 버블 사이에 카드로 인터리브된다(사용자:
 // 데스크탑 앱처럼 보기좋게). 캡처 프록시(/conversation)는 AskUserQuestion 선택지·라이브
 // streaming·effort/model 표시의 보너스 소스로만 — 프록시 꺼지면 그 부분만 비활성(본문은
 // jsonl 로 멀쩡). /model·권한 프롬프트는 화면(peek) 폴백.
@@ -32,16 +32,16 @@ const shortModel = (m?: string) => {
   return has1m ? `${base} (1M)` : base;
 };
 const shortCwd = (p?: string) => (!p ? '' : p.split('/').filter(Boolean).slice(-2).join('/'));
-// effort 표시 — ultracode 는 xhigh 와 thinking budget 이 같아 모델칩처럼 구분이 필요(거노). 프록시가
+// effort 표시 — ultracode 는 xhigh 와 thinking budget 이 같아 모델칩처럼 구분이 필요(사용자). 프록시가
 // output_config.effort 로 "ultracode" 를 그대로 주므로, 그 값일 때만 풀어서 표기한다.
 const shortEffort = (e?: string | null) => (!e ? '' : e === 'ultracode' ? 'ultracode (xhigh+workflows)' : e);
-// effort 단계별 색 — low(약)→ultracode(강) 순으로 진하게(거노: 단계별 색상). effort 칩 앞 점 색.
+// effort 단계별 색 — low(약)→ultracode(강) 순으로 진하게(사용자: 단계별 색상). effort 칩 앞 점 색.
 const EFFORT_COLOR: Record<string, string> = {
   low: '#9aa7b8', medium: '#4a86e8', high: '#16a766', xhigh: '#e0a020', max: '#fb4c2f', ultracode: '#a479e2',
 };
 const effortColor = (e?: string | null): string | undefined => (e ? EFFORT_COLOR[e.toLowerCase()] : undefined);
 
-// AskUserQuestion 옵션에 학생 이름이 박혀 있으면 그 도트를 곁들인다(거노: 목업의 학생을 진짜
+// AskUserQuestion 옵션에 학생 이름이 박혀 있으면 그 도트를 곁들인다(사용자: 목업의 학생을 진짜
 // 도트로). SLUG 로스터와 동일 — label·description·preview 어디에 있든 첫 매치 반환.
 const AQ_STUDENTS = ['아로나', '프라나', '미도리', '모모이', '유즈', '아리스'];
 const detectStudent = (...texts: (string | undefined)[]): string | null => {
@@ -52,7 +52,7 @@ const detectStudent = (...texts: (string | undefined)[]): string | null => {
 };
 
 
-// /context 터미널 화면에서 의미있는 라인만 추출(거노: GUI 새로 만들지 말고 터미널에 보이는
+// /context 터미널 화면에서 의미있는 라인만 추출(사용자: GUI 새로 만들지 말고 터미널에 보이는
 // 거 잘 정리해서). 실측 포맷: "⛁ Custom agents: 602 tokens (0.1%)"·"⛶ Free space: 835.2k
 // (83.5%)" 분해 라인 + "MCP tools · /mcp" / "└ 227 tools · 97.4k tokens" 상세. 색블록 그리드·
 // 트리 글리프·프롬프트는 걷어내고, 토큰/퍼센트/"· /명령"/free space 라인만. 헤더가 peek 위에서
@@ -64,13 +64,13 @@ function extractContext(screen: string): string | null {
   let started = false;
   for (const raw of lines) {
     // 박스·트리·프롬프트 글리프만 제거 — ⛁⛶ 동전 그리드·ANSI 색은 유지(AnsiText 가 색 렌더,
-    // 거노: 동전 색까지 똑같이). 정렬 공백 보존(trailing 만 정리, pre 표시).
+    // 사용자: 동전 색까지 똑같이). 정렬 공백 보존(trailing 만 정리, pre 표시).
     // claude 트리 글리프 ⎿⎾⏋⏌(U+23BE~) 도 제거 — "⎿ Context Usage" 의 ⎿ 때문에 헤더 매칭이
-    // 실패해 ctxView 가 안 떴다(거노: /context 안 떠). 박스·트리·프롬프트 글리프 일괄.
+    // 실패해 ctxView 가 안 떴다(사용자: /context 안 떠). 박스·트리·프롬프트 글리프 일괄.
     const t = raw.replace(/[│┃╭╮╰╯─━┌┐└┘├┤┬┴┼❯●◐◓◑◒⎿⎾⏋⏌⎽⎼]/g, '').replace(/\s+$/, '');
     const plain = strip(t);
     // "Context Usage" 가 줄 시작일 때만 시작 — 슬래시 자동완성 설명 "Visualize current context
-    // usage"(문장 중간)를 오캡처하던 것 차단(거노: /context 이상해).
+    // usage"(문장 중간)를 오캡처하던 것 차단(사용자: /context 이상해).
     if (/^\s*context usage\b/i.test(plain)) started = true;
     if (!started) continue;
     if (/esc to|jump to|bypass permissions|\/rc active|setup issue|\/doctor|^\s*\d+ tokens\s*$/i.test(plain)) continue;
@@ -95,13 +95,13 @@ function normText(s: string): string {
 function isSystemInjectionText(role: string, text: string): boolean {
   if (role !== 'user') return false;
   // compact 직후 들어오는 요약 이어가기 메시지("This session is being continued…")는 user 턴이지만
-  // isMeta 가 없어 선생님 노란 버블로 통째로 샜다(거노: 엄청 길게 내가 보냈다고 뜸). 시작 문구로 격리.
+  // isMeta 가 없어 선생님 노란 버블로 통째로 샜다(사용자: 엄청 길게 내가 보냈다고 뜸). 시작 문구로 격리.
   return /\[Request interrupted|^\s*##\s*Context Usage|^\s*Caveat:\s|^\s*This session is being continued from a previous conversation/i.test(text);
 }
 
 // 프록시 strip_meta(proxy.rs)의 TS 미러 — transcript 경로(events)는 프록시를 안 거치니 여기서
 // 같은 격리를 한다. 시스템이 user 턴에 주입하는 메타 블록(task-notification·system-reminder·
-// caveat 등)을 통째로 제거. 다 지우고 빈 문자열이면 호출부가 그 버블을 스킵(거노: 서브에이전트
+// caveat 등)을 통째로 제거. 다 지우고 빈 문자열이면 호출부가 그 버블을 스킵(사용자: 서브에이전트
 // /background 알림이 내 노란 말풍선으로 샜다). command 태그는 parseSlashCommand 가 카드로 승격.
 const META_BLOCKS: [string, string][] = [
   ['<system-reminder>', '</system-reminder>'],
@@ -247,7 +247,7 @@ function fmtClock(iso?: string): string {
 // transcript 의 권한 모드 판정. permission-mode/user 이벤트의 permissionMode 가 1차 소스지만
 // claude 는 이걸 *turn 시작 시점* 에 찍어서, EnterPlanMode(turn 중간 plan 진입)를 한 턴 늦게
 // 잡는다 — 게다가 --dangerously-skip-permissions 세션은 기저값 bypass 가 계속 찍혀 plan 이
-// 묻힌다(거노: plan 작업 중인데 칩이 bypass). 그래서 EnterPlanMode/ExitPlanMode 도구 호출을
+// 묻힌다(사용자: plan 작업 중인데 칩이 bypass). 그래서 EnterPlanMode/ExitPlanMode 도구 호출을
 // 정순 추적해 plan 진입을 즉시 반영하고, ExitPlanMode 또는 plan 이 아닌 permission-mode 명시
 // 기록으로 해제한다. default(normal)는 칩 미표시 위해 null.
 function latestPermissionMode(events: SessionEvent[]): string | null {
@@ -302,7 +302,7 @@ function flattenSystem(ev: SessionEvent): string | null {
 // AskUserQuestion 은 기존 선택지 menu 카드가 전담하므로 제외. tool_result 블록은
 // buildToolMap 이 페어링해 카드 안에서 표시되니 별도 버블로 안 만든다.
 // tell 로 온 학생→학생 메시지의 발신자 — messages.jsonl from_pane 대조로 채운다. 있으면
-// 거노 직접 입력(우측 노랑)이 아니라 발신자 프사+accent 색 좌측 버블로(거노 #5/#7).
+// 사용자 직접 입력(우측 노랑)이 아니라 발신자 프사+accent 색 좌측 버블로(사용자 #5/#7).
 type BubbleSender = { pane: string; name: string; accent?: AccentColorName; accentHex?: string };
 type RenderItem =
   | { kind: 'bubble'; role: string; text: string; uuid?: string; ts?: string; cancelled?: boolean; queued?: boolean; images?: string[]; sender?: BubbleSender }
@@ -324,7 +324,7 @@ function parseAnsweredPairs(content: unknown, questions?: string[]): Map<string,
     ? content
     : Array.isArray(content) ? content.map((x) => (x as { text?: string })?.text ?? '').join('') : '';
   // 질문을 앵커로 자른다 — 질문에 따옴표가 있으면(예: GUI 푸터의 "현재 경로"는) 단순 쌍 정규식이
-  // 깨져 커스텀(자유 입력) 답이 통째로 누락됐다(거노: 커스텀 답변이 "—"로 떴다). 질문은 input 에
+  // 깨져 커스텀(자유 입력) 답이 통째로 누락됐다(사용자: 커스텀 답변이 "—"로 떴다). 질문은 input 에
   // 정확히 있으니 `"질문"="` 를 indexOf 로 찾고 답 종료 따옴표까지 취한다(답 내부 따옴표는 드묾).
   for (const q of questions ?? []) {
     const key = `"${q}"="`;
@@ -376,7 +376,7 @@ function pushUserText(items: RenderItem[], text: string, ts?: string, uuid?: str
     // uuid 는 고아(orphan) 취소 판정용 — 이 발화를 아무 row 도 parent 로 안 가리키면 미처리.
     const clean = stripMeta(text);
     if (clean && !isSystemInjectionText('user', clean)) {
-      // tell 발신자 대조 — 학생→학생이면 sender 부착(좌측 버블), 거노 직접 입력이면 undefined.
+      // tell 발신자 대조 — 학생→학생이면 sender 부착(좌측 버블), 사용자 직접 입력이면 undefined.
       // 네이티브 teammate 래퍼는 발신자명이 태그에 있으니 대조 없이 이름으로 직접 해석하고,
       // 본문은 래퍼를 벗긴 알맹이만 렌더한다.
       const tm = parseTeammateMessage(clean);
@@ -392,17 +392,17 @@ function pushUserText(items: RenderItem[], text: string, ts?: string, uuid?: str
 function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain = false, senderOf?: (t: string, ts?: string, fromName?: string) => BubbleSender | undefined): RenderItem[] {
   const items: RenderItem[] = [];
   // 작업 중 보낸 예약(큐) 메시지는 transcript 에 깨끗한 user 턴으로 안 남고 queue-operation
-  // (enqueue/remove)으로만 기록된다(거노: 예약·취소·이미지가 GUI 에 안 떴다). enqueue 를 본문
+  // (enqueue/remove)으로만 기록된다(사용자: 예약·취소·이미지가 GUI 에 안 떴다). enqueue 를 본문
   // user 버블로 직접 넣고, remove 를 FIFO 로 매칭해 처리된 건 일반 버블, 남은 건 대기중(queued).
   const pendingQ: (Extract<RenderItem, { kind: 'bubble' }> | null)[] = [];
   // dequeue/popAll 된 큐 버블 — 처리되며 같은 내용이 정식 user 턴으로 재기록돼 중복이라 마지막에 뺀다.
   const droppedQ = new Set<RenderItem>();
   // 같은 예약의 첨부 이미지(attachment queued_command)는 enqueue 텍스트보다 ts 가 앞서 따로 온다.
-  // 별도 버블로 띄우면 텍스트와 다른 ts·위치로 갈라져 발송 시 점프했다(거노). 보류했다가 다음
+  // 별도 버블로 띄우면 텍스트와 다른 ts·위치로 갈라져 발송 시 점프했다(사용자). 보류했다가 다음
   // enqueue 버블에 합쳐 한 버블(ts 통일)로 만든다. 못 합치면(이미지만 예약) 별도 버블 폴백.
   let pendingQImg: string[] = [];
   // 고아(orphan) 취소 판정 — 진짜 user 발화인데 그 uuid 를 어떤 row 도 parentUuid/logicalParentUuid 로
-  // 안 가리키면 "보내자마자 esc"로 프롬프트에 안 들어간(취소된) 메시지다(거노: 안 들어간 건 없어지게).
+  // 안 가리키면 "보내자마자 esc"로 프롬프트에 안 들어간(취소된) 메시지다(사용자: 안 들어간 건 없어지게).
   // 정상 발화·멀티발화는 assistant 응답이나 harness attachment 가 그 uuid 를 부모로 삼아 체인이 잇는다.
   const referenced = new Set<string>();
   for (const ev of events) {
@@ -471,7 +471,7 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
         }
       } else if (att?.type === 'hook_success' && att.stdout) {
         // hook(SessionStart 등) stdout 의 systemMessage 만 회색 시스템 카드로 — 빈 출력/비-
-        // systemMessage hook(PreToolUse 등)은 스킵(범람 방지). 거노: 훅 실행 결과도 채팅에 보이게.
+        // systemMessage hook(PreToolUse 등)은 스킵(범람 방지). 사용자: 훅 실행 결과도 채팅에 보이게.
         try {
           const j = JSON.parse(att.stdout.trim()) as { systemMessage?: unknown };
           if (typeof j.systemMessage === 'string' && j.systemMessage.trim()) items.push({ kind: 'system', text: j.systemMessage.trim() });
@@ -485,9 +485,9 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
     const ts = (ev as { timestamp?: string }).timestamp; // 카톡식 메시지 시각
     const content = (ev as { message?: { content?: unknown } }).message?.content;
     // "[Request interrupted by user]" 마커 — 그 직전 프롬프트는 이미 transcript 에 정식 user 턴으로
-    // 기록된(=전송된) 것이라 취소가 아니다(거노: 입력된 프롬프트가 취소로 뜨면 안 됨). 프롬프트는
+    // 기록된(=전송된) 것이라 취소가 아니다(사용자: 입력된 프롬프트가 취소로 뜨면 안 됨). 프롬프트는
     // 그대로 두되, 중단이 일어난 그 자리에 "작업 중단" 마커를 흐름에 넣어 정확한 위치에 표시한다
-    // (거노). 연속 중단은 1개로 합친다. 전송 전 esc 로 안 들어간 발화는 superset/orphan 정리가 따로 숨긴다.
+    // (사용자). 연속 중단은 1개로 합친다. 전송 전 esc 로 안 들어간 발화는 superset/orphan 정리가 따로 숨긴다.
     if (role === 'user') {
       const flat = typeof content === 'string' ? content
         : Array.isArray(content) ? content.map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: string }).text ?? '') : '')).join(' ') : '';
@@ -535,7 +535,7 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
           }
         } else if (b.type === 'tool_use' && b.name === 'Workflow') {
           // 워크플로 — script(거대 JS 문자열)에서 meta/단계/agent 를 정규식으로만 추출해 전용 카드로
-          // (거노: 워크플로 서브에이전트 표시). 실제 spawn 된 내부 agent 는 메타칸 ↳ 드릴인으로.
+          // (사용자: 워크플로 서브에이전트 표시). 실제 spawn 된 내부 agent 는 메타칸 ↳ 드릴인으로.
           const wf = parseWorkflowScript(b.input);
           items.push({ kind: 'workflow', name: wf.name, description: wf.description, phases: wf.phases, agents: wf.agents, agentCount: wf.agentCount });
         } else if (b.type === 'tool_use' && b.name === 'Agent') {
@@ -550,8 +550,8 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
   }
   // 취소(미처리) user 버블 제거 — uuid 고아(어떤 row 도 parent 로 참조 안 함)인데, 바로 다음 user
   // 발화가 이 내용으로 시작(취소→재전송·미완성→완성·중복)일 때만 "보내자마자 esc"로 버려진 것이라 숨긴다.
-  // 단순 고아만으로 숨기면 거노의 빠른 연속/중복 발화나 background task-notification 이 체인을 가로채
-  // 만든 고아(정상 발화)까지 사라졌다(거노: 정상 '어근데 취소메시지 안사라진다' 가 사라짐). superset
+  // 단순 고아만으로 숨기면 사용자의 빠른 연속/중복 발화나 background task-notification 이 체인을 가로채
+  // 만든 고아(정상 발화)까지 사라졌다(사용자: 정상 '어근데 취소메시지 안사라진다' 가 사라짐). superset
   // 재전송 시그니처로 좁혀 그 오탐을 없앤다. 다음 user 가 없는 마지막 발화는 자동 유지(라이브).
   // 서브에이전트 단독뷰(keepSidechain)는 체인 구조가 달라 적용하지 않는다.
   if (!keepSidechain) {
@@ -572,7 +572,7 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
 // 표시용 effort 신호 — /effort 의 실제 stdout 만 신뢰한다. stdout 은 항상
 // <local-command-stdout>…</local-command-stdout> 로 감싸진 user 메시지라, 이 태그가 있는
 // 이벤트에서만 레벨을 읽는다 → 이 버그를 조사·설명하며 출력한 "Set effort level to …"
-// 메타-대화(grep 결과·해설)가 진짜 stdout 으로 오인되는 누수를 차단한다(거노: ultracode
+// 메타-대화(grep 결과·해설)가 진짜 stdout 으로 오인되는 누수를 차단한다(사용자: ultracode
 // 끝났는데 grep 출력 때문에 ultracode 로 표시). ultracode 는 session-only 라 compact/resume
 // 경계를 넘기면 리셋되므로, 그 경계 이후의 stdout 만 본다.
 function resolveEffort(events: SessionEvent[], proxyEffort: string | null, savedEffort: string | null): string | null {
@@ -584,7 +584,7 @@ function resolveEffort(events: SessionEvent[], proxyEffort: string | null, saved
       : Array.isArray(c) ? c.map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: string }).text ?? '') : '')).join(' ') : '';
   };
   // 마지막 compact/--resume 경계("This session is being continued") 이후만 본다 — ultracode 는
-  // session-only 라 그 경계를 넘기면 리셋되고, 경계 전 stdout 은 무효다(거노: resume 후 xhigh).
+  // session-only 라 그 경계를 넘기면 리셋되고, 경계 전 stdout 은 무효다(사용자: resume 후 xhigh).
   let start = 0;
   for (let i = 0; i < events.length; i++) {
     if (/^\s*This session is being continued from a previous conversation/.test(flatOf(i))) start = i + 1;
@@ -600,13 +600,13 @@ function resolveEffort(events: SessionEvent[], proxyEffort: string | null, saved
   // 복원값(xhigh 등)을 보인다. ultracode 는 여기 잔존하지 않는다.
   // proxyEffort 가 빈 문자열('')이면 ?? 는 폴백을 안 한다(null/undefined 만 넘기고 '' 는 통과) —
   // 처음 시작 시 effort 칩이 빈칸이던 원인. || null 로 빈 문자열을 null 화해 saved default 로 확실히
-  // 폴백한다(거노: 처음 시작해도 정확 표기).
+  // 폴백한다(사용자: 처음 시작해도 정확 표기).
   return (proxyEffort || null) ?? (savedEffort || null);
 }
 
 // ANSI 색(SGR) 렌더는 ./AnsiText 모듈로 분리 — bash/read 카드 resultView 와 공용.
 
-// 채팅방 맨위/맨아래 점프 버튼 공용 스타일(거노: 긴 대화 스크롤).
+// 채팅방 맨위/맨아래 점프 버튼 공용 스타일(사용자: 긴 대화 스크롤).
 const SCROLL_BTN: CSSProperties = {
   width: 30, height: 30, borderRadius: 999, cursor: 'pointer',
   border: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
@@ -616,7 +616,7 @@ const SCROLL_BTN: CSSProperties = {
 
 function MetaChip({ label, dim, onClick, tone, title, dot }: { label: string; dim?: boolean; onClick?: () => void; tone?: 'danger' | 'sky'; title?: string; dot?: string }) {
   const danger = tone === 'danger';
-  const sky = tone === 'sky'; // 서브에이전트 칩 — launch 마커·WorkflowCard 와 색 통일(거노)
+  const sky = tone === 'sky'; // 서브에이전트 칩 — launch 마커·WorkflowCard 와 색 통일(사용자)
   const style: CSSProperties = {
     fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: danger ? 700 : 600,
     padding: '2px 8px', borderRadius: 6,
@@ -665,7 +665,7 @@ function ModeIcon({ mode }: { mode: string | null }) {
 }
 
 // 헤더 우측 액션 드롭다운 항목 — 좁은 멀티뷰 타일에서 버튼이 정보를 밀어내, 눈·캐릭터·종료·닫기를
-// "⋯ 더보기" 메뉴로 접는다(거노: pane 여러개일 때 제목탭 버튼 겹침).
+// "⋯ 더보기" 메뉴로 접는다(사용자: pane 여러개일 때 제목탭 버튼 겹침).
 function MenuItem({ label, danger, onClick }: { label: string; danger?: boolean; onClick: () => void }) {
   const [h, setH] = useState(false);
   return (
@@ -716,7 +716,7 @@ function SystemBubble({ text }: { text: string }) {
   );
 }
 
-// 모모톡풍 원형 아바타 — SpritePortrait bust 를 원형으로 크롭(거노: momotalk 참조 리디자인).
+// 모모톡풍 원형 아바타 — SpritePortrait bust 를 원형으로 크롭(사용자: momotalk 참조 리디자인).
 function ChatAvatar({ character, size = 32 }: { character: string; size?: number }) {
   return (
     <span style={{
@@ -733,7 +733,7 @@ function ChatAvatar({ character, size = 32 }: { character: string; size?: number
 // 나머지(학생 버블 배경·보더·텍스트)는 기존 SCHALE 토큰을 그대로 써 다크모드 자동 반전 유지.
 const MOMO_TEACHER_BUBBLE = '#3493F9';
 
-// 채팅 버블(모모톡풍) — 학생=좌측 아바타+이름+흰 버블, 선생님=우측 파랑 버블(거노 리디자인).
+// 채팅 버블(모모톡풍) — 학생=좌측 아바타+이름+흰 버블, 선생님=우측 파랑 버블(사용자 리디자인).
 // showHead=false 면 연속 동일 발신자 그룹의 두 번째 이후라 아바타·이름을 생략, grouped=true 면
 // 다음 버블도 같은 그룹이라 간격을 좁힌다.
 function ChatBubble({
@@ -826,9 +826,9 @@ export interface TerminalPeekPanelProps {
 // 학생 대화 패널 — 모모톡풍 좌/우 버블(학생=좌측 아바타+이름+버블, 선생님=우측 파랑 버블).
 // claude 인터랙티브 선택 메뉴(/model 등 API 안 타는 것)를 화면에서 추출 → 선택지 카드.
 // 단 권한 승인(Yes/No) 프롬프트는 카드 대신 헤더 상태점(빨강 '입력 필요')으로만 — isPermissionMenu.
-// AskUserQuestion 은 캡처 프록시 tool_use 로 정확히 잡으니(거노: 추정 금지) 이 화면 파싱은
+// AskUserQuestion 은 캡처 프록시 tool_use 로 정확히 잡으니(사용자: 추정 금지) 이 화면 파싱은
 // 그 외(/model·권한 프롬프트) 폴백 전용. **❯ 커서가 실제로 찍힌 줄이 있어야만** 메뉴로
-// 인정한다 — 일반 출력의 "1. 2. 3." 번호목록·todo·코드엔 ❯ 가 없어 false-positive(거노:
+// 인정한다 — 일반 출력의 "1. 2. 3." 번호목록·todo·코드엔 ❯ 가 없어 false-positive(사용자:
 // askquestion 아닌데 선택지 뜸)를 막는다. '>' 는 셸 프롬프트·인용에 흔해 커서에서 뺀다.
 function parsePromptMenu(screen: string): { title: string; options: { idx: number; label: string; cur: boolean }[] } | null {
   const lines = screen.split('\n');
@@ -856,7 +856,7 @@ function parsePromptMenu(screen: string): { title: string; options: { idx: numbe
 }
 
 // 권한 승인(Yes/No) 프롬프트 판정 — 승인 확인대기는 선택지 카드로 안 띄우고 헤더 상태점
-// (빨강 '입력 필요')으로만 알린다(거노: 클로드 데몬 세션 목록의 needs-input/completed 점
+// (빨강 '입력 필요')으로만 알린다(사용자: 클로드 데몬 세션 목록의 needs-input/completed 점
 // 체계처럼). Yes…/No… 옵션 조합 또는 "Do you want…" 제목이면 승인 프롬프트. AskUserQuestion
 // 은 프록시 tool_use 경로(aq)라 여길 안 타고, /model 등 일반 메뉴는 카드 유지.
 function isPermissionMenu(m: { title: string; options: { label: string }[] }): boolean {
@@ -866,23 +866,23 @@ function isPermissionMenu(m: { title: string; options: { label: string }[] }): b
 }
 
 // claude 라이브 작업 표시(footer)를 화면에서 추출 — board status 는 idle/working 2값뿐이라
-// "무슨 작업·몇 초"를 모른다(거노: "✻ Twisting… (23s)" 같은 진행 표시도 GUI 에). **진행형만**
+// "무슨 작업·몇 초"를 모른다(사용자: "✻ Twisting… (23s)" 같은 진행 표시도 GUI 에). **진행형만**
 // 잡는다: "✻ Churned for 42s" 같은 완료형은 작업이 *끝난* 표시라 로딩 점으로 띄우면 "다 됐는데
-// 생각 중처럼 보인다"(거노). 별기호+verb…+(경과초) 신호로만 판정해 한글 verb 도 커버.
+// 생각 중처럼 보인다"(사용자). 별기호+verb…+(경과초) 신호로만 판정해 한글 verb 도 커버.
 function parseSpinner(screen: string): string | null {
   const lines = screen.split('\n');
   for (let i = lines.length - 1; i >= 0 && i >= lines.length - 14; i--) {
     const t = lines[i].trim();
     // 진행형: 스피너글리프 + verb… + (경과시간). 완료형("for Ns")은 의도적으로 무시.
     // 글리프는 회전 프레임마다 다르다(· ✻ ✳ ✶ … 브라유 ⠋⠙) — claude 가 가운뎃점(·)이나
-    // 브라유로 돌 때 옛 [✠-❏] 만으론 verb 를 놓쳐 로딩이 안 떴다(거노: 빨간 스피너 안 뜸).
+    // 브라유로 돌 때 옛 [✠-❏] 만으론 verb 를 놓쳐 로딩이 안 떴다(사용자: 빨간 스피너 안 뜸).
     const m = t.match(/[·*∗⋆✠-➿⠀-⣿][^\S\n]*(.+?…)\s*\(((?:\d+m\s*)?\d+s)\b/);
     if (m) return `${m[1]} · ${m[2]}`;
   }
   return null;
 }
 
-// 컴팩트 등 긴 작업의 진행바 — 터미널 "▰▰▰☐☐ 9%" 막대를 GUI 로딩에도 똑같이(거노: 컴팩트할 때
+// 컴팩트 등 긴 작업의 진행바 — 터미널 "▰▰▰☐☐ 9%" 막대를 GUI 로딩에도 똑같이(사용자: 컴팩트할 때
 // 로딩바도). 진행바 글리프(▰▱☐■□…)가 있는 줄의 N% 를 0~100 으로. 없으면 null(일반 작업은 진행률 X).
 function parseProgress(screen: string): number | null {
   const lines = screen.split('\n');
@@ -894,7 +894,7 @@ function parseProgress(screen: string): number | null {
   return null;
 }
 
-// effort level — claude 상태바 "high · /effort" 파싱(거노: effort 도 모델 옆에). 없으면 null.
+// effort level — claude 상태바 "high · /effort" 파싱(사용자: effort 도 모델 옆에). 없으면 null.
 function parseEffort(screen: string): string | null {
   const m = screen.match(/\b(low|medium|high|xhigh|max|ultracode)\b\s*·\s*\/effort/i);
   return m ? m[1].toLowerCase() : null;
@@ -931,14 +931,14 @@ function parseEffortMenu(screen: string): number | null {
 }
 
 // 말풍선 본문 — 텍스트 + 첨부 이미지. claude 가 붙여넣은 이미지는 transcript 에
-// "[Image: source: <abs-path>]" 텍스트로 남는다 → 그 토큰을 실제 <img> 로 치환(거노:
+// "[Image: source: <abs-path>]" 텍스트로 남는다 → 그 토큰을 실제 <img> 로 치환(사용자:
 // 이미지가 텍스트로 보이던 것). 이미지 토큰이 없으면 기존 렌더(user=span / assistant=md).
 // 경로는 실제 이미지 확장자로 끝나고 따옴표·꺾쇠·개행이 없어야 한다 — transcript 가
 // 이 토큰 포맷을 다루는 소스코드/문서를 담을 때 "[Image: source: ..."] 문자열이 코드
 // 한복판에서 잡혀 가짜 경로로 로드되던 오탐(400) 차단.
 const IMG_TOKEN = /\[Image:\s*source:\s*([^\]\n"'`<>]+\.(?:png|jpe?g|gif|webp|bmp))\s*\]/gi;
 // 작업 중 보낸 예약 이미지는 base64 가 transcript 에 안 남고 [Image #N] placeholder 만 남는다
-// (거노: 예약 이미지). 실제 이미지는 못 띄우니 날 텍스트 대신 인라인 "이미지" 칩으로 표식만 준다.
+// (사용자: 예약 이미지). 실제 이미지는 못 띄우니 날 텍스트 대신 인라인 "이미지" 칩으로 표식만 준다.
 const IMG_NUM = /\[Image #\d+\]/g;
 function ImgChip() {
   return (
@@ -1037,13 +1037,13 @@ function WorkflowCard({ item, subList, onDrill }: {
 
 // 입력창 폐기 자리에 그 학생의 현재 작업(TaskCreate)을 고정 — 터미널 상단 task 트리와 동형.
 // 진행중(채운 원) → 대기(빈 원) → 완료(체크) 순. 소스는 transcript tool_use(TaskCreate/Update):
-// /pane-tasks 는 task store 디렉토리 id 가 transcript uuid 와 달라 매핑이 깨져 빈값이 됐다(거노).
+// /pane-tasks 는 task store 디렉토리 id 가 transcript uuid 와 달라 매핑이 깨져 빈값이 됐다(사용자).
 interface StripTask { id: string; subject: string; status: string }
 const TASK_ORDER: Record<string, number> = { in_progress: 0, pending: 1, completed: 2 };
 // transcript 의 TaskCreate("Task #N created…" result 로 id) + TaskUpdate(taskId/status)를 누적 재구성.
 function tasksFromEvents(events: SessionEvent[], toolMap: ToolMap): StripTask[] {
   // compact 이어가기 경계 이후만 — Task #N 번호가 compact 마다 리셋돼 충돌하고, 옛 세대의 완료
-  // 태스크가 계속 끌려와 stale 했다(거노: 업무탭엔 없는데 하단엔 옛 태스크가 떴다). 마지막 경계부터.
+  // 태스크가 계속 끌려와 stale 했다(사용자: 업무탭엔 없는데 하단엔 옛 태스크가 떴다). 마지막 경계부터.
   let start = 0;
   for (let i = 0; i < events.length; i++) {
     const ev = events[i];
@@ -1069,7 +1069,7 @@ function tasksFromEvents(events: SessionEvent[], toolMap: ToolMap): StripTask[] 
       if (b.name === 'TaskCreate') {
         // 새 작업 그룹 시작 — 직전 그룹이 전부 끝났으면(완료/삭제) 비운다. 한 세션(특히
         // /resume 이어가기)에 작업을 여러 번 하면 옛 완료 태스크가 현재 작업과 섞여
-        // 남았다(거노: 이전 태스크 잔존). 진행/대기가 남아 있으면 같은 그룹이라 유지.
+        // 남았다(사용자: 이전 태스크 잔존). 진행/대기가 남아 있으면 같은 그룹이라 유지.
         if (tasks.size > 0 && [...tasks.values()].every((t) => t.status === 'completed' || t.status === 'deleted')) {
           tasks.clear();
         }
@@ -1086,7 +1086,7 @@ function tasksFromEvents(events: SessionEvent[], toolMap: ToolMap): StripTask[] 
   return [...tasks.values()];
 }
 function TaskStrip({ tasks }: { tasks: StripTask[] }) {
-  const [collapsed, setCollapsed] = useState(false); // 헤더 클릭으로 목록 접기/펼치기(거노)
+  const [collapsed, setCollapsed] = useState(false); // 헤더 클릭으로 목록 접기/펼치기(사용자)
   const active = useMemo(
     () => tasks
       .filter((t) => t.status !== 'deleted')
@@ -1094,7 +1094,7 @@ function TaskStrip({ tasks }: { tasks: StripTask[] }) {
     [tasks],
   );
   // 진행/대기 작업이 하나도 없으면(다 완료거나 비었으면) 목록 대신 안내만 — 끝난 태스크가 계속
-  // 떠 "지금 할 게 없는데 태스크가 있다"는 혼란을 막는다(거노).
+  // 떠 "지금 할 게 없는데 태스크가 있다"는 혼란을 막는다(사용자).
   const hasLive = active.some((t) => t.status === 'in_progress' || t.status === 'pending');
   if (!hasLive) return (
     <div style={{
@@ -1161,7 +1161,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 서브 모드: 부모(오케스트레이터) 학생을 board 에서 조회 — user 턴 아바타로 쓴다.
   const parentAgent = useStore((s) => s.agents.find((a) => a.id === (subagent?.parentSurface ?? '__none__')));
   // 아바타는 board(라이브) 캐릭터명 우선 — title(클릭 시점 고정)이 pane id('%3')로 깨졌을 때
-  // 보강(거노: 프사 %). board 도 id 면 SpritePortrait 가 사람 실루엣으로 막는다.
+  // 보강(사용자: 프사 %). board 도 id 면 SpritePortrait 가 사람 실루엣으로 막는다.
   // 서브 모드의 assistant 턴은 학생이 아닌 서브에이전트라 agentType 으로(미도리와 구분 = 실루엣).
   const avatarChar = isSub
     ? (subagent!.agentType || subagent!.label || 'agent')
@@ -1171,7 +1171,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     ? parentAgent.character
     : (title.split('↳')[0].trim() || title);
   // 헤더 제목 = 캐릭터명(avatarChar) + 작업제목만. 작업제목 앞 status 글리프(⠐/✳…)와
-  // surfaceId 는 떼어 중복 제거(거노: 타이틀 중복 많아 복잡, 간단하게).
+  // surfaceId 는 떼어 중복 제거(사용자: 타이틀 중복 많아 복잡, 간단하게).
   const liveTask = (agent?.title || '').replace(/^[^\p{L}\p{N}]+/u, '').trim();
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [streaming, setStreaming] = useState('');
@@ -1180,7 +1180,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 카드로 자동 승격. claude 가 jsonl 을 라이브로 안 써(2.1.x) 진행 중엔 프록시가 메운다.
   const [convTurns, setConvTurns] = useState<Turn[]>([]);
   const [menu, setMenu] = useState<{ header?: string; title: string; options: { idx: number; label: string; cur: boolean; description?: string; preview?: string }[]; multi?: boolean } | null>(null);
-  // 권한 승인(Yes/No) 프롬프트가 화면에 떠 있음 — 카드 대신 헤더 상태점을 빨강으로(거노:
+  // 권한 승인(Yes/No) 프롬프트가 화면에 떠 있음 — 카드 대신 헤더 상태점을 빨강으로(사용자:
   // 데몬 needs-input 점 체계). board attention 훅보다 화면 파싱이 즉각적이라 보조 신호로 든다.
   const [permPrompt, setPermPrompt] = useState(false);
   const [checked, setChecked] = useState<Set<number>>(new Set()); // multiSelect 체크된 인덱스
@@ -1191,30 +1191,30 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   const [progress, setProgress] = useState<number | null>(null); // 컴팩트 등 진행률 % (터미널 진행바 미러)
   const [effort, setEffort] = useState<string | null>(null); // effort level(상태바 파싱) — 모델 옆 칩
   const [mode, setMode] = useState<string | null>(null); // 권한 모드(transcript permissionMode) — 헤더 칩
-  const [convModel, setConvModel] = useState(''); // 캡처 프록시가 요청에서 잡은 model(거노: 화면스크랩 대신 프록시 소스)
+  const [convModel, setConvModel] = useState(''); // 캡처 프록시가 요청에서 잡은 model(사용자: 화면스크랩 대신 프록시 소스)
   const [effortMenu, setEffortMenu] = useState<number | null>(null); // /effort 슬라이더 현재 idx(뜬 동안)
   const [flash, setFlash] = useState<'ok' | 'err' | null>(null);
-  // window.confirm 은 wry webview(macOS)에서 무반응 — 자체 확인 모달로 종료·compact 확인(거노).
+  // window.confirm 은 wry webview(macOS)에서 무반응 — 자체 확인 모달로 종료·compact 확인(사용자).
   const [confirm, setConfirm] = useState<{ msg: string; sub?: string; danger?: boolean; yes: string; onYes: () => void } | null>(null);
   const [charPicker, setCharPicker] = useState(false); // 캐릭터 변경 팝업(헤더 버튼)
   const [actionMenu, setActionMenu] = useState(false); // 헤더 우측 ⋯ 더보기(눈·캐릭터·종료·닫기 통합)
-  // 패널 아무 데나 우클릭 → ⋯ 와 같은 메뉴를 마우스 자리에(거노: ⋯ 가 눈에 안 띄어
+  // 패널 아무 데나 우클릭 → ⋯ 와 같은 메뉴를 마우스 자리에(사용자: ⋯ 가 눈에 안 띄어
   // 「캐릭터 변경」을 못 찾았다). 좌표는 패널-로컬(루트가 position:relative).
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [titleHover, setTitleHover] = useState(false); // 제목 더블클릭 줌 — hover 시 인터랙션 힌트
   const [atTop, setAtTop] = useState(true); // 스크롤 맨위 — true 면 ↑ 버튼 숨김
   const [atBottom, setAtBottom] = useState(true); // 스크롤 맨아래 — true 면 ↓ 버튼 숨김
   // 위로 스크롤하면 상단에 붙는 "지금 보고 있는 내 프롬프트" 헤더 — 그 아래로 무슨 작업·답을
-  // 했는지 보게(거노). 클릭하면 그 프롬프트 위치로 점프. null=맨 위라 헤더 불필요.
+  // 했는지 보게(사용자). 클릭하면 그 프롬프트 위치로 점프. null=맨 위라 헤더 불필요.
   const [stickyP, setStickyP] = useState<{ idx: number; text: string } | null>(null);
   // 위로 스크롤해 옛 대화 보는 중(맨 밑 아님) 새 대화가 도착하면 하단 가운데 "새 대화 ↓" sticky
-  // 배너 — 상단 프롬프트 헤더의 하단 대칭(거노: 새 대화 오면 하단 sticky로 밑으로 이동, 맨밑 아닐때).
+  // 배너 — 상단 프롬프트 헤더의 하단 대칭(사용자: 새 대화 오면 하단 sticky로 밑으로 이동, 맨밑 아닐때).
   const [newMsg, setNewMsg] = useState(false);
-  const [footerOpen, setFooterOpen] = useState(false); // 인연도 줄 아래 서브에이전트·백그라운드·작업 묶음 펼침(거노: 평소엔 인연도 줄만)
-  const [footerHidden, setFooterHidden] = useState(() => { try { return localStorage.getItem('schale-footer-hidden') === '1'; } catch { return false; } }); // 하단바 통째 숨김(거노: pane별 하단바 숨기기)
+  const [footerOpen, setFooterOpen] = useState(false); // 인연도 줄 아래 서브에이전트·백그라운드·작업 묶음 펼침(사용자: 평소엔 인연도 줄만)
+  const [footerHidden, setFooterHidden] = useState(() => { try { return localStorage.getItem('schale-footer-hidden') === '1'; } catch { return false; } }); // 하단바 통째 숨김(사용자: pane별 하단바 숨기기)
   // 슬래시 자동완성 — 입력이 '/' 로 시작하면 claude-code 명령 드롭다운(↑↓ 선택·Tab/Enter 완성).
   const [navIdx, setNavIdx] = useState(0); // 선택지 카드 키보드 네비(↑↓) 하이라이트
-  // /context 출력 정리본 — GUI 모달 새로 만들지 말고(거노) 터미널 /context 화면(peek)을
+  // /context 출력 정리본 — GUI 모달 새로 만들지 말고(사용자) 터미널 /context 화면(peek)을
   // 정리해 대화창 안에 보여준다. null=비활성, 그 외=정리된 그리드 텍스트.
   const [ctxView, setCtxView] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -1226,11 +1226,11 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   const atBottomRef = useRef(true); // 사용자가 위로 스크롤했으면 자동 하단고정 멈춤
   const evtLenRef = useRef(0); // 직전 events 길이 — 위로 올려둔 중 증가하면 newMsg(새 대화 도착)
   // ESC/Enter 로 메뉴를 닫은 직후 ~700ms 는 화면 재파싱으로 카드를 다시 띄우지 않는다
-  // (거노: GUI 에서 esc 눌러도 안 멈춤 — tick 이 stale 화면에서 메뉴를 재감지해 재등장).
+  // (사용자: GUI 에서 esc 눌러도 안 멈춤 — tick 이 stale 화면에서 메뉴를 재감지해 재등장).
   const menuSuppressRef = useRef(0);
   // 마지막으로 화면에서 진행형 verb 를 본 시각(ms) — 폴링 사이 verb 가 잠깐 안 보여도
   // 4초간 직전 spinner 를 유지해 깜빡임(있었다 없었다)을 흡수. board status 폴링 노이즈에
-  // 안 흔들리게 시간 기반(거노: 똑같이 깜빡임).
+  // 안 흔들리게 시간 기반(사용자: 똑같이 깜빡임).
   const lastSpinnerRef = useRef(0);
   // 라이브 transcript 증분 — 백엔드가 offset 이후 append 된 줄만 주고(fetchTranscriptChunk),
   // 안 바뀌면 빈값이라 setEvents 자체를 건너뛴다(리렌더 0). 매 폴마다 수십 MB 전체를 다시
@@ -1238,10 +1238,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   const offsetRef = useRef(0);
   const firstTsRef = useRef<string | undefined>(undefined);
   // ESC 로 닫은 AskUserQuestion 질문(title) — tool_use 가 응답 전까지 캡처 프록시에 남아
-  // tick 마다 카드가 부활하던 것(거노: esc 눌러도 취소 안 됨). 같은 질문이면 다시 안 띄운다.
+  // tick 마다 카드가 부활하던 것(사용자: esc 눌러도 취소 안 됨). 같은 질문이면 다시 안 띄운다.
   const dismissedQRef = useRef<string | null>(null);
   // 카드에서 내가 고른 선택 — AskUserQuestion 답은 conv.turns 로 안 새므로(시스템 주입 필터)
-  // 직접 user 버블로 남긴다(거노: 뭐 선택했는지 대화창에 떠야). surface 바뀌면 리셋.
+  // 직접 user 버블로 남긴다(사용자: 뭐 선택했는지 대화창에 떠야). surface 바뀌면 리셋.
   const [myChoices, setMyChoices] = useState<Turn[]>([]);
   useEffect(() => { setMyChoices([]); setPermPrompt(false); dismissedQRef.current = null; }, [surfaceId]);
   useEffect(() => {
@@ -1311,13 +1311,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         setEvents((prev) => [...prev, ...chunk.events]);
       }
       // 세션 경계: tail 윈도 첫 이벤트 ts. 이전 세션 이미지(sent-images.jsonl 방단위 누적)
-      // 잔류를 백엔드 since 로 컷(거노: 이전 pane 이미지가 새 대화에 남던 것).
+      // 잔류를 백엔드 since 로 컷(사용자: 이전 pane 이미지가 새 대화에 남던 것).
       const ts0 = firstTsRef.current;
       const since = ts0 ? Date.parse(ts0) / 1000 : undefined;
       const [conv, imgs, screen, msgs] = await Promise.all([
         fetchConversation(surfaceId),
         // since(현재 세션 시작 ts) 없으면 백엔드가 sent-images.jsonl(방 누적)을 통째로 줘
-        // 이전 세션 이미지가 새 대화에 떴다(거노: 아무것도 안 쳤는데 이미지들). 세션 경계가
+        // 이전 세션 이미지가 새 대화에 떴다(사용자: 아무것도 안 쳤는데 이미지들). 세션 경계가
         // 잡힐 때(transcript 첫 이벤트)까지 보류 — 새/조용한 학생에 잔류 이미지가 안 뜨게.
         since ? fetchSentImages(surfaceId, 12, since) : Promise.resolve<string[]>([]),
         fetchPeek(surfaceId, 60),
@@ -1329,7 +1329,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       setStreaming(conv.streaming.trim() ? conv.streaming : '');
       setConvTurns(conv.turns); // 프록시 텍스트 대화 — jsonl 비었을 때 라이브 폴백
       // 인터랙티브 선택지 — AskUserQuestion 은 캡처 프록시 tool_use 로 질문/선택지가 정확히
-      // 잡힌다(거노: peek 추정 금지). 그게 있으면 그걸 쓰고, 없을 때만 화면 메뉴(/model 등
+      // 잡힌다(사용자: peek 추정 금지). 그게 있으면 그걸 쓰고, 없을 때만 화면 메뉴(/model 등
       // API 안 타는 것)를 peek 폴백으로 파싱한다.
       const aq = conv.tool_uses?.find((t) => t.name === 'AskUserQuestion' && t.input.questions?.length);
       // ESC/Enter 직후 suppress 창 동안은 메뉴 재감지 보류(닫은 카드가 stale 화면으로 재등장 방지).
@@ -1338,7 +1338,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         const qs = aq.input.questions!;
         // AskUserQuestion 이 질문을 여러 개 담아도 claude TUI 는 하나씩 순차로 띄운다(질문1 답
         // → 질문2 표시). 무조건 [0]이면 2번째 질문부터 화면과 어긋나 카드가 안 맞거나 안 뜬다
-        // (거노: 질문 2개↑ 안 보임). 화면에 지금 뜬 옵션 라벨을 각 질문 옵션과 대조해 현재 질문을
+        // (사용자: 질문 2개↑ 안 보임). 화면에 지금 뜬 옵션 라벨을 각 질문 옵션과 대조해 현재 질문을
         // 고른다 — 옵션 텍스트(preview/desc)는 정확한 aq 것을 쓰고, 인덱스만 화면으로 결정.
         const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
         let q = qs[0];
@@ -1355,7 +1355,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             : undefined;
           if (matched) q = matched;
         }
-        // ESC 로 닫은/숨긴 질문이면 카드 부활 금지(거노: esc 취소). 다른 질문이면 dismiss 해제 후 표시.
+        // ESC 로 닫은/숨긴 질문이면 카드 부활 금지(사용자: esc 취소). 다른 질문이면 dismiss 해제 후 표시.
         setPermPrompt(false);
         if (q.question === dismissedQRef.current) {
           setMenu(null);
@@ -1371,7 +1371,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       } else {
         dismissedQRef.current = null; // aq 사라짐 = 응답/취소됨 → 다음 질문 위해 해제
         // 권한 승인(Yes/No) 프롬프트는 선택지 카드로 안 띄운다 — 헤더 상태점(빨강)으로만
-        // 알리고 답변은 터미널/카드 외 경로로(거노: 데몬 needs-input 점 체계). suppress 창과
+        // 알리고 답변은 터미널/카드 외 경로로(사용자: 데몬 needs-input 점 체계). suppress 창과
         // 무관하게 화면 존재 여부로 permPrompt 를 갱신해 점이 즉시 따라오게.
         const pm = parsePromptMenu(screen);
         const isPerm = !!pm && isPermissionMenu(pm);
@@ -1379,7 +1379,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         if (!suppressed) setMenu(isPerm ? null : pm);
       }
       // claude 라이브 작업 표시(verb·경과초)도 화면에만 — 로딩 인디케이터에 실값으로.
-      // 화면에 진행형 verb 가 잠깐 안 보이는 프레임마다 null 로 깜빡이던 것(거노)을 막는다:
+      // 화면에 진행형 verb 가 잠깐 안 보이는 프레임마다 null 로 깜빡이던 것(사용자)을 막는다:
       // 7초 grace — verb 를 본 지 7초 안이면 직전값 유지, 넘으면(작업 끝남) 클리어. tool 결과 대량
       // 출력이 화면에서 verb 를 잠깐 밀어내도 로딩이 안 사라지게 폴링(1.5초) 여러 회를 덮는다.
       const sp = parseSpinner(screen);
@@ -1390,7 +1390,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       setEffort(conv.effort || parseEffort(screen)); // 캡처 프록시 effort(output_config.effort) 우선, 폴백 화면파싱
       setConvModel(conv.model || ''); // 프록시가 요청에서 잡은 model — /model 전환 시 다음 요청에 반영(실시간 소스)
       if (!suppressed) setEffortMenu(parseEffortMenu(screen)); // /effort 슬라이더 뜨면 GUI 카드로
-      // /context 출력이 화면에 보이면 자동으로 컨텍스트 패널 활성(거노: 어디서 /context 보내든
+      // /context 출력이 화면에 보이면 자동으로 컨텍스트 패널 활성(사용자: 어디서 /context 보내든
       // 떠야 함 — 모모톡/학생별/터미널 무관). null 일 때만 켜고, 색 갱신은 peek_ansi 폴링이 담당.
       const ctxAuto = extractContext(screen);
       if (ctxAuto) setCtxView((prev) => prev ?? ctxAuto);
@@ -1419,7 +1419,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   useEffect(() => { setMode(latestPermissionMode(events)); }, [events]);
 
   // 새 내용 도착 시, 사용자가 하단에 있을 때만 따라내린다(위로 스크롤 중이면 안 건드림 —
-  // 거노: 스크롤 올리면 자꾸 내려가던 버그).
+  // 사용자: 스크롤 올리면 자꾸 내려가던 버그).
   useEffect(() => {
     const el = bodyRef.current;
     if (el && atBottomRef.current) { el.scrollTop = el.scrollHeight; setNewMsg(false); }
@@ -1430,13 +1430,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 새 질문(title 변경) 시 체크·네비 초기화(메뉴 열릴 때 터미널 커서는 ❯1=navIdx 0).
   useEffect(() => { setChecked(new Set()); setNavIdx(0); }, [menu?.title]);
 
-  // /context 활성 시 peek_ansi(색 포함) 폴링 → 동전 색까지 대화창에(거노: peek 로 색까지).
+  // /context 활성 시 peek_ansi(색 포함) 폴링 → 동전 색까지 대화창에(사용자: peek 로 색까지).
   const ctxOpen = ctxView != null;
   useEffect(() => {
     if (!ctxOpen) return;
     let stop = false;
     const poll = async () => {
-      // peek_ansi(색) 우선, 헤더 못 잡으면 일반 peek 폴백 — 색은 없어도 "불러오는 중" 멈춤 방지(거노).
+      // peek_ansi(색) 우선, 헤더 못 잡으면 일반 peek 폴백 — 색은 없어도 "불러오는 중" 멈춤 방지(사용자).
       let ctx = extractContext(await fetchPeek(surfaceId, 80, true));
       if (!ctx) ctx = extractContext(await fetchPeek(surfaceId, 80, false));
       if (!stop && ctx) setCtxView(ctx);
@@ -1454,7 +1454,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     if (atBottomRef.current) setNewMsg(false); // 맨 밑 도달 → 배너 해제
     setAtTop(el.scrollTop < 48);
     // 컨테이너 상단을 지난(스크롤로 위로 올라간) 마지막 내 프롬프트 → sticky 헤더. 버블은 DOM
-    // 순서대로라 처음 "아직 상단 아래"를 만나면 멈춘다(거노: 올린 만큼 위 프롬프트가 붙게).
+    // 순서대로라 처음 "아직 상단 아래"를 만나면 멈춘다(사용자: 올린 만큼 위 프롬프트가 붙게).
     const elTop = el.getBoundingClientRect().top;
     const marks = el.querySelectorAll<HTMLElement>('[data-uprompt]');
     let cur: HTMLElement | null = null;
@@ -1463,7 +1463,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     }
     setStickyP(cur ? { idx: Number(cur.dataset.uidx), text: cur.dataset.uprompt || '' } : null);
   };
-  // sticky 헤더 클릭 → 그 프롬프트로 부드럽게 점프(거노).
+  // sticky 헤더 클릭 → 그 프롬프트로 부드럽게 점프(사용자).
   const jumpToPrompt = (idx: number) => {
     bodyRef.current?.querySelector<HTMLElement>(`[data-uidx="${idx}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
@@ -1472,16 +1472,16 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 인터랙티브 메뉴 선택 → 숫자 단축키 전송(claude 가 즉시 선택). 다음 폴에서 갱신.
   const pickMenu = async (oi: number) => {
     const label = menu?.options[oi]?.label;
-    if (label) setMyChoices((p) => [...p, { role: 'user', text: label }]); // 대화창에 내 선택 남김(거노)
+    if (label) setMyChoices((p) => [...p, { role: 'user', text: label }]); // 대화창에 내 선택 남김(사용자)
     setMenu(null);
     // 단일 선택 — navIdx(=터미널 커서)에서 oi(0-based)로 ↑↓ 이동 후 Enter. peek 안 쓰고
-    // GUI 커서와 터미널 커서를 같이 움직여 일치(거노: 완전 연동).
+    // GUI 커서와 터미널 커서를 같이 움직여 일치(사용자: 완전 연동).
     const delta = oi - navIdx;
     const move = delta > 0 ? '\x1b[B'.repeat(delta) : '\x1b[A'.repeat(-delta);
     await sendToPane(surfaceId, move + '\r', false);
   };
 
-  // multiSelect 체크 토글 — peek 안 쓰고(거노) GUI navIdx 를 터미널 커서와 동일하게 유지:
+  // multiSelect 체크 토글 — peek 안 쓰고(사용자) GUI navIdx 를 터미널 커서와 동일하게 유지:
   // 클릭한 항목(oi, 0-based)으로 navIdx 만큼 이동 + Space. GUI 와 터미널이 항상 같이 움직여 일치.
   const toggleCheck = (oi: number) => {
     const delta = oi - navIdx;
@@ -1494,13 +1494,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // multiSelect 제출 — 체크는 toggleCheck 가 이미 터미널에 미러함. Submit 영역으로 Tab + Enter.
   const submitMulti = async () => {
     const labels = menu ? [...checked].sort((a, b) => a - b).map((i) => menu.options[i]?.label).filter(Boolean) : [];
-    if (labels.length) setMyChoices((p) => [...p, { role: 'user', text: labels.join(', ') }]); // 내 선택 남김(거노)
+    if (labels.length) setMyChoices((p) => [...p, { role: 'user', text: labels.join(', ') }]); // 내 선택 남김(사용자)
     setMenu(null);
     setChecked(new Set());
     await sendToPane(surfaceId, '\t\r', false);
   };
 
-  // /effort 슬라이더 선택 — 현재(effortMenu)에서 target 으로 ←/→ 이동 후 Enter(거노: effort 연동).
+  // /effort 슬라이더 선택 — 현재(effortMenu)에서 target 으로 ←/→ 이동 후 Enter(사용자: effort 연동).
   const pickEffort = (target: number) => {
     const cur = effortMenu ?? 2;
     const delta = target - cur;
@@ -1509,14 +1509,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     void sendToPane(surfaceId, move + '\r', false);
   };
 
-  // 선택지 카드 키보드 조작(거노: 방향키·엔터·esc 안 됨) — ↑↓ 네비, Space 다중 토글,
+  // 선택지 카드 키보드 조작(사용자: 방향키·엔터·esc 안 됨) — ↑↓ 네비, Space 다중 토글,
   // Enter 선택/제출, Esc 취소. 마우스 클릭과 병행. 카드 뜬 동안만 활성.
   useEffect(() => {
     if (!menu) return;
     const onKey = (e: KeyboardEvent) => {
       const opts = menu.options;
       // ↑↓: GUI navIdx 와 터미널 커서를 동시에 이동. 끝(0/max)에 닿으면 터미널 키도 안 보낸다
-      // — GUI 는 clamp 인데 터미널만 계속 내려가 둘이 어긋나던 것(거노: 꾹 누르면 다른 거 선택).
+      // — GUI 는 clamp 인데 터미널만 계속 내려가 둘이 어긋나던 것(사용자: 꾹 누르면 다른 거 선택).
       if (e.key === 'ArrowDown') { e.preventDefault(); if (navIdx < opts.length - 1) { setNavIdx(navIdx + 1); void sendToPane(surfaceId, '\x1b[B', false); } }
       else if (e.key === 'ArrowUp') { e.preventDefault(); if (navIdx > 0) { setNavIdx(navIdx - 1); void sendToPane(surfaceId, '\x1b[A', false); } }
       else if (e.key === ' ' && menu.multi) { e.preventDefault(); void sendToPane(surfaceId, ' ', false); setChecked((s) => { const n = new Set(s); if (n.has(navIdx)) n.delete(navIdx); else n.add(navIdx); return n; }); }
@@ -1528,7 +1528,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       } else if (e.key === 'Escape') {
         e.preventDefault();
         menuSuppressRef.current = Date.now() + 700; // 닫은 뒤 재감지 보류
-        if (menu) dismissedQRef.current = menu.title; // aq 부활 방지(거노: esc 눌러도 취소 안 되던 것)
+        if (menu) dismissedQRef.current = menu.title; // aq 부활 방지(사용자: esc 눌러도 취소 안 되던 것)
         setMenu(null); setChecked(new Set());
         void sendToPane(surfaceId, '\x1b', false); // 터미널 메뉴도 취소
       }
@@ -1537,7 +1537,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     return () => window.removeEventListener('keydown', onKey);
   }, [menu, navIdx, checked, surfaceId]);
 
-  // /effort 슬라이더 키보드 — ←/→ 이동(터미널 동시), Enter 확정, Esc 취소(거노: 방향키 연동).
+  // /effort 슬라이더 키보드 — ←/→ 이동(터미널 동시), Enter 확정, Esc 취소(사용자: 방향키 연동).
   useEffect(() => {
     if (effortMenu == null) return;
     const onKey = (e: KeyboardEvent) => {
@@ -1551,7 +1551,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   }, [effortMenu, surfaceId]);
 
   // 학생 종료 — pane kill(close_surface). window.confirm 은 wry webview 에서 무반응이라
-  // (거노: ba gui 종료버튼 눌러도 반응없음) 자체 확인 모달로.
+  // (사용자: ba gui 종료버튼 눌러도 반응없음) 자체 확인 모달로.
   const onKill = () => {
     setConfirm({
       msg: `${title} 캐릭터를 종료할까요?`,
@@ -1585,14 +1585,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     // tell 로 온 학생→학생 메시지의 발신자 — messages.jsonl(from_pane) 을 ts+normText 로
     // 대조. 발신 기록 ts 는 항상 수신 턴 ts(처리 시각)보다 앞이므로 턴보다 미래(+슬랙)의
     // 기록은 다른 발화로 배제하고, 남은 것 중 최신(배열이 ts 내림차순)을 취해 반복 발화
-    // 오탐을 막는다. normText 비교라 tell 의 개행→공백 평탄화 차이도 흡수. 거노 직접
+    // 오탐을 막는다. normText 비교라 tell 의 개행→공백 평탄화 차이도 흡수. 사용자 직접
     // 입력(from_pane=sensei 또는 매칭 없음)은 undefined → 우측 노랑 유지.
     const senderOf = (text: string, tsIso?: string, fromName?: string): BubbleSender | undefined => {
       // 네이티브 teammate-message — 발신자명이 래퍼 속성에 직접 있어 messages.jsonl
       // 대조를 생략하고 agents 에서 accent 만 해석한다. fromName = teammate_id =
       // "<로마자 slug>-<sid4>"(kasaterm shim 자동 부착)라 slug 를 한글 캐릭터로 역매핑
       // 해야 agents(character=한글)와 매칭된다 — 직접 비교하면 항상 어긋나 색·이름이
-      // raw agent-name 으로 샜다(거노: 아리스에 시로코 칩). 못 찾으면 이름만, 색 없이.
+      // raw agent-name 으로 샜다(사용자: 아리스에 시로코 칩). 못 찾으면 이름만, 색 없이.
       if (fromName) {
         const ko = SLUG_TO_CHARACTER[fromName.split('-')[0]] ?? fromName;
         const a = agents.find((x) => x.character === ko);
@@ -1616,14 +1616,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     if (events.length) {
       const list = eventsToItems(events, toolMap, isSub, senderOf);
       // 보낸 시각순 정렬 — 예약(큐) 버블은 enqueue 시각을 ts 로 들고 본문에 직접 삽입되므로 여기서
-      // ts 로 stable sort 하면 대화 사이 제자리에 끼인다(거노: 시간별 정렬). ts 없는 아이템
+      // ts 로 stable sort 하면 대화 사이 제자리에 끼인다(사용자: 시간별 정렬). ts 없는 아이템
       // (thinking/tool/qa/launch)은 직전 ts 를 상속해 같은 턴에 붙어 따라간다.
       let prevTs = 0;
       const keyed = list.map((it, i) => {
         const raw = (it as { ts?: string }).ts;
         const t = raw ? Date.parse(raw) : NaN;
         // 대기 중 예약(queued)은 아직 안 보내진 거라 enqueue 시각(작업 중간)이 아니라 맨 아래로
-        // 내린다(거노: 예약이 작업 로그 사이에 끼던 걸 처리 위치=하단으로). 처리된 예약은 이미
+        // 내린다(사용자: 예약이 작업 로그 사이에 끼던 걸 처리 위치=하단으로). 처리된 예약은 이미
         // 정식 user 턴(처리 ts)으로 대체돼 여기 해당 없음. 여러 예약은 i(enqueue 순)로 안정 정렬.
         const eff = (it as { queued?: boolean }).queued
           ? Number.MAX_SAFE_INTEGER
@@ -1693,7 +1693,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       .map((t) => ({ kind: 'bubble', role: t.role, text: t.text, sender: t.sender }) as RenderItem);
   }, [events, toolMap, convTurns, isSub, messages, agents, subInFlight, streaming]);
   // optimistic 으로 남긴 내 발화(myChoices) 중 transcript(items)에 아직 안 잡힌 것만 — 작업
-  // 중 미리 보낸 메시지를 즉시 띄우되(거노), 다음 폴에서 transcript 에 같은 텍스트가 뜨면
+  // 중 미리 보낸 메시지를 즉시 띄우되(사용자), 다음 폴에서 transcript 에 같은 텍스트가 뜨면
   // 중복 제거. 메뉴 선택(label)은 transcript 에 raw 키로 들어가 매칭 안 돼 계속 남는다(의도).
   const pendingChoices = useMemo(
     () => myChoices.filter((c) => !items.some((it) =>
@@ -1709,7 +1709,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     return undefined;
   }, [items]);
 
-  // 메타칸엔 진행 중 서브에이전트만(거노: 완료된 게 다 떠서 범람). async 서브는 board 가
+  // 메타칸엔 진행 중 서브에이전트만(사용자: 완료된 게 다 떠서 범람). async 서브는 board 가
   // '진행 중'을 못 잡으니, board 매칭 OR transcript 최근수정(60초)으로 진행을 추정한다.
   // 한번 연 타일은 완료돼도 유지되니(별도 타일), 끝난 건 목록에서만 빠진다.
   const runningSubs = useMemo(() => {
@@ -1720,7 +1720,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
 
   // 모모톡풍 연속 발신자 그룹핑 — 같은 발신자(선생님/학생/발신 학생/부모지시)의 버블이
   // 연달으면 첫 버블에서만 아바타·이름을 보여주고 간격을 좁힌다. 버블 아닌 항목(도구카드 등)이
-  // 끼면 그룹이 끊긴다(거노: momotalk 참조 리디자인).
+  // 끼면 그룹이 끊긴다(사용자: momotalk 참조 리디자인).
   const chatFeed = useMemo(() => {
     const list: RenderItem[] = [
       ...items,
@@ -1779,14 +1779,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       overflow: 'hidden'
     }}>
       {/* 헤더(슬림) — 제목 · 경로(cwd) · 권한(plan)칩 · 하단바숨김·캐릭터·종료·닫기.
-          거노: 얇게, 경로·plan칩을 상단으로, 하단바 숨기기 토글. */}
+          사용자: 얇게, 경로·plan칩을 상단으로, 하단바 숨기기 토글. */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
         padding: '6px 10px',
         background: 'var(--cth-cream-50)',
         borderBottom: '1px solid var(--cth-cream-200)'
       }}>
-        {/* 상태점 — 클로드 데몬 세션 목록 점 체계(거노): 입력 필요(승인·질문 대기)=빨강 깜빡,
+        {/* 상태점 — 클로드 데몬 세션 목록 점 체계(사용자): 입력 필요(승인·질문 대기)=빨강 깜빡,
             작업 중=하늘 펄스, 완료·유휴=초록 정적. 승인 프롬프트는 선택지 카드 대신 이 점이 알린다. */}
         {!offline && !isSub && agent && (() => {
           const needsInput = isAwaitingTeacher(agent) || agent.status === 'waiting' || permPrompt;
@@ -1834,13 +1834,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             {liveTask && <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 400, color: 'var(--cth-ink-300)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, maxWidth: 220 }}>{liveTask}</span>}</>
           )}
         </span>
-        {/* 경로(cwd) — 거노: 경로를 상단바로. viewCwd(현재 보는 경로) 우선, 없으면 실행 cwd */}
+        {/* 경로(cwd) — 사용자: 경로를 상단바로. viewCwd(현재 보는 경로) 우선, 없으면 실행 cwd */}
         {!offline && !isSub && agent?.cwd && (
           <span title={`경로\n${agent.viewCwd && agent.viewCwd !== agent.cwd ? agent.viewCwd : agent.cwd}`} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 170, minWidth: 0, flexShrink: 1 }}>
             {shortCwd(agent.viewCwd && agent.viewCwd !== agent.cwd ? agent.viewCwd : agent.cwd)}
           </span>
         )}
-        {/* 권한(plan/acceptEdits/bypass) 칩 — 색+아이콘 (거노: planmode칩 색·아이콘) */}
+        {/* 권한(plan/acceptEdits/bypass) 칩 — 색+아이콘 (사용자: planmode칩 색·아이콘) */}
         {!offline && !isSub && modeLabel(mode) && (() => {
           const st = modeStyle(mode)!;
           return (
@@ -1849,7 +1849,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             </span>
           );
         })()}
-        {/* 진행 중 백그라운드·서브에이전트 — 하단바를 접거나 숨겨도 헤더엔 항상(거노: 모니터링 안 보임).
+        {/* 진행 중 백그라운드·서브에이전트 — 하단바를 접거나 숨겨도 헤더엔 항상(사용자: 모니터링 안 보임).
             클릭하면 하단바를 펴서 상세를 본다. */}
         {!offline && !isSub && ((agent?.background?.length ?? 0) + (agent?.subagents?.length ?? 0) > 0) && (
           <button
@@ -1862,7 +1862,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           </button>
         )}
         <div style={{ flex: 1 }} />
-        {/* 액션 통합 — 좁은 멀티뷰 타일에서 버튼이 정보를 밀어내지 않게 ⋯ 메뉴 하나로(거노).
+        {/* 액션 통합 — 좁은 멀티뷰 타일에서 버튼이 정보를 밀어내지 않게 ⋯ 메뉴 하나로(사용자).
             offline/sub 는 액션이 닫기뿐이라 × 그대로. */}
         {!offline && !isSub ? (
           <div style={{ position: 'relative', flexShrink: 0 }}>
@@ -1897,7 +1897,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         )}
       </div>
 
-      {/* 대화(채팅 버블) + 보낸 이미지 — relative 래퍼로 감싸 맨위/맨아래 스크롤 버튼을 띄운다(거노). */}
+      {/* 대화(채팅 버블) + 보낸 이미지 — relative 래퍼로 감싸 맨위/맨아래 스크롤 버튼을 띄운다(사용자). */}
       <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div ref={bodyRef} onScroll={onBodyScroll} style={{ flex: 1, overflow: 'auto', padding: '14px 16px', background: 'var(--cth-cream-100)' }}>
         {events.length === 0 && convTurns.length === 0 && !streaming.trim() && myChoices.length === 0 && images.length === 0 && agent?.status !== 'working' && agent?.status !== 'thinking' ? (
@@ -1908,7 +1908,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           <>
             {chatFeed.map(({ it, showHead, grouped }, i) => {
               // esc 중단 — 프롬프트(취소 아님)는 그대로 두고, 중단이 일어난 그 자리에 가는 구분선 +
-              // "작업 중단" 라벨을 넣어 어디서 끊겼는지 흐름에서 바로 보이게(거노: 정확한 위치).
+              // "작업 중단" 라벨을 넣어 어디서 끊겼는지 흐름에서 바로 보이게(사용자: 정확한 위치).
               if (it.kind === 'interrupted') {
                 return (
                   <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '2px 0 12px', color: 'var(--cth-ink-300)' }}>
@@ -2041,7 +2041,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               const cancelled = !!it.cancelled; // esc 로 취소한 프롬프트 — 회색 취소선
               const queued = !!it.queued && !cancelled; // 작업 중 보내 아직 처리 전 — 예약 라벨
               const turnChar = sender ? sender.name : (isSub && it.role === 'user' ? parentAvatarChar : avatarChar);
-              // 턴 소요시간 — assistant 턴이 그 턴의 마지막이면 시계 푸터(거노 데스크탑 앱풍).
+              // 턴 소요시간 — assistant 턴이 그 턴의 마지막이면 시계 푸터(사용자 데스크탑 앱풍).
               const durMs = !mine && it.uuid ? durationMap.get(it.uuid) : undefined;
               const tokOut = !mine && it.uuid ? tokenMap.get(it.uuid) : undefined; // 완료 응답 출력 토큰(transcript usage)
               const clock = fmtClock(it.ts); // 메시지 시각(오후 2:47)
@@ -2089,7 +2089,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               </ChatBubble>
             ))}
 
-            {/* /context 결과 — 별도 패널(x 안 닫히던) 대신 채팅 흐름에(거노: 채팅창 안에 입력되게).
+            {/* /context 결과 — 별도 패널(x 안 닫히던) 대신 채팅 흐름에(사용자: 채팅창 안에 입력되게).
                 선생님 "/context" 친 기록(우측 버블) + 학생 컨텍스트 결과(좌측, 코드 카드). */}
             {ctxView && (
               <>
@@ -2104,13 +2104,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
 
             {/* 로딩 인디케이터 — verb(spinner)가 있으면 status 와 무관하게 표시한다. board status
                 는 폴링마다 working↔idle 로 흔들려, status 를 게이트로 두면 verb 가 멀쩡히 떠도 status
-                가 잠깐 idle 인 순간 로딩이 사라졌다(거노: Cultivating 30s 인데 깜빡). spinner 는 진행형
+                가 잠깐 idle 인 순간 로딩이 사라졌다(사용자: Cultivating 30s 인데 깜빡). spinner 는 진행형
                 verb·sticky(7초)라 tool/버블 사이 공백을 메워 안 흔들린다. verb 가 아예 없을 때만
                 status(working/thinking)+"선생님 발화 직후"로 폴백 — 답 시작 전 대기 표시이자, 답변
                 직후 nudge thinking 잔류(마지막이 학생 답변)는 빼서 "생각 중"이 답 아래 계속 뜨던 것 방지. */}
             {(spinner != null || ((agent?.status === 'working' || agent?.status === 'thinking')
               && lastBubbleRole === 'user')) && !streaming.trim() && (
-              // sticky 바닥 고정(거노) — 위로 스크롤해 옛 대화를 봐도 로딩이 바닥에 남는다. 풀폭
+              // sticky 바닥 고정(사용자) — 위로 스크롤해 옛 대화를 봐도 로딩이 바닥에 남는다. 풀폭
               // 그라데 배경(컨테이너 좌우 padding 16 을 음수 margin 으로 상쇄)으로 그 위 새 메시지가
               // 자연스럽게 페이드되며 가려져 겹쳐 보이지 않는다.
               <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 8, alignItems: 'flex-start',
@@ -2133,10 +2133,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                       ))}
                     </span>
                     {/* spinner(라이브 verb) 우선, 없으면 board intent(action=구체 도구·대상)로 폴백 — "작업 중"
-                        추상 표시 대신 지금 뭘 하는지 보이게(거노). */}
+                        추상 표시 대신 지금 뭘 하는지 보이게(사용자). */}
                     {spinner || (agent?.status === 'thinking' ? '생각 중…' : (agent?.action || agent?.currentTool || '작업 중…'))}
                   </span>
-                  {/* 컴팩트 등 진행률 막대 — 터미널 "▰▰☐ 9%" 를 GUI 에도 똑같이(거노). 있을 때만. */}
+                  {/* 컴팩트 등 진행률 막대 — 터미널 "▰▰☐ 9%" 를 GUI 에도 똑같이(사용자). 있을 때만. */}
                   {progress != null && (
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, width: '100%', minWidth: 140 }}>
                       <span style={{ position: 'relative', flex: 1, height: 6, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
@@ -2145,7 +2145,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                       <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', flexShrink: 0 }}>{progress}%</span>
                     </span>
                   )}
-                  {/* 최근 도구 흐름 — working 중 세부 진행이 안 보이고 로딩바만 떴다(거노: 작업 중 사항을
+                  {/* 최근 도구 흐름 — working 중 세부 진행이 안 보이고 로딩바만 떴다(사용자: 작업 중 사항을
                       봐야 하는데). 도구 이력을 한 줄로 깔아 "방금 무엇을 했는지" 흐름이 보이게. */}
                   {agent?.recentTools && agent.recentTools.length > 0 && (
                     <span style={{ fontSize: 10, color: 'var(--cth-ink-300)', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -2159,8 +2159,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         )}
       </div>
       {/* 위로 스크롤하면 상단에 붙는 "지금 보는 내 프롬프트" — 그 아래로 무슨 작업·답을 했는지
-          보게. 클릭하면 그 프롬프트로 점프(거노). 맨 위면 굳이 안 띄우고, 맨 아래(최신)로 다
-          내려가 있으면 숨긴다(거노: 조금 올려야 보이게, 다 내리면 안 보이게). */}
+          보게. 클릭하면 그 프롬프트로 점프(사용자). 맨 위면 굳이 안 띄우고, 맨 아래(최신)로 다
+          내려가 있으면 숨긴다(사용자: 조금 올려야 보이게, 다 내리면 안 보이게). */}
       {stickyP && !atTop && !atBottom && (
         <button onClick={() => jumpToPrompt(stickyP.idx)} title="이 프롬프트로 이동" style={{
           position: 'absolute', top: 8, left: 14, right: 14, zIndex: 15,
@@ -2174,7 +2174,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{stickyP.text}</span>
         </button>
       )}
-      {/* 맨 위·맨 아래 점프 — 긴 대화에서 빠르게(거노). 이미 끝이면 해당 버튼 숨김. */}
+      {/* 맨 위·맨 아래 점프 — 긴 대화에서 빠르게(사용자). 이미 끝이면 해당 버튼 숨김. */}
       <div style={{ position: 'absolute', right: 14, bottom: 12, display: 'flex', flexDirection: 'column', gap: 6, zIndex: 20 }}>
         {!atTop && (
           <button onClick={() => bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' })} title="맨 위로" style={isPhone ? { ...SCROLL_BTN, width: 44, height: 44 } : SCROLL_BTN}>
@@ -2187,7 +2187,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           </button>
         )}
       </div>
-      {/* 새 대화 도착 — 위로 올려둔 동안만(맨 밑이면 안 띄움). 클릭하면 최신으로 내려가며 해제(거노).
+      {/* 새 대화 도착 — 위로 올려둔 동안만(맨 밑이면 안 띄움). 클릭하면 최신으로 내려가며 해제(사용자).
           가운데 pill 이라 우하단 ↑ 점프 버튼과 안 겹친다. wrapper 는 클릭 통과(스크롤 방해 X). */}
       {newMsg && !atBottom && (
         <div style={{ position: 'absolute', bottom: 12, left: 0, right: 0, zIndex: 20, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
@@ -2206,12 +2206,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       </div>
 
       {/* 인터랙티브 메뉴(/model·AskUserQuestion) — 선택지 카드. 단일=클릭 즉시 선택,
-          multiSelect=체크박스 여러개 토글 후 제출(거노: 중복선택 GUI). */}
+          multiSelect=체크박스 여러개 토글 후 제출(사용자: 중복선택 GUI). */}
       {menu && (
         // 폰에서 260px 는 선택지 세 개면 차서, 정작 고를 것을 상자 안에서 또 굴려야 한다.
         <div style={{ padding: '10px 14px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-sky-light)', maxHeight: isPhone ? '58vh' : 260, overflowY: 'auto', position: 'relative' }}>
           {/* 숨기기 — 카드만 치운다(터미널엔 키 안 보내 답은 유지). 같은 질문 부활 방지로
-              계속 숨김. ESC(취소, 터미널에 \x1b)와 구분(거노: 선택지 나올 때 숨기기). */}
+              계속 숨김. ESC(취소, 터미널에 \x1b)와 구분(사용자: 선택지 나올 때 숨기기). */}
           <button
             onClick={() => {
               menuSuppressRef.current = Date.now() + 700;
@@ -2289,7 +2289,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       )}
 
       {/* 통합 하단 줄(항상 노출) — 인연도 게이지·재화·모델·effort·권한·브랜치·경로를 한 줄에
-          (거노: 인연도 있는 곳에 다 넣음). 서브에이전트·백그라운드·작업은 우측 토글로 접는다 —
+          (사용자: 인연도 있는 곳에 다 넣음). 서브에이전트·백그라운드·작업은 우측 토글로 접는다 —
           평소엔 이 줄만 보여 화면을 안 가린다. 라이브 학생만(offline/서브 제외). */}
       {!offline && !isSub && !footerHidden && agent && (() => {
         const hasFold = runningSubs.length > 0 || (agent.background?.length ?? 0) > 0 || taskList.length > 0;
@@ -2327,7 +2327,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               yes: '변경 보기',
               onYes: () => { void sendToPane(surfaceId, '/diff', true, false); },
             })} />}
-            {/* 우측 — 작업중이면(서브에이전트·백그라운드·모니터) 펼치지 않아도 칩으로 표시(거노:
+            {/* 우측 — 작업중이면(서브에이전트·백그라운드·모니터) 펼치지 않아도 칩으로 표시(사용자:
                 밑에 칩에도 둘 다). 칩 클릭=펼침. 그 뒤 접기 토글(전체 개수). */}
             {hasFold && (
               <div style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -2364,7 +2364,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               </div>
             )}
           </div>
-          {/* 접이식 묶음 — 서브에이전트·백그라운드 칩 + 현재 작업(TaskStrip). 평소 숨김(거노). */}
+          {/* 접이식 묶음 — 서브에이전트·백그라운드 칩 + 현재 작업(TaskStrip). 평소 숨김(사용자). */}
           {footerOpen && hasFold && (
             <div style={{ borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-100)' }}>
               {(runningSubs.length > 0 || (agent.background?.length ?? 0) > 0) && (
@@ -2389,7 +2389,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         );
       })()}
 
-      {/* /effort 슬라이더 — 터미널 슬라이더(←/→)를 GUI 카드로(거노: effort 연동). 현재 강조,
+      {/* /effort 슬라이더 — 터미널 슬라이더(←/→)를 GUI 카드로(사용자: effort 연동). 현재 강조,
           클릭/←→ → 터미널 ←/→ + Enter. */}
       {effortMenu != null && (
         <div style={{ padding: '10px 14px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-sky-light)' }}>
@@ -2410,7 +2410,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         </div>
       )}
 
-      {/* 입력창 + 슬래시 자동완성 드롭다운 — '/' 치면 claude 명령 후보(거노). 오프라인
+      {/* 입력창 + 슬래시 자동완성 드롭다운 — '/' 치면 claude 명령 후보(사용자). 오프라인
           세션은 입력창 대신 '현재 터미널에 입력' 이어가기 액션바를 띄운다(읽기 전용). */}
       {offline ? (
         <div style={{

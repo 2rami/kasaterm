@@ -1468,7 +1468,7 @@ fn board_rows_named<'a>(rows: &'a [Value], target: &str) -> Vec<&'a Value> {
     }).collect()
 }
 
-// macOS 컴퓨터 이름은 띄어쓰기가 줄바꿈 없는 공백(U+00A0)이라, 목록을 보고 그대로 친 `이름@건호의 MacBook Pro`
+// macOS 컴퓨터 이름은 띄어쓰기가 줄바꿈 없는 공백(U+00A0)이라, 목록을 보고 그대로 친 `이름@내 MacBook Pro`
 // 가 「보드에 없어요」로 떨어졌다(2026-10-01). 공백 종류는 가리지 않는다.
 fn spaced(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -4913,8 +4913,8 @@ mod tests {
         ];
         assert_eq!(super::board_matches(&rows, "미도리").len(), 2);
         assert_eq!(super::board_matches(&rows, "미도리@맥미니").len(), 1);
-        let nbsp = vec![serde_json::json!({"character":"유우카","machine_label":"건호의 MacBook\u{a0}Pro","address":{"surface_id":"%3","session_id":"s"}})];
-        assert_eq!(super::board_matches(&nbsp, "유우카@건호의 MacBook Pro").len(), 1, "줄바꿈 없는 공백도 띄어쓰기로 본다");
+        let nbsp = vec![serde_json::json!({"character":"유우카","machine_label":"내 MacBook\u{a0}Pro","address":{"surface_id":"%3","session_id":"s"}})];
+        assert_eq!(super::board_matches(&nbsp, "유우카@내 MacBook Pro").len(), 1, "줄바꿈 없는 공백도 띄어쓰기로 본다");
         assert_eq!(super::board_matches(&rows, "%5").len(), 1);
         assert!(super::board_matches(&rows, "유즈").is_empty());
         assert_eq!(super::board_rows_named(&rows, "유즈").len(), 1, "화면 보기는 셸 칸도 고른다");

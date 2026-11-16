@@ -118,11 +118,11 @@ impl State {
     pub(crate) fn fixture(&mut self, form: Option<Form>) {
         self.fixture = true;
         self.data = serde_json::json!({"ok":true,"account":"fixture","login":"kasa","has_password":true,
-            "nickname":"건호","display_name":"건호","avatar":null,
+            "nickname":"나","display_name":"나","avatar":null,
             "identities":[{"provider":"google","display":"me@example.com","picture":null}]});
         self.form = form;
         if form == Some(Form::Profile) {
-            self.nickname = "건호".into();
+            self.nickname = "나".into();
         } else if form == Some(Form::Login) {
             self.new_login = "kasa".into();
         }
@@ -738,7 +738,7 @@ mod tests {
     #[test]
     fn the_shown_name_prefers_the_nickname_then_the_login() {
         let status = serde_json::json!({"account":"oauth_abc"});
-        assert_eq!(name_of(&serde_json::json!({"nickname":"건호","login":"kasa"}), &status), "건호");
+        assert_eq!(name_of(&serde_json::json!({"nickname":"나","login":"kasa"}), &status), "나");
         assert_eq!(name_of(&serde_json::json!({"login":"kasa"}), &status), "kasa");
         assert_eq!(name_of(&serde_json::Value::Null, &status), "oauth_abc");
     }

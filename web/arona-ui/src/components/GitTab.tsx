@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { fetchGitStatus, gitCommit, gitPush, type GitStatus } from '@/lib/mcp';
 
 // 소스 컨트롤 탭 — 활성 pane cwd 의 git 상태(브랜치·변경파일)를 보고, 파일 골라 커밋·푸시.
-// 터미널 git 컬럼과 같은 백엔드(/git-status·/git-commit·/git-push)를 BA GUI 에 노출(거노).
+// 터미널 git 컬럼과 같은 백엔드(/git-status·/git-commit·/git-push)를 BA GUI 에 노출(사용자).
 export function GitTab() {
   const [st, setSt] = useState<GitStatus>({});
   const [picked, setPicked] = useState<Set<string>>(new Set());

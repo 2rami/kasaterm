@@ -39,7 +39,7 @@ export function App() {
   const [view, setView] = useState<ViewMode>(() =>
     launch.get('view') === 'classroom' ? 'classroom' : 'terminal'
   );
-  // 중앙 멀티뷰 = 터미널 layout 미러(거노: 터미널이랑 pane 위치 동기화). fetchLayout 의
+  // 중앙 멀티뷰 = 터미널 layout 미러(사용자: 터미널이랑 pane 위치 동기화). fetchLayout 의
   // % 배치를 그대로 absolute 로 그린다. activeId = 마지막 포커스 학생(우측·교실 강조).
   // offlinePeek = 과거 세션 단독 보기(layout 과 별개, 읽기 전용).
   const [layoutRects, setLayoutRects] = useState<PaneRect[]>([]);
@@ -62,7 +62,7 @@ export function App() {
     const t = window.setTimeout(() => setToast(null), 3200);
     return () => window.clearTimeout(t);
   }, [toast]);
-  // wry webview(WKWebView)는 브라우저와 달리 ⌘R/F5 기본 새로고침이 없다(거노: webview도
+  // wry webview(WKWebView)는 브라우저와 달리 ⌘R/F5 기본 새로고침이 없다(사용자: webview도
   // 새로고침되게). dev 서버(5173) 브라우저 기본과 겹쳐도 무해.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -75,7 +75,7 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   // 학생 대화를 열면 = 그 학생의 현재 대기('확인 필요')를 '확인'한 것 → 코랄 표시 해제.
-  // 학생 클릭 = 터미널에서 그 pane 포커스(layout 미러라 위치는 터미널이 결정 — 거노: pane
+  // 학생 클릭 = 터미널에서 그 pane 포커스(layout 미러라 위치는 터미널이 결정 — 사용자: pane
   // 위치 동기화). 우측·교실 강조도 그 학생으로. 과거 세션 단독 보기 중이면 라이브로 복귀.
   const openStudent = (id: string, _title: string) => {
     void focusPane(id);
@@ -104,7 +104,7 @@ export function App() {
     window.setTimeout(() => setPendingDetach((s) => (s === surface ? null : s)), 6000);
   };
   // 서브에이전트 드릴인 — 학생 메타칸의 ↳ 칩 클릭 → 그 서브에이전트 대화를 부모 옆 별도
-  // 타일로(거노: "따로 볼수있게"). layout 미러엔 없는 가상 타일이라 별도 배열로 관리.
+  // 타일로(사용자: "따로 볼수있게"). layout 미러엔 없는 가상 타일이라 별도 배열로 관리.
   // 같은 agentId 다시 누르면 토글로 닫힌다.
   const [subPeeks, setSubPeeks] = useState<{ parentSurface: string; agentId: string; agentType: string; label: string }[]>([]);
   const openSubagent = (parentSurface: string, agentId: string, agentType: string, label: string) => {
@@ -113,7 +113,7 @@ export function App() {
       : [...prev, { parentSurface, agentId, agentType, label }]);
     setView('terminal');
   };
-  // 방 = kasaterm 윈도우(거노). GET /sessions 폴링 → 좌측 방 네비. 클릭하면 그 윈도우로.
+  // 방 = kasaterm 윈도우(사용자). GET /sessions 폴링 → 좌측 방 네비. 클릭하면 그 윈도우로.
   const [sessions, setSessions] = useState<SessionsInfo>({ count: 0, active: 0, labels: [], saved: [] });
   useEffect(() => {
     let stop = false;
@@ -126,7 +126,7 @@ export function App() {
   const [usage, setUsage] = useState<{ usage: ClaudeUsage; stale: boolean; accountDir: string } | null>(null);
   // 폰 폭이면 레이아웃이 갈린다 — 데스크톱 pane 배치 미러 대신 대화 하나만, 패널은 전체폭.
   const isPhone = useIsPhone();
-  // 좌(방/학생)·우(업무/소스/스케줄) 패널 — 상단 아이콘 클릭 시 팝오버 오버레이로 펼침(거노:
+  // 좌(방/학생)·우(업무/소스/스케줄) 패널 — 상단 아이콘 클릭 시 팝오버 오버레이로 펼침(사용자:
   // 상단 아이콘+팝오버, 평소엔 멀티뷰만 꽉 차게). 기본 닫힘, 멀티뷰 공간을 안 뺏는다.
   //
   // 폰만 예외로 열고 시작한다 — 폰에는 학생 목록을 늘 보여 줄 자리가 없어서, 아무도 안 고른
@@ -141,7 +141,7 @@ export function App() {
     setLeftOpen(true);
   }, [isPhone]);
   // 집중 모드 — 타이틀바·헤더·좌우 패널·풋터까지 전부 접고 중앙(멀티뷰/대화)만 꽉 채운다
-  // (거노: 평소에도 다 닫을 수 있게). 헤더 버튼·⌘\ 토글, 우상단 떠있는 버튼·Esc 로 복귀.
+  // (사용자: 평소에도 다 닫을 수 있게). 헤더 버튼·⌘\ 토글, 우상단 떠있는 버튼·Esc 로 복귀.
   const [focusMode, setFocusMode] = useState(() => localStorage.getItem('schale-focus') === '1');
   useEffect(() => { localStorage.setItem('schale-focus', focusMode ? '1' : '0'); }, [focusMode]);
   useEffect(() => {
@@ -153,7 +153,7 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   // claude oauth 사용량(5시간/주간 한도·리셋)을 1분마다 폴링 → TitleBar 게이지.
-  // 실패(토큰만료·429·네트워크)면 null 이 오는데, 그때 칩을 지우면 1분마다 깜빡인다(거노).
+  // 실패(토큰만료·429·네트워크)면 null 이 오는데, 그때 칩을 지우면 1분마다 깜빡인다(사용자).
   // 마지막 성공값을 유지하고, 실패는 그냥 무시 — 다음 성공 틱이 갱신.
   useEffect(() => {
     let stop = false;
@@ -188,18 +188,18 @@ export function App() {
   }, [ready]);
 
   // 터미널 뷰 기본(A안: 중앙 단일 대화) — 선택된 학생이 없으면 첫 학생을
-  // 자동으로 띄워 중앙이 비지 않게. peek 있으면 그대로 둔다(거노).
+  // 자동으로 띄워 중앙이 비지 않게. peek 있으면 그대로 둔다(사용자).
   useEffect(() => {
     if (activeId || !agents.length) return;
     setActiveId(agents[0].id);
   }, [agents, activeId]);
   // foreground 학생이 없고(claude pane 이 안 떠 있음) background daemon 세션만 있으면 — 첫
   // background 를 중앙에 자동 표시(offlinePeek 버블). 터미널이 꺼져도/claude 가 안 떠도 웹뷰가
-  // "아로나 오는 중…" 빈 교실 스피너 대신 daemon claude 대화를 바로 보여준다(거노 핵심).
+  // "아로나 오는 중…" 빈 교실 스피너 대신 daemon claude 대화를 바로 보여준다(사용자 핵심).
   useEffect(() => {
     if (activeId || offlinePeek || agents.length > 0 || backgroundAgents.length === 0) return;
     // 활성(working) background 를 우선 — 목록 첫 거(옛 done 세션)가 아니라 지금 도는 대화를
-    // 보여줘야 한다(거노: 대화 안 맞던 버그). working 없으면 background, 그것도 없으면 첫 거.
+    // 보여줘야 한다(사용자: 대화 안 맞던 버그). working 없으면 background, 그것도 없으면 첫 거.
     const bg = backgroundAgents.find((a) => a.kind === 'background' && (a.state === 'working' || a.status === 'working'))
       ?? backgroundAgents.find((a) => a.kind === 'background')
       ?? backgroundAgents[0];
@@ -256,7 +256,7 @@ export function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backgroundAgents, offlinePeek, agents]);
-  // 터미널 layout(% 배치) 폴링 → 중앙 멀티뷰가 터미널 split 을 그대로 미러(거노: pane 위치
+  // 터미널 layout(% 배치) 폴링 → 중앙 멀티뷰가 터미널 split 을 그대로 미러(사용자: pane 위치
   // 동기화). 과거 세션 단독 보기 중이거나 터미널 뷰가 아니면 폴링 불필요.
   useEffect(() => {
     // offlinePeek(bg 대화) 중에도 layout 은 계속 폴링한다 — fg pane 이 살아있으면 bg 를 왼쪽
@@ -280,18 +280,18 @@ export function App() {
 
   const sorted = assignSprites([...agents]);
   // 방 = kasaterm 윈도우. board(collab_board)는 활성 윈도우의 panes 만 주므로 보이는
-  // 학생이 곧 그 방 학생 — 클라이언트 cwd 필터 없이 그대로 그린다(거노).
+  // 학생이 곧 그 방 학생 — 클라이언트 cwd 필터 없이 그대로 그린다(사용자).
   const shown = sorted;
   // 우측 CommandCenter·교실 강조에 넘길 active 학생(과거 세션 보기 중이면 그걸 우선).
   const activeSelected: PeekItem | null = offlinePeek
     ?? (activeId ? { id: activeId, title: sorted.find((x) => x.id === activeId)?.name ?? activeId } : null);
 
-  // 방(윈도우) 전환 — POST /session-switch?idx → 그 터미널 윈도우로(거노: "gui에서
+  // 방(윈도우) 전환 — POST /session-switch?idx → 그 터미널 윈도우로(사용자: "gui에서
   // 방바꾸면 터미널 윈도우 바뀌게"). board 폴링이 그 윈도우 학생으로 따라온다.
   const selectRoom = (idx: number) => {
     void switchSession(idx);
     setSessions((s) => ({ ...s, active: idx })); // 폴링 전 즉시 하이라이트
-    // 방 바뀌면 active·과거세션 초기화 — layout 폴링이 새 방 pane 으로 미러를 갱신(거노)
+    // 방 바뀌면 active·과거세션 초기화 — layout 폴링이 새 방 pane 으로 미러를 갱신(사용자)
     setActiveId(null);
     setOfflinePeek(null);
     setLayoutRects([]);
@@ -369,7 +369,7 @@ export function App() {
     // SCHALE OS 전체 셸: 세로 100% + 가로 100%
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-      {/* 슬림 아이콘 바 — 집중 모드면 숨김. 좌=방, 우=업무·교실토글·집중(거노: 종·메일·터미널/교실탭 제거). */}
+      {/* 슬림 아이콘 바 — 집중 모드면 숨김. 좌=방, 우=업무·교실토글·집중(사용자: 종·메일·터미널/교실탭 제거). */}
       {!focusMode && (<TitleBar
         leftBadge={agents.filter((a) => a.status === 'waiting' || a.status === 'blocked').length}
         usage={usage}
@@ -382,7 +382,7 @@ export function App() {
         onFocus={() => setFocusMode(true)}
       />)}
 
-      {/* 바디: 멀티뷰가 100% 점유 + 좌·우 패널은 팝오버 오버레이(거노: 패널이 공간 안 뺏게).
+      {/* 바디: 멀티뷰가 100% 점유 + 좌·우 패널은 팝오버 오버레이(사용자: 패널이 공간 안 뺏게).
           relative = 팝오버 absolute 기준. */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
 
@@ -405,7 +405,7 @@ export function App() {
                 />
               ) : (
                 // bg peek(좌, 있으면) + layout 미러(중, flex) + 서브에이전트 드릴인(우) — fg pane
-                // 이 살아있으면 bg 대화가 전체를 덮지 않고 왼쪽 타일로 나란히(거노: 왼 bg·오 fg).
+                // 이 살아있으면 bg 대화가 전체를 덮지 않고 왼쪽 타일로 나란히(사용자: 왼 bg·오 fg).
                 <div style={{ height: '100%', display: 'flex' }}>
                   {offlinePeek && (
                     <div style={{ width: 360, flexShrink: 0, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-100)' }}>
@@ -465,7 +465,7 @@ export function App() {
                   </div>
                   {subPeeks.length > 0 && (
                     <div style={{ width: 360, flexShrink: 0, display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-100)' }}>
-                      {/* 서브에이전트 뷰 열 — 부모(학생) 세션에 속한 영역임을 헤더로 못박는다(거노:
+                      {/* 서브에이전트 뷰 열 — 부모(학생) 세션에 속한 영역임을 헤더로 못박는다(사용자:
                           다른 pane 과 헷갈리지 않게). 각 타일은 부모 이름 prefix + 스카이 좌측 띠로 묶음. */}
                       <div style={{ flexShrink: 0, padding: '6px 12px', fontFamily: 'var(--cth-font-display)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky-text-surface)', borderBottom: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'center', gap: 6 }}>
                         <svg width="12" height="12" viewBox="0 0 16 16"><path d="M4 3v6a3 3 0 0 0 3 3h6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -502,7 +502,7 @@ export function App() {
           </div>
         </div>
 
-        {/* 좌 패널 팝오버 — 방·학생. 딤 클릭/Esc 닫힘. 선택 시 자동 닫힘(거노: 상단 아이콘+팝오버). */}
+        {/* 좌 패널 팝오버 — 방·학생. 딤 클릭/Esc 닫힘. 선택 시 자동 닫힘(사용자: 상단 아이콘+팝오버). */}
         {!focusMode && leftOpen && (
           <>
             <div onClick={() => setLeftOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 30, background: 'rgba(21,41,74,0.16)' }} />
@@ -534,7 +534,7 @@ export function App() {
         )}
       </div>
 
-      {/* 집중 모드 복귀 — 패널 다 숨겼을 때만 우상단 떠있는 버튼(거노). Esc·⌘\ 로도 해제. */}
+      {/* 집중 모드 복귀 — 패널 다 숨겼을 때만 우상단 떠있는 버튼(사용자). Esc·⌘\ 로도 해제. */}
       {focusMode && (
         <button onClick={() => setFocusMode(false)} title="패널 보이기 (Esc · ⌘\)"
           style={{ position: 'fixed', top: 8, right: 8, zIndex: 50, width: 30, height: 30, borderRadius: 9, cursor: 'pointer', border: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)', color: 'var(--cth-ink-500)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(21,41,74,0.16)' }}>

@@ -1988,7 +1988,7 @@ mod tests {
         let accounts = dir.join("relay-accounts.json");
         let mut f = kasa_identity::relay_auth::AccountsFile::default();
         f.accounts.insert(
-            "geno".into(),
+            "tester".into(),
             kasa_identity::relay_auth::Account {
                 pbkdf2_sha256: kasa_identity::relay_auth::hash_password_with("correct horse", 1000),
                 created: 1,
@@ -2027,16 +2027,16 @@ mod tests {
         drop(account_gate(&dir));
         let accounts_path = dir.join("relay-accounts.json");
         let mut accounts = kasa_identity::relay_auth::load_accounts(&accounts_path);
-        let other = accounts.accounts["geno"].clone();
+        let other = accounts.accounts["tester"].clone();
         accounts.accounts.insert("other".into(), other);
         kasa_identity::relay_auth::save_accounts(&accounts_path, &accounts).unwrap();
         let addr = spawn_relay(Gate::new(Some(dir.join("relay-state.json")))).await;
         let (_, desktop) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","machine_id":"sync-desktop","kind":"desktop"
+            "account":"tester","password":"correct horse","machine_id":"sync-desktop","kind":"desktop"
         })).await;
         let token = desktop["token"].as_str().unwrap();
         let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","kind":"phone"
+            "account":"tester","password":"correct horse","kind":"phone"
         })).await;
         let phone_token = phone["token"].as_str().unwrap();
         let (_, other) = post(addr, "/relay/login", None, serde_json::json!({
@@ -2077,10 +2077,10 @@ mod tests {
         let gate = account_gate(&dir);
         let addr = spawn_relay(gate).await;
         let (_, desktop) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","machine_id":"account-mac-a"
+            "account":"tester","password":"correct horse","machine_id":"account-mac-a"
         })).await;
         let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","kind":"phone"
+            "account":"tester","password":"correct horse","kind":"phone"
         })).await;
         let token = phone["token"].as_str().unwrap();
         let mut hello = desktop_hello("account-mac-a", desktop["token"].as_str().unwrap());
@@ -2128,10 +2128,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kasa-account-roster-{}", uuid::Uuid::new_v4()));
         let addr = spawn_relay(account_gate(&dir)).await;
         let (_, desktop) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","machine_id":"account-mac-a"
+            "account":"tester","password":"correct horse","machine_id":"account-mac-a"
         })).await;
         let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","kind":"phone"
+            "account":"tester","password":"correct horse","kind":"phone"
         })).await;
         let token = phone["token"].as_str().unwrap();
         let mut hello = desktop_hello("account-mac-a", desktop["token"].as_str().unwrap());
@@ -2165,12 +2165,12 @@ mod tests {
         let mut tokens = Vec::new();
         for machine in ["work-mac", "home-mac"] {
             let (_, device) = post(addr, "/relay/login", None, serde_json::json!({
-                "account":"geno","password":"correct horse","machine_id":machine
+                "account":"tester","password":"correct horse","machine_id":machine
             })).await;
             tokens.push(device["token"].as_str().unwrap().to_string());
         }
         let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","kind":"phone"
+            "account":"tester","password":"correct horse","kind":"phone"
         })).await;
         let phone = phone["token"].as_str().unwrap();
         assert_eq!(get_json(addr, "/relay/account-machines", "invalid").await.0, 401);
@@ -2204,12 +2204,12 @@ mod tests {
         drop(account_gate(&dir));
         let accounts_path = dir.join("relay-accounts.json");
         let mut accounts = kasa_identity::relay_auth::load_accounts(&accounts_path);
-        accounts.accounts.insert("other".into(), accounts.accounts["geno"].clone());
+        accounts.accounts.insert("other".into(), accounts.accounts["tester"].clone());
         kasa_identity::relay_auth::save_accounts(&accounts_path, &accounts).unwrap();
         let gate = Gate::new(Some(dir.join("relay-state.json")));
         let addr = spawn_relay(gate.clone()).await;
         let mut credentials = Vec::new();
-        for (account, machine) in [("geno", "nacho-macbook"), ("geno", "nacho-mini"), ("other", "other-hub") ] {
+        for (account, machine) in [("tester", "nacho-macbook"), ("tester", "nacho-mini"), ("other", "other-hub") ] {
             let (status, device) = post(addr, "/relay/login", None, serde_json::json!({
                 "account":account,"password":"correct horse","machine_id":machine
             })).await;
@@ -2232,7 +2232,7 @@ mod tests {
         let legacy = fake_uplink_at(addr, serde_json::json!({
             "t":"hello","key":"legacy-machine-key-123","machine_id":"legacy-hub",
             "slugs":["qwertyuiopasdfghjklzxcvbnm"],"owner_slug":"qwertyuiopasdfghjklzxcvbnm",
-            "capabilities":{"nacho_app":true},"account":"geno"
+            "capabilities":{"nacho_app":true},"account":"tester"
         }), |id, _, out| reply(&out, id, serde_json::json!({"status":200}), b"legacy")).await;
         assert!(!gate.live.lock().unwrap().values().find(|(_, up)| up.machine_id == "legacy-hub")
             .unwrap().1.nacho_app.load(Ordering::Relaxed));
@@ -2281,7 +2281,7 @@ mod tests {
         let gate = account_gate(&dir);
         let addr = spawn_relay(gate.clone()).await;
         let (_, device) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","machine_id":"refresh-hub"
+            "account":"tester","password":"correct horse","machine_id":"refresh-hub"
         })).await;
         let mut hello = desktop_hello("refresh-hub", device["token"].as_str().unwrap());
         hello["slugs"] = serde_json::json!([SLUG]);
@@ -2302,25 +2302,25 @@ mod tests {
     async fn device_login_binds_one_machine_and_revocation_drops_its_uplink() {
         let dir = std::env::temp_dir().join(format!("kasa-login-{}", uuid::Uuid::new_v4()));
         let addr = spawn_relay(account_gate(&dir)).await;
-        let book = serde_json::json!({"account":"geno","password":"correct horse","machine_id":"machine-book-1","label":"맥북"});
-        let wrong = serde_json::json!({"account":"geno","password":"nope","machine_id":"machine-book-1"});
+        let book = serde_json::json!({"account":"tester","password":"correct horse","machine_id":"machine-book-1","label":"맥북"});
+        let wrong = serde_json::json!({"account":"tester","password":"nope","machine_id":"machine-book-1"});
         assert_eq!(post(addr, "/relay/login", None, wrong).await.0, 401);
-        assert_eq!(post(addr, "/relay/login", None, serde_json::json!({"account":"geno","password":"correct horse"})).await.0, 400, "기계 없는 데스크톱 로그인이 통했다");
+        assert_eq!(post(addr, "/relay/login", None, serde_json::json!({"account":"tester","password":"correct horse"})).await.0, 400, "기계 없는 데스크톱 로그인이 통했다");
         let (status, v) = post(addr, "/relay/login", None, book.clone()).await;
         assert_eq!(status, 200, "{v}");
         let token = v["token"].as_str().unwrap().to_string();
         let desktop_id = v["device_id"].as_str().unwrap().to_string();
-        assert_eq!(get_json(addr, "/relay/whoami", &token).await.1["account"], "geno");
+        assert_eq!(get_json(addr, "/relay/whoami", &token).await.1["account"], "tester");
 
         let (_, other) = hello_uplink(addr, desktop_hello("machine-mini-1", &token)).await;
         assert_eq!(other["error"], "device_token_invalid", "다른 기계가 이 기기 토큰으로 붙었다");
         let (mut ws, ok) = hello_uplink(addr, desktop_hello("machine-book-1", &token)).await;
-        assert_eq!((ok["t"].as_str(), ok["account"].as_str()), (Some("ok"), Some("geno")), "{ok}");
+        assert_eq!((ok["t"].as_str(), ok["account"].as_str()), (Some("ok"), Some("tester")), "{ok}");
         let (_, list) = get_json(addr, "/relay/devices", &token).await;
         let me = list["devices"].as_array().unwrap().iter().find(|d| d["device_id"] == desktop_id.as_str()).cloned().unwrap();
         assert_eq!((me["online"].as_bool(), me["current"].as_bool()), (Some(true), Some(true)), "{list}");
 
-        let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({"account":"geno","password":"correct horse","kind":"phone","label":"폰"})).await;
+        let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({"account":"tester","password":"correct horse","kind":"phone","label":"폰"})).await;
         let phone_token = phone["token"].as_str().unwrap();
         let (status, _) = post(addr, &format!("/relay/devices/{desktop_id}/revoke"), Some(phone_token), serde_json::json!({})).await;
         assert_eq!(status, 200);
@@ -2349,7 +2349,7 @@ mod tests {
     async fn logging_in_again_on_a_machine_retires_its_old_token_and_disabling_stops_all() {
         let dir = std::env::temp_dir().join(format!("kasa-login-{}", uuid::Uuid::new_v4()));
         let addr = spawn_relay(account_gate(&dir)).await;
-        let book = serde_json::json!({"account":"geno","password":"correct horse","machine_id":"machine-book-1"});
+        let book = serde_json::json!({"account":"tester","password":"correct horse","machine_id":"machine-book-1"});
         let first = post(addr, "/relay/login", None, book.clone()).await.1["token"].as_str().unwrap().to_string();
         let second = post(addr, "/relay/login", None, book).await.1["token"].as_str().unwrap().to_string();
         assert_eq!(get_json(addr, "/relay/whoami", &first).await.0, 401, "같은 기계의 옛 토큰이 살아 있다");
@@ -2357,7 +2357,7 @@ mod tests {
 
         let p = dir.join("relay-accounts.json");
         let mut f = kasa_identity::relay_auth::load_accounts(&p);
-        f.accounts.get_mut("geno").unwrap().disabled = true;
+        f.accounts.get_mut("tester").unwrap().disabled = true;
         kasa_identity::relay_auth::save_accounts(&p, &f).unwrap();
         let later = std::time::SystemTime::now() + Duration::from_secs(2);
         let _ = std::fs::File::options().write(true).open(&p).and_then(|file| file.set_modified(later));
@@ -2370,7 +2370,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kasa-agents-{}", uuid::Uuid::new_v4()));
         let addr = spawn_relay(account_gate(&dir)).await;
         let login = |machine: &str, label: &str| {
-            serde_json::json!({"account":"geno","password":"correct horse","machine_id":machine,"label":label})
+            serde_json::json!({"account":"tester","password":"correct horse","machine_id":machine,"label":label})
         };
         let mini = post(addr, "/relay/login", None, login("machine-mini-1", "미니")).await.1;
         let book = post(addr, "/relay/login", None, login("machine-book-1", "맥북")).await.1;
@@ -2489,7 +2489,7 @@ mod tests {
     fn catalog_fixture_device(gate: &Gate) -> (String, axum::http::HeaderMap) {
         let token = kasa_identity::relay_auth::new_token();
         gate.devices.lock().unwrap().insert("dev_catalog_fixture".into(), DeviceRec {
-            token_hash: kasa_identity::relay_auth::token_hash(&token), account: "geno".into(), kind: "desktop".into(),
+            token_hash: kasa_identity::relay_auth::token_hash(&token), account: "tester".into(), kind: "desktop".into(),
             machine_id: Some("catalog-fixture-machine".into()), label: "Fixture".into(),
             created: 1, last_seen: 1, revoked_at: None,
         });
@@ -2522,7 +2522,7 @@ mod tests {
         if disable_account {
             let path = dir.join("relay-accounts.json");
             let mut accounts = kasa_identity::relay_auth::load_accounts(&path);
-            accounts.accounts.get_mut("geno").unwrap().disabled = true;
+            accounts.accounts.get_mut("tester").unwrap().disabled = true;
             kasa_identity::relay_auth::save_accounts(&path, &accounts).unwrap();
             std::fs::File::options().write(true).open(&path).unwrap()
                 .set_modified(std::time::SystemTime::now() + Duration::from_secs(2)).unwrap();
@@ -2579,11 +2579,11 @@ mod tests {
         drop(account_gate(&dir));
         let accounts_path = dir.join("relay-accounts.json");
         let mut accounts = kasa_identity::relay_auth::load_accounts(&accounts_path);
-        accounts.accounts.insert("other".into(), accounts.accounts["geno"].clone());
+        accounts.accounts.insert("other".into(), accounts.accounts["tester"].clone());
         kasa_identity::relay_auth::save_accounts(&accounts_path, &accounts).unwrap();
         let addr = spawn_relay(Gate::new(Some(dir.join("relay-state.json")))).await;
         let mut tokens = Vec::new();
-        for account in ["geno", "other"] {
+        for account in ["tester", "other"] {
             let (status, login) = post(addr, "/relay/login", None, serde_json::json!({
                 "account":account, "password":"correct horse", "kind":"phone"
             })).await;
@@ -2627,10 +2627,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kasa-secret-approval-{}", uuid::Uuid::new_v4()));
         let addr = spawn_relay(account_gate(&dir)).await;
         let (_, desk) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","machine_id":"op-secret-desktop","kind":"desktop"
+            "account":"tester","password":"correct horse","machine_id":"op-secret-desktop","kind":"desktop"
         })).await;
         let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
-            "account":"geno","password":"correct horse","kind":"phone"
+            "account":"tester","password":"correct horse","kind":"phone"
         })).await;
         let (desk_token, phone_token) = (desk["token"].as_str().expect(&desk.to_string()), phone["token"].as_str().expect(&phone.to_string()));
         let rng = ring::rand::SystemRandom::new();
@@ -2648,7 +2648,7 @@ mod tests {
 
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         let open = |nonce: &str| serde_json::json!({"kind": "secret", "challenge": serde_json::json!({
-            "v": 1, "kind": "keychain.read", "nonce": nonce, "account": "geno", "device": desk["device_id"],
+            "v": 1, "kind": "keychain.read", "nonce": nonce, "account": "tester", "device": desk["device_id"],
             "student": "유우카", "pane": "%3", "cwd": "/repo", "command": "kasaterm-cli secret read keychain://svc#me",
             "refs": ["keychain://svc#me"], "exp": now + 60_000}).to_string()});
         let (status, created) = post(addr, "/relay/approvals", Some(desk_token), open("0123456789abcdef0123456789abcdef")).await;

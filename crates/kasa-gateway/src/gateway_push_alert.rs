@@ -340,7 +340,7 @@ mod tests {
             let dir = std::env::temp_dir().join(format!("kasa-push-alert-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
             let mut accounts = kasa_identity::relay_auth::AccountsFile::default();
-            for name in ["geno", "other"] {
+            for name in ["tester", "other"] {
                 accounts.accounts.insert(
                     name.into(),
                     kasa_identity::relay_auth::Account {
@@ -428,8 +428,8 @@ mod tests {
     #[tokio::test]
     async fn only_a_live_desktop_login_may_ring_the_phones() {
         let rig = Rig::new().await;
-        let desk = rig.device("dev_desk", "geno", "desktop");
-        let phone = rig.device("dev_phone", "geno", "phone");
+        let desk = rig.device("dev_desk", "tester", "desktop");
+        let phone = rig.device("dev_phone", "tester", "phone");
         assert_eq!(rig.alert(None, done()).await, (401, json!({"ok": false, "error": "unauthorized"})));
         assert_eq!(rig.alert(Some("kasa_not-a-token"), done()).await.0, 401);
         assert_eq!(rig.alert(Some(&phone), done()).await, (403, json!({"ok": false, "error": "desktop_only"})));
@@ -441,7 +441,7 @@ mod tests {
     #[tokio::test]
     async fn bad_kinds_text_and_fields_are_refused() {
         let rig = Rig::new().await;
-        let desk = rig.device("dev_desk", "geno", "desktop");
+        let desk = rig.device("dev_desk", "tester", "desktop");
         for (patch, code) in [
             (json!({"kind": "waiting:idle"}), "bad_kind"),
             (json!({"kind": "note:dead"}), "bad_kind"),
@@ -462,9 +462,9 @@ mod tests {
     #[tokio::test]
     async fn the_answer_counts_this_accounts_phones_with_tokens() {
         let rig = Rig::new().await;
-        let desk = rig.device("dev_desk", "geno", "desktop");
-        let first = rig.device("dev_phone1", "geno", "phone");
-        let second = rig.device("dev_phone2", "geno", "phone");
+        let desk = rig.device("dev_desk", "tester", "desktop");
+        let first = rig.device("dev_phone1", "tester", "phone");
+        let second = rig.device("dev_phone2", "tester", "phone");
         let stranger = rig.device("dev_phone3", "other", "phone");
         assert_eq!(rig.alert(Some(&desk), done()).await, (200, json!({"ok": true, "phones": 0, "face": false})));
         rig.give_push_token(&first, &"a1".repeat(32)).await;
@@ -479,8 +479,8 @@ mod tests {
     #[tokio::test]
     async fn a_desktop_past_thirty_a_minute_is_told_to_wait() {
         let rig = Rig::new().await;
-        let desk = rig.device("dev_desk", "geno", "desktop");
-        let other = rig.device("dev_desk2", "geno", "desktop");
+        let desk = rig.device("dev_desk", "tester", "desktop");
+        let other = rig.device("dev_desk2", "tester", "desktop");
         for _ in 0..PER_MINUTE {
             assert_eq!(rig.alert(Some(&desk), done()).await.0, 200);
         }
@@ -498,8 +498,8 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_face_is_asked_for_once_then_served_without_auth() {
         let rig = Rig::new().await;
-        let desk = rig.device("dev_desk", "geno", "desktop");
-        let phone = rig.device("dev_phone", "geno", "phone");
+        let desk = rig.device("dev_desk", "tester", "desktop");
+        let phone = rig.device("dev_phone", "tester", "phone");
         let stranger = rig.device("dev_desk2", "other", "desktop");
         let png = face_png();
         let hash = kasa_device::push::face::hash(&png);
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(rig.alert(Some(&desk), done()).await.1["face"], false);
         assert_eq!(rig.alert(Some(&stranger), with_face).await.1["error"], "face_unknown", "얼굴은 계정마다 따로 둔다");
 
-        let id = rig.face_id("geno", &hash).unwrap();
+        let id = rig.face_id("tester", &hash).unwrap();
         let got = reqwest::get(format!("{}/relay/push/face/{id}.png", rig.base)).await.unwrap();
         assert_eq!(got.status(), 200);
         assert_eq!(got.headers()["content-type"], "image/png");
@@ -538,8 +538,8 @@ mod tests {
     #[tokio::test]
     async fn the_desktop_uploads_a_face_once_and_the_alert_still_rings() {
         let rig = Rig::new().await;
-        let desk = rig.device("dev_desk", "geno", "desktop");
-        let phone = rig.device("dev_phone", "geno", "phone");
+        let desk = rig.device("dev_desk", "tester", "desktop");
+        let phone = rig.device("dev_phone", "tester", "phone");
         rig.give_push_token(&phone, &"a1".repeat(32)).await;
         let face = kasa_device::push::face::from_raw(&face_png()).unwrap();
         let alert = kasa_device::push::Alert {
@@ -554,9 +554,9 @@ mod tests {
             url: None,
         };
         assert_eq!(kasa_device::push::relay_alert(&rig.base, &desk, &alert, Some(&face)).await, 1);
-        let id = rig.face_id("geno", &face.hash).expect("그림을 맡았다");
+        let id = rig.face_id("tester", &face.hash).expect("그림을 맡았다");
         assert_eq!(kasa_device::push::relay_alert(&rig.base, &desk, &alert, Some(&face)).await, 1);
-        assert_eq!(rig.face_id("geno", &face.hash), Some(id));
+        assert_eq!(rig.face_id("tester", &face.hash), Some(id));
         let uploads = rig.gate.push_alerts.0.lock().unwrap().get("face:dev_desk").map(VecDeque::len);
         assert_eq!(uploads, Some(1), "같은 그림은 다시 안 올린다");
         assert_eq!(kasa_device::push::relay_alert(&rig.base, &desk, &alert, None).await, 1);

@@ -463,7 +463,7 @@ mod tests {
         let p = dir.join("device.json");
         let c = DeviceCred {
             relay: "https://relay.example".into(),
-            account: "geno".into(),
+            account: "tester".into(),
             device_id: "dev_1".into(),
             token: "kdt_x".into(),
             display_name: None,

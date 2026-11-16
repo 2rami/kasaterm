@@ -5,7 +5,7 @@ import { fetchTranscriptRaw } from '@/lib/mcp';
 import type { SessionEvent } from '@/lib/types';
 
 // 업무탭에서 학생 카드를 펼치면 그 pane 의 도구·서브에이전트(Task)를 채팅방과 동일한
-// ToolUseCard 로 펼쳐 보여준다(거노: read/bash 누르면 채팅방처럼). board 는 도구 "이름"만
+// ToolUseCard 로 펼쳐 보여준다(사용자: read/bash 누르면 채팅방처럼). board 는 도구 "이름"만
 // 줘서 상세(input/output)는 per-pane transcript 가 필요 — 펼친 학생만 폴링해 비용 최소.
 const MAX_CARDS = 14;
 

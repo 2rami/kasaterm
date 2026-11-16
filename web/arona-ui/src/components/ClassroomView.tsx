@@ -23,7 +23,7 @@ function shortCwd(p?: string): string {
   const segs = p.split('/').filter(Boolean);
   return (segs.length > 2 ? '…/' : '') + segs.slice(-2).join('/');
 }
-// 머리 위 말풍선 = 상태 + 쓰는 툴만(거노). 답변/질문 본문(lastReply)은 안 띄움 —
+// 머리 위 말풍선 = 상태 + 쓰는 툴만(사용자). 답변/질문 본문(lastReply)은 안 띄움 —
 // 그건 학생을 클릭해 '학생별 대화'에서 본다. waiting/blocked 는 짧은 상태어만.
 function thoughtFor(a: Agent): string {
   switch (a.status) {
@@ -35,7 +35,7 @@ function thoughtFor(a: Agent): string {
     case 'thinking': return '생각 중';
     case 'waiting': return '입력 대기';
     case 'blocked': return '확인 필요';
-    // idle = 답변(lastReply) 안 띄움(거노: 답변말고 상태만). 말풍선은 비고, 한가하면
+    // idle = 답변(lastReply) 안 띄움(사용자: 답변말고 상태만). 말풍선은 비고, 한가하면
     // 카페 잡담(chatLine)만 뜬다. 상태는 이름표 점 색으로 표시.
     case 'idle': return '';
     default: return '';
@@ -127,7 +127,7 @@ function ClassroomCharacter(
   { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void; index: number; selected?: boolean; unconfirmed?: boolean; reducedMotion: boolean },
 ) {
   // working/waiting/blocked = 자기 책상으로. idle 은 카페 배회 — god 개념 폐기
-  // (거노 2026-07-13)로 전원 동일 규칙.
+  // (사용자 2026-07-13)로 전원 동일 규칙.
   const atDesk = agent.status !== 'idle';
   const home = seat ? { x: seat.x, y: seat.y } : { x: 50, y: 75 };
   const [pos, setPos] = useState<Pt>(home);
@@ -175,7 +175,7 @@ function ClassroomCharacter(
   }, [grid, step, reducedMotion]);
 
   useEffect(() => {
-    // 자율 이동(거노: 방향키 수동조종 폐기) — 일하면 자기 책상, 쉬면 소파/카페 거점으로
+    // 자율 이동(사용자: 방향키 수동조종 폐기) — 일하면 자기 책상, 쉬면 소파/카페 거점으로
     // 스스로 걸어가 정착. 상태(atDesk)가 바뀌면 책상↔소파 자동 전환. 도착하면 멈춤
     // (계속 배회하던 옛 wander 는 산만해서 폐기 — 거점은 인덱스로 결정적 분배).
     const home = cafe.length ? cafe[index % cafe.length] : null;
@@ -221,7 +221,7 @@ function ClassroomCharacter(
       {(thought || unconfirmed) && (
         <div style={{
           maxWidth: 150, padding: '6px 10px', borderRadius: 12,
-          // 미확인(선생님 확인 대기) = 코랄 강조 말풍선(거노). 그 외엔 흰 말풍선.
+          // 미확인(선생님 확인 대기) = 코랄 강조 말풍선(사용자). 그 외엔 흰 말풍선.
           background: unconfirmed ? 'var(--cth-coral)' : 'var(--cth-cream-50)',
           border: unconfirmed ? '1px solid var(--cth-coral)' : '1px solid var(--cth-cream-200)',
           boxShadow: unconfirmed
@@ -312,7 +312,7 @@ export interface ClassroomViewProps {
   onAdd?: () => void;
   onRefresh?: () => void;
   emptyState?: 'loading' | 'ready' | 'error';
-  /** 클릭으로 선택된 학생 — 교실에서 글로우 강조 + 방향키로 직접 이동(거노). */
+  /** 클릭으로 선택된 학생 — 교실에서 글로우 강조 + 방향키로 직접 이동(사용자). */
   selectedId?: string | null;
 }
 
@@ -362,11 +362,11 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
   return (
     <div className="cth-classroom-view" style={{
       // 부모(메인 컬럼)를 꽉 채운다 — 옛 maxWidth:960 + aspectRatio 고정이 좌우
-      // 여백을 만들던 것 제거(거노: 꽉차게). 캐릭터는 % 좌표라 비율 따라 분포.
+      // 여백을 만들던 것 제거(사용자: 꽉차게). 캐릭터는 % 좌표라 비율 따라 분포.
       position: 'relative', width: '100%', height: '100%',
       borderRadius: 16, overflow: 'hidden',
       // 가구/캐릭터 zIndex(발밑 y*10, 최대 ~960)를 교실 안에 가둔다 — 안 그러면
-      // 문서 레벨에서 모달(z 낮음) 위로 책상이 뚫고 올라온다(거노 학생부르기 버그).
+      // 문서 레벨에서 모달(z 낮음) 위로 책상이 뚫고 올라온다(사용자 학생부르기 버그).
       isolation: 'isolate',
       backgroundColor: 'var(--cth-cream-100)',
       backgroundImage: background ? `url(${ROOT}assets/${background})` : undefined,

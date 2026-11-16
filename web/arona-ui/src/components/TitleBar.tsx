@@ -3,8 +3,8 @@ import { useIsPhone } from '@/lib/useIsPhone';
 import { usagePressure, type ClaudeUsage } from '@/lib/mcp';
 import { formatRemainingTime } from '@/lib/utils';
 
-// 슬림 아이콘 바 — 모든 버튼을 IconBtn 으로 통일(거노: 디자인 통일), 로고·기어 제거.
-// 좌측엔 방 하나, 나머지(업무·교실·집중)는 전부 우측에 모았다(거노: task 아이콘 우측으로).
+// 슬림 아이콘 바 — 모든 버튼을 IconBtn 으로 통일(사용자: 디자인 통일), 로고·기어 제거.
+// 좌측엔 방 하나, 나머지(업무·교실·집중)는 전부 우측에 모았다(사용자: task 아이콘 우측으로).
 // 전역 바라 옅은 sky 틴트+그림자로 pane 하단바(plain cream)와 시각 구분.
 
 interface IconBtnProps {
@@ -75,7 +75,7 @@ function TasksIcon() {
     </svg>
   );
 }
-// 교실(캐릭터) 보기 — 액자 속 그림(산·해). 거노: 터미널 아이콘 자리에 그림 아이콘=교실 기능.
+// 교실(캐릭터) 보기 — 액자 속 그림(산·해). 사용자: 터미널 아이콘 자리에 그림 아이콘=교실 기능.
 function ClassroomIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 16 16">
@@ -156,7 +156,7 @@ export function TitleBar({ usage, onToggleLeft, onToggleRight, leftOpen, rightOp
       padding: '0 10px', flexShrink: 0, boxSizing: 'border-box',
       height: isPhone ? 'calc(48px + env(safe-area-inset-top, 0px))' : 44,
       paddingTop: isPhone ? 'env(safe-area-inset-top, 0px)' : undefined,
-      // 전역 바 — 옅은 sky 그라데이션 + 아래 그림자로 pane 하단바(plain cream)와 구분(거노).
+      // 전역 바 — 옅은 sky 그라데이션 + 아래 그림자로 pane 하단바(plain cream)와 구분(사용자).
       background: 'linear-gradient(180deg, var(--cth-sky-light), var(--cth-cream-50))',
       borderBottom: '1px solid var(--cth-cream-200)',
       boxShadow: '0 1px 4px rgba(21,41,74,0.06)', zIndex: 5,
@@ -170,7 +170,7 @@ export function TitleBar({ usage, onToggleLeft, onToggleRight, leftOpen, rightOp
       {/* 창을 하나만 — **가장 먼저 닫히는** 것. 전에는 five_hour·seven_day 를 각각
           그렸는데 oauth/usage 는 seven_day 를 안 주고(limits[] 로 옮겨 갔다) five_hour
           는 세 계정 모두 0 이라, 실제로는 주간 95% 인데 pill 이 「5h 0%」 하나만
-          떴다(거노 2026-08-05: "info에는 다 0퍼로뜨는데"). */}
+          떴다(사용자 2026-08-05: "info에는 다 0퍼로뜨는데"). */}
       {pressure && <UsagePill label={pressure.label} pct={pressure.pct} resetsAt={pressure.resetsAt} stale={usage?.stale} />}
       <IconBtn title="업무·소스 컨트롤·스케줄" active={rightOpen} onClick={onToggleRight}><TasksIcon /></IconBtn>
       <IconBtn title={classroom ? '대화 보기로' : '캐릭터 보기'} active={classroom} onClick={onToggleClassroom}><ClassroomIcon /></IconBtn>

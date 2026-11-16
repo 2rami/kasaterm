@@ -29,7 +29,7 @@ class _Fake {
       case '/relay/account/version':
         return _json({'machine_id': 'book'});
       case '/relay/account/mobile/me':
-        return _json({'name': 'owner', 'owner': true, 'machine': '건호의 MacBook Pro'});
+        return _json({'name': 'owner', 'owner': true, 'machine': '내 MacBook Pro'});
       case '/relay/account/machines':
         return _json({
           'machines': [
@@ -80,7 +80,7 @@ void main() {
     test('id 를 아는 길·기준 기기·이름 표가 계정 이름을 찾고, 모르면 제 이름', () {
       expect(looks.names, {'book': '회사 맥북', 'mini': '거실'});
       expect(looks.name('아무 이름', route: '~mini'), '거실');
-      expect(looks.name('건호의 MacBook Pro', local: true), '회사 맥북');
+      expect(looks.name('내 MacBook Pro', local: true), '회사 맥북');
       expect(looks.name('NachoNeko'), '거실', reason: '거울 칩은 이름만 든다');
       expect(looks.name('옛 기계', route: '옛 기계'), '옛 기계');
       expect(looks.name('~'), '~');
@@ -118,7 +118,7 @@ void main() {
     await tester.pumpWidget(_screen(fake));
     await tester.pumpAndSettle();
     expect(find.text('회사 맥북'), findsOneWidget);
-    expect(find.text('원래 이름 건호의 MacBook Pro · 이 폰이 붙은 기기'), findsOneWidget);
+    expect(find.text('원래 이름 내 MacBook Pro · 이 폰이 붙은 기기'), findsOneWidget);
     expect(find.text('nachoneko'), findsOneWidget);
     expect(find.text('이름을 안 붙였어요'), findsOneWidget);
     expect(find.text('옛 기계'), findsNothing, reason: 'id 를 모르는 기계엔 이름을 못 붙인다');
@@ -149,7 +149,7 @@ void main() {
     await tester.tap(find.text('원래 이름으로'));
     await tester.pumpAndSettle();
     expect(fake.patches.single['settings'], {'device_names': null});
-    expect(find.text('건호의 MacBook Pro'), findsOneWidget);
+    expect(find.text('내 MacBook Pro'), findsOneWidget);
   });
 
   testWidgets('화면 — 옛 관문이 키를 모르면 까닭을 말하고 이름은 그대로', (tester) async {
