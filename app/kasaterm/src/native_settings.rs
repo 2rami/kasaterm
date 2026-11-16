@@ -440,7 +440,8 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
     let active_id = app.set_claude_account.clone();
     let mut rows = Vec::new();
 
-    for (index, account) in app.set_claude_accounts.iter().filter(|account| !account.id.is_empty()).enumerate() {
+    let ordered = socket::ordered_claude_accounts(app.set_claude_accounts.clone());
+    for (index, account) in ordered.iter().filter(|account| !account.id.is_empty()).enumerate() {
         let probe = crate::settings::auth_probe(&account.id);
         let sub = probe
             .as_ref()
@@ -821,10 +822,6 @@ pub(crate) struct Snapshot {
     pub(crate) statusbar_usage_fields: std::collections::HashMap<String, Vec<String>>,
     pub(crate) statusbar_separators: bool,
     pub(crate) claude_persona: bool,
-    pub(crate) shim_inject: bool,
-    pub(crate) claude_model: String,
-    pub(crate) claude_effort: String,
-    pub(crate) claude_extra: String,
     pub(crate) account_autoswitch: bool,
     pub(crate) account_autoswitch_pct: f32,
     pub(crate) accounts: Arc<Vec<AccountChoice>>,
@@ -1073,10 +1070,6 @@ impl App {
             statusbar_usage_fields: self.set_statusbar.usage_fields.clone(),
             statusbar_separators: self.set_statusbar.separators,
             claude_persona: self.set_claude_persona,
-            shim_inject: self.set_shim_inject,
-            claude_model: self.set_claude_model.clone(),
-            claude_effort: self.set_claude_effort.clone(),
-            claude_extra: self.set_claude_extra.clone(),
             account_autoswitch: self.set_account_autoswitch,
             account_autoswitch_pct: self.set_account_autoswitch_pct,
             accounts: cache.accounts.clone(),
@@ -1370,9 +1363,6 @@ impl App {
                 self.set_shell = direct_shell_seed(&self.set_shell, detected_preset);
                 self.settings_caret = self.set_shell.chars().count();
             }
-            SettingsInput::ClaudeExtra => {
-                self.settings_caret = self.set_claude_extra.chars().count()
-            }
             SettingsInput::StudentName => self.settings_caret = self.students_name.chars().count(),
             SettingsInput::StudentPersona => {
                 self.students_caret = self.students_persona.chars().count()
@@ -1450,7 +1440,6 @@ impl App {
             SettingsInput::CwdPath => (self.set_cwd_mode.clone(), self.settings_caret),
             SettingsInput::FileOpenCmd => (self.set_file_open_cmd.clone(), self.settings_caret),
             SettingsInput::Shell => (self.set_shell.clone(), self.settings_caret),
-            SettingsInput::ClaudeExtra => (self.set_claude_extra.clone(), self.settings_caret),
             SettingsInput::StudentName => (self.students_name.clone(), self.settings_caret),
             SettingsInput::StudentPersona => (self.students_persona.clone(), self.students_caret),
             SettingsInput::FeedbackBody => (self.feedback_body.clone(), self.feedback_caret),
@@ -1535,9 +1524,6 @@ impl App {
             SettingsInput::Shell => {
                 crate::lineedit::insert(&mut self.set_shell, &mut self.settings_caret, text)
             }
-            SettingsInput::ClaudeExtra => {
-                crate::lineedit::insert(&mut self.set_claude_extra, &mut self.settings_caret, text)
-            }
             SettingsInput::StudentName => {
                 crate::lineedit::insert(&mut self.students_name, &mut self.settings_caret, text)
             }
@@ -1591,7 +1577,6 @@ impl App {
             SettingsInput::CwdPath
                 | SettingsInput::FileOpenCmd
                 | SettingsInput::Shell
-                | SettingsInput::ClaudeExtra
         ) {
             self.settings_save();
         }
@@ -1685,7 +1670,6 @@ impl App {
             SettingsInput::CwdPath => self.set_cwd_mode = backup.value,
             SettingsInput::FileOpenCmd => self.set_file_open_cmd = backup.value,
             SettingsInput::Shell => self.set_shell = backup.value,
-            SettingsInput::ClaudeExtra => self.set_claude_extra = backup.value,
             SettingsInput::StudentName => self.students_name = backup.value,
             SettingsInput::StudentPersona => self.students_persona = backup.value,
             SettingsInput::FeedbackBody => self.feedback_body = backup.value,
@@ -1739,7 +1723,6 @@ impl App {
             SettingsInput::CwdPath
                 | SettingsInput::FileOpenCmd
                 | SettingsInput::Shell
-                | SettingsInput::ClaudeExtra
         ) {
             self.settings_save();
         }
@@ -2132,7 +2115,6 @@ impl App {
                 SettingsInput::CwdPath
                     | SettingsInput::FileOpenCmd
                     | SettingsInput::Shell
-                    | SettingsInput::ClaudeExtra
             ) {
                 self.settings_save();
             }
@@ -2539,7 +2521,6 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
         SettingsInput::CwdPath => Some((&mut app.set_cwd_mode, &mut app.settings_caret)),
         SettingsInput::FileOpenCmd => Some((&mut app.set_file_open_cmd, &mut app.settings_caret)),
         SettingsInput::Shell => Some((&mut app.set_shell, &mut app.settings_caret)),
-        SettingsInput::ClaudeExtra => Some((&mut app.set_claude_extra, &mut app.settings_caret)),
         SettingsInput::StudentName => Some((&mut app.students_name, &mut app.settings_caret)),
         SettingsInput::StudentPersona => Some((&mut app.students_persona, &mut app.students_caret)),
         SettingsInput::FeedbackBody => Some((&mut app.feedback_body, &mut app.feedback_caret)),
@@ -2615,8 +2596,8 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
         SettingsCat::Appearance => "테마 theme 색상 밝기 다크 폰트 font 글꼴 커서 배율 크기 기기 아이콘 appearance color cursor scale",
         SettingsCat::Statusbar => "하단 상태줄 상태바 사용량 cpu 메모리 계정 표시 statusbar usage memory",
         SettingsCat::Weather => "날씨 비 애니메이션 움직임 투명도 weather rain motion",
-        SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth claude codex kasa 구글 github 키체인 비밀 승인 keychain secret 자동 전환 한도 사용량 account login password",
-        SettingsCat::Claude => "클로드 claude 코덱스 codex 모델 model 추론 effort 권한 실행 인자",
+        SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth kasa 구글 github 키체인 비밀 승인 keychain secret account login password",
+        SettingsCat::Claude => "클로드 claude 코덱스 codex 계정 로그인 재인증 자동 전환 한도 사용량 차례 순서 기본 에이전트 권한 상태줄 account login order permission",
         SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
         SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 덮개 덮어 마저 잠자기 핫스팟 폰 lid sleep hotspot 크롬 chrome 브라우저 device connection machine browser",
         SettingsCat::Feedback => "피드백 문의 오류 버그 문제 제안 feedback bug report",
@@ -3791,17 +3772,8 @@ fn statusbar_widget_row(
     let can_down = index + 1 < s.statusbar_order.len()
         && crate::statusbar_config::group(&s.statusbar_order[index + 1])
             == crate::statusbar_config::group(id);
-    statusbar_move_button(g, s, hits, up, id, -1, can_up, "arrow-up");
-    statusbar_move_button(
-        g,
-        s,
-        hits,
-        down,
-        id,
-        1,
-        can_down,
-        "arrow-down",
-    );
+    move_button(g, s, hits, up, SettingsAction::MoveStatusbarItem(id.to_string(), -1), can_up, "arrow-up");
+    move_button(g, s, hits, down, SettingsAction::MoveStatusbarItem(id.to_string(), 1), can_down, "arrow-down");
 
     let Some(id) = crate::statusbar_config::WIDGETS.iter().copied().find(|key| *key == id) else { return; };
     let field = SettingsInput::StatusbarHex(id);
@@ -3822,13 +3794,13 @@ fn statusbar_widget_row(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn statusbar_move_button(
+/// 차례를 한 칸 옮기는 화살표. 끝에 닿은 쪽은 흐리게만 그리고 누를 수 없다.
+fn move_button(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
     rect: Rect,
-    id: &str,
-    delta: i8,
+    action: SettingsAction,
     enabled: bool,
     icon: &str,
 ) {
@@ -3859,7 +3831,7 @@ fn statusbar_move_button(
         register_clipped(
             g,
             hits,
-            Target::Setting(SettingsAction::MoveStatusbarItem(id.to_string(), delta)),
+            Target::Setting(action),
             rect,
             HitCursor::Pointer,
         );
@@ -4397,6 +4369,8 @@ fn agent_statusline_preview(fields: [bool; 3]) -> String {
     if parts.is_empty() { "선택한 항목 없음".into() } else { parts.join("  ·  ") }
 }
 
+/// 코딩 에이전트 칸. Claude·Codex 로그인과 한도 자동 전환을 둔다 — 「계정」 페이지에 KASA 계정과
+/// 함께 있어 둘이 헷갈렸다(2026-11-16). 계정 줄의 위아래 화살표가 쓰는 차례다.
 fn paint_claude(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -4406,75 +4380,18 @@ fn paint_claude(
     y: &mut f32,
     w: f32,
 ) {
-    paint_setup_section(g, s, hits, caret, x, y, w, 2);
-    if !disclosure(g, s, hits, x, y, w, "agent", "세부 에이전트 · 모델, 생각 깊이와 협업") {
-        return;
-    }
-    section_title(
-        g,
-        x,
-        *y,
-        "Claude Code 기본값",
-        "새로 띄우는 Claude와 Codex 작업대에 적용됩니다",
-    );
+    account_group(g, s, hits, caret, x, y, w, AccountProvider::Claude);
+    *y += 14.0;
+    autoswitch_rows(g, s, hits, x, y, w);
+    *y += 14.0;
+    account_group(g, s, hits, caret, x, y, w, AccountProvider::Codex);
+    *y += 14.0;
+    section_title(g, x, *y, "에이전트 기본값", "새로 띄우는 Claude와 Codex 작업에 적용됩니다");
     *y += 54.0;
-    // 「캐릭터 성격 넣기」는 「캐릭터」 페이지의 「캐릭터 페르소나」와 같은 값이라 거기 한 곳에 둔다.
-    toggle_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "협업 연결 넣기",
-        s.shim_inject,
-        SettingsAction::ToggleShimInject,
-    );
-    // 고정 목록은 새 모델(Fable 5.2)을 몰랐다 — Claude CLI 가 알려 주는 목록을 쓴다.
-    let models = kasa_agents::claude_models::setting_choices(&s.claude_model);
-    let model_cells: Vec<(&str, bool, SettingsAction)> = models
-        .iter()
-        .map(|m| (m.label.as_str(), s.claude_model == m.value, SettingsAction::ClaudeModel(m.value.clone())))
-        .collect();
-    seg_row(g, s, hits, x, y, w, "모델", &model_cells);
-    let efforts = [
-        ("기본", ""),
-        ("낮게", "low"),
-        ("보통", "medium"),
-        ("높게", "high"),
-        ("아주 높게", "xhigh"),
-    ];
-    let effort_cells: Vec<(&str, bool, SettingsAction)> = efforts
-        .iter()
-        .map(|(label, key)| {
-            (
-                *label,
-                s.claude_effort == *key,
-                SettingsAction::ClaudeEffort((*key).to_string()),
-            )
-        })
-        .collect();
-    seg_row(g, s, hits, x, y, w, "생각 깊이", &effort_cells);
-    text_field(
-        g,
-        s,
-        hits,
-        caret,
-        x,
-        *y,
-        w,
-        "추가 인자",
-        &s.claude_extra,
-        SettingsInput::ClaudeExtra,
-        s.settings_caret,
-        false,
-    );
-    *y += 66.0;
-
+    paint_setup_section(g, s, hits, caret, x, y, w, 2);
 }
 
-/// 계정 칸. 모델 기본값과 한 화면에 있던 것을 뺐다 — 로그인과 제거는 위쪽
-/// 토글들과 되돌리기 무게가 다르고, 계정을 보러 온 사람이 스크롤을 내려야 했다.
+/// 계정 칸. KASA 계정과 그에 딸린 연결·비밀 승인이다. 코딩 에이전트 로그인은 「코딩 에이전트」에 있다.
 fn paint_accounts(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -4484,13 +4401,20 @@ fn paint_accounts(
     y: &mut f32,
     w: f32,
 ) {
-    // KASA 계정이 맨 위 — 코딩 에이전트 계정과 따로 「연결 기기」에 있어서, 계정을 찾는 사람이
-    // 두 페이지를 오갔다(2026-09-29 「계정 설정이 여기저기 흩어졌다」).
     device_account::paint(g, s, hits, caret, x, y, w);
     device_account::work::paint(g, s, hits, x, y, w);
     device_account::op::paint(g, s, hits, x, y, w);
-    account_group(g, s, hits, caret, x, y, w, AccountProvider::Claude);
-    *y += 14.0;
+}
+
+/// 한도 자동 전환과 그 기준. 넘어갈 곳은 계정 목록의 차례다.
+fn autoswitch_rows(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
     let switch_home = s.home_accounts.as_ref().filter(|_| s.account_scope_home);
     let switch_on = switch_home.map_or(s.account_autoswitch, |h| h.autoswitch);
     let switch_accounts = switch_home.map_or(s.accounts.as_ref(), |h| h.accounts.as_ref());
@@ -4551,9 +4475,9 @@ fn paint_accounts(
                 ),
             ],
         );
+        let back = socket::SWITCH_BACK_MARGIN.round() as u32;
+        plain_hint(g, x, y, w, &format!("계정 목록의 위에서부터 여유 있는 계정을 씁니다. 위 계정 사용량이 기준보다 {back}%p 낮아지면 그 계정으로 돌아갑니다."));
     }
-    *y += 14.0;
-    account_group(g, s, hits, caret, x, y, w, AccountProvider::Codex);
 }
 
 /// 명부 한 줄을 화면에 옮긴 것. 파일 형식(다른 필드가 여럿 딸린 json)을 그대로
@@ -5995,8 +5919,11 @@ fn account_group(
         }
         *y += 8.0;
     }
-    for row in rows {
-        account_row(g, s, hits, caret, x, y, w, row);
+    // 차례는 등록한 슬롯끼리다 — 목록에 함께 서는 기본 로그인은 차례에 없다.
+    let slots: Vec<&str> = rows.iter().filter(|row| row.slot).map(|row| row.id.as_str()).collect();
+    for row in rows.iter().copied() {
+        let place = slots.iter().position(|id| *id == row.id).map_or((0, 0), |at| (at, slots.len()));
+        account_row(g, s, hits, caret, x, y, w, row, place);
     }
     if home.is_none() {
         shared_rows(g, s, hits, x, y, w, provider, needs_code || running);
@@ -6125,6 +6052,7 @@ fn account_row(
     y: &mut f32,
     w: f32,
     row: &AccountChoice,
+    (index, count): (usize, usize),
 ) {
     let editing = s
         .account_label_edit
@@ -6206,8 +6134,10 @@ fn account_row(
     // 않게 잘라야 하는데, 글자 단추는 라벨 길이에 따라 폭이 달라진다.
     let w_remove = g.measure_chrome_text("제거", 10.5, false) + 32.0;
     let w_reauth = g.measure_chrome_text("재인증", 10.5, false) + 32.0;
+    // 차례 화살표는 고를 차례가 있을 때만 — 계정이 하나면 옮길 곳이 없다.
+    let movable = show_slot_actions && count > 1;
     let actions_w = if show_slot_actions {
-        w_remove + w_reauth + 2.0 + 60.0 + 10.0
+        w_remove + w_reauth + 2.0 + 60.0 + if movable { 60.0 } else { 0.0 } + 10.0
     } else if show_actions {
         w_reauth + 10.0
     } else {
@@ -6417,6 +6347,14 @@ fn account_row(
                 row.id.clone(),
             )),
         );
+        if movable {
+            rx -= 30.0;
+            move_button(g, s, hits, (rx, by - 1.0, 28.0, 28.0),
+                SettingsAction::MoveAccount(row.provider, row.id.clone(), 1), index + 1 < count, "arrow-down");
+            rx -= 30.0;
+            move_button(g, s, hits, (rx, by - 1.0, 28.0, 28.0),
+                SettingsAction::MoveAccount(row.provider, row.id.clone(), -1), index > 0, "arrow-up");
+        }
     }
     *y += rect.3 + 6.0;
 }
@@ -6671,12 +6609,12 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         SettingsCat::Claude => (
             "코딩 에이전트",
             "claude",
-            "모델과 협업 연결의 기본값을 정합니다",
+            "Claude·Codex 로그인과 쓰는 차례, 새 작업의 기본값을 정합니다",
         ),
         SettingsCat::Accounts => (
             "계정",
             "users",
-            "KASA 계정과 코딩 에이전트 로그인, 한도가 차면 넘어갈 차례를 정합니다",
+            "KASA 계정과 연결한 서비스, 비밀 승인을 정합니다",
         ),
         SettingsCat::Machines => (
             "연결 기기",
@@ -7197,7 +7135,6 @@ fn field_placeholder(field: SettingsInput) -> &'static str {
         SettingsInput::CwdPath => "프로젝트 폴더 경로…",
         SettingsInput::FileOpenCmd => "편집기 실행 명령…",
         SettingsInput::Shell => "셸 실행 파일 경로…",
-        SettingsInput::ClaudeExtra => "선택 사항…",
         SettingsInput::StudentName => "캐릭터 이름…",
         SettingsInput::StudentPersona => "말투와 특징…",
         SettingsInput::FeedbackBody => "문제와 재현 방법…",
@@ -7769,7 +7706,9 @@ mod tests {
     fn settings_search_accepts_korean_aliases_and_multiple_terms() {
         assert!(category_matches(SettingsCat::Appearance, "폰트"));
         assert!(category_matches(SettingsCat::Appearance, "기기 아이콘"));
-        assert!(category_matches(SettingsCat::Accounts, "CLAUDE 로그인"));
+        assert!(category_matches(SettingsCat::Claude, "CLAUDE 로그인"));
+        assert!(category_matches(SettingsCat::Claude, "계정 순서"));
+        assert!(!category_matches(SettingsCat::Accounts, "codex"), "agent logins moved to the coding agent page");
         assert!(category_matches(SettingsCat::Machines, "ssh 주소"));
         assert!(category_matches(SettingsCat::Machines, "덮개 핫스팟"));
         assert!(!category_matches(SettingsCat::General, "존재하지않는설정"));

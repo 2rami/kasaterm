@@ -1991,13 +1991,14 @@ impl ApplicationHandler<UserEvent> for App {
                 to,
                 pct,
                 label,
+                back,
                 generation,
             } => {
                 if *generation != crate::session::selection_generation()
                     || !socket::read_account_autoswitch()
                     || *from != self.set_claude_account
                     || *from != socket::read_claude_account()
-                    || *pct < socket::read_account_autoswitch_pct()
+                    || (!*back && *pct < socket::read_account_autoswitch_pct())
                 {
                     return;
                 }
@@ -2015,8 +2016,13 @@ impl ApplicationHandler<UserEvent> for App {
                     if !same {
                         self.account_flash = Some(std::time::Instant::now());
                     }
+                    let why = if *back {
+                        format!("{to_label} 사용량에 여유가 돌아와 차례대로")
+                    } else {
+                        format!("{from_label} · {label} 사용량 {pct:.0}%")
+                    };
                     self.set_toast(format!(
-                    "{from_label} · {label} 사용량 {pct:.0}% — {}",
+                    "{why} — {}",
                     crate::session::account_switch_toast(
                         &to_label, same, restarted, deferred, focused, live
                     )
@@ -2898,66 +2904,55 @@ impl ApplicationHandler<UserEvent> for App {
                             &active_dir,
                         );
                         if let Some(p) = fresh_usage.pressure(&active_dir, &active_id, &models, polled_at) {
-                            if p.pct >= socket::read_account_autoswitch_pct() {
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map_or(0, |d| d.as_secs());
-                                // `active_id` 재사용 — 위 조회와 **같은 스냅샷**이어야
-                                // 「어느 계정의 숫자로 판정했나」와 「어느 계정에서
-                                // 떠나나」가 안 갈린다. 그 사이에 비활성 슬롯 curl 이
-                                // 끼므로(슬롯당 최대 5초) 다시 읽으면 값이 바뀔 수 있다.
-                                // **로그인 안 된 슬롯은 후보에서 뺀다.** 그런
-                                // 자리로 옮기면 그 뒤 뜨는 claude 가 전부 로그아웃
-                                // 상태가 된다 — 계정 추가가 활성 전환을 일부러 안
-                                // 하는 것과 같은 이유인데(`add_claude_account`),
-                                // 자동 전환에는 그 방어가 없었다. 2026-09-05 에
-                                // 로그인이 한 번도 안 끝나던 버그를 고치기 전까지는
-                                // 빈 슬롯이 계속 쌓이던 터라 특히 위험하다.
-                                //
-                                // 판정은 **사용량을 한 번이라도 받았나**로 한다.
-                                // 그 조회는 슬롯 토큰으로 나가므로 값이 있다는 건
-                                // 토큰이 실재한다는 뜻이다. 아직 못 받은 슬롯도
-                                // 빠지는데, 모르는 자리로 옮기느니 「갈 곳 없음」을
-                                // 알리는 쪽이 낫다.
-                                let usable: Vec<socket::ClaudeAccount> = {
-                                    let g = usage_all.lock().ok();
-                                    socket::read_claude_accounts()
-                                        .into_iter()
-                                        .filter(|a| {
-                                            let Some(g) = g.as_ref() else { return false };
-                                            crate::claude_auth::runtime_dir_for(&a.id, &active_id)
-                                                .is_some_and(|d| {
-                                                    g.get(d.to_string_lossy().as_ref())
-                                                        .is_some_and(|badge| !badge.stale
-                                                            && (a.id == active_id || socket::account_has_capacity(badge.pct, socket::read_account_autoswitch_pct())))
-                                                })
-                                        })
-                                        .collect()
+                            let limit = socket::read_account_autoswitch_pct();
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| d.as_secs());
+                            // `active_id` 재사용 — 위 조회와 **같은 스냅샷**이어야
+                            // 「어느 계정의 숫자로 판정했나」와 「어느 계정에서
+                            // 떠나나」가 안 갈린다. 그 사이에 비활성 슬롯 curl 이
+                            // 끼므로(슬롯당 최대 5초) 다시 읽으면 값이 바뀔 수 있다.
+                            //
+                            // **사용량을 받은 적 없는 슬롯은 후보에서 뺀다.** 그 조회는 슬롯
+                            // 토큰으로 나가므로 값이 있다는 건 로그인이 실재한다는 뜻이다.
+                            // 로그인 안 된 자리로 옮기면 그 뒤 뜨는 claude 가 전부 로그아웃
+                            // 상태가 되고(2026-09-05), 모르는 자리로 옮기느니 「갈 곳 없음」이 낫다.
+                            // 차례는 사람이 정한 것(`read_claude_accounts`)이고 지금 계정의
+                            // 자리는 위 차례로 돌아갈지 가르는 데 쓴다.
+                            let slots: Vec<(String, f32)> = {
+                                let g = usage_all.lock().ok();
+                                socket::read_claude_accounts()
+                                    .into_iter()
+                                    .filter_map(|a| {
+                                        let dir = crate::claude_auth::runtime_dir_for(&a.id, &active_id)?;
+                                        let badge = g.as_ref()?.get(dir.to_string_lossy().as_ref())?;
+                                        let pct = if a.id == active_id { p.pct } else { badge.pct };
+                                        (!badge.stale).then_some((a.id, pct))
+                                    })
+                                    .collect()
+                            };
+                            let to = socket::pick_account_by_order(
+                                &active_id,
+                                p.pct,
+                                &slots,
+                                limit,
+                                &socket::read_account_cooldowns(),
+                                now,
+                            );
+                            // 갈 곳이 없어도 여기서 따로 알리지 않는다 — 한도 경고가
+                            // 위에서 이미 나갔고, 그쪽은 전환이 되는 경우까지 덮는다.
+                            if let Some((to, back)) = to {
+                                last_switch = Some(std::time::Instant::now());
+                                let ev = UserEvent::ClaudeAccountAutoswitch {
+                                    from: active_id.clone(),
+                                    to,
+                                    pct: p.pct,
+                                    label: p.label.clone(),
+                                    back,
+                                    generation,
                                 };
-                                let to = socket::pick_next_account(
-                                    &active_id,
-                                    &usable,
-                                    &socket::read_account_cooldowns(),
-                                    now,
-                                );
-                                match to {
-                                    Some(to) => {
-                                        last_switch = Some(std::time::Instant::now());
-                                        let ev = UserEvent::ClaudeAccountAutoswitch {
-                                            from: active_id.clone(),
-                                            to,
-                                            pct: p.pct,
-                                            label: p.label.clone(),
-                                            generation,
-                                        };
-                                        if usage_proxy.send_event(ev).is_err() {
-                                            break;
-                                        }
-                                    }
-                                    // 갈 곳이 없어도 여기서 따로 알리지 않는다 — 90% 경고가
-                                    // 위에서 이미 나갔고, 그쪽은 전환이 되는 경우까지 덮는다.
-                                    // 둘 다 울리면 같은 사실로 알림이 두 번 뜬다.
-                                    None => {}
+                                if usage_proxy.send_event(ev).is_err() {
+                                    break;
                                 }
                             }
                         }

@@ -466,7 +466,7 @@ impl App {
             }
             AccountMenuItem::ManageAccounts => {
                 self.close_account_menu();
-                let _ = self.open_settings_room(Some(SettingsCat::Accounts));
+                let _ = self.open_settings_room(Some(SettingsCat::Claude));
             }
             // 풀린 Claude 줄은 고르지 않고 그 슬롯 로그인을 띄운다. 풀린 계정으로 옮기면
             // 도는 학생들이 다음 요청에서 전부 로그인 화면에 걸린다.
@@ -483,7 +483,7 @@ impl App {
             AccountMenuItem::Reauth(provider, id) => {
                 self.close_account_menu();
                 self.settings_apply(SettingsAction::ReauthAccount(provider, id, crate::settings::LoginBrowser::Default));
-                let _ = self.open_settings_room(Some(SettingsCat::Accounts));
+                let _ = self.open_settings_room(Some(SettingsCat::Claude));
             }
             AccountMenuItem::UseLimitReset => {
                 self.close_account_menu();

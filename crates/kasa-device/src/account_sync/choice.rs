@@ -26,7 +26,7 @@ fn text(v: &Value, max: usize) -> bool {
     v.as_str().is_some_and(|s| s.chars().count() <= max && !s.chars().any(char::is_control))
 }
 
-fn id(v: Option<&Value>) -> Option<uuid::Uuid> {
+pub(super) fn id(v: Option<&Value>) -> Option<uuid::Uuid> {
     let raw = v?.as_str()?;
     let parsed = uuid::Uuid::parse_str(raw).ok()?;
     (raw.len() == 36 && !parsed.is_nil()).then_some(parsed)

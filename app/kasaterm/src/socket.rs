@@ -6740,27 +6740,6 @@ pub fn resolve_terminal_editor() -> Option<String> {
         .map(String::from)
 }
 
-pub fn read_claude_model() -> String {
-    read_settings()
-        .get("claude_model")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-pub fn read_claude_effort() -> String {
-    read_settings()
-        .get("claude_effort")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-pub fn read_claude_extra() -> String {
-    read_settings()
-        .get("claude_extra")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string()
-}
 
 /// pane 안 `claude` 에 자동으로 얹을 MCP 서버 목록의 위치. `--mcp-config` 가 그대로
 /// 먹는 `{"mcpServers":{…}}` 파일이라 **파일이 곧 진실**이다 — 여기가 갈리면 shim 을
@@ -6795,13 +6774,45 @@ pub struct ClaudeAccount {
     pub label: String,
 }
 
-/// Registered Claude logins, in display order. Empty ids are not accounts.
+/// Registered Claude logins, in the order people chose to use them. Empty ids are not accounts.
 pub fn read_claude_accounts() -> Vec<ClaudeAccount> {
-    read_settings()
+    let accounts = read_settings()
         .get("claude_accounts")
         .and_then(|v| serde_json::from_value::<Vec<ClaudeAccount>>(v.clone()).ok())
         .unwrap_or_default()
-        .into_iter().filter(|a| !a.id.is_empty()).collect()
+        .into_iter().filter(|a| !a.id.is_empty()).collect();
+    ordered_claude_accounts(accounts)
+}
+
+/// The Claude account order every device of the KASA account shares (`claude_account_order`).
+pub fn read_claude_account_order() -> Vec<kasa_device::account_sync::order::Entry> {
+    use kasa_device::account_sync::order;
+    order::read(read_settings().get(order::KEY))
+}
+
+/// A slot's place in the shared order is its proven provider identity: slot ids differ per device.
+pub fn claude_account_uuids(id: &str) -> Option<kasa_device::account_sync::order::Entry> {
+    crate::settings::account_sync_identity(id).map(|identity| {
+        let (account, organization) = identity.uuids();
+        (account.to_string(), organization.to_string())
+    })
+}
+
+pub fn ordered_claude_accounts(accounts: Vec<ClaudeAccount>) -> Vec<ClaudeAccount> {
+    in_account_order(accounts, &read_claude_account_order(), |a| claude_account_uuids(&a.id))
+}
+
+/// `items` in `order`. One whose identity is not proven yet, or that the order does not name,
+/// keeps its place among the rest after the named ones.
+pub fn in_account_order<T>(
+    mut items: Vec<T>,
+    order: &[kasa_device::account_sync::order::Entry],
+    identity_of: impl Fn(&T) -> Option<kasa_device::account_sync::order::Entry>,
+) -> Vec<T> {
+    items.sort_by_cached_key(|item| {
+        identity_of(item).and_then(|id| order.iter().position(|named| *named == id)).unwrap_or(usize::MAX)
+    });
+    items
 }
 
 /// An unresolved selection stays empty so it cannot impersonate a registered login.
@@ -7255,35 +7266,40 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// 다음으로 옮겨갈 계정 id. 후보는 등록된 계정 목록 순서이고,
-/// 현재 계정 **다음** 자리부터 한 바퀴 돌며 쿨다운이 풀린 첫 후보를 고른다.
-/// 전부 잠겨 있으면 `None` — 어차피 갈 곳이 없는데 옮기면 멀쩡한 계정에서
-/// 소진된 계정으로 내려앉는 꼴이 된다.
-pub fn pick_next_account(
+/// 위 차례 계정으로 돌아가려면 기준보다 이만큼(%p) 여유가 있어야 한다. 기준 바로 아래에서
+/// 돌아가면 곧 다시 넘어 두 계정을 오간다.
+pub const SWITCH_BACK_MARGIN: f32 = 20.0;
+
+/// 옮겨 갈 계정과 그것이 위 차례로 돌아가는 것인지. `slots` 는 사람이 정한 차례로 늘어놓은,
+/// 최신 사용량을 아는 로그인 슬롯(지금 계정 포함)과 그 사용률이다. 지금 계정이 기준을 넘었으면
+/// 차례상 가장 위의 여유 있는 계정, 넘지 않았어도 지금보다 위 차례에 넉넉히 여유가 생긴 계정이
+/// 있으면 그 계정이다(위 계정의 5시간 창이 풀렸을 때). 쿨다운이 남은 슬롯은 가지 않는다 —
+/// 갈 곳이 없는데 옮기면 멀쩡한 계정에서 소진된 계정으로 내려앉는다.
+pub fn pick_account_by_order(
     current: &str,
-    accounts: &[ClaudeAccount],
+    current_pct: f32,
+    slots: &[(String, f32)],
+    threshold: f32,
     cooldowns: &std::collections::HashMap<String, u64>,
     now: u64,
-) -> Option<String> {
-    let all: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).filter(|id| !id.is_empty()).collect();
-    if all.is_empty() {
-        return None;
-    }
-    // 지금 자리가 후보 목록 안에 있으면 그 **다음**부터 돌고, 밖에 있으면(기본을
-    // 쓰는데 기본이 후보에서 빠진 경우) 처음부터 전부가 후보다.
-    let ordered: Vec<&str> = match all.iter().position(|&i| i == current) {
-        Some(here) => (1..all.len()).map(|step| all[(here + step) % all.len()]).collect(),
-        None => all.clone(),
+) -> Option<(String, bool)> {
+    let open = |(id, pct): &(String, f32)| {
+        !id.is_empty() && id != current && cooldowns.get(id).is_none_or(|&t| t <= now) && account_has_capacity(*pct, threshold)
     };
-    ordered
-        .into_iter()
-        .find(|id| cooldowns.get(*id).is_none_or(|&t| t <= now))
-        .map(str::to_string)
+    if current_pct >= threshold {
+        return slots.iter().find(|slot| open(slot)).map(|(id, _)| (id.clone(), false));
+    }
+    let here = slots.iter().position(|(id, _)| id == current)?;
+    slots[..here]
+        .iter()
+        .find(|slot| open(slot) && slot.1 <= threshold - SWITCH_BACK_MARGIN)
+        .map(|(id, _)| (id.clone(), true))
 }
 
-/// shim 주입 전역 스위치(설정 "shim_inject"). false 면 install_pane_shims 가 shim dir 를
+/// shim 주입 전역 스위치(설정 파일의 "shim_inject"). false 면 install_pane_shims 가 shim dir 를
 /// 아예 안 만들어 PATH/ZDOTDIR 무접촉 → 순정 claude(캐릭터·프록시·훅·board 전무 진짜 독립).
-/// 기본 true(하위호환 — 지금 풀 경험 유지). install 은 부팅 1회라 변경은 재시작 후 적용.
+/// 설정창에서는 걷었고 검증 리그가 격리하려고 파일에 적는다. 기본 true. install 은 부팅 1회라
+/// 바꾸면 재시작 후 적용.
 pub fn read_shim_inject() -> bool {
     read_settings()
         .get("shim_inject")
@@ -9044,91 +9060,56 @@ mod account_autoswitch_tests {
         assert_eq!(usage_pressure_for_models(&legacy, &[]).unwrap().pct, 91.0);
     }
 
+    fn slots(rows: &[(&str, f32)]) -> Vec<(String, f32)> {
+        rows.iter().map(|(id, pct)| (id.to_string(), *pct)).collect()
+    }
+
     #[test]
-    fn pick_next_account_rotates_from_the_current_slot() {
-        let a = accts(&["acct-1", "acct-2"]);
+    fn a_full_account_moves_to_the_highest_one_with_room() {
         let none = Default::default();
-        assert_eq!(
-            pick_next_account("", &a, &none, 0).as_deref(),
-            Some("acct-1")
-        );
-        assert_eq!(
-            pick_next_account("acct-1", &a, &none, 0).as_deref(),
-            Some("acct-2")
-        );
-        assert_eq!(
-            pick_next_account("acct-2", &a, &none, 0).as_deref(),
-            Some("acct-1")
-        );
+        let order = slots(&[("team", 100.0), ("icloud", 40.0), ("gmail", 10.0)]);
+        assert_eq!(pick_account_by_order("team", 100.0, &order, 100.0, &none, 0), Some(("icloud".into(), false)));
+        let order = slots(&[("team", 30.0), ("icloud", 100.0), ("gmail", 10.0)]);
+        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &none, 0), Some(("team".into(), false)),
+            "the top account with room comes first, not the next one in a rotation");
+        assert_eq!(pick_account_by_order("gmail", 95.0, &slots(&[("gmail", 95.0)]), 95.0, &none, 0), None, "one login has nowhere to go");
     }
 
     #[test]
-    fn pick_next_account_skips_and_then_refuses_cooled_down_slots() {
-        let a = accts(&["acct-1", "acct-2"]);
-        let mut cool = std::collections::HashMap::new();
-        cool.insert("acct-1".to_string(), 500_u64);
-        // acct-1 은 아직 잠겨 있으니 건너뛴다.
-        assert_eq!(
-            pick_next_account("", &a, &cool, 100).as_deref(),
-            Some("acct-2")
-        );
-        // 풀린 뒤에는 다시 1순위.
-        assert_eq!(
-            pick_next_account("", &a, &cool, 600).as_deref(),
-            Some("acct-1")
-        );
-        // 전부 잠기면 안 옮긴다 — 멀쩡한 자리에서 소진된 자리로 내려앉지 않게.
-        cool.insert("acct-2".to_string(), 500);
-        cool.insert(String::new(), 500);
-        assert_eq!(pick_next_account("acct-1", &a, &cool, 100), None);
+    fn a_higher_account_with_ample_room_takes_over_again() {
+        let none = Default::default();
+        // The team's five-hour window reset while iCloud was in use.
+        let order = slots(&[("team", 5.0), ("icloud", 60.0)]);
+        assert_eq!(pick_account_by_order("icloud", 60.0, &order, 100.0, &none, 0), Some(("team".into(), true)));
+        let order = slots(&[("team", 85.0), ("icloud", 60.0)]);
+        assert_eq!(pick_account_by_order("icloud", 60.0, &order, 100.0, &none, 0), None,
+            "just under the line it would cross again soon");
+        let order = slots(&[("icloud", 60.0), ("team", 5.0)]);
+        assert_eq!(pick_account_by_order("icloud", 60.0, &order, 100.0, &none, 0), None, "a lower account never pulls");
+        assert_eq!(pick_account_by_order("", 60.0, &slots(&[("team", 5.0)]), 100.0, &none, 0), None,
+            "the default login is outside the order");
     }
 
     #[test]
-    fn pick_next_account_has_nowhere_to_go_with_a_single_login() {
-        assert_eq!(pick_next_account("", &[], &Default::default(), 0), None);
-        assert_eq!(pick_next_account("acct-1", &accts(&["", "acct-1"]), &Default::default(), 0), None);
+    fn cooled_down_slots_are_not_candidates() {
+        let order = slots(&[("team", 10.0), ("icloud", 100.0), ("gmail", 20.0)]);
+        let cool = std::collections::HashMap::from([("team".to_string(), 500u64)]);
+        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &cool, 100), Some(("gmail".into(), false)));
+        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &cool, 600), Some(("team".into(), false)));
+        let cool = std::collections::HashMap::from([("team".to_string(), 500u64), ("gmail".to_string(), 500)]);
+        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &cool, 100), None);
     }
 
-    /// 기본이 슬롯 하나와 같은 계정이면 후보에서 뺀다 — 옮겨도 한도가 그대로라
-    /// 「옮기고 5분 쉬고 또 옮기는」 헛돌이가 된다(2026-09-05 실측).
     #[test]
-    fn a_duplicate_default_slot_is_not_a_candidate() {
-        let a = vec![
-            ClaudeAccount { id: "acct-1".into(), label: String::new() },
-            ClaudeAccount { id: "acct-2".into(), label: String::new() },
-        ];
-        let none = std::collections::HashMap::new();
-        // acct-1 에서 떠난다 — 기본을 못 쓰면 acct-2 로만 갈 수 있다.
-        assert_eq!(
-            pick_next_account("acct-1", &a, &none, 0).as_deref(),
-            Some("acct-2")
-        );
-        // 한 바퀴 돌아도 기본은 안 나온다.
-        assert_eq!(
-            pick_next_account("acct-2", &a, &none, 0).as_deref(),
-            Some("acct-1")
-        );
-    }
-
-    /// 기본을 쓰는 중인데 그 기본이 후보에서 빠진 경우 — 지금 자리가 목록 밖이라
-    /// **첫 슬롯부터 전부**가 후보다. 예전 회전식은 이때 첫 슬롯을 건너뛰었다.
-    #[test]
-    fn leaving_a_default_that_is_not_a_candidate_can_reach_every_slot() {
-        let a = vec![
-            ClaudeAccount { id: "acct-1".into(), label: String::new() },
-            ClaudeAccount { id: "acct-2".into(), label: String::new() },
-        ];
-        let none = std::collections::HashMap::new();
-        assert_eq!(
-            pick_next_account("", &a, &none, 0).as_deref(),
-            Some("acct-1")
-        );
-        // 첫 슬롯이 쿨다운이면 다음으로 — 건너뛴 자리가 생기지 않는다.
-        let cool = std::collections::HashMap::from([("acct-1".to_string(), 500u64)]);
-        assert_eq!(
-            pick_next_account("", &a, &cool, 100).as_deref(),
-            Some("acct-2")
-        );
+    fn the_shared_order_comes_first_and_unproven_slots_keep_their_places() {
+        let order = vec![("a-3".to_string(), "o-3".to_string()), ("a-1".to_string(), "o-1".to_string())];
+        let ids = |a: &ClaudeAccount| match a.id.strip_prefix("acct-") {
+            Some("4") | None => None,
+            Some(n) => Some((format!("a-{n}"), format!("o-{n}"))),
+        };
+        let got = in_account_order(accts(&["acct-1", "acct-2", "acct-3", "acct-4"]), &order, ids);
+        let got: Vec<_> = got.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(got, ["acct-3", "acct-1", "acct-2", "acct-4"]);
     }
 }
 

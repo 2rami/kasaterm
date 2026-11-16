@@ -10,7 +10,7 @@ impl App {
         if !crate::verification_run() || std::env::var_os("KASATERM_LOGIN_PASTE_PROBE").is_none()
             || START.get_or_init(Instant::now).elapsed().as_millis() < 1800
             || DONE.swap(true, Ordering::Relaxed) { return; }
-        self.open_settings_room(Some(SettingsCat::Accounts));
+        self.open_settings_room(Some(SettingsCat::Claude));
         self.set_account_scope_home = false;
         let mode = std::env::var("KASATERM_LOGIN_PASTE_PROBE").unwrap_or_default();
         let state = if mode.ends_with("running") {

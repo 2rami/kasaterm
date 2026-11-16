@@ -62,15 +62,24 @@ mod tests {
     }
 
     #[test]
-    fn all_slots_choose_the_actual_standby_account() {
+    fn the_first_account_in_the_chosen_order_with_room_is_used() {
         let mut v=values(47.0,17.0);
         v["claude"]["accounts"].as_array_mut().unwrap().push(row("gmail",0.0));
         let choice=choose(&v).unwrap();
-        assert_eq!((choice.provider,choice.account_id.as_str(),choice.used_percent),("claude","gmail",Some(0.0)));
-        v["claude"]["accounts"][1]["usage"]=json!(40.0);
+        assert_eq!((choice.provider,choice.account_id.as_str(),choice.reason),("claude","c","account_order"),
+            "the account people put first is used while it has room, not the least used one");
+        v["claude"]["autoswitch"]=json!(true);
+        v["claude"]["autoswitch_pct"]=json!(45.0);
+        assert_eq!(choose(&v).unwrap().account_id,"gmail","past the switch line the next in order takes over");
+        v["claude"]["accounts"][1]["usage"]=json!(60.0);
         v["claude"]["codex_accounts"].as_array_mut().unwrap().push(row("codex-spare",2.0));
         let choice=choose(&v).unwrap();
-        assert_eq!((choice.provider,choice.account_id.as_str()),("codex","codex-spare"));
+        assert_eq!((choice.provider,choice.account_id.as_str()),("codex",""),"Codex only once every Claude account is past the line");
+        v["claude"]["codex_accounts"][0]["usage"]=json!(90.0);
+        v["claude"]["codex_accounts"][1]["usage"]=json!(50.0);
+        let choice=choose(&v).unwrap();
+        assert_eq!((choice.provider,choice.account_id.as_str(),choice.reason),("claude","c","remaining_usage"),
+            "when all are past it, the least used");
         assert_eq!(v["claude"]["account"],"c");
     }
 
@@ -80,7 +89,8 @@ mod tests {
         v["claude"]["accounts"].as_array_mut().unwrap().extend([row("stale",0.0),row("revoked",0.0),row("full",100.0)]);
         v["claude"]["accounts"][1]["usage_stale"]=json!(true);
         v["claude"]["accounts"][2]["usage_state"]=json!("logged_out");
-        assert_eq!(choose(&v).unwrap().provider,"codex");
+        v["claude"]["accounts"][0]["usage"]=json!(100.0);
+        assert_eq!(choose(&v).unwrap().provider,"codex","a stale, revoked or full Claude slot is no room");
         let selected=Selection{provider:"claude".into(),account_id:"stale".into()};
         assert!(validate_selection(&v,&selected).is_err());
         assert!(validate_resume(&v,&selected).is_ok());
@@ -235,8 +245,18 @@ pub fn resume_substitute(values: &Value, provider: &str) -> Option<Selection> {
     choose_among(values,&[provider]).ok().map(|choice|Selection {provider:provider.into(),account_id:choice.account_id})
 }
 
+/// 넘어갈 기준. 자동 전환을 켰으면 그 기준이고, 껐으면 다 쓸 때까지다.
+fn switch_limit(values: &Value) -> f64 {
+    if values["claude"]["autoswitch"] != true { return 100.0; }
+    values["claude"]["autoswitch_pct"].as_f64().filter(|p| (1.0..=100.0).contains(p)).unwrap_or(100.0)
+}
+
+/// 사람이 정한 차례(설정 값의 목록 순서)에서 기준보다 여유 있는 첫 계정이다. 선호 제공자의 계정이 모두
+/// 기준을 넘었을 때만 다른 제공자로 간다. 모두 넘었으면 그중 가장 덜 쓴 계정, 사용량을 아는 계정이 없으면
+/// 로그인된 현재 계정이다.
 fn choose_among(values: &Value, providers: &[&'static str]) -> Result<Choice, &'static str> {
-    let mut known = Vec::new();
+    let limit = switch_limit(values);
+    let mut over = Vec::new();
     let mut fallback = None;
     for (rank,&provider) in providers.iter().enumerate() {
         for row in rows(values,provider) {
@@ -248,12 +268,16 @@ fn choose_among(values: &Value, providers: &[&'static str]) -> Result<Choice, &'
             let used = (row["usage_state"]=="ready" && row["usage_stale"]==false)
                 .then(||row["usage"].as_f64()).flatten().filter(|p|p.is_finite() && (0.0..100.0).contains(p));
             let choice = Choice {provider,account_id:id.into(),account_label:label,used_percent:used,
-                reason:if used.is_some() {"remaining_usage"} else {"usage_unavailable"}};
-            if let Some(used) = used { known.push((used,rank,!current,choice)); }
-            else if current && fallback.is_none() { fallback=Some(choice); }
+                reason:if used.is_some() {"account_order"} else {"usage_unavailable"}};
+            match used {
+                Some(used) if used < limit => return Ok(choice),
+                Some(used) => over.push((used,rank,!current,Choice {reason:"remaining_usage",..choice})),
+                None if current && fallback.is_none() => fallback=Some(choice),
+                None => {}
+            }
         }
     }
-    known.sort_by(|a,b|a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.account_id.cmp(&b.3.account_id)));
-    known.into_iter().next().map(|(_,_,_,choice)|choice).or(fallback)
+    over.sort_by(|a,b|a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.account_id.cmp(&b.3.account_id)));
+    over.into_iter().next().map(|(_,_,_,choice)|choice).or(fallback)
         .ok_or("사용 가능한 Claude·Codex 계정을 확인하지 못했어요. 로그인과 사용량을 확인해 주세요")
 }

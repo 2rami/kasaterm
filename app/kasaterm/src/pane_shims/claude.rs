@@ -412,14 +412,6 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             }
         }
     }
-    // 설정창 "클로드" 탭 노브를 shim 에 인라인 — 파싱은 여기 Rust 가 하고 shim 은 순수 sh 로
-    // 남긴다(hot path 가벼움). 아래 라인들은 전부 PERSONA_OK 게이트를 공유하므로
-    // attach/agents/subcommand(case 가 PERSONA_OK 를 비움)엔 안 붙어 서브커맨드를 오염 안
-    // 시킨다. 불변식(session-id/--settings/task-list)은 노브가 아니라 계속 하드코딩.
-    let model = socket::read_claude_model();
-    let effort = socket::read_claude_effort();
-    let extra = socket::read_claude_extra();
-    let extra = extra.trim();
     // 말투를 꺼도 지침을 찾을 길은 필요하다. 본문은 싣지 않고 필요한 주제를 읽는 안내만 남긴다.
     let persona_line = format!(
         "if [ -n \"$PERSONA_OK\" ]; then\nKASA_GUIDE_START={}\nset -- --append-system-prompt \"${{KASATERM_PERSONA}}\n${{KASA_GUIDE_START}}\" \"$@\"\nfi\n",
@@ -439,39 +431,18 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
 && { KASATERM_VIA_BACKEND=1; export KASATERM_VIA_BACKEND; exec \"$KASATERM_BACKEND\" claude \"$@\"; }\n"
         .to_string();
     let backend_line = format!("{}{backend_line}", automatic_account_backend_guard());
-    // 학생별 모델(`KASATERM_MODEL`)이 설정창 전역 노브를 이긴다(2026-08-24 지시:
-    // 학생 한 명당 모델 선택). 전역이 비어 있어도 줄을 굽는다 — 학생 값이 들어올
-    // 자리를 남겨야 하고, 둘 다 비면 셸에서 걸러져 `--model` 이 안 붙는다.
+    // 학생별 모델(`KASATERM_MODEL`, 학생 고르기에서 정한 값)만 붙인다. 없으면 Claude 자체 설정(`model`)을
+    // 따른다 — 설정창의 전역 모델 노브는 걷었다(2026-11-16).
     //
     // 게이트웨이 런처를 거쳐 돌아온 경우엔 손대지 않는다: 그 런처가 이미 자기
     // `--model` 을 붙였으므로 여기서 덧붙이면 플래그가 두 번이 되어, 게이트웨이가
-    // 모르는 이름이 이겨 엉뚱한 모델로 붙을 수 있다.
-    let model_line = {
-        // 전역값만 작은따옴표로 감싼다 — `claude-opus-5[1m]` 의 `[1m]` 이 zsh 글롭이라
-        // 무인용이면 "no matches found" 로 대입이 통째 실패해 --model 이 아예 안 붙고
-        // claude 가 기본 모델(구세대 Opus)로 떨어졌다(사용자 2026-07-27 실사고: 학생이
-        // 전부 4.8). env 쪽은 큰따옴표 확장이라 글롭을 안 탄다.
-        let q = model.replace('\'', "'\\''");
-        format!(
-            "if [ -n \"$PERSONA_OK\" ] && [ -z \"$KASATERM_VIA_BACKEND\" ]; then\n\
-             _KTM=\"$KASATERM_MODEL\"\n\
-             [ -z \"$_KTM\" ] && _KTM='{q}'\n\
-             [ -n \"$_KTM\" ] && set -- --model \"$_KTM\" \"$@\"\n\
-             fi\n"
-        )
-    };
-    let effort_line = if effort.is_empty() {
-        String::new()
-    } else {
-        format!("[ -n \"$PERSONA_OK\" ] && export CLAUDE_EFFORT={effort}\n")
-    };
-    let extra_line = if extra.is_empty() {
-        String::new()
-    } else {
-        format!("[ -n \"$PERSONA_OK\" ] && set -- {extra} \"$@\"\n")
-    };
+    // 모르는 이름이 이겨 엉뚱한 모델로 붙을 수 있다. env 는 큰따옴표 확장이라
+    // `[1m]` 같은 이름도 글롭을 안 탄다.
+    let model_line = "if [ -n \"$PERSONA_OK\" ] && [ -z \"$KASATERM_VIA_BACKEND\" ] && [ -n \"$KASATERM_MODEL\" ]; then\n\
+set -- --model \"$KASATERM_MODEL\" \"$@\"\n\
+fi\n";
     let persona_block =
-        format!("{backend_line}{persona_line}{model_line}{effort_line}{extra_line}");
+        format!("{backend_line}{persona_line}{model_line}");
     // MCP 자동 주입. 위 노브들과 달리 **prepend 가 아니라 append** 라서 블록이 따로다 —
     // `--mcp-config` 는 variadic 이라 뒤따르는 non-flag 를 값으로 삼켜, 앞에 두면 사용자
     // 프롬프트가 통째로 사라진다. 반복 지정은 누적되므로 사용자가 자기 것을 줘도 안 부딪힌다.

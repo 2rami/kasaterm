@@ -114,19 +114,6 @@ impl App {
             "claude_persona",
             serde_json::Value::Bool(self.set_claude_persona),
         );
-        socket::write_setting("shim_inject", serde_json::Value::Bool(self.set_shim_inject));
-        socket::write_setting(
-            "claude_model",
-            serde_json::Value::String(self.set_claude_model.clone()),
-        );
-        socket::write_setting(
-            "claude_effort",
-            serde_json::Value::String(self.set_claude_effort.clone()),
-        );
-        socket::write_setting(
-            "claude_extra",
-            serde_json::Value::String(self.set_claude_extra.clone()),
-        );
         socket::write_setting(
             "claude_accounts",
             serde_json::to_value(&self.set_claude_accounts).unwrap_or(serde_json::Value::Null),
@@ -210,6 +197,10 @@ impl App {
             SettingsAction::SwitchAccount(AccountProvider::Claude, id) => {
                 homeaccounts::act("claude-account", Some(id.clone()), None);
             }
+            SettingsAction::MoveAccount(AccountProvider::Claude, id, delta) => {
+                let way = if *delta < 0 { "up" } else { "down" };
+                homeaccounts::act("claude-account-move", Some(id.clone()), Some(way.to_string()));
+            }
             SettingsAction::ReauthAccount(AccountProvider::Claude, id, browser) => {
                 let act = match browser {
                     LoginBrowser::Isolated => "reauth-account-isolated",
@@ -241,6 +232,34 @@ impl App {
             }
             _ => return false,
         }
+        true
+    }
+
+    /// 계정 차례를 한 칸 옮긴다. Claude 는 관문 공통 설정의 차례(`claude_account_order`)에도 적어 모든
+    /// 기기가 같은 차례를 쓴다. 신원을 아직 확인하지 못한 슬롯은 공통 차례에 이름이 없어 이 기기에서만 옮겨진다.
+    pub(crate) fn move_account(&mut self, provider: AccountProvider, id: &str, delta: i8) -> bool {
+        fn shift<T>(items: &mut [T], at: Option<usize>, delta: i8) -> bool {
+            let Some(at) = at else { return false };
+            let Some(to) = at.checked_add_signed(delta as isize).filter(|to| *to < items.len()) else { return false };
+            items.swap(at, to);
+            true
+        }
+        match provider {
+            AccountProvider::Claude => {
+                use kasa_device::account_sync::order;
+                let mut ordered = socket::ordered_claude_accounts(self.set_claude_accounts.clone());
+                let at = ordered.iter().position(|a| a.id == id);
+                if !shift(&mut ordered, at, delta) { return false; }
+                let mine: Vec<_> = ordered.iter().filter_map(|a| socket::claude_account_uuids(&a.id)).collect();
+                socket::write_setting(order::KEY, order::value(&order::merge(&socket::read_claude_account_order(), &mine)));
+                self.set_claude_accounts = ordered;
+            }
+            AccountProvider::Codex => {
+                let at = self.set_codex_accounts.iter().position(|a| a.id == id);
+                if !shift(&mut self.set_codex_accounts, at, delta) { return false; }
+            }
+        }
+        self.settings_save();
         true
     }
 
@@ -1310,21 +1329,10 @@ impl App {
                 theme::set_character_appearance(enabled);
                 self.set_toast(if enabled { "캐릭터 외형을 켰습니다" } else { "캐릭터 외형을 껐습니다" }.to_string());
             }
-            SettingsAction::ToggleShimInject => {
-                self.set_shim_inject = !self.set_shim_inject;
-                self.settings_save();
-                // 시작할 때 한 번만 설치되는 shim 이라 라이브 pane 엔 안 먹는다.
-                self.set_toast("재시작하면 적용돼요".to_string());
-            }
-            SettingsAction::ClaudeModel(m) => {
-                self.set_claude_model = m;
-                self.settings_input = None;
-                self.settings_save();
-            }
-            SettingsAction::ClaudeEffort(e) => {
-                self.set_claude_effort = e;
-                self.settings_input = None;
-                self.settings_save();
+            SettingsAction::MoveAccount(provider, id, delta) => {
+                if !self.move_account(provider, &id, delta) {
+                    self.set_toast("더 옮길 자리가 없어요".to_string());
+                }
             }
             SettingsAction::ToggleAccountAutoswitch => {
                 if !self.set_account_autoswitch && self.set_claude_accounts.len() < 2 {
@@ -2236,29 +2244,10 @@ impl App {
                 self.settings_apply(SettingsAction::AgentStatuslineCustom(on));
                 Ok(agent_preferences::statusline_customized() == on)
             }
-            "toggle-shim-inject" => {
-                self.settings_apply(SettingsAction::ToggleShimInject);
-                Ok(saved_bool("shim_inject") == Some(self.set_shim_inject))
-            }
-            "claude-model" => {
-                if !kasa_agents::claude_models::setting_choices(&self.set_claude_model).iter().any(|m| m.value == id) {
-                    return Err(unknown(id));
-                }
-                self.settings_apply(SettingsAction::ClaudeModel(id.to_string()));
-                Ok(self.set_claude_model == id)
-            }
-            "claude-effort" => {
-                if !matches!(id, "" | "low" | "medium" | "high" | "xhigh") {
-                    return Err(unknown(id));
-                }
-                self.settings_apply(SettingsAction::ClaudeEffort(id.to_string()));
-                Ok(self.set_claude_effort == id)
-            }
-            "claude-extra" => {
-                // 여기만 빈 값이 정상이다 — 붙일 플래그가 없다는 뜻이다.
-                self.set_claude_extra = arg.clone();
-                self.settings_save();
-                Ok(self.set_claude_extra == arg)
+            "claude-account-move" | "codex-account-move" => {
+                let provider = if action == "claude-account-move" { AccountProvider::Claude } else { AccountProvider::Codex };
+                let delta: i8 = match arg.as_str() { "up" => -1, "down" => 1, _ => return Err(unknown(&arg)) };
+                Ok(self.move_account(provider, id, delta))
             }
             "claude-account" => {
                 if id.is_empty() || !self.set_claude_accounts.iter().any(|a| a.id == id) {
@@ -2604,8 +2593,8 @@ impl App {
 
         let active_acct = self.set_claude_account.clone();
         let sync_notice = crate::session::account_sync_notice(&active_acct);
-        let claude_rows: Vec<serde_json::Value> = self
-            .set_claude_accounts
+        // 다른 기기·새 학생 계정 고르기가 이 목록 순서를 사람이 정한 차례로 읽는다.
+        let claude_rows: Vec<serde_json::Value> = socket::ordered_claude_accounts(self.set_claude_accounts.clone())
             .iter()
             .filter(|account| !account.id.is_empty())
             .enumerate()
@@ -2917,7 +2906,6 @@ impl App {
             "shell": { "shell": self.set_shell },
             "agents": agent_preferences::values(),
             "claude": {
-                "shim_inject": self.set_shim_inject,
                 "accounts": claude_rows,
                 "account": self.set_claude_account,
                 // 폰·다른 기기의 기기 목록 재료 — 공통 선택을 못 따라간 사유와 다시 로그인할 슬롯.
@@ -2949,14 +2937,6 @@ impl App {
                         _ => None,
                     },
                 })),
-                "model": self.set_claude_model,
-                // 폰 설정창이 고정 넷 대신 이 목록을 그린다 — 데스크톱의 Claude CLI 가 아는 모델이다.
-                "model_choices": kasa_agents::claude_models::setting_choices(&self.set_claude_model)
-                    .into_iter()
-                    .map(|m| serde_json::json!({ "value": m.value, "label": m.label }))
-                    .collect::<Vec<_>>(),
-                "effort": self.set_claude_effort,
-                "extra": self.set_claude_extra,
             },
             "feedback": {
                 "diag": diag_line(),

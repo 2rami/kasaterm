@@ -4326,14 +4326,16 @@ enum UserEvent {
         surface_id: String,
         reason: String,
     },
-    /// 사용량 폴러가 "지금 계정이 임계를 넘었고, 갈 만한 다른 계정이 있다"고
-    /// 판정했다. 실제 전환은 GUI 스레드 몫이다 — `settings_save` 가 shim 을 다시
+    /// 사용량 폴러가 "지금 계정이 임계를 넘었거나 위 차례 계정에 여유가 돌아왔고, 갈 만한
+    /// 계정이 있다"고 판정했다. 실제 전환은 GUI 스레드 몫이다 — `settings_save` 가 shim 을 다시
     /// 깔아야 이미 열려 있는 pane 도 다음 claude 부터 새 계정으로 뜬다.
     ClaudeAccountAutoswitch {
         from: String,
         to: String,
         pct: f32,
         label: String,
+        /// 한도가 아니라 위 차례 계정에 여유가 돌아와 옮긴다.
+        back: bool,
         /// 판단을 시작할 때의 계정 선택 세대 — 그 사이 계정이 바뀌었으면 이 판단은 낡았다.
         generation: u64,
     },
@@ -4788,8 +4790,6 @@ pub(crate) enum SettingsInput {
     FileOpenCmd,
     /// 직접 적는 기본 셸 경로.
     Shell,
-    /// Claude 실행에 붙일 자유 인자.
-    ClaudeExtra,
     /// 캐릭터 상세 화면의 이름 칸. 어느 캐릭터인지는 `App.students_selected` 가
     /// 들고 있다 — 상세는 한 번에 한 명뿐이라 여기 실을 것이 없다.
     StudentName,
@@ -4933,11 +4933,10 @@ pub(crate) enum SettingsAction {
     MouseCursor(&'static str),
     /// 떠 있는 pane 보호·확인 카드를 포함한 계정 전환. 빈 id는 기본 로그인.
     SwitchAccount(AccountProvider, String),
+    /// 계정 차례를 한 칸 옮긴다(음수가 위). 자동 전환과 새 작업이 이 차례로 계정을 고른다.
+    MoveAccount(AccountProvider, String, i8),
     ToggleClaudePersona,
     ToggleCharacterAppearance,
-    ToggleShimInject,
-    ClaudeModel(String),
-    ClaudeEffort(String),
     /// 계정 추가 — 저장소 dir 을 만들고 그 dir 을 물린 로그인 CLI 를 **터미널 없이**
     /// 돌린다. 브라우저 승인만 사람이 하고, 결과는 설정 화면 그 자리에 뜬다.
     AddClaudeAccount,
@@ -5957,22 +5956,14 @@ struct App {
     /// 쓰는 사람이 설정에서 올린다 — 둘이 같은 델타로 와 자동 구분이 안 된다.
     set_wheel_pixel_gain: f32,
     set_status_h: f32,
-    /// Per-pane claude wrapper injection (the shim reads these): persona on/off,
-    /// model/effort overrides, and free-form extra args. Invariants
-    /// (session-id/settings/task-list) stay hardcoded and are never exposed here.
+    /// 새 claude 에 캐릭터 말투를 넣을지 — shim 이 읽는다.
     set_claude_persona: bool,
-    set_shim_inject: bool,
     /// 팔레트 hex 편집 버퍼 — 포커스된 칸 하나가 쓴다. custom_theme 에는
     /// 완성된(파싱되는) 값만 나가므로, 타이핑 중의 반쪽 값은 여기서만 산다.
     set_palette_edit: String,
     /// 색 선택기의 HSV 상태. RGB 에서 매번 역산하면 s=0·v=0 에서 색상(H)이
     /// 소실돼 핸들이 튄다 — 포커스 때 한 번 역산해 시드하고 이후는 이게 정본.
     set_picker_hsv: (f32, f32, f32),
-    /// 색 선택기 드래그 중인 면(액션)과 그 히트 rect(x,y,w,h). 커서가 rect
-    /// 밖으로 나가도 클램프해 계속 따라오게, press 때 잡아 release 때 놓는다.
-    set_claude_model: String,
-    set_claude_effort: String,
-    set_claude_extra: String,
     /// 전환 가능한 Claude 로그인 목록과 활성 계정 id(`""` = 기본 로그인). 설정
     /// 스냅샷이 프레임마다 만들어지므로 파일을 그때 읽지 않고 여기 들고 있는다.
     set_claude_accounts: Vec<socket::ClaudeAccount>,
@@ -6552,12 +6543,8 @@ impl App {
             set_wheel_pixel_gain: socket::read_wheel_pixel_gain(),
             set_status_h: socket::read_status_h(),
             set_claude_persona: socket::read_claude_persona(),
-            set_shim_inject: socket::read_shim_inject(),
             set_palette_edit: String::new(),
             set_picker_hsv: (0.0, 0.0, 0.0),
-            set_claude_model: socket::read_claude_model(),
-            set_claude_effort: socket::read_claude_effort(),
-            set_claude_extra: socket::read_claude_extra(),
             set_claude_accounts: socket::read_claude_accounts(),
             set_claude_account: socket::read_claude_account(),
             set_codex_accounts: socket::read_codex_accounts(),
