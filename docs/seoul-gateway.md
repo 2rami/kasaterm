@@ -223,6 +223,15 @@ x86_64-unknown-linux-gnu.2.36`(도커 빌드와 같은 glibc 기준)으로 지�
 (옆에 `.info`). 되돌리기는 그 파일을 제자리로 놓고 `sudo systemctl restart kasa-relay`(옛 관문은 그 키를 모를 뿐, 기기는 키를 빼고
 다시 보낸다). 확인: `/relay/health` 200, 무토큰 whoami·connections·account-sync 401(전후 같음), 2R4MI·맥북 재접속, 관문 기록 오류 0.
 
+## 로그인 금고 교체 기록 (2026-11-16)
+
+bd51029b 관문으로 교체(18:09:35, sha256 902a0ee6…, `/relay/login-vault` 와 「로그인 금고」 승인 종류). env 변경 없음.
+도커 엔진이 여전히 응답하지 않아 위와 같은 `cargo zigbuild` 로 지었다(서버 glibc 2.39). 교체 전 백업
+`/usr/local/bin/kasa-relay.bak-20261116b`(=4933d7dc…, 옆에 `.info`). 되돌리기는 그 파일을 제자리로 놓고
+`sudo systemctl restart kasa-relay`. 확인: `/relay/login-vault` 무토큰 404 → 401, `/relay/health` 200, 무토큰 whoami·connections
+401(전후 같음), 데스크톱 넷 재접속, 교체 뒤 관문 기록 error·panic 0. 같은 때 폰 Ad Hoc 1.0.0(2611161806)을 올려 서울 `latest` 도 그 판이다.
+⚠️ `kasa-relay --help` 는 도움말이 아니라 기본값으로 켜지려 한다 — 서버에서 바이너리가 뜨는지만 보려다 「Address already in use」로 끝났다.
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서
