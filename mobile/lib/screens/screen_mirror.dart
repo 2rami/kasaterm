@@ -186,7 +186,7 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
               isSelected: _control,
               icon: const Icon(Icons.touch_app_outlined),
               selectedIcon: const Icon(Icons.touch_app),
-              onPressed: _session.image == null
+              onPressed: !_session.hasPicture
                   ? null
                   : () => setState(() {
                       _control = !_control;
@@ -220,7 +220,7 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
         body: Column(
           children: [
             Expanded(child: _body(theme)),
-            if (_control && _session.image != null) ...[
+            if (_control && _session.hasPicture) ...[
               KeyRow(
                 keys: [
                   KeyChip(
@@ -268,9 +268,9 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
   );
 
   Widget _body(ThemeData theme) {
-    final image = _session.image;
+    final size = _session.pictureSize;
     final note = _session.note;
-    if (image == null) {
+    if (size == null || !_session.hasPicture) {
       final Widget center = _session.state == ScreenState.denied
           ? TwinsNotice(text: _deniedText(_session.denied))
           : const TwinsLoading(label: '화면을 받는 중', size: Look.twinsSmall);
@@ -285,14 +285,18 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
         ],
       );
     }
-    final picture = RawImage(
-      image: image,
-      fit: BoxFit.fill,
-      filterQuality: FilterQuality.medium,
-    );
+    // 영상 방식이면 네이티브가 푼 장을 텍스처로(`docs/screen-stream.md` S2), 아니면 JPEG 를 그림으로.
+    final textureId = _session.textureId;
+    final Widget picture = _session.videoMode && textureId != null
+        ? Texture(textureId: textureId, filterQuality: FilterQuality.medium)
+        : RawImage(
+            image: _session.image,
+            fit: BoxFit.fill,
+            filterQuality: FilterQuality.medium,
+          );
     final stage = Center(
       child: AspectRatio(
-        aspectRatio: image.width / image.height,
+        aspectRatio: size.width / size.height,
         child: _control ? _controlSurface(picture) : picture,
       ),
     );

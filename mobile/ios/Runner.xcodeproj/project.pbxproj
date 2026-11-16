@@ -20,6 +20,7 @@
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		AADB89CBB24F47A5137DA140 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4CC55647F756928B7972891 /* NotificationService.swift */; };
+		E800B8787CAD0FEB30F72E11 /* ScreenVideo.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD5EC046A20D7837497821AB /* ScreenVideo.swift */; };
 		EF28C067A29A22F9C86E33C1 /* kasa-wait.caf in Resources */ = {isa = PBXBuildFile; fileRef = EA70A8B92ADE1D2BA55F4F5C /* kasa-wait.caf */; };
 		EF70F6E5783E036222F2845F /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DBCC5A8255836C9F22DBDDB0 /* Pods_RunnerTests.framework */; };
 /* End PBXBuildFile section */
@@ -97,6 +98,7 @@
 		DBCC5A8255836C9F22DBDDB0 /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		DD6B2F9E84ACA49E2B96B025 /* Pods-Runner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"; sourceTree = "<group>"; };
 		EA70A8B92ADE1D2BA55F4F5C /* kasa-wait.caf */ = {isa = PBXFileReference; includeInIndex = 1; path = "kasa-wait.caf"; sourceTree = "<group>"; };
+		FD5EC046A20D7837497821AB /* ScreenVideo.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScreenVideo.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -216,6 +218,7 @@
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 				5043C05C396A01A5B977C6CF /* Sounds */,
+				FD5EC046A20D7837497821AB /* ScreenVideo.swift */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -488,6 +491,7 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
+				E800B8787CAD0FEB30F72E11 /* ScreenVideo.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

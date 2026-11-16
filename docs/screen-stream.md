@@ -230,3 +230,36 @@ screen-stream view <ADDR> --key PATH [--secs N] [--codec hevc|h264] [--mbps N] [
 - 실측(격리 앱 둘, release, 3024×1964, 검증 스크롤 300줄/장): GPU 올리기 장마다 **0.10–0.15ms**(CPU 복사 2.1–3.4ms), 60–61fps·
   화면→풀림 21–23ms 그대로, GUI 가 초당 약 60장. 색·글자는 원본대로 나왔다(창 캡처로 확인).
 
+## S2 — 폰에서 보기 (2026-11-16)
+
+### 길
+
+- 폰은 이미 `/screen/ws` 로 JPEG 거울을 본다(직통이면 카사넷 포워드, 아니면 관문). 그 소켓에 **영상 방식**을 더했다 —
+  `?codec=hevc&scale=0.667&mbps=15&fps=60` 을 실으면 데스크탑이 S1 과 같은 압축 세션(`screen_stream::Capture`)을 열고 장을 웹소켓
+  바이너리 `'F'` 틀로 보낸다(`screen_stream::serve_ws`). 못 보낸 장이 쌓이면 버리고 키프레임부터 — 카사넷 장과 같은 규칙.
+- 폰은 **카사넷 직통일 때만** 청한다(관문으로는 30Mbps 를 못 싣는다). 실제 소켓 주소로 가른다 — 앱이 돌아오면 늘 관문부터 붙어서
+  「관문 깃발」로 가르면 직통이 서도 JPEG 에 머문다(시뮬레이터에서 걸렸다). 옛 판 데스크탑은 `codec` 을 모른 척 JPEG 를 보내고, 폰은
+  `hello` 에 `codec` 이 없으니 JPEG 로 본다.
+- 폰 화면보다 넉넉하게 2/3 크기(3024 폭 → 2018)·15Mbps 로 받는다 — 8배까지 키워 봐도 글자가 무르지 않고 셀룰러 직통에도 싣는다.
+
+### 폰
+
+- `lib/screen_video.dart` — `ScreenVideoSink`(실제는 iOS 네이티브, 시험은 가짜)와 장 머리 읽기. `screen_session.dart` 는 `hello` 의
+  `codec` 으로 영상 방식에 들어가 받은 차례대로 장을 넘기고 크기·상태가 바뀔 때만 알린다(텍스처는 네이티브가 새 장마다 갱신한다).
+  ack 는 없다. 화면은 `Texture(textureId)` — 확대·조작은 JPEG 와 같은 비율 상자 위에서 그대로 돈다.
+- `ios/Runner/ScreenVideo.swift` — `FlutterTexture` + `VTDecompressionSession`(BGRA·IOSurface·Metal 호환 출력). 파라미터 셋이 셋이면
+  HEVC, 둘이면 H.264. 풀기는 전용 큐에서. 장은 `BasicMessageChannel`(바이너리) 하나로 받는다 — 앞 8바이트가 텍스처 번호.
+- **새 연결(리셋)은 장 채널 안의 `R` 한 바이트로** 보낸다. 메서드 채널로 따로 보내면 장과 차례가 엇갈려 첫 키프레임을 버린 채 기다릴
+  수 있다. 키프레임을 기다리는 동안 일반 장이 오면 0.5초에 한 번 다시 청한다.
+- 시뮬레이터·같은 맥 리그처럼 직통이 아닌 길에서 영상을 보려면 `--dart-define=KASA_SCREEN_VIDEO=always`.
+
+### 검증
+
+- 서버 시험(`kasa-remote screen_stream::tests::ws`) — 영상 소켓이 `hello`(codec·장 크기)를 먼저, 키프레임부터 순서대로 장을 보내고,
+  `keyframe` 청·조작(`t:"input"` 사정)·닫으면 뜨기 멈춤·떠날 때 단추 떼기 / 압축 못 하는 판·권한 없음은 `denied`.
+- 폰 시험(`test/screen_session_test.dart`) — 직통이면 `codec=hevc`·60fps 를 청하고, 장을 순서대로 넘기고 ack 를 안 보내며, 네이티브의
+  키프레임 청을 그 기기로 / 옛 판은 JPEG 로 물러난다 / 텍스처가 없거나 관문이면 영상을 청하지 않는다.
+- 시뮬레이터(아이폰, 디버그) — 검증 스크롤을 켠 원본 리그를 `KASA_ROOT` 로 두고 「PC 화면 조작」을 열자 상태줄 **60–61fps** 로
+  영상이 텍스처에 그려졌다. 리그 소켓을 직접 열어 보면 `hello codec=hevc 2018×1310`, 3초에 180장·키프레임 1장.
+- 남은 것: 실기(아이폰)의 셀룰러·Wi-Fi 직통 실측과 Ad Hoc 판. 안드로이드 풀기(MediaCodec)는 아직 없다 — 안드로이드는 JPEG 그대로.
+

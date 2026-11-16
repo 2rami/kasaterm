@@ -33,6 +33,10 @@ PC 웹 칸 /m/<기기>/screen ──(이 기기 HTTP → 그 기기 길)──�
 
 ### `GET /screen/ws?display=&w=&h=&q=&fps=`
 
+`codec=hevc|h264`(+ `scale`·`mbps`·`fps`)를 실으면 이 판이 화면을 압축할 수 있을 때 **영상 방식**으로 답한다 — `hello` 에 `codec`·`info`
+(장 크기 등)가 실리고, 바이너리는 아래 JPEG 틀 대신 `'F'` 영상 장(`docs/screen-stream.md` S2), ack 는 없고 보는 쪽은 풀기에 실패하면
+`{"t":"keyframe"}` 을 보낸다. 조작·`denied`·`input` 은 같다. 압축 못 하는 판·옛 판은 `codec` 을 모른 척하고 JPEG 로 답한다.
+
 - 주인만(`guest_denied` — 화면에는 메일·비밀번호 창까지 보인다). 남의 Origin 은 거절(`ws_origin_ok`).
 - 보는 사람이 있는 동안 그 기기 화면을 켜 둔다(`Source::keep_awake`, macOS 는 `IOPMAssertionDeclareUserActivity` — 사람이
   만진 것처럼 화면을 깨우고 잠들기 시계를 되감는다). 붙자마자 먼저 깨우고, 깨운 화면이 켜진 화면 목록에 잡힐 때까지 최대 3초

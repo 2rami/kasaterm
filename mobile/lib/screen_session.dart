@@ -9,6 +9,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'network_watch.dart';
+import 'screen_video.dart';
 import 'server.dart';
 import 'term_socket.dart';
 
@@ -54,24 +55,50 @@ class ScreenDisplay {
   return b.length < end ? null : (head.getUint32(0), end);
 }
 
+/// 시뮬레이터·같은 맥 리그처럼 직통이 아닌 길에서도 영상으로 받아 볼 때 — `--dart-define=KASA_SCREEN_VIDEO=always`.
+const _videoAlways = String.fromEnvironment('KASA_SCREEN_VIDEO') == 'always';
+
 /// 기기 화면 하나와의 소켓 — JPEG 프레임을 [image] 로 풀고, 다 푼 뒤에 ack 한다.
 /// ack 가 서버의 보낼 몫을 채워 주므로 폰이 그릴 수 있는 만큼만 온다(`docs/screen-mirror.md`).
+///
+/// 카사넷 직통이고 이 폰이 영상을 풀 수 있으면 하드웨어 영상 장(`codec=hevc`)을 청한다(`docs/screen-stream.md` S2). 그 기기가
+/// 영상 방식을 아는 판이면 `hello` 에 `codec` 이 실려 오고, 장은 [video] 가 풀어 [textureId] 텍스처로 낸다. 모르는 판이면 그대로
+/// JPEG 가 온다.
 class ScreenSession extends ChangeNotifier {
   ScreenSession(
     this.server, {
     this.machine,
     this.ping = const Duration(seconds: 15),
     this.connectWait = const Duration(seconds: 10),
-  }) {
+    ScreenVideoSink? video,
+    bool Function(bool direct)? wantVideo,
+  }) : video = video ?? (NativeScreenVideo.supported ? NativeScreenVideo() : null),
+       _wantVideo = wantVideo ?? ((direct) => direct || _videoAlways) {
     server.addCloseListener(_serverClosed);
     server.routeChanges?.addListener(_routeChanged);
     NetworkWatch.instance.addListener(networkChanged);
+    final v = this.video;
+    if (v != null) {
+      v.onNeedKeyframe = () => _sendJson({'t': 'keyframe'});
+      unawaited(v.create().then(_textureReady));
+    }
   }
 
   final Server server;
   final String? machine;
   final Duration ping;
   final Duration connectWait;
+  final ScreenVideoSink? video;
+  final bool Function(bool direct) _wantVideo;
+
+  /// 영상 장을 그리는 텍스처 — 이 폰이 영상을 못 풀면 null.
+  int? textureId;
+
+  /// 지금 소켓이 영상 방식인가(그 기기가 `hello` 에 `codec` 을 실었다).
+  bool videoMode = false;
+
+  /// 마지막 영상 장의 픽셀 크기.
+  Size? videoSize;
 
   ScreenState state = ScreenState.connecting;
 
@@ -117,7 +144,18 @@ class ScreenSession extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  /// 직통이면 크게, 관문이면 작게 — 관문은 큰 프레임 하나가 그 기기의 업링크를 붙든다.
+  void _textureReady(int? id) {
+    if (_disposed) {
+      video?.dispose();
+      return;
+    }
+    textureId = id;
+    // 텍스처가 서기 전에 JPEG 로 붙었으면 영상으로 다시 붙는다.
+    if (id != null && _channel != null && !videoMode && _wantVideo(_direct)) connect();
+  }
+
+  /// 직통이면 크게, 관문이면 작게 — 관문은 큰 프레임 하나가 그 기기의 업링크를 붙든다. 직통이면 영상도 청한다 — 화면 크기의
+  /// 2/3(레티나 3024 폭이면 2016)·15Mbps·60fps. 폰 화면보다 넉넉해 키워 봐도 글자가 무르지 않다.
   Uri _wsUri({bool gateway = false}) {
     Uri at(Map<String, String> query) => server.wsUri(
       'screen/ws',
@@ -127,12 +165,15 @@ class ScreenSession extends ChangeNotifier {
     );
     final direct = server.isDirect(at(const {}).replace(scheme: 'http'));
     final (edge, quality) = direct ? (1920, 60) : (1280, 50);
+    // 관문 길 여부는 실제 주소로 가른다 — 앱이 돌아오면 늘 관문부터 붙어서 관문 깃발로 보면 직통이 서도 JPEG 에 머문다.
+    final wantVideo = textureId != null && _wantVideo(direct);
     return at({
       'w': '$edge',
       'h': '$edge',
       'q': '$quality',
-      'fps': '8',
+      'fps': wantVideo ? '60' : '8',
       if (display != null) 'display': '$display',
+      if (wantVideo) ...{'codec': 'hevc', 'scale': '0.667', 'mbps': '15'},
     });
   }
 
@@ -201,11 +242,44 @@ class ScreenSession extends ChangeNotifier {
   void _onData(Object? data) {
     if (data is String) {
       _control(data);
-    } else if (data is Uint8List) {
-      unawaited(_frame(data));
-    } else if (data is List<int>) {
-      unawaited(_frame(Uint8List.fromList(data)));
+      return;
     }
+    final bytes = data is Uint8List
+        ? data
+        : data is List<int>
+        ? Uint8List.fromList(data)
+        : null;
+    if (bytes == null) return;
+    if (videoMode) {
+      _videoFrame(bytes);
+    } else {
+      unawaited(_frame(bytes));
+    }
+  }
+
+  /// 영상 장은 앞 장을 참조해 순서대로 풀어야 한다 — 받은 차례 그대로 [video] 에 넘긴다. ack 는 없다(그 기기는 못 보낸 장이
+  /// 쌓이면 버리고 키프레임부터 다시 보낸다). 텍스처는 네이티브가 새 장마다 갱신하므로 크기·상태가 바뀔 때만 알린다.
+  void _videoFrame(Uint8List bytes) {
+    final head = screenVideoHead(bytes);
+    if (head == null) return;
+    video?.push(bytes);
+    _shownAt.add(_clock.elapsedMilliseconds);
+    final size = Size(head.width.toDouble(), head.height.toDouble());
+    if (size == videoSize && state == ScreenState.live) return;
+    videoSize = size;
+    denied = null;
+    state = ScreenState.live;
+    notifyListeners();
+  }
+
+  /// 그릴 장이 있나 — JPEG 면 [image], 영상이면 첫 장을 받았나.
+  bool get hasPicture => videoMode ? videoSize != null : image != null;
+
+  /// 그릴 장의 픽셀 크기 — 비율 맞춤에 쓴다.
+  Size? get pictureSize {
+    if (videoMode) return videoSize;
+    final i = image;
+    return i == null ? null : Size(i.width.toDouble(), i.height.toDouble());
   }
 
   void _control(String raw) {
@@ -227,6 +301,8 @@ class ScreenSession extends ChangeNotifier {
             ? list.map(ScreenDisplay.parse).whereType<ScreenDisplay>().toList()
             : const [];
         display = (m['display'] as num?)?.toInt() ?? display;
+        videoMode = m['codec'] is String && textureId != null;
+        if (videoMode) video?.reset();
         if (state != ScreenState.live) state = ScreenState.connecting;
       case 'denied':
         denied = m['reason'] as String? ?? 'unavailable';
@@ -292,10 +368,7 @@ class ScreenSession extends ChangeNotifier {
         return Size(d.width.toDouble(), d.height.toDouble());
       }
     }
-    final i = image;
-    return i == null
-        ? const Size(1, 1)
-        : Size(i.width.toDouble(), i.height.toDouble());
+    return pictureSize ?? const Size(1, 1);
   }
 
   /// 단추 상태(1 왼쪽·2 오른쪽)를 통째로 — 서버가 앞 상태와 견줘 누름·뗌을 가른다.
@@ -399,6 +472,7 @@ class ScreenSession extends ChangeNotifier {
     _closeChannel();
     image?.dispose();
     image = null;
+    video?.dispose();
     super.dispose();
   }
 }

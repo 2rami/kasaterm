@@ -16,6 +16,7 @@ import os
   private let filePreview = ResultFilePreview()
   private var channel: FlutterMethodChannel?
   private var a11yChannel: FlutterMethodChannel?
+  private var screenVideo: ScreenVideoPlugin?
   private var pendingTap: [String: Any]?
   private var lastToken: String?
   private var pushEnabled = UserDefaults.standard.bool(forKey: "kasaLegacyPushEnabled")
@@ -54,6 +55,9 @@ import os
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "ScreenVideo") {
+      screenVideo = ScreenVideoPlugin(registrar: registrar)
+    }
     let messenger = engineBridge.applicationRegistrar.messenger()
     let files = FlutterMethodChannel(name: "kasaterm/file_preview", binaryMessenger: messenger)
     files.setMethodCallHandler { [weak self] call, result in

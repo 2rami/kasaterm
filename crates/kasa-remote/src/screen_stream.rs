@@ -65,7 +65,7 @@ impl Config {
     }
 
     /// 범위 밖 값은 끝으로 붙인다 — 보는 쪽이 보낸 값이라 그대로 믿지 않는다.
-    fn from_json(v: &Value) -> Self {
+    pub fn from_json(v: &Value) -> Self {
         let d = Self::default();
         Self {
             codec: match v.get("codec").and_then(Value::as_str) {
@@ -185,6 +185,11 @@ pub trait Session: Send {
 }
 
 static CAPTURE: OnceLock<Arc<dyn Capture>> = OnceLock::new();
+
+/// 이 판이 화면을 압축해 보낼 수 있나 — 화면 거울 소켓의 영상 방식을 받을지 가른다.
+pub fn installed() -> bool {
+    CAPTURE.get().is_some()
+}
 
 /// 앱이 부팅 때 한 번 — 카사넷 화면 입구도 함께 연다.
 pub fn install(capture: Arc<dyn Capture>) {
@@ -318,7 +323,7 @@ struct Inputs {
     /// 지금 눌린 단추(1 왼쪽·2 오른쪽·4 가운데). 다음 누름과 견줘 누름·뗌·끌기를 가른다.
     buttons: u8,
     last_at: (f64, f64),
-    /// 마지막으로 알린 사정. 바뀔 때만 다시 알린다.
+    /// 마지막으로 알린 사정. 바뀔 때만 다시 알린다. 화면 거울 소켓은 같은 말에 `t:"input"` 을 붙인다.
     told: Option<Option<Denied>>,
     asked: bool,
 }
@@ -359,6 +364,104 @@ impl Inputs {
         let _ = tokio::task::spawn_blocking(move || c.input(display, &up)).await;
         self.buttons = 0;
     }
+}
+
+/// 화면 거울 소켓의 영상 방식(`/screen/ws?codec=hevc`, `docs/screen-stream.md` S2) — 폰이 카사넷 직통일 때 JPEG 대신 받는다.
+/// 첫 말은 화면 거울과 같은 `hello` 에 `codec`·장 크기를 더한 것, 장은 바이너리 `'F'` 틀(카사넷 장과 같다). 보는 쪽은
+/// `{"t":"keyframe"}` 과 화면 거울 조작 JSON 을 보낸다. 사정은 화면 거울처럼 `{"t":"denied"}`·`{"t":"input"}`.
+pub async fn serve_ws(socket: axum::extract::ws::WebSocket, config: Config) {
+    serve_ws_with(socket, CAPTURE.get().cloned(), config).await;
+}
+
+pub(crate) async fn serve_ws_with(socket: axum::extract::ws::WebSocket, capture: Option<Arc<dyn Capture>>, config: Config) {
+    use axum::extract::ws::Message;
+    use futures_util::{SinkExt, StreamExt};
+    let text = |v: Value| Message::Text(v.to_string().into());
+    let (mut tx, mut rx) = socket.split();
+    let Some(capture) = capture else {
+        let _ = tx.send(text(json!({ "t": "denied", "reason": "unavailable" }))).await;
+        let _ = tx.close().await;
+        return;
+    };
+    let (frames_tx, mut frames) = mpsc::unbounded_channel::<Frame>();
+    let started = {
+        let (capture, config) = (capture.clone(), config.clone());
+        tokio::task::spawn_blocking(move || capture.start(&config, Box::new(move |f| drop(frames_tx.send(f))))).await
+    };
+    let session = match started {
+        Ok(Ok(s)) => s,
+        Ok(Err(denied)) => {
+            if denied == Denied::Permission {
+                let c = capture.clone();
+                let _ = tokio::task::spawn_blocking(move || c.request_permission()).await;
+            }
+            let reason = if denied == Denied::Permission { "permission" } else { "unavailable" };
+            let _ = tx.send(text(json!({ "t": "denied", "reason": reason }))).await;
+            let _ = tx.close().await;
+            return;
+        }
+        Err(_) => return,
+    };
+    let info = session.info();
+    let display = session.display();
+    let (w, h) = (info.get("width").cloned().unwrap_or(Value::Null), info.get("height").cloned().unwrap_or(Value::Null));
+    let hello = json!({
+        "t": "hello", "codec": config.codec, "info": info, "display": display,
+        "displays": [{ "id": display, "width": w, "height": h, "main": true }],
+    });
+    if tx.send(text(hello)).await.is_err() {
+        return;
+    }
+    let mut input = Inputs::default();
+    let mut waiting_key = false;
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(20), Duration::from_secs(20));
+    loop {
+        tokio::select! {
+            frame = frames.recv() => {
+                let Some(frame) = frame else { break };
+                // 보내지 못한 장이 쌓이면 다 버리고 키프레임부터 — 카사넷 장과 같은 규칙.
+                if frames.len() >= BACKLOG_MAX {
+                    while frames.try_recv().is_ok() {}
+                    session.keyframe();
+                    waiting_key = true;
+                    continue;
+                }
+                if waiting_key && !frame.key {
+                    continue;
+                }
+                waiting_key = false;
+                if tx.send(Message::Binary(frame.encode().into())).await.is_err() {
+                    break;
+                }
+            }
+            msg = rx.next() => {
+                let raw = match msg {
+                    Some(Ok(Message::Text(t))) => t,
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => continue,
+                };
+                if serde_json::from_str::<Value>(raw.as_str()).ok().and_then(|v| v.get("t")?.as_str().map(str::to_string)).as_deref() == Some("keyframe") {
+                    session.keyframe();
+                    continue;
+                }
+                let Some(event) = crate::screen_mirror::input_of(raw.as_str()) else { continue };
+                if let Some(mut told) = input.put(&capture, display, event).await {
+                    told["t"] = json!("input");
+                    if tx.send(text(told)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            _ = ping.tick() => {
+                if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    input.release(&capture, display).await;
+    let _ = tokio::task::spawn_blocking(move || drop(session)).await;
+    let _ = tx.close().await;
 }
 
 /// 장마다 단방향 스트림. 보내지 못한 장이 쌓이면 다 버리고 키프레임부터 다시 — 압축은 앞 장을 참조해 장을 골라
