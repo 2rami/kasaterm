@@ -36,6 +36,7 @@ members = [
     "spikes/warpui-term",
     "spikes/winit-ime-test",
     "spikes/p3-poc",
+    "spikes/screen-stream",
 ]
 default-members = [
     "app/kasaterm",
