@@ -34,8 +34,8 @@ type ClaudeObservations = HashMap<String, (Option<crate::UsageBadge>, &'static s
 /// ⋮ 메뉴 칸에 올리면 뜨는 이름. `chat_on` 은 대화 보기가 켜졌나.
 fn handle_menu_tip(action: ActionKind, chat_on: bool) -> &'static str {
     match action {
-        ActionKind::ChatView if chat_on => "터미널로 보기",
-        ActionKind::ChatView => "대화로 보기",
+        ActionKind::ChatView if chat_on => "풀스크린으로 보기",
+        ActionKind::ChatView => "그려서 보기",
         ActionKind::NewTab => if cfg!(windows) { "셸 선택 · 새 탭" } else { "새 탭" },
         ActionKind::SplitH => "좌우로 나누기",
         ActionKind::SplitV => "위아래로 나누기",
@@ -4507,7 +4507,7 @@ impl App {
                             .and_then(|(_, view)| *view);
                         let can_chat = view.is_some();
                         let view = view.unwrap_or(false);
-                        let chat_icon = if view { "terminal" } else { "message-circle" };
+                        let chat_icon = if view { "fullscreen" } else { "paintbrush" };
                         let hdr_icon = if hdr_vis {
                             "panel-top"
                         } else {

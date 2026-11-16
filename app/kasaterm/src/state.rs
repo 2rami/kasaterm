@@ -763,7 +763,7 @@ pub(crate) enum PaneMenuItem {
     Focus,
     /// 크게 보기 토글.
     Zoom,
-    /// 대화로 보기 ↔ 터미널로 보기(학생 pane 만, chat_view.rs).
+    /// 그려서 보기 ↔ 풀스크린으로 보기(학생 pane 만, chat_view.rs).
     ChatView,
     /// pane 닫기 — 되살리기(⌘⇧T)로 되돌릴 수 있다.
     Close,

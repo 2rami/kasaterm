@@ -1,10 +1,10 @@
-//! 학생 칸을 대화로 보기(PC) — 터미널 칸과 같은 격자·같은 글꼴로, 대화는 그 칸의 기록(jsonl·rollout)을
+//! 학생 칸을 그려서 보기(PC, ⋮ 반대편은 「풀스크린으로 보기」) — 터미널 칸과 같은 격자·같은 글꼴로, 대화는 그 칸의 기록(jsonl·rollout)을
 //! claude classic 화면 꼴(`classic.rs`)로 칸 폭에 다시 늘어놓고, 입력칸·상태줄·스피너·선택지 창은 진짜
 //! 화면 바닥을 그대로 옮겨 붙인다. 그래서 치는 것·한글 조합·`/` 명령·승인 답은 터미널과 똑같이 학생
 //! TUI 로 가고, 이 보기가 바꾸는 것은 위쪽 대화 줄뿐이다.
 //!
 //! 기록에서 그리는 까닭: 풀스크린 claude 는 지난 대화를 앱 안에만 두고 `--resume` 뒤엔 압축 경계 앞을
-//! 아예 안 보이며, 거울은 원본 칸 크기를 못 바꾼다. 기록은 처음부터 다 있고 어느 폭으로든 다시 접힌다.
+//! 아예 안 보이며, 거울에서 굴리면 원본 화면까지 같이 구른다. 기록은 처음부터 다 있고 어느 폭으로든 다시 접힌다.
 //! 바닥 영역을 못 찾는 화면(`/config` 같은 판)이나 화면 대부분을 차지하는 창은 그동안 진짜 터미널을 보인다.
 
 use super::*;
@@ -53,6 +53,8 @@ enum AutoStep {
 pub(crate) struct ChatViews {
     /// 대화로 보는 pane(바깥 pane id). 없으면 터미널이다. pane 마다 따로 기억한다.
     panes: HashMap<String, ChatPane>,
+    /// 사람이 풀스크린으로 돌려 둔 거울 칸 — 처음 얼굴(`mirror_render`)이 다시 그리지 않는다.
+    declined: HashSet<String>,
     /// 이번 프레임에 실제로 대화로 그린 pane. 휠·누름·선택 복사는 이것만 본다 — 판이 떠 진짜 터미널을
     /// 보인 프레임이면 비어 있어 손이 그대로 터미널로 간다.
     drawn: RefCell<HashMap<String, Drawn>>,
@@ -414,12 +416,23 @@ impl App {
     pub(crate) fn toggle_chat_view(&mut self, id: &str) {
         if self.chat_view.panes.remove(id).is_some() {
             self.chat_view.drawn.borrow_mut().remove(id);
+            self.chat_view.declined.insert(id.to_string());
         } else {
+            self.chat_view.declined.remove(id);
             self.chat_view.panes.insert(id.to_string(), ChatPane::new());
             self.focus_pane(id);
         }
         self.selection = None;
         self.drag_anchor = None;
+        self.chrome_dirty = true;
+    }
+
+    /// 초점은 그대로 두고 그려서 연다 — 거울의 처음 얼굴(`mirror_render`). 풀스크린으로 돌린 칸은 안 연다.
+    pub(crate) fn open_chat_view_quietly(&mut self, id: &str) {
+        if self.chat_view.declined.contains(id) || self.chat_view.panes.contains_key(id) {
+            return;
+        }
+        self.chat_view.panes.insert(id.to_string(), ChatPane::new());
         self.chrome_dirty = true;
     }
 

@@ -63,6 +63,6 @@ Color selection starts with a continuous HSV plane, hue strip and large color pr
 
 The user explicitly chose removal of shared-folder screens and mandatory saving conventions while retaining existing files, file links and transfer between devices. PC Info shows runtime information. Mobile conversations render validated image blocks from the producing device and offer file preview from links. Agents save results in the project or an appropriate output folder, return an inline image block or file link, and use a separate image tab only when explicitly requested. Earlier shared-folder studies and placement decisions are superseded.
 
-## PC mirror terminal default — 2026-10-16
+## PC mirror drawn default — 2026-11-16
 
-The user explicitly chose the original terminal as the default for every PC mirror. Conversation reconstruction and shell command cards remain manual per-pane choices. Phone defaults are independent. This supersedes automatic conversation/shell reconstruction for desktop mirrors; geometry follows `docs/mirror-render.md`.
+Claude and Codex PC mirrors start in the drawn view (conversation rebuilt from the transcript, live bottom from the source screen), so each viewer scrolls on its own and the source PTY size is untouched. The pane menu toggle reads 「그려서 보기」 (paintbrush) and 「풀스크린으로 보기」 (fullscreen); a pane switched to fullscreen stays fullscreen. Shell mirrors stay terminal. This supersedes the 2026-10-16 terminal default; geometry follows `docs/mirror-render.md`.

@@ -1607,7 +1607,7 @@ enum ActionKind {
     /// 탭 띠 헤더 오른쪽의 ⋮ 단추 — 단추 넷을 접고 ⋮ 메뉴(`handle_menu`)를 연다.
     /// 헤더 우클릭과 같은 메뉴다.
     HandleMenu,
-    /// ⋮ 메뉴의 「대화로 보기 / 터미널로 보기」 — 학생 pane 만(chat_view.rs).
+    /// ⋮ 메뉴의 「그려서 보기 / 풀스크린으로 보기」 — 학생 pane 만(chat_view.rs).
     ChatView,
     /// 웹 pane 헤더의 브라우저 컨트롤 — 터미널 클러스터(분할·상태바) 대신
     /// 이 넷이 그려진다. 실행은 webpane::web_nav.

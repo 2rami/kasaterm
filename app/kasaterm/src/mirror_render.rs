@@ -1,7 +1,8 @@
 //! 거울 칸이 무엇이고 무엇으로 보이나 — 한 곳의 판정. 정본 규칙은 `docs/mirror-render.md`.
 //!
-//! PC 거울은 원본 TUI 격자로 시작한다. 대화 보기는 사람이 골랐을 때만 다시 짓는다(셸은 늘 원본 격자).
-//! 원본 격자를 보는 칸은 뷰어 크기로 원본 PTY 를 잡고, 안 보거나 재구성 보기를 켜면 놓는다.
+//! Claude·코덱스 거울은 그려서 보기(`chat_view`)로 시작한다 — 원본 PTY 크기를 안 건드리고, 스크롤도 이 칸
+//! 안에서만 돈다. 사람이 ⋮ 에서 풀스크린으로 돌린 칸은 칸마다 기억해 다시 그리지 않는다(셸은 늘 원본 격자).
+//! 원본 격자를 보는 칸은 뷰어 크기로 원본 PTY 를 잡고, 안 보거나 그려서 보기를 켜면 놓는다.
 use super::*;
 use std::collections::HashSet;
 
@@ -46,7 +47,7 @@ impl App {
         needs_source(self.mirror_kind(tab), self.chat_view_on(id), kasa_remote::remote::cached_agent_running(tab).is_some())
     }
 
-    /// 원본 TUI를 보는 거울만 뷰어 크기를 빌려야 원본 앱이 그 폭으로 다시 그린다.
+    /// 보이는 Claude·코덱스 거울을 그려서 열고, 원본 TUI를 보는 거울만 뷰어 크기를 빌려 원본 앱이 그 폭으로 다시 그리게 한다.
     pub(crate) fn pump_mirror_views(&mut self) {
         let now = Instant::now();
         if self.mirror_views.checked.is_some_and(|t| now.duration_since(t) < CHECK_EVERY) {
@@ -54,6 +55,19 @@ impl App {
         }
         self.mirror_views.checked = Some(now);
         let visible = self.visible_pane_ids();
+        // 같은 바퀴에서 먼저 그려서 열어야 크기 판정이 풀스크린으로 잠깐도 잡지 않는다.
+        let drawn: Vec<String> = {
+            let ws = self.ws.lock().unwrap();
+            visible
+                .iter()
+                .filter(|id| ws.panes.contains_key(*id))
+                .filter(|id| self.mirror_kind(&ws.active_tab_pid(id)) == MirrorKind::Chat && self.pane_can_chat(&ws, id))
+                .cloned()
+                .collect()
+        };
+        for id in drawn {
+            self.open_chat_view_quietly(&id);
+        }
         let (seen, want) = {
             let ws = self.ws.lock().unwrap();
             let mut seen = HashSet::new();
