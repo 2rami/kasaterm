@@ -214,6 +214,15 @@ UA 만 429, 관문은 `KASA-AgentChains/1`), 프로필 창구는 무토큰 401.
 첫 사슬은 새 앱 판(ee19de7b 이상)을 받은 기기가 맡기고, 첫 실제 갱신은 그 뒤 0~5시간 안이다 — 확인 방법은
 [agent-chains.md](agent-chains.md) 「첫 실제 갱신 확인」.
 
+## 계정 차례 공유 키 교체 기록 (2026-11-16)
+
+운영 판(b71213c9 로 추정 — 그 커밋 2분 뒤 기동, sha256 0a1c2172…)에 계정 동기화 파일 넷(`account_sync/{order,schema,choice,mod}.rs`,
+opt-in 키 `claude_account_order`)만 얹어 지은 관문으로 교체했다(15:37:18, sha256 4933d7dc…). 그 사이 main 의 다른 크레이트
+변경은 싣지 않았다. 도커 엔진이 응답하지 않아 `cargo zigbuild --release -p kasa-gateway --bin kasa-relay --target
+x86_64-unknown-linux-gnu.2.36`(도커 빌드와 같은 glibc 기준)으로 지었다. 교체 전 백업 `/usr/local/bin/kasa-relay.bak-20261116`
+(옆에 `.info`). 되돌리기는 그 파일을 제자리로 놓고 `sudo systemctl restart kasa-relay`(옛 관문은 그 키를 모를 뿐, 기기는 키를 빼고
+다시 보낸다). 확인: `/relay/health` 200, 무토큰 whoami·connections·account-sync 401(전후 같음), 2R4MI·맥북 재접속, 관문 기록 오류 0.
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서
