@@ -783,6 +783,23 @@ pub(crate) fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// Windows 도우미의 「앱이 떠 있나」 — 실행 파일 경로가 같은 프로세스 중 화면 도우미(`--screen-service`·`--screen-agent`,
+/// SYSTEM)는 뺀다. 같은 kasaterm.exe 라 경로로만 세면 관리자 권한 도우미가 늘 「다른 인스턴스」를 보고 설치·재시작을 멈췄다.
+/// 사용자 권한에서는 SYSTEM 프로세스의 경로가 비어 원래도 안 셌다.
+pub(crate) fn ps_running_fn(app_exe: &str) -> String {
+    let exe = ps_quote(app_exe);
+    let leaf = app_exe.rsplit(['\\', '/']).next().unwrap_or(app_exe);
+    // WQL 거르기는 빠르지만 이름에 따옴표 따위가 있으면 식이 깨진다 — 그때는 경로로만 고른다.
+    let filter = if !leaf.is_empty() && leaf.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' ')) {
+        format!(" -Filter \"Name='{leaf}'\"")
+    } else {
+        String::new()
+    };
+    format!(
+        "function running($skip) {{ Get-CimInstance Win32_Process{filter} -ErrorAction SilentlyContinue | Where-Object {{ $_.ProcessId -ne $skip -and $_.ExecutablePath -and $_.ExecutablePath -ieq {exe} -and $_.CommandLine -notmatch '--screen-(service|agent)' }} | Select-Object -First 1 -ExpandProperty ProcessId }}"
+    )
+}
+
 /// Windows 도우미 — sh 도우미와 같은 단계·같은 상태 줄·같은 상한, 강제 종료 없음. 옛 앱은 pid 가 아니라 프로세스 핸들로
 /// 기다린다 — 꺼진 뒤 그 pid 가 다른 프로세스에 다시 쓰이면 pid 로 재는 기다림은 상한까지 헛돈다. 앱은 실행 파일 경로가
 /// 같은 프로세스로만 센다(대소문자 무시 — Windows 경로).
@@ -791,13 +808,14 @@ pub fn helper_powershell(spec: &HelperSpec) -> Result<String> {
     ensure!(!spec.launch.is_empty(), "launch command is empty");
     let events = ps_quote(&events_path(&spec.dir, &spec.job_id).display().to_string());
     let exe = ps_quote(&spec.app_exe);
+    let running = ps_running_fn(&spec.app_exe);
     let program = ps_quote(&spec.launch[0]);
     let args = spec.launch[1..].iter().map(|a| ps_quote(a)).collect::<Vec<_>>().join(" ");
     let (pid, exit_ms, boot_ticks) = (spec.old_pid, u64::from(spec.exit_timeout_s) * 1000, spec.boot_timeout_s * 5);
     Ok(format!(
         r#"$ErrorActionPreference = 'Continue'
 function ev($state, $note) {{ [IO.File]::AppendAllText({events}, "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $state $note`n") }}
-function running($skip) {{ Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne $skip -and $_.Path -and $_.Path -ieq {exe} }} | Select-Object -First 1 -ExpandProperty Id }}
+{running}
 function cancelled {{ [bool](Get-Content -LiteralPath {events} -ErrorAction SilentlyContinue | Select-String '^[0-9]+ (failed|cancelled) ') }}
 ev 'helper_started' "pid $PID"
 try {{ $old = [Diagnostics.Process]::GetProcessById({pid}) }} catch {{ $old = $null }}
@@ -1146,6 +1164,10 @@ mod tests {
         assert!(script.contains("GetProcessById(4242)") && script.contains("WaitForExit(60000)"), "pid 재사용에 안 속게 핸들로 기다린다");
         assert!(script.contains(r"'C:\it''s\kasaterm.exe'"), "작은따옴표를 PowerShell 식으로 감싼다");
         assert!(script.contains("-gt 450"), "부팅 상한 90초 = 0.2초 × 450");
+        assert!(
+            script.contains("-Filter \"Name='kasaterm.exe'\"") && script.contains("-notmatch '--screen-(service|agent)'"),
+            "화면 도우미(SYSTEM, 같은 kasaterm.exe)를 앱으로 세지 않는다"
+        );
         assert!(script.contains("Get-Process -Name explorer") && script.contains("GetEnvironmentVariables($scope)")
                 && script.contains(r"Start-Process -FilePath 'C:\Program Files\kasaterm\bin\kasaterm.exe'"),
             "explorer 가 없는 세션에서 explorer.exe 를 부르면 그것이 셸로 선다 — 로그인 env 로 앱을 직접 띄운다");

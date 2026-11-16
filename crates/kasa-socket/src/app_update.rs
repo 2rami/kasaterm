@@ -891,7 +891,8 @@ pub fn swap_powershell(spec: &SwapSpec) -> Result<String> {
     let installer = spec.installer.as_ref().context("Windows swap needs a staged installer")?;
     ensure!(hex(&installer.sha256, 64, 64), "installer sha256 must be 64 lowercase hex");
     let events = q(&events_path(&spec.dir, &spec.job_id).display().to_string());
-    let exe = q(&format!("{}\\bin\\kasaterm.exe", spec.installed.display().to_string().trim_end_matches('\\')));
+    let app_exe = format!("{}\\bin\\kasaterm.exe", spec.installed.display().to_string().trim_end_matches('\\'));
+    let running = app_restart::ps_running_fn(&app_exe);
     let msi = installer.msi.display().to_string();
     let log = spec.dir.join(format!("{}.msi.log", spec.job_id)).display().to_string();
     let (msi_arg, log_arg) = (q(&format!("\"{msi}\"")), q(&format!("\"{log}\"")));
@@ -902,7 +903,7 @@ pub fn swap_powershell(spec: &SwapSpec) -> Result<String> {
     Ok(format!(
         r#"$ErrorActionPreference = 'Continue'
 function ev($state, $note) {{ [IO.File]::AppendAllText({events}, "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $state $note`n") }}
-function running($skip) {{ Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne $skip -and $_.Path -and $_.Path -ieq {exe} }} | Select-Object -First 1 -ExpandProperty Id }}
+{running}
 function booted {{ Select-String -LiteralPath {events} -Pattern '^[0-9]+ booted ' -Quiet }}
 function relaunch {{ try {{ & {relaunch_program} {args}; $true }} catch {{ $false }} }}
 ev 'helper_started' "pid $PID"
