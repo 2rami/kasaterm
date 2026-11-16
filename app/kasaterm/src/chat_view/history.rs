@@ -3,9 +3,10 @@
 //! 잃는다. 그래서 처음부터 읽되, 대화 칸에 안 쓰이는 무게(그림 base64·`toolUseResult` 사본·긴
 //! 도구 결과·메타 키·첨부 줄)를 걷어 가볍게 한다 — 135MB 기록이 5MB 안팎이 된다(2026-10-14 실측).
 //! 걷는 것은 `parse.rs` 가 안 읽는 것뿐이라 펴진 대화는 원본과 같다. 원본 기기의
-//! `/transcript-raw?history=1` 도 이 함수로 답해 거울도 같은 대화를 받는다.
+//! `/transcript-raw?history=1` 도 이 함수로 답해 거울도 같은 대화를 받는다. 그려서 보기는 그것을
+//! 끝 쪽부터 한 쪽씩 받는다(`page`) — 위로 올리면 그 앞 쪽을 받아 위에 붙인다.
 
-use kasa_socket::backend::TranscriptChunk;
+use kasa_socket::backend::{HistoryAsk, HistoryPage, TranscriptChunk};
 use serde_json::Value;
 
 /// 이보다 짧은 줄은 걷을 것이 없다 — 파싱 없이 그대로 둔다.
@@ -198,8 +199,7 @@ pub(crate) fn read_archive(path: &std::path::Path, offset: u64) -> std::io::Resu
 }
 
 fn read_inner(path: &std::path::Path, offset: u64, budget: Option<usize>) -> std::io::Result<TranscriptChunk> {
-    use std::io::{BufRead, BufReader, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path)?;
+    let f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
     let reset = offset == 0 || offset > len;
     let start = if reset { 0 } else { offset };
@@ -207,12 +207,19 @@ fn read_inner(path: &std::path::Path, offset: u64, budget: Option<usize>) -> std
     if start >= len {
         return Ok(TranscriptChunk { raw: String::new(), offset: len, reset, source });
     }
+    let (raw, next) = lines(f, start, u64::MAX, budget)?;
+    Ok(TranscriptChunk { raw, offset: next, reset, source })
+}
+
+/// `start` 부터 `until` 앞까지 완전한 줄을 걸러 붙인다. 반환은 (걸러 낸 줄, 다음 읽을 자리).
+fn lines(mut f: std::fs::File, start: u64, until: u64, budget: Option<usize>) -> std::io::Result<(String, u64)> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
     f.seek(SeekFrom::Start(start))?;
     let mut reader = BufReader::with_capacity(256 * 1024, f);
     let mut raw = String::new();
     let mut next = start;
     let mut buf = Vec::new();
-    loop {
+    while next < until {
         buf.clear();
         let n = if budget.is_some() {
             use std::io::Read;
@@ -239,16 +246,59 @@ fn read_inner(path: &std::path::Path, offset: u64, budget: Option<usize>) -> std
         next += n as u64;
         if budget.is_some_and(|budget| raw.len() >= budget || next - start >= (8 << 20)) { break; }
     }
-    Ok(TranscriptChunk { raw, offset: next, reset, source })
+    Ok((raw, next))
 }
 
-/// 원본이 처음 한 번에 보내는 걸러 낸 기록 전체의 상한. 원격 GET 기본(16MB)이면 긴 세션이 넘친다 — 90MB 기록이
-/// 걸러도 18MB 였고, 넘치면 그려서 보기가 빈 대화로 남았다(2026-11-16 실측).
+/// 한 쪽에 읽는 기록 파일 바이트. 걸러 내면 보통 1~2MB 라 첫 화면이 빨리 선다 — 처음부터 다 거르면 90MB 기록이
+/// 18MB 였고, 원본은 그 90MB 를 칸을 열 때마다 다시 읽었다(2026-11-16 실측).
+const PAGE_BYTES: u64 = 8 << 20;
+
+/// 그려서 보기의 쪽 받기 — 처음은 끝 쪽 한 쪽, 위로 올리면 그 앞 한 쪽, 그 사이엔 덧붙은 줄만(`read`).
+/// 칸이 다른 파일로 옮겨 갔거나 파일이 줄었으면 새 끝 쪽으로 다시 시작한다(`reset`).
+pub(crate) fn page(path: &std::path::Path, ask: &HistoryAsk) -> std::io::Result<HistoryPage> {
+    let len = std::fs::metadata(path)?.len();
+    let source = crate::socket::transcript_source(path);
+    let moved = !ask.held.is_empty() && ask.held != source;
+    match ask.before {
+        Some(before) if !moved && before > 0 && before <= len => slice(path, before, false, source),
+        _ if moved || ask.offset == 0 || ask.offset > len || ask.before.is_some() => slice(path, len, true, source),
+        _ => Ok(HistoryPage { chunk: read(path, ask.offset)?, start: None }),
+    }
+}
+
+/// `end` 앞 한 쪽 — 줄 경계에서 시작한다. 끝 쪽이면 `end` 가 파일 길이이고 쓰다 만 끝 줄은 다음 바퀴로 미룬다.
+fn slice(path: &std::path::Path, end: u64, reset: bool, source: String) -> std::io::Result<HistoryPage> {
+    let mut f = std::fs::File::open(path)?;
+    let start = line_start(&mut f, end.saturating_sub(PAGE_BYTES))?;
+    let (raw, next) = lines(f, start, end, None)?;
+    Ok(HistoryPage { chunk: TranscriptChunk { raw, offset: next, reset, source }, start: Some(start) })
+}
+
+/// `pos` 가 든 줄의 첫 자리 — 그림 한 장이 든 줄은 몇 MB 라 조각씩 거꾸로 찾는다.
+fn line_start(f: &mut std::fs::File, pos: u64) -> std::io::Result<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    const BLOCK: u64 = 64 << 10;
+    let mut buf = vec![0u8; BLOCK as usize];
+    let mut hi = pos;
+    while hi > 0 {
+        let lo = hi.saturating_sub(BLOCK);
+        let n = (hi - lo) as usize;
+        f.seek(SeekFrom::Start(lo))?;
+        f.read_exact(&mut buf[..n])?;
+        if let Some(i) = buf[..n].iter().rposition(|&b| b == b'\n') {
+            return Ok(lo + i as u64 + 1);
+        }
+        hi = lo;
+    }
+    Ok(0)
+}
+
+/// 원본이 한 번에 보내는 걸러 낸 기록의 상한. 쪽 받기는 한 쪽(1~2MB)이지만, 쪽을 모르는 옛 원본과 대화 전체를
+/// 받는 Info 목록은 처음부터 다 받는다 — 원격 GET 기본(16MB)이면 긴 세션이 넘쳐 그려서 보기가 빈 대화로 남았다(90MB 기록이 18MB).
 const REMOTE_HISTORY_MAX: usize = 96 << 20;
 
-/// 원본 기기의 `/transcript-raw` 한 조각 — 처음부터 걸러 받는다(`read`, 모르는 옛 원본은 꼬리).
-/// `source` 는 `offset` 이 가리키는 파일 — 원본 칸이 다른 파일로 옮겨 갔으면 새 파일이 `reset` 으로
-/// 온다. 묶인 기록이 없으면 None.
+/// 원본 기기의 `/transcript-raw` 한 조각 — 처음부터 다 걸러 받는다(`read`, 모르는 옛 원본은 꼬리). Info 의
+/// 내 프롬프트·결과물 목록처럼 대화 전체가 필요한 곳이 쓴다. 묶인 기록이 없으면 None.
 pub(crate) fn remote(base: &str, surface: &str, offset: u64, source: &str) -> anyhow::Result<Option<TranscriptChunk>> {
     let path = format!(
         "/transcript-raw?surface={}&offset={offset}&source={}&history=1",
@@ -259,12 +309,35 @@ pub(crate) fn remote(base: &str, surface: &str, offset: u64, source: &str) -> an
     if v["ok"].as_bool() != Some(true) {
         return Ok(None);
     }
-    Ok(Some(TranscriptChunk {
+    Ok(Some(chunk_of(&v, offset)))
+}
+
+fn chunk_of(v: &serde_json::Value, offset: u64) -> TranscriptChunk {
+    TranscriptChunk {
         raw: v["raw"].as_str().unwrap_or("").to_string(),
         offset: v["offset"].as_u64().unwrap_or(offset),
         reset: v["reset"].as_bool().unwrap_or(false),
         source: v["source"].as_str().unwrap_or("").to_string(),
-    }))
+    }
+}
+
+/// 원본 기기의 `/transcript-raw` 쪽 받기(`page`). 쪽을 모르는 옛 원본은 `page`·`before` 를 모르고 처음부터 다
+/// 보내며 `start` 가 없다 — 받는 쪽은 그것을 처음부터 다 받은 것으로 본다. 묶인 기록이 없으면 None.
+pub(crate) fn remote_page(base: &str, surface: &str, ask: &HistoryAsk) -> anyhow::Result<Option<HistoryPage>> {
+    let mut path = format!(
+        "/transcript-raw?surface={}&offset={}&source={}&history=1&page=1",
+        kasa_remote::remote::urlencode(surface),
+        ask.offset,
+        kasa_remote::remote::urlencode(&ask.held),
+    );
+    if let Some(before) = ask.before {
+        path.push_str(&format!("&before={before}"));
+    }
+    let v = kasa_remote::remote::remote_get_json_bounded(base, &path, REMOTE_HISTORY_MAX)?;
+    if v["ok"].as_bool() != Some(true) {
+        return Ok(None);
+    }
+    Ok(Some(HistoryPage { chunk: chunk_of(&v, ask.offset), start: v["start"].as_u64() }))
 }
 
 #[cfg(test)]
@@ -405,10 +478,52 @@ mod tests {
             write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).unwrap();
             stream.write_all(body.as_bytes()).unwrap();
         });
-        let chunk = remote(&format!("http://127.0.0.1:{port}"), "%2", 0, "").unwrap().unwrap();
+        let page = remote_page(&format!("http://127.0.0.1:{port}"), "%2", &HistoryAsk::default()).unwrap().unwrap();
         server.join().unwrap();
-        assert_eq!(chunk.raw.len(), raw.len());
-        assert!(chunk.reset);
-        assert_eq!(chunk.offset, 90_000_000);
+        assert_eq!(page.chunk.raw.len(), raw.len());
+        assert!(page.chunk.reset);
+        assert_eq!(page.chunk.offset, 90_000_000);
+        assert_eq!(page.start, None, "쪽을 모르는 옛 원본은 처음부터 다 보낸 것이다");
+    }
+
+    fn turn(i: usize) -> String {
+        serde_json::json!({"type":"user","sessionId":"s","message":{"content":format!("질문 {i} {}", "x".repeat(200))}}).to_string()
+    }
+
+    #[test]
+    fn the_first_page_is_the_end_and_earlier_pages_meet_it_without_gaps() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-history-page-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let n = (PAGE_BYTES as usize * 5 / 2) / 260;
+        let mut body: String = (0..n).map(|i| turn(i) + "\n").collect();
+        body.push_str("{\"type\":\"user\",\"sessionId\":\"s\",\"mess");
+        std::fs::write(&path, &body).unwrap();
+        let full = read(&path, 0).unwrap();
+
+        let tail = page(&path, &HistoryAsk::default()).unwrap();
+        assert!(tail.chunk.reset);
+        let end = tail.chunk.offset;
+        assert_eq!(end, full.offset, "쓰다 만 끝 줄은 다음 바퀴로 미룬다");
+        assert!(tail.chunk.raw.ends_with(&format!("{}\n", slim(&turn(n - 1)).unwrap())));
+        let mut start = tail.start.unwrap();
+        assert!(start > 0 && end - start >= PAGE_BYTES);
+        let mut text = tail.chunk.raw;
+        while start > 0 {
+            let source = crate::socket::transcript_source(&path);
+            let older = page(&path, &HistoryAsk { offset: end, before: Some(start), held: source }).unwrap();
+            assert!(!older.chunk.reset);
+            assert_eq!(older.chunk.offset, start, "앞 쪽은 받은 쪽 첫 줄에서 끝난다");
+            text = older.chunk.raw + &text;
+            start = older.start.unwrap();
+        }
+        assert_eq!(text, full.raw, "쪽을 다 이으면 처음부터 다 받은 것과 같다");
+
+        let after = page(&path, &HistoryAsk { offset: end, before: None, held: crate::socket::transcript_source(&path) }).unwrap();
+        assert_eq!(after.start, None);
+        assert!(after.chunk.raw.is_empty() && !after.chunk.reset);
+        let moved = page(&path, &HistoryAsk { offset: end, before: Some(start.max(1)), held: "other.jsonl".into() }).unwrap();
+        assert!(moved.chunk.reset && moved.start.is_some(), "다른 파일로 옮겨 갔으면 새 끝 쪽부터");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

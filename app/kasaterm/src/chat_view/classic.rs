@@ -1085,6 +1085,12 @@ impl Cache {
         }
     }
 
+    /// 앞에 칸이 붙었거나 대화가 갈렸다 — 칸 번호로 기억한 줄은 번호가 밀려 남의 줄이 된다.
+    pub(crate) fn forget(&mut self) {
+        self.blocks.clear();
+        self.stamp = None;
+    }
+
     /// 그 칸(또는 그 뒤 첫 칸)이 시작하는 줄.
     pub(crate) fn line_of(&self, item: usize) -> Option<usize> {
         self.starts.iter().find(|(k, _)| *k != usize::MAX && *k >= item).map(|(_, l)| *l)

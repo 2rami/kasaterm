@@ -1740,6 +1740,12 @@ pub trait Backend: Send + Sync {
         self.transcript_raw(surface_id, offset)
     }
 
+    /// 그려서 보기의 쪽 받기(`/transcript-raw?history=1&page=1`) — 처음은 끝 쪽 한 쪽, 위로 올리면 그 앞 한 쪽.
+    /// 쪽을 모르는 백엔드는 `transcript_history` 그대로 답하고, `start` 가 없으면 받는 쪽은 처음부터 다 받은 것으로 본다.
+    fn transcript_history_page(&self, surface_id: &str, ask: &HistoryAsk) -> Result<HistoryPage> {
+        Ok(HistoryPage { chunk: self.transcript_history(surface_id, ask.offset)?, start: None })
+    }
+
     /// Archives require a bounded, from-the-start reader; falling back to a tail would silently lose history.
     fn transcript_archive(&self, _surface_id: &str, _offset: u64) -> Result<TranscriptChunk> {
         anyhow::bail!("transcript_archive unsupported by this backend")
@@ -1808,6 +1814,22 @@ pub struct TranscriptChunk {
     /// lines carry no `sessionId` for it to notice on its own.
     #[serde(default)]
     pub source: String,
+}
+
+/// 그려서 보기가 원하는 쪽. `before` 가 있으면 그 자리 앞 한 쪽, 없고 `offset` 이 0 이면 끝 쪽 한 쪽, 아니면
+/// `offset` 뒤에 덧붙은 줄. `held` 는 받는 쪽이 쥔 파일 — 칸이 다른 파일로 옮겨 갔으면 새 끝 쪽으로 다시 시작한다.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryAsk {
+    pub offset: u64,
+    pub before: Option<u64>,
+    pub held: String,
+}
+
+/// 쪽으로 받았으면 `start` 가 그 쪽 첫 줄의 자리다(0 이면 기록 처음까지 왔다). 덧붙은 줄이면 None.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryPage {
+    pub chunk: TranscriptChunk,
+    pub start: Option<u64>,
 }
 
 /// One turn of a pane's claude conversation, extracted from its transcript

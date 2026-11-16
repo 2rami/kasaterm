@@ -115,6 +115,23 @@ async fn transcript_raw_handler(
     let held = params.get("source").map(String::as_str).unwrap_or("");
     // `history=1` — 꼬리 대신 기록 처음부터, 대화 칸에 안 쓰이는 무게는 걷어서(PC 대화 보기). 모르는 옛 원본은 꼬리로 답한다.
     let history = params.get("history").is_some_and(|v| v == "1");
+    // `page=1` — 처음부터 다 보내는 대신 끝 쪽 한 쪽, `before=<n>` 이면 그 앞 한 쪽(PC 그려서 보기가 위로 올릴 때).
+    if history && params.get("page").is_some_and(|v| v == "1") {
+        let ask = kasa_socket::backend::HistoryAsk {
+            offset,
+            before: params.get("before").and_then(|s| s.parse::<u64>().ok()),
+            held: held.to_string(),
+        };
+        let body = match (!surface.is_empty()).then(|| backend.transcript_history_page(surface, &ask)) {
+            None => serde_json::json!({ "ok": false, "error": "surface=%N required" }),
+            Some(Ok(p)) => serde_json::json!({
+                "ok": true, "surface_id": surface, "raw": p.chunk.raw, "offset": p.chunk.offset,
+                "reset": p.chunk.reset, "source": p.chunk.source, "start": p.start,
+            }),
+            Some(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        };
+        return ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body));
+    }
     let read = || read_for_source(backend.as_ref(), surface, offset, held, history);
     let mut chunk = (!surface.is_empty()).then(read);
     if let (Some(wait), Some(mut seen)) = (wait, seen) {

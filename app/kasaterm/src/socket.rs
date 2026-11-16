@@ -3192,6 +3192,17 @@ impl Backend for PtyBackend {
             .map_err(|e| anyhow::anyhow!("read transcript {path:?}: {e}"))
     }
 
+    fn transcript_history_page(&self, surface_id: &str, ask: &kasa_socket::backend::HistoryAsk) -> Result<kasa_socket::backend::HistoryPage> {
+        let path = self
+            .bound
+            .lock()
+            .unwrap()
+            .get(surface_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("pane {surface_id} has no bound transcript"))?;
+        crate::chat_view::history::page(&path, ask).map_err(|e| anyhow::anyhow!("read transcript {path:?}: {e}"))
+    }
+
     /// 공유방 host 창구 — 앱 스레드의 공유방 작업표에 묻는다. 기기·로그인 사실은 앱 스레드를 붙잡지 않게 여기서 더한다.
     fn shared_room_action(&self, action: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         if matches!(action, "fork" | "publish") { self.prepare_action()?; }

@@ -19,6 +19,7 @@ mod select;
 
 pub(crate) use scrollbar::{paint_scrollbars, BAR_COLS};
 
+use kasa_socket::backend::{HistoryAsk, HistoryPage};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -113,6 +114,13 @@ pub(crate) struct ChatPane {
     polled: Option<Instant>,
     /// 기록을 한 번도 못 받았다 — 빈 대화 대신 진짜 화면을 그리고, 거울이면 원본 크기를 잡는다.
     failed: Cell<bool>,
+    /// 위로 올라 받은 쪽 첫머리에 가까워졌다 — 다음 바퀴에 앞 쪽을 받는다.
+    want_older: Cell<bool>,
+    /// 마지막으로 맞춘 앞머리 바뀜(`Feed::front_changes`)과 그때의 `Feed::head_items`. 안 맞으면 그 판은 아직 안 그린다.
+    front_seen: Cell<u64>,
+    head_seen: usize,
+    /// 앞 쪽이 막 붙었다 — 다음 프레임은 늘어난 줄만큼 올리지 않는다(앞 쪽은 위에 붙어 아래 기준 자리가 그대로다).
+    anchor: Cell<bool>,
     painted: Cell<u64>,
     live_tab: Option<String>,
     /// 거울이면 원본 (주소, 칸). 기록을 거기서 받는다.
@@ -143,6 +151,10 @@ impl ChatPane {
             jump: Cell::new(None),
             polled: None,
             failed: Cell::new(false),
+            want_older: Cell::new(false),
+            front_seen: Cell::new(0),
+            head_seen: 0,
+            anchor: Cell::new(false),
             painted: Cell::new(0),
             live_tab: None,
             remote: None,
@@ -168,6 +180,10 @@ impl ChatPane {
         self.remote = remote.cloned();
         self.polled = None;
         self.failed.set(false);
+        self.want_older.set(false);
+        self.front_seen.set(0);
+        self.head_seen = 0;
+        self.anchor.set(false);
         self.painted.set(0);
         self.open.clear();
         self.back.set(0);
@@ -189,6 +205,16 @@ pub(crate) struct Feed {
     offset: u64,
     /// `offset` 이 가리키는 파일(`TranscriptChunk::source`). 거울의 원본 칸이 다른 파일로 옮겨 가면 다르다.
     source: String,
+    /// 받은 기록의 첫 줄 자리 — 0 이면 처음까지 다 받았다. 그 앞은 위로 올리면 한 쪽씩 받는다.
+    pub(crate) start: u64,
+    /// 받은 걸러 낸 줄 전부 — 앞 쪽이 오면 그 앞에 붙여 대화를 다시 편다.
+    text: String,
+    /// 대화 앞머리가 바뀐 횟수(앞 쪽을 붙였거나 처음부터 갈렸다) — 칸 번호가 밀린다.
+    pub(crate) front_changes: u64,
+    /// 앞 쪽이 붙으며 앞에 생긴 칸 수의 합 — 펼친 칸 번호를 그만큼 민다. 처음부터 갈리면 0.
+    head_items: usize,
+    /// 앞 쪽 받기가 실패한 때 — 위에 머무는 동안 매 프레임 다시 묻지 않는다.
+    older_failed: Option<Instant>,
     pub(crate) conv: parse::Conversation,
     /// 바뀔 때마다 오른다 — 화면이 이것만 보고 다시 편다.
     pub(crate) version: u64,
@@ -200,6 +226,7 @@ pub(crate) struct Feed {
 }
 
 /// 기록을 어디서 읽나 — 이 기기 파일, 또는 거울이면 원본 기기의 `/transcript-raw`.
+#[derive(Clone)]
 enum Source {
     File(std::path::PathBuf),
     Remote(String, String),
@@ -213,19 +240,33 @@ impl Source {
         }
     }
 
-    fn read(&self, offset: u64, held: &str) -> Result<Option<kasa_socket::backend::TranscriptChunk>, String> {
+    fn read(&self, ask: &HistoryAsk) -> Result<Option<HistoryPage>, String> {
         match self {
-            Source::File(p) => history::read(p, offset).map(Some).map_err(|e| e.to_string()),
-            Source::Remote(base, rid) => history::remote(base, rid, offset, held).map_err(|e| e.to_string()),
+            Source::File(p) => history::page(p, ask).map(Some).map_err(|e| e.to_string()),
+            Source::Remote(base, rid) => history::remote_page(base, rid, ask).map_err(|e| e.to_string()),
         }
     }
 }
 
-fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopProxy<UserEvent>) {
+/// 앞 쪽 받기가 실패하면 이만큼 쉬었다 다시 받는다.
+const OLDER_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn parsed(text: &str) -> parse::Conversation {
+    let mut conv = parse::Conversation::default();
+    conv.apply(text);
+    conv
+}
+
+/// 기록 한 번 받기. `older` 면 받은 쪽 앞 한 쪽을, 아니면 처음엔 끝 쪽 한 쪽·그 뒤엔 덧붙은 줄을 받는다.
+/// 받으러 갔으면 true — 이미 받는 중이거나 더 앞이 없으면 false.
+fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopProxy<UserEvent>, older: bool) -> bool {
     {
-        let Ok(mut f) = feed.lock() else { return };
+        let Ok(mut f) = feed.lock() else { return false };
         if f.busy {
-            return;
+            return false;
+        }
+        if older && (f.start == 0 || f.older_failed.is_some_and(|t| t.elapsed() < OLDER_RETRY)) {
+            return false;
         }
         if source.is_none() {
             let changed = !f.loaded || !f.missing;
@@ -234,22 +275,31 @@ fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopPro
             if changed {
                 f.version += 1;
             }
-            return;
+            return false;
         }
         f.busy = true;
     }
     std::thread::spawn(move || {
         let Some(source) = source else { return };
         let path = source.key();
-        let (offset, same, held) = match feed.lock() {
-            Ok(f) => (f.offset, f.path.as_ref() == Some(&path), f.source.clone()),
+        let (ask, same) = match feed.lock() {
+            Ok(f) => {
+                let same = f.path.as_ref() == Some(&path);
+                let ask = match (same, older) {
+                    (false, _) => HistoryAsk::default(),
+                    (true, true) => HistoryAsk { offset: f.offset, before: Some(f.start), held: f.source.clone() },
+                    (true, false) => HistoryAsk { offset: f.offset, before: None, held: f.source.clone() },
+                };
+                (ask, same)
+            }
             Err(_) => return,
         };
-        let chunk = if same { source.read(offset, &held) } else { source.read(0, "") };
+        let page = source.read(&ask);
         let Ok(mut f) = feed.lock() else { return };
         f.busy = false;
         let mut changed = !f.loaded || f.missing;
-        match chunk {
+        match page {
+            Ok(None) if older => f.older_failed = Some(Instant::now()),
             Ok(None) => {
                 // 원본에 묶인 기록이 아직 없다(막 띄운 학생).
                 let was = f.missing;
@@ -263,29 +313,51 @@ fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopPro
                 }
                 return;
             }
-            Ok(Some(chunk)) => {
+            Ok(Some(HistoryPage { chunk, start })) => {
                 if !same || chunk.reset {
-                    f.conv = parse::Conversation::default();
+                    // 쪽을 모르는 옛 원본은 처음부터 다 보낸다(`start` 없음).
                     f.path = Some(path);
-                    changed = true;
-                }
-                f.source = chunk.source.clone();
-                if !chunk.raw.is_empty() {
-                    changed = true;
-                    if f.conv.apply(&chunk.raw) {
-                        f.offset = chunk.offset;
-                    } else {
-                        // 세션이 바뀌었다 — 다음 바퀴가 새 파일을 처음부터 다시 받는다.
-                        f.conv = parse::Conversation::default();
-                        f.offset = 0;
-                    }
-                } else {
+                    f.start = start.unwrap_or(0);
                     f.offset = chunk.offset;
+                    f.source = chunk.source;
+                    f.conv = parsed(&chunk.raw);
+                    f.text = chunk.raw;
+                    f.older_failed = None;
+                    f.front_changes += 1;
+                    f.head_items = 0;
+                    changed = true;
+                } else if older {
+                    if let Some(start) = start {
+                        let had = f.conv.items.len();
+                        f.start = start;
+                        f.text.insert_str(0, &chunk.raw);
+                        f.conv = parsed(&f.text);
+                        f.head_items += f.conv.items.len().saturating_sub(had);
+                        f.front_changes += 1;
+                        changed = true;
+                    }
+                } else if chunk.raw.is_empty() {
+                    f.offset = chunk.offset;
+                } else if f.conv.apply(&chunk.raw) {
+                    f.text.push_str(&chunk.raw);
+                    f.offset = chunk.offset;
+                    changed = true;
+                } else {
+                    // 세션이 바뀌었다 — 다음 바퀴가 새 끝 쪽부터 다시 받는다.
+                    f.conv = parse::Conversation::default();
+                    f.text.clear();
+                    f.start = 0;
+                    f.offset = 0;
+                    f.front_changes += 1;
+                    f.head_items = 0;
+                    changed = true;
                 }
                 f.error = None;
             }
             Err(e) => {
-                if !f.loaded {
+                if older {
+                    f.older_failed = Some(Instant::now());
+                } else if !f.loaded {
                     f.error = Some(format!("기록을 못 읽었어요 · {e}"));
                     changed = true;
                 }
@@ -299,9 +371,28 @@ fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopPro
             let _ = proxy.send_event(UserEvent::Redraw);
         }
     });
+    true
 }
 
 // ── 진짜 화면의 바닥 ─────────────────────────────────────────────────────────
+
+fn loading_row(text: &str, cols: usize) -> Vec<GridCell> {
+    let mut row = Vec::with_capacity(cols);
+    for ch in text.chars() {
+        let mut c = GridCell::blank();
+        c.ch = ch;
+        c.dim = true;
+        row.push(c);
+        if unicode_width::UnicodeWidthChar::width(ch) == Some(2) {
+            let mut spacer = GridCell::blank();
+            spacer.ch = '\0';
+            row.push(spacer);
+        }
+    }
+    row.resize(cols, GridCell::blank());
+    row.truncate(cols);
+    row
+}
 
 fn row_text(row: &[GridCell]) -> String {
     row.iter().filter(|c| c.ch != '\0').map(|c| c.ch).collect()
@@ -488,11 +579,27 @@ impl App {
                     pane.failed.set(f.error.is_some());
                     self.chrome_dirty = true;
                 }
+                if f.front_changes != pane.front_seen.get() {
+                    // 앞에 붙은 칸 수만큼 펼친 칸 번호를 민다. 처음부터 갈렸으면(`head_items` 가 줄었으면) 펼침도 버린다.
+                    pane.open = match f.head_items.checked_sub(pane.head_seen) {
+                        Some(shift) => pane.open.iter().map(|i| i + shift).collect(),
+                        None => HashSet::new(),
+                    };
+                    pane.sel = None;
+                    pane.cache.borrow_mut().forget();
+                    pane.front_seen.set(f.front_changes);
+                    pane.head_seen = f.head_items;
+                    pane.anchor.set(true);
+                    self.chrome_dirty = true;
+                }
+            }
+            if pane.want_older.get() && poll_feed(Arc::clone(&pane.feed), source.clone(), proxy.clone(), true) {
+                pane.want_older.set(false);
             }
             let every = if pane.failed.get() { RETRY_FAILED } else { POLL_EVERY };
             if pane.polled.is_none_or(|t| now.duration_since(t) >= every) {
                 pane.polled = Some(now);
-                poll_feed(Arc::clone(&pane.feed), source, proxy);
+                poll_feed(Arc::clone(&pane.feed), source, proxy, false);
             }
             let version = pane.feed.try_lock().map(|f| f.version).unwrap_or(pane.painted.get());
             if version != pane.painted.get() {
@@ -541,15 +648,21 @@ impl App {
             banner: chat.banner.borrow().clone(),
         };
         let mut cache = chat.cache.borrow_mut();
+        let mut older_left = false;
         if let Ok(f) = chat.feed.try_lock() {
-            // 마지막 칸은 스크롤바 자리라 대화 줄은 그만큼 좁게 접는다.
-            cache.build(&f.conv, f.version, cols - scrollbar::BAR_COLS, &chat.open, &look);
-            chat.painted.set(f.version);
+            // 앞머리가 바뀐 판은 `pump_chat_views` 가 펼침·캐시를 맞춘 뒤에 그린다.
+            if f.front_changes == chat.front_seen.get() {
+                // 마지막 칸은 스크롤바 자리라 대화 줄은 그만큼 좁게 접는다.
+                cache.build(&f.conv, f.version, cols - scrollbar::BAR_COLS, &chat.open, &look);
+                chat.painted.set(f.version);
+            }
+            older_left = f.start > 0;
         }
         let total = cache.lines.len();
         let max_back = total.saturating_sub(hist_rows);
         let mut back = chat.back.get();
-        if back > 0 && total > chat.total.get() {
+        // 아래에 덧붙은 줄만큼 올려 보던 자리를 지킨다. 앞 쪽은 위에 붙으니 아래 기준 자리가 그대로다.
+        if back > 0 && total > chat.total.get() && !chat.anchor.replace(false) {
             back += total - chat.total.get();
         }
         if let Some(line) = chat.jump.take().and_then(|item| cache.line_of(item)) {
@@ -575,6 +688,14 @@ impl App {
         while cells.len() < hist_rows {
             cells.push(vec![GridCell::blank(); cols]);
             toggles.push(None);
+        }
+        // 받은 쪽 첫머리에 두 화면 안으로 다가가면 앞 쪽을 받는다 — 닿기 전에 대개 와 있다.
+        if older_left && first < hist_rows * 2 {
+            chat.want_older.set(true);
+        }
+        if older_left && first == 0 {
+            cells[0] = loading_row("  ↑ 앞 대화를 불러오는 중…", cols);
+            toggles[0] = None;
         }
         // 코덱스 사람 말 칸 바탕은 코덱스가 터미널 바탕에서 섞어 낸 값이다 — 진짜 화면에서 읽어 둔 것을 쓴다.
         if let Some(crate::screenread::PromptBox::Filled { rows: input }) = crate::screenread::prompt_box(&src.cells) {
