@@ -362,6 +362,8 @@ impl Decoder {
         let mut ptrs: Vec<NonNull<u8>> = param_sets.iter().map(|p| NonNull::new(p.as_ptr() as *mut u8).unwrap()).collect();
         let mut sizes: Vec<usize> = param_sets.iter().map(Vec::len).collect();
         let mut fmt: *const CMFormatDescription = ptr::null();
+        // 보내는 쪽이 HEVC 를 못 내 H.264 로 물러날 수 있다(Windows) — 파라미터 셋이 셋(VPS·SPS·PPS)이면 HEVC, 둘이면 H.264.
+        self.codec = if param_sets.len() >= 3 { Codec::Hevc } else { Codec::H264 };
         let status = unsafe {
             match self.codec {
                 Codec::Hevc => CMVideoFormatDescriptionCreateFromHEVCParameterSets(
@@ -458,3 +460,49 @@ pub fn with_bgra<R>(px: &CVPixelBuffer, f: impl FnOnce(&[u8], u32, u32, u32) -> 
     unsafe { CVPixelBufferUnlockBaseAddress(px, CVPixelBufferLockFlags::ReadOnly) };
     out
 }
+
+/// 풀린 장 하나(플랫폼 공통 모양 — `view.rs`). macOS 는 VT 가 낸 IOSurface 기반 BGRA 버퍼다.
+#[derive(Clone)]
+pub(crate) struct Picture(CFRetained<CVPixelBuffer>);
+// VT 가 낸 IOSurface 버퍼 — 풀기 일꾼이 넣고 GUI 가 읽기만 한다.
+unsafe impl Send for Picture {}
+unsafe impl Sync for Picture {}
+
+impl Picture {
+    pub(crate) fn size(&self) -> (u32, u32) {
+        (objc2_core_video::CVPixelBufferGetWidth(&self.0) as u32, objc2_core_video::CVPixelBufferGetHeight(&self.0) as u32)
+    }
+
+    /// 복사 없이 텍스처로 삼을 IOSurface(번호는 쓰지 않는다 — 장마다 새로 감싼다).
+    pub(crate) fn surface(&self) -> (*mut c_void, u64) {
+        extern "C" {
+            fn CVPixelBufferGetIOSurface(pixel_buffer: *const c_void) -> *mut c_void;
+        }
+        (unsafe { CVPixelBufferGetIOSurface((&*self.0 as *const CVPixelBuffer).cast()) }, 0)
+    }
+
+    pub(crate) fn with_bgra<R>(&self, f: impl FnOnce(&[u8], u32, u32, u32) -> R) -> Option<R> {
+        with_bgra(&self.0, f)
+    }
+}
+
+/// IOSurface 는 늘 CPU 로도 읽힌다 — 알 것이 없다.
+pub(crate) fn zero_copy_result(_ok: bool) {}
+
+/// 보는 쪽 풀기(플랫폼 공통 모양). 코덱은 키프레임의 파라미터 셋 수로 가른다.
+pub(crate) struct VideoDecoder(Decoder);
+
+impl VideoDecoder {
+    /// 받고 싶은 코덱 — 보내는 쪽이 못 내면 H.264 로 물러난다.
+    pub(crate) const CODEC: &'static str = "hevc";
+
+    pub(crate) fn new() -> Self {
+        Self(Decoder::new(Codec::Hevc))
+    }
+
+    pub(crate) fn decode(&mut self, frame: &mut kasa_remote::screen_stream::Frame) -> Result<Option<Picture>> {
+        self.0.decode(&frame.param_sets, &mut frame.data, frame.t_enc)?;
+        Ok(self.0.last().map(Picture))
+    }
+}
+

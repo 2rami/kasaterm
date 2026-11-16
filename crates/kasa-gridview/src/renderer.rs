@@ -73,6 +73,9 @@ pub struct GridRenderer {
     /// Uploaded image textures keyed by pane id. Populated lazily on the
     /// first frame a given image pane is drawn.
     pub images: HashMap<String, ImageEntry>,
+    /// D3D11 공유 텍스처를 들여온 것들(장 고리 한 칸에 하나) — 장마다 들여오지 않고 고리를 돌며 다시 쓴다.
+    #[cfg(windows)]
+    shared_images: std::collections::VecDeque<(u64, wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
     /// Per-frame image quads: (pane id, instance, chrome watermark). Drained
     /// in `render()` where each is drawn with that pane's texture bind group.
     ///
@@ -176,7 +179,8 @@ impl GridRenderer {
         );
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("kasaterm gpu device"),
-            required_features: wgpu::Features::empty(),
+            // 화면 칸이 디코더의 D3D11 텍스처를 복사 없이 들여온다(Windows·Vulkan). 없는 기기는 CPU 로 올린다.
+            required_features: adapter.features() & wgpu::Features::VULKAN_EXTERNAL_MEMORY_WIN32,
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -368,6 +372,8 @@ impl GridRenderer {
             image_pipeline,
             image_sampler,
             images: HashMap::new(),
+            #[cfg(windows)]
+            shared_images: std::collections::VecDeque::new(),
             image_quads: Vec::new(),
             icon_quads: Vec::new(),
             clip_stack: Vec::new(),
@@ -1103,6 +1109,69 @@ impl GridRenderer {
         let view = texture.create_view(&Default::default());
         let bind_group = self.image_pipeline.make_bind_group(&self.device, &view, &self.image_sampler);
         self.images.insert(id.to_string(), ImageEntry { _texture: texture, _view: view, bind_group, w, h });
+        true
+    }
+
+    /// Windows — 디코더가 쓴 D3D11 공유 텍스처(NT 핸들)를 복사 없이 그림으로. `key` 는 그 텍스처마다 하나인 번호다(핸들 값은
+    /// 닫힌 뒤 다시 쓰일 수 있어 열쇠로 못 쓴다). 들여오기를 못 하면(Vulkan 확장이 없거나 GPU 가 다르면) 거짓 — CPU 로 올린다.
+    ///
+    /// # Safety
+    /// `handle` 은 BGRA8 `w`×`h` D3D11 텍스처의 살아 있는 공유 NT 핸들이고, 그 텍스처의 쓰기는 이미 끝났어야 한다.
+    #[cfg(windows)]
+    pub unsafe fn set_image_d3d11(&mut self, id: &str, handle: *mut std::ffi::c_void, key: u64, w: u32, h: u32) -> bool {
+        // 디코더 고리(6칸)와 몇 번 바뀐 크기를 넉넉히 덮는다.
+        const KEEP: usize = 16;
+        if handle.is_null() || w == 0 || h == 0 {
+            return false;
+        }
+        if !self.shared_images.iter().any(|(k, ..)| *k == key) {
+            let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+            let hal_texture = {
+                let Some(hal) = (unsafe { self.device.as_hal::<wgpu_hal::api::Vulkan>() }) else { return false };
+                let desc = wgpu_hal::TextureDescriptor {
+                    label: Some("kasaterm d3d11 video frame"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Bgra8Unorm,
+                    usage: wgpu::TextureUses::RESOURCE,
+                    memory_flags: wgpu_hal::MemoryFlags::empty(),
+                    view_formats: Vec::new(),
+                };
+                // wgpu-hal 은 windows 0.62 의 `HANDLE`(포인터 하나를 감싼 투명 구조체)을 받는다 — 워크스페이스의 windows 판과
+                // 달라 그 타입을 이름으로 못 써, 같은 모양의 포인터를 그 자리 타입으로 옮긴다.
+                let handle = unsafe { std::mem::transmute::<*mut std::ffi::c_void, _>(handle) };
+                match unsafe { hal.texture_from_d3d11_shared_handle(handle, &desc) } {
+                    Ok(t) => t,
+                    Err(_) => return false,
+                }
+            };
+            let texture = unsafe {
+                self.device.create_texture_from_hal::<wgpu_hal::api::Vulkan>(
+                    hal_texture,
+                    &wgpu::TextureDescriptor {
+                        label: Some("kasaterm d3d11 video frame"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Bgra8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                )
+            };
+            let view = texture.create_view(&Default::default());
+            let bind_group = self.image_pipeline.make_bind_group(&self.device, &view, &self.image_sampler);
+            if self.shared_images.len() >= KEEP {
+                self.shared_images.pop_front();
+            }
+            self.shared_images.push_back((key, texture, view, bind_group));
+        }
+        let Some((_, texture, view, bind_group)) = self.shared_images.iter().find(|(k, ..)| *k == key) else { return false };
+        let entry = ImageEntry { _texture: texture.clone(), _view: view.clone(), bind_group: bind_group.clone(), w, h };
+        self.images.insert(id.to_string(), entry);
         true
     }
 

@@ -24,5 +24,9 @@ objc2-foundation = { workspace = true, features = ["NSString", "NSGeometry"] }
 # 영상 장(IOSurface)을 복사 없이 텍스처로 — wgpu-hal 28 이 쓰는 metal 판과 같아야 `texture_from_raw` 에 넘어간다.
 metal = "0.33"
 
+[target.'cfg(windows)'.dependencies]
+# 영상 장(D3D11 공유 텍스처)을 복사 없이 Vulkan 텍스처로(`texture_from_d3d11_shared_handle`).
+wgpu-hal = { workspace = true, features = ["vulkan"] }
+
 [lints]
 workspace = true

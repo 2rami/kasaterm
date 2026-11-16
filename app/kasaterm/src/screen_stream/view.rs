@@ -8,16 +8,9 @@ use std::time::Duration;
 
 use kasa_remote::screen_stream::{self, Config, Event, Frame, Keyframes, Watch};
 use serde_json::json;
-use objc2_core_foundation::CFRetained;
-use objc2_core_video::CVPixelBuffer;
 
-use super::codec::{self, Codec, Decoder};
+use super::platform::{Picture, VideoDecoder};
 use super::{contains, Layout};
-
-#[derive(Clone)]
-struct Pixels(CFRetained<CVPixelBuffer>);
-// VT 가 내준 IOSurface 버퍼 — 일꾼이 넣고 GUI 가 읽기만 한다.
-unsafe impl Send for Pixels {}
 
 /// GPU 에 넘긴 뒤 쥐고 있을 장 수 — 60fps 에서 50ms. 그려지는 동안 디코더가 그 버퍼에 다음 장을 풀지 않게.
 const HELD: usize = 3;
@@ -37,7 +30,7 @@ struct Stats {
 }
 
 struct Shared {
-    latest: Mutex<Option<Pixels>>,
+    latest: Mutex<Option<Picture>>,
     serial: AtomicU64,
     status: Mutex<String>,
     stats: Mutex<Stats>,
@@ -61,7 +54,7 @@ pub(crate) struct ScreenView {
     frame: (u32, u32),
     /// GPU 에 넘긴 최근 장들 — 복사 없이 IOSurface 를 텍스처로 쓰므로 GPU 가 다 그릴 때까지 디코더가 같은 버퍼를 다시 못
     /// 쓰게 쥐고 있는다. 마지막 것은 텍스처를 못 만들 때 CPU 로 올리는 밑감이다.
-    held: VecDeque<Pixels>,
+    held: VecDeque<Picture>,
     /// 마지막 장을 복사 없이 올렸나 — 검증 리그가 읽는다.
     pub zero_copy: bool,
     /// 안 보이기 시작한 때 — 오래 안 보이면 연결을 닫는다(`pane.rs sync_screen_views`).
@@ -81,7 +74,7 @@ impl ScreenView {
             stats: Mutex::new(Stats::default()),
             input_note: Mutex::new(None),
         });
-        let config = Config::default();
+        let config = Config { codec: VideoDecoder::CODEC.into(), ..Config::default() };
         let (tx, rx) = mpsc::channel::<Incoming>();
         let keyframes: Arc<Mutex<Option<Keyframes>>> = Arc::new(Mutex::new(None));
         let on = {
@@ -121,42 +114,36 @@ impl ScreenView {
         let watch = screen_stream::watch(base.to_string(), config.clone(), on)?;
         *keyframes.lock().unwrap_or_else(|e| e.into_inner()) = Some(watch.keyframes());
         let worker_shared = shared.clone();
-        let codec = Codec::named(&config.codec);
         std::thread::Builder::new()
             .name("screen-stream-decode".into())
-            .spawn(move || decode_loop(codec, rx, keyframes, &worker_shared, &wake))
+            .spawn(move || decode_loop(rx, keyframes, &worker_shared, &wake))
             .ok()?;
         Some(Self { label: label.to_string(), shared, watch: Some(watch), uploaded: 0, upload_ms: 0.0, uploads: 0, control: false, layout: None, buttons: 0, preedit: String::new(), frame: (0, 0), held: VecDeque::new(), zero_copy: false, hidden_since: None })
     }
 
-    /// 지난번에 가져간 뒤 새로 풀린 장이 있으면 그 IOSurface(가로·세로)를 내준다. 장은 `held` 에 쥔다.
-    pub(crate) fn new_surface(&mut self) -> Option<(*mut std::ffi::c_void, u32, u32)> {
-        extern "C" {
-            fn CVPixelBufferGetIOSurface(pixel_buffer: *const std::ffi::c_void) -> *mut std::ffi::c_void;
-        }
+    /// 지난번에 가져간 뒤 새로 풀린 장이 있으면 복사 없이 텍스처로 삼을 표면(macOS IOSurface·Windows D3D11 공유 핸들, 없으면
+    /// null)·그 표면의 번호·크기를 내준다. 장은 `held` 에 쥔다.
+    pub(crate) fn new_surface(&mut self) -> Option<(*mut std::ffi::c_void, u64, u32, u32)> {
         let serial = self.shared.serial.load(Ordering::Acquire);
         if serial == self.uploaded {
             return None;
         }
         self.uploaded = serial;
         let px = self.shared.latest.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
-        let (w, h) = (
-            objc2_core_video::CVPixelBufferGetWidth(&px.0) as u32,
-            objc2_core_video::CVPixelBufferGetHeight(&px.0) as u32,
-        );
-        let surface = unsafe { CVPixelBufferGetIOSurface((&*px.0 as *const CVPixelBuffer).cast()) };
+        let (w, h) = px.size();
+        let (surface, key) = px.surface();
         self.held.push_back(px);
         while self.held.len() > HELD {
             self.held.pop_front();
         }
         self.frame = (w, h);
-        Some((surface, w, h))
+        Some((surface, key, w, h))
     }
 
-    /// 마지막 장을 BGRA 바이트(가로·세로·줄 간격)로 — IOSurface 텍스처를 못 만들 때.
+    /// 마지막 장을 BGRA 바이트(가로·세로·줄 간격)로 — 표면을 텍스처로 못 삼을 때.
     pub(crate) fn copy_latest(&self, f: impl FnOnce(&[u8], u32, u32, u32)) {
         if let Some(px) = self.held.back() {
-            codec::with_bgra(&px.0, f);
+            px.with_bgra(f);
         }
     }
 
@@ -164,6 +151,7 @@ impl ScreenView {
         self.upload_ms = took.as_secs_f64() * 1000.0;
         self.uploads += 1;
         self.zero_copy = zero_copy;
+        super::platform::zero_copy_result(zero_copy);
     }
 
     pub(crate) fn has_new_frame(&self) -> bool {
@@ -267,13 +255,12 @@ fn set_status(shared: &Shared, wake: &Arc<dyn Fn() + Send + Sync>, text: &str) {
 /// 장은 앞 장을 참조해 순서대로만 풀린다. 단방향 스트림마다 도착 순서가 조금 엇갈려 seq 로 다시 줄 세우고, 키프레임
 /// 전의 장은 버린다. 풀기에 실패하면 키프레임을 청하고 다음 키프레임까지 기다린다.
 fn decode_loop(
-    codec: Codec,
     rx: mpsc::Receiver<Incoming>,
     keyframes: Arc<Mutex<Option<Keyframes>>>,
     shared: &Shared,
     wake: &Arc<dyn Fn() + Send + Sync>,
 ) {
-    let mut dec = Decoder::new(codec);
+    let mut dec = VideoDecoder::new();
     let mut pending: BTreeMap<u32, Incoming> = BTreeMap::new();
     let mut next: Option<u32> = None;
     let mut last_cap: Option<u64> = None;
@@ -314,15 +301,21 @@ fn decode_loop(
         while let Some(seq) = next {
             let Some(mut f) = pending.remove(&seq) else { break };
             next = Some(seq.wrapping_add(1));
-            if let Err(e) = dec.decode(&f.frame.param_sets, &mut f.frame.data, f.frame.t_enc) {
-                eprintln!("[screen-stream] 풀기 실패 seq={seq}: {e:#} — 키프레임을 청한다");
-                next = None;
-                asked_key = true;
-                ask_key();
-                break;
+            match dec.decode(&mut f.frame) {
+                Ok(Some(picture)) => {
+                    *shared.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(picture);
+                    decoded = true;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[screen-stream] 풀기 실패 seq={seq}: {e:#} — 키프레임을 청한다");
+                    next = None;
+                    asked_key = true;
+                    ask_key();
+                    break;
+                }
             }
             asked_key = false;
-            decoded = true;
             let t_done = screen_stream::now();
             if last_cap != Some(f.frame.cap_id) {
                 last_cap = Some(f.frame.cap_id);
@@ -334,17 +327,14 @@ fn decode_loop(
             }
         }
         if decoded {
-            if let Some(px) = dec.last() {
-                *shared.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pixels(px));
-                shared.serial.fetch_add(1, Ordering::Release);
-                let now = screen_stream::now();
-                let mut s = shared.stats.lock().unwrap_or_else(|e| e.into_inner());
-                while s.window.front().is_some_and(|w| now - w.0 > 1.0) {
-                    s.window.pop_front();
-                }
-                drop(s);
-                wake();
+            shared.serial.fetch_add(1, Ordering::Release);
+            let now = screen_stream::now();
+            let mut s = shared.stats.lock().unwrap_or_else(|e| e.into_inner());
+            while s.window.front().is_some_and(|w| now - w.0 > 1.0) {
+                s.window.pop_front();
             }
+            drop(s);
+            wake();
         }
     }
 }

@@ -1,6 +1,6 @@
 //! 화면 스트림 — 다른 기기 화면을 하드웨어 영상 압축으로 카사텀 칸 안에 본다. 계약·실측은 `docs/screen-stream.md`.
-//! 틀과 흐름은 `kasa_remote::screen_stream`, 여기는 macOS 의 화면 뜨기(SCK)·압축·풀기(VT)다. 다른 OS 는 아직
-//! 보내지도 보지도 않는다 — 화면 거울이 JPEG 웹 칸으로 연다.
+//! 틀과 흐름은 `kasa_remote::screen_stream`, 여기는 macOS 의 화면 뜨기(SCK)·압축·풀기(VT)와 Windows 의 보내기(DXGI·MF, `win.rs`)·
+//! 풀기(MF·D3D11, `win_view.rs`)다. 보는 칸(`view.rs`)은 둘이 같고 풀기만 `platform` 으로 갈린다.
 
 #[cfg(target_os = "macos")]
 mod capture;
@@ -10,14 +10,24 @@ mod codec;
 mod host;
 #[cfg(target_os = "macos")]
 mod scroll_probe;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod view;
+#[cfg(windows)]
+mod win;
+#[cfg(windows)]
+mod win_view;
+
+#[cfg(target_os = "macos")]
+use codec as platform;
+#[cfg(windows)]
+use win_view as platform;
+mod annexb;
 mod input;
 mod pane;
 
 pub(crate) use pane::paint;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) use view::ScreenView;
 
 /// 호스트 시계(초). SCK 장의 시각과 같은 시계다.
@@ -32,9 +42,15 @@ pub(crate) fn install() {
     kasa_remote::screen_stream::install(std::sync::Arc::new(host::Host));
 }
 
+/// 부팅 때 한 번 — Windows 는 DXGI 복제·Media Foundation 하드웨어 인코더로 보낸다(S3).
+#[cfg(windows)]
+pub(crate) fn install() {
+    win::install();
+}
+
 /// 그 기기를 네이티브 칸으로 볼 수 있나 — 이 판이 보고, 그 기기가 보내는 판이고, 카사넷 직통·믿는 중계일 때.
 pub(crate) fn can_view(base: &str) -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", windows))
         && kasa_device::kasanet::screen_capable(base)
         && kasa_device::kasanet::path(base).is_some_and(|(p, _)| p != "ssh")
 }
@@ -48,13 +64,13 @@ pub(crate) struct Layout {
     pub toggle: (f32, f32, f32, f32),
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub(crate) fn contains((x, y, w, h): (f32, f32, f32, f32), (px, py): (f64, f64)) -> bool {
     let (px, py) = (px as f32, py as f32);
     px >= x && px < x + w && py >= y && py < y + h
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) struct ScreenView {
     pub label: String,
     pub upload_ms: f64,
@@ -67,7 +83,7 @@ pub(crate) struct ScreenView {
     pub hidden_since: Option<std::time::Instant>,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[allow(dead_code)]
 impl ScreenView {
     pub(crate) fn open(_label: &str, _base: &str, _wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<Self> {

@@ -26,14 +26,19 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
     for (view_id, (x, y, w, h)) in slots {
         let Some(view) = views.get_mut(view_id) else { continue };
         let key = texture_key(*view_id);
-        if let Some((surface, fw, fh)) = view.new_surface() {
+        if let Some((surface, surface_key, fw, fh)) = view.new_surface() {
             let started = std::time::Instant::now();
-            // 복사 없이 IOSurface 를 텍스처로. 못 하면(다른 백엔드 등) 장을 CPU 로 한 번 올린다.
+            // 복사 없이 디코더 표면(IOSurface·D3D11 공유 텍스처)을 텍스처로. 못 하면(다른 백엔드 등) 장을 CPU 로 한 번 올린다.
             #[cfg(target_os = "macos")]
-            let zero_copy = unsafe { g.set_image_iosurface(&key, surface, fw, fh) };
-            #[cfg(not(target_os = "macos"))]
             let zero_copy = {
-                let _ = (surface, fw, fh);
+                let _ = surface_key;
+                unsafe { g.set_image_iosurface(&key, surface, fw, fh) }
+            };
+            #[cfg(windows)]
+            let zero_copy = unsafe { g.set_image_d3d11(&key, surface, surface_key, fw, fh) };
+            #[cfg(not(any(target_os = "macos", windows)))]
+            let zero_copy = {
+                let _ = (surface, surface_key, fw, fh);
                 false
             };
             if !zero_copy {

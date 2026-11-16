@@ -314,7 +314,7 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 ## 화면 스트림 입구 (2026-11-16, `docs/screen-stream.md`)
 
 - 같은 엔드포인트가 ALPN `kasa/screen/1` 도 받는다(`kasanet::SCREEN_ALPN`, 라우터에 `fwd` 와 나란히). 받는 일은 이 층이 모르고
-  `kasa_remote::screen_stream::install` 이 꽂는다. 꽂지 않은 판(관문·lite·Windows)은 연결을 바로 닫는다.
+  `kasa_remote::screen_stream::install` 이 꽂는다. 꽂지 않은 판(관문·lite)은 연결을 바로 닫는다. macOS·Windows 앱이 꽂는다.
 - 허용 목록 훅을 지난 뒤에도 **명부로 배운 기기와 등록된 주인 폰만** 받는다 — 지금 카사넷으로 `/screen/ws` 에 닿는 범위와 같다.
 - `/version` 의 `kasanet` 에 `screen: true`(꽂았을 때만). `learn` 이 base 마다 상대 id 와 이 값을 적어 둔다(`screen_capable`).
 - `kasanet::connect(base, alpn)` 은 그 base 의 링크 주소로 **ALPN 이 다른 QUIC 연결을 따로** 연다. 링크 연결은 `fwd` 전용이라
