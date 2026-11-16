@@ -245,6 +245,10 @@ pub fn resume_substitute(values: &Value, provider: &str) -> Option<Selection> {
     choose_among(values,&[provider]).ok().map(|choice|Selection {provider:provider.into(),account_id:choice.account_id})
 }
 
+/// 쓸 계정은 넘어갈 기준보다 이만큼(%p) 여유가 있어야 한다 — 거의 찬 계정으로 띄우면 몇 분 만에 한도에 걸린다.
+/// 앱 자동 전환의 `SWITCH_ROOM` 과 같은 값이다.
+const ROOM: f64 = 5.0;
+
 /// 넘어갈 기준. 자동 전환을 켰으면 그 기준이고, 껐으면 다 쓸 때까지다.
 fn switch_limit(values: &Value) -> f64 {
     if values["claude"]["autoswitch"] != true { return 100.0; }
@@ -270,7 +274,7 @@ fn choose_among(values: &Value, providers: &[&'static str]) -> Result<Choice, &'
             let choice = Choice {provider,account_id:id.into(),account_label:label,used_percent:used,
                 reason:if used.is_some() {"account_order"} else {"usage_unavailable"}};
             match used {
-                Some(used) if used < limit => return Ok(choice),
+                Some(used) if used < limit && used <= limit - ROOM => return Ok(choice),
                 Some(used) => over.push((used,rank,!current,Choice {reason:"remaining_usage",..choice})),
                 None if current && fallback.is_none() => fallback=Some(choice),
                 None => {}

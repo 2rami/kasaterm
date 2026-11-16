@@ -7266,6 +7266,10 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// 옮겨 갈 계정은 기준보다 이만큼(%p) 여유가 있어야 한다. 기준 100% 에서 98% 계정으로 옮겼다가 몇 분 만에
+/// 한도에 걸렸다(2026-11-16).
+pub const SWITCH_ROOM: f32 = 5.0;
+
 /// 위 차례 계정으로 돌아가려면 기준보다 이만큼(%p) 여유가 있어야 한다. 기준 바로 아래에서
 /// 돌아가면 곧 다시 넘어 두 계정을 오간다.
 pub const SWITCH_BACK_MARGIN: f32 = 20.0;
@@ -7284,7 +7288,8 @@ pub fn pick_account_by_order(
     now: u64,
 ) -> Option<(String, bool)> {
     let open = |(id, pct): &(String, f32)| {
-        !id.is_empty() && id != current && cooldowns.get(id).is_none_or(|&t| t <= now) && account_has_capacity(*pct, threshold)
+        !id.is_empty() && id != current && cooldowns.get(id).is_none_or(|&t| t <= now)
+            && account_has_capacity(*pct, threshold) && *pct <= threshold - SWITCH_ROOM
     };
     if current_pct >= threshold {
         return slots.iter().find(|slot| open(slot)).map(|(id, _)| (id.clone(), false));
@@ -9073,6 +9078,9 @@ mod account_autoswitch_tests {
         assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &none, 0), Some(("team".into(), false)),
             "the top account with room comes first, not the next one in a rotation");
         assert_eq!(pick_account_by_order("gmail", 95.0, &slots(&[("gmail", 95.0)]), 95.0, &none, 0), None, "one login has nowhere to go");
+        let order = slots(&[("team", 100.0), ("personal", 98.0), ("naver", 0.0)]);
+        assert_eq!(pick_account_by_order("team", 100.0, &order, 100.0, &none, 0), Some(("naver".into(), false)),
+            "an account a few points from the line fills up within minutes");
     }
 
     #[test]
