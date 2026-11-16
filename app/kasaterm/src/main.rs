@@ -6213,6 +6213,8 @@ struct App {
     /// 화면 칸의 연결·풀린 장(`PaneContent::Screen` 의 view_id). 칸이 닫히면 `sync_screen_views` 가 버린다.
     screen_views: HashMap<u64, screen_stream::ScreenView>,
     screen_view_seq: u64,
+    /// 별도 창으로 꺼낸 화면 보기(`screen_stream/window.rs`). 보기 자체는 `screen_views` 에 그대로 있다.
+    screen_windows: Vec<screen_stream::ScreenWindow>,
     /// `WebPane.host_id` 발급 시퀀스.
     web_host_seq: u64,
     /// 웹 pane 헤더 주소창의 인라인 편집(한 번에 하나). None = 편집 아님.
@@ -6664,6 +6666,7 @@ impl App {
             web_hosts: HashMap::new(),
             screen_views: HashMap::new(),
             screen_view_seq: 1,
+            screen_windows: Vec::new(),
             web_host_seq: 0,
             web_addr: None,
             web_find: None,

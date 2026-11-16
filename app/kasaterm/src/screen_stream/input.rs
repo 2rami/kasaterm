@@ -4,6 +4,7 @@
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 
+use super::Surface;
 use crate::App;
 
 /// 글자 넣기 한 번의 상한 — 그 기기가 4096 바이트 넘는 글은 버린다(`screen_mirror` TEXT_MAX).
@@ -18,15 +19,20 @@ fn mods_of(m: ModifiersState) -> u8 {
 const LINE_PX: f64 = 40.0;
 
 impl App {
-    /// 화면 칸 위의 마우스. 쓴 이벤트면 true — 뒤의 칸 누름 처리(초점·선택)로 흘리지 않는다.
+    /// 본창 화면 칸 위의 마우스. 쓴 이벤트면 true — 뒤의 칸 누름 처리(초점·선택)로 흘리지 않는다.
     pub(crate) fn screen_pointer_event(&mut self, event: &WindowEvent) -> bool {
-        if self.screen_views.is_empty() {
+        let p = (f64::from(self.cursor_px.0), f64::from(self.cursor_px.1));
+        self.screen_pointer_on(event, p, Surface::Main)
+    }
+
+    /// `on` 창에 그려진 화면 보기 위의 마우스(`p` 는 그 창의 논리 px).
+    pub(crate) fn screen_pointer_on(&mut self, event: &WindowEvent, p: (f64, f64), on: Surface) -> bool {
+        if !self.screen_views.values().any(|v| v.surface == on) {
             return false;
         }
-        let p = (f64::from(self.cursor_px.0), f64::from(self.cursor_px.1));
         let mods = mods_of(self.modifiers);
         // 끌던 단추가 있는 칸이 먼저다 — 칸 밖에서 떼도 그 기기에 뗌이 가야 단추가 눌린 채 남지 않는다.
-        let held = self.screen_views.iter().find(|(_, v)| v.buttons != 0).map(|(id, _)| *id);
+        let held = self.screen_views.iter().find(|(_, v)| v.surface == on && v.buttons != 0).map(|(id, _)| *id);
         match event {
             WindowEvent::MouseInput { state, button, .. } => {
                 let bit = match button {
@@ -37,14 +43,17 @@ impl App {
                 };
                 let pressed = *state == ElementState::Pressed;
                 let target = held.or_else(|| {
-                    self.screen_views.iter().find(|(_, v)| v.on_toggle(p) || (v.control && v.on_image(p))).map(|(id, _)| *id)
+                    self.screen_views
+                        .iter()
+                        .find(|(_, v)| v.surface == on && (v.on_toggle(p) || (v.control && v.on_image(p))))
+                        .map(|(id, _)| *id)
                 });
                 let Some(id) = target else { return false };
                 let Some(view) = self.screen_views.get_mut(&id) else { return false };
                 if held.is_none() && view.on_toggle(p) {
                     if pressed && bit == 1 {
                         view.control = !view.control;
-                        self.focus_screen_view(id);
+                        self.focus_screen_view(id, on);
                         self.chrome_dirty = true;
                     }
                     return true;
@@ -52,19 +61,19 @@ impl App {
                 let buttons = if pressed { view.buttons | bit } else { view.buttons & !bit };
                 view.pointer(p, buttons, mods);
                 if pressed {
-                    self.focus_screen_view(id);
+                    self.focus_screen_view(id, on);
                 }
                 true
             }
             WindowEvent::CursorMoved { .. } => {
-                let target = held.or_else(|| self.screen_views.iter().find(|(_, v)| v.control && v.on_image(p)).map(|(id, _)| *id));
+                let target = held.or_else(|| self.screen_views.iter().find(|(_, v)| v.surface == on && v.control && v.on_image(p)).map(|(id, _)| *id));
                 let Some(view) = target.and_then(|id| self.screen_views.get_mut(&id)) else { return false };
                 let buttons = view.buttons;
                 view.pointer(p, buttons, mods);
                 true
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let Some(view) = self.screen_views.values().find(|v| v.control && v.on_image(p)) else { return false };
+                let Some(view) = self.screen_views.values().find(|v| v.surface == on && v.control && v.on_image(p)) else { return false };
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (f64::from(*x) * LINE_PX, f64::from(*y) * LINE_PX),
                     MouseScrollDelta::PixelDelta(d) => (d.x, d.y),
@@ -85,6 +94,11 @@ impl App {
     /// 한글은 이 앱이 자모로 받아 조합하므로(macOS) 다 된 글자만 보낸다.
     pub(crate) fn screen_view_key(&mut self, event: &KeyEvent) -> bool {
         let Some(id) = self.active_screen_view() else { return false };
+        self.screen_key_for(id, event)
+    }
+
+    /// 그 보기에 키 하나 — 꺼낸 화면 창은 늘 이 보기 하나가 앞이다.
+    pub(crate) fn screen_key_for(&mut self, id: u64, event: &KeyEvent) -> bool {
         if !self.screen_views.get(&id).is_some_and(|v| v.control) || event.state != ElementState::Pressed {
             return true;
         }
@@ -128,6 +142,10 @@ impl App {
     /// 입력기 확정 글(일본어 등 OS 입력기를 거친 글)도 조작 중인 화면 탭으로.
     pub(crate) fn screen_ime(&mut self, ime: &Ime) -> bool {
         let Some(id) = self.active_screen_view() else { return false };
+        self.screen_ime_for(id, ime)
+    }
+
+    pub(crate) fn screen_ime_for(&mut self, id: u64, ime: &Ime) -> bool {
         if let Ime::Commit(text) = ime {
             if self.screen_views.get(&id).is_some_and(|v| v.control) {
                 self.screen_text(id, text);
@@ -139,6 +157,10 @@ impl App {
     /// ⌘V — 조작 중이면 이 기기 클립보드 글을 그 기기에 글자째 넣는다. 화면 탭이 앞이면 어디로도 붙이지 않는다.
     pub(crate) fn screen_paste(&mut self) -> bool {
         let Some(id) = self.active_screen_view() else { return false };
+        self.screen_paste_for(id)
+    }
+
+    pub(crate) fn screen_paste_for(&mut self, id: u64) -> bool {
         if !self.screen_views.get(&id).is_some_and(|v| v.control) {
             return true;
         }
@@ -173,8 +195,11 @@ impl App {
         self.chrome_dirty = true;
     }
 
-    /// 누른 화면 탭을 앞 칸·앞 탭으로 — 키가 그 칸으로 간다.
-    fn focus_screen_view(&mut self, id: u64) {
+    /// 누른 화면 탭을 앞 칸·앞 탭으로 — 키가 그 칸으로 간다. 꺼낸 화면 창은 그 창이 곧 초점이라 할 일이 없다.
+    fn focus_screen_view(&mut self, id: u64, on: Surface) {
+        if on != Surface::Main {
+            return;
+        }
         let mut ws = self.ws.lock().unwrap();
         let found = ws
             .panes

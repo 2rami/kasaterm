@@ -1,12 +1,7 @@
-//! 기기 화면 거울의 창구 — 브라우저·PC 웹 칸이 여는 보기 페이지 `/screen` 과 프레임 소켓 `/screen/ws`.
-//! 뜨기·역압은 `kasa_remote::screen_mirror`, 계약은 `docs/screen-mirror.md`.
+//! 기기 화면 거울의 프레임 소켓 `/screen/ws` — 폰이 붙는다. PC 는 화면 칸(카사넷 `kasa/screen/1`)으로 보고, 브라우저용
+//! 보기 페이지는 느려 걷어냈다. 뜨기·역압은 `kasa_remote::screen_mirror`, 계약은 `docs/screen-mirror.md`.
 
 use super::*;
-use super::auth::html_with_token_cookie;
-
-async fn page(Query(q): Query<std::collections::HashMap<String, String>>) -> axum::response::Response {
-    html_with_token_cookie(include_str!("../../assets/screen/index.html"), &q)
-}
 
 async fn ws(req: axum::extract::Request) -> axum::response::Response {
     // 화면에는 주인의 메일·비밀번호 창까지 다 보인다 — 손님 폰 주소는 막는다.
@@ -48,6 +43,5 @@ async fn ws(req: axum::extract::Request) -> axum::response::Response {
 
 pub(super) fn routes() -> axum::Router {
     axum::Router::new()
-        .route("/screen", get(page))
         .route("/screen/ws", get(ws))
 }

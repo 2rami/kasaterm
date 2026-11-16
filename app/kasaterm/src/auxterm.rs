@@ -1165,6 +1165,7 @@ impl App {
             Markdown,
             TerminalTab,
             Pane,
+            Screen,
             Skip,
         }
         let (outer, tab_idx, route) = {
@@ -1183,6 +1184,7 @@ impl App {
                         Route::TerminalTab
                     }
                     PaneContent::Terminal(_) => Route::Pane,
+                    PaneContent::Screen(_) => Route::Screen,
                     _ => Route::Skip,
                 },
                 None => Route::Skip,
@@ -1193,6 +1195,7 @@ impl App {
             Route::Markdown => self.popout_pane_tab(&outer, tab_idx, event_loop),
             Route::TerminalTab => self.undock_pane_tab(&outer, tab_idx, event_loop, None),
             Route::Pane => self.undock_pane_terminal(&outer, event_loop, None),
+            Route::Screen => self.pop_out_screen(&outer, tab_idx, event_loop),
             Route::Skip => {}
         }
     }

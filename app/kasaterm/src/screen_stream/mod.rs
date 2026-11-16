@@ -26,8 +26,18 @@ use win_view as platform;
 mod annexb;
 mod input;
 mod pane;
+mod window;
 
 pub(crate) use pane::paint;
+pub(crate) use window::ScreenWindow;
+
+/// 화면 보기가 그려지는 창 — 본창의 칸이거나 꺼낸 화면 창(`window.rs`). 누름은 그 창에서 온 것만 받는다.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Surface {
+    #[default]
+    Main,
+    Window(winit::window::WindowId),
+}
 
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use view::ScreenView;
@@ -89,6 +99,8 @@ pub(crate) struct ScreenView {
     pub preedit: String,
     pub zero_copy: bool,
     pub hidden_since: Option<std::time::Instant>,
+    pub surface: Surface,
+    pub closed_since: Option<std::time::Instant>,
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -97,9 +109,16 @@ impl ScreenView {
     pub(crate) fn open(_label: &str, _base: &str, _wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
         None
     }
-    pub(crate) fn new_surface(&mut self) -> Option<(*mut std::ffi::c_void, u32, u32)> {
+    pub(crate) fn new_surface(&mut self) -> Option<(*mut std::ffi::c_void, u64, u32, u32)> {
         None
     }
+    pub(crate) fn current_surface(&mut self) -> Option<(*mut std::ffi::c_void, u64, u32, u32)> {
+        None
+    }
+    pub(crate) fn closed(&self) -> bool {
+        true
+    }
+    pub(crate) fn carry_status(&self, _previous: &str) {}
     pub(crate) fn copy_latest(&self, _f: impl FnOnce(&[u8], u32, u32, u32)) {}
     pub(crate) fn note_upload(&mut self, _took: std::time::Duration, _zero_copy: bool) {}
     pub(crate) fn has_new_frame(&self) -> bool {

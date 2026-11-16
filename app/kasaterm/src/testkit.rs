@@ -7010,12 +7010,16 @@ impl App {
 
     /// 검증 실행에서 `KASATERM_TEST_SCREEN_LABEL` 기기의 화면 칸을 연다(docs/screen-stream.md S1 리그). 카사넷이 그 기기를
     /// 배워 직통이 설 때까지 기다렸다 열고, 2초마다 칸 위 표시(fps·지연·길)를 로그에 적는다.
-    pub(crate) fn run_pending_screen_view_test(&mut self) {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    /// `KASATERM_TEST_SCREEN_POPOUT=<초>` 면 첫 장이 온 뒤 화면 탭을 별도 창으로 꺼냈다가 그만큼 뒤 칸으로 되돌린다.
+    /// `KASATERM_TEST_SCREEN_ANYPATH=1` 이면 직통을 기다리지 않고 바로 연다 — 못 붙는 칸의 상태 글을 본다.
+    pub(crate) fn run_pending_screen_view_test(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
         use std::sync::{Mutex, OnceLock};
         static LABEL: OnceLock<Option<String>> = OnceLock::new();
         static OPENED: AtomicBool = AtomicBool::new(false);
         static LOGGED: Mutex<Option<Instant>> = Mutex::new(None);
+        static POP: AtomicU8 = AtomicU8::new(0);
+        static POPPED_AT: Mutex<Option<Instant>> = Mutex::new(None);
         let Some(label) = LABEL.get_or_init(|| {
             crate::verification_run().then(|| std::env::var("KASATERM_TEST_SCREEN_LABEL").ok()).flatten()
         }) else {
@@ -7023,13 +7027,39 @@ impl App {
         };
         if !OPENED.load(Ordering::Relaxed) {
             let Some(machine) = kasa_device::machines::find(label) else { return };
-            if !crate::screen_stream::can_view(&machine.base) {
+            if std::env::var_os("KASATERM_TEST_SCREEN_ANYPATH").is_none() && !crate::screen_stream::can_view(&machine.base) {
                 return;
             }
             OPENED.store(true, Ordering::Relaxed);
             let opened = self.open_screen_pane(label, &machine.base);
             eprintln!("[screen-view-test] {label} opened={opened}");
             return;
+        }
+        if let Some(secs) = std::env::var("KASATERM_TEST_SCREEN_POPOUT").ok().and_then(|s| s.parse::<u64>().ok()) {
+            match POP.load(Ordering::Relaxed) {
+                0 if self.screen_views.values().any(|v| v.has_frame()) => {
+                    let found = {
+                        let ws = self.ws.lock().unwrap();
+                        ws.panes.iter().find_map(|(id, p)| {
+                            p.tabs.iter().position(|t| t.screen().is_some_and(|s| &s.label == label)).map(|i| (id.clone(), i))
+                        })
+                    };
+                    if let Some((pane, idx)) = found {
+                        self.pop_out_screen(&pane, idx, event_loop);
+                        eprintln!("[screen-view-test] popped out windows={}", self.screen_windows.len());
+                        *POPPED_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                        POP.store(1, Ordering::Relaxed);
+                    }
+                }
+                1 if POPPED_AT.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| t.elapsed().as_secs() >= secs) => {
+                    if !self.screen_windows.is_empty() {
+                        self.dock_screen_window(0);
+                    }
+                    eprintln!("[screen-view-test] docked windows={}", self.screen_windows.len());
+                    POP.store(2, Ordering::Relaxed);
+                }
+                _ => {}
+            }
         }
         let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
         if logged.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
@@ -7038,8 +7068,9 @@ impl App {
         *logged = Some(Instant::now());
         for view in self.screen_views.values() {
             eprintln!(
-                "[screen-view-test] {} frame={} hud={} upload={:.2}ms zero_copy={} uploads={} control={} toggle={:?} image={:?} status={}",
+                "[screen-view-test] {} surface={:?} frame={} hud={} upload={:.2}ms zero_copy={} uploads={} control={} toggle={:?} image={:?} status={}",
                 view.label,
+                view.surface,
                 view.has_frame(),
                 view.hud(),
                 view.upload_ms,

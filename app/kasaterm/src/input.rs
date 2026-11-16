@@ -4355,7 +4355,7 @@ impl App {
 /// 따로 두고 있다(2026-08-31 확정). 맥은 `windows=false` 라 아무것도 안 바뀐다.
 ///
 /// AltGr 은 윈도우에서 Ctrl+Alt 로 오고 그건 문자 입력이라 제외한다.
-fn windows_paste_chord(windows: bool, ctrl: bool, host: bool, alt: bool, is_v: bool) -> bool {
+pub(crate) fn windows_paste_chord(windows: bool, ctrl: bool, host: bool, alt: bool, is_v: bool) -> bool {
     windows && ctrl && !host && !alt && is_v
 }
 

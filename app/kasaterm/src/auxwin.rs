@@ -2606,6 +2606,10 @@ impl App {
             self.aux_terminal_event(term, event, event_loop);
             return true;
         }
+        if let Some(screen) = self.screen_window_index(id) {
+            self.screen_window_event(screen, event);
+            return true;
+        }
         if let Some(index) = self.aux.windows.iter().position(|aux| aux.rich.as_ref().is_some_and(|host| host.owns(id))) {
             match event {
                 WindowEvent::CloseRequested => self.close_aux_editor(index, event_loop),
@@ -3129,7 +3133,7 @@ impl App {
     }
 
     pub(crate) fn aux_owns_window(&self, id: WindowId) -> bool {
-        self.aux_index(id).is_some() || self.aux_terminal_window_index(id).is_some()
+        self.aux_index(id).is_some() || self.aux_terminal_window_index(id).is_some() || self.screen_window_index(id).is_some()
             || self.aux.windows.iter().any(|aux| aux.rich.as_ref().is_some_and(|host| host.owns(id)))
     }
 

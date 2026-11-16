@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{Layout, ScreenView};
+use super::{Layout, ScreenView, Surface};
 use crate::{gpu, theme, App, PaneContent, PaneTab, ScreenPane, UserEvent};
 
 const STATUS_FONT: f32 = 13.0;
@@ -11,6 +11,8 @@ const HUD_FONT: f32 = 11.0;
 const HUD_PAD: f32 = 6.0;
 /// 안 보인 지 이만큼이면 연결을 닫는다 — 탭을 잠깐 넘겨 보는 동안 다시 붙느라 키프레임을 기다리지 않게.
 const HIDDEN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// 보이는 칸의 연결이 닫히면 이만큼 뒤 다시 붙는다 — 그 기기 재시작·직통이 늦게 서는 경우.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 
 fn texture_key(view: u64) -> String {
     format!("screen:{view}")
@@ -19,14 +21,17 @@ fn texture_key(view: u64) -> String {
 /// 새로 풀린 장을 올리고 칸 본문 안에 비율을 지켜 그린다. 아직 장이 없으면 상태 글을 가운데에, 장이 흐르면 오른쪽
 /// 위에 「조작」 단추와 `fps · 지연 · 길` 을 작게 얹는다. 조작 중이면 장을 강조색 테로 두르고, 조작을 못 넣으면 그 까닭을
 /// 아래에 띄운다. 그린 자리는 누름 판정에 쓰도록 보기에 적어 둔다.
-pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenView>, slots: &[(u64, (f32, f32, f32, f32))]) {
+pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenView>, slots: &[(u64, (f32, f32, f32, f32))], on: Surface) {
     let white = [255, 255, 255, 235];
     let dim = [0, 0, 0, 150];
     let opts = |font_size, color| gpu::DrawOpts { font_size, color, bold: false, italic: false };
     for (view_id, (x, y, w, h)) in slots {
         let Some(view) = views.get_mut(view_id) else { continue };
         let key = texture_key(*view_id);
-        if let Some((surface, surface_key, fw, fh)) = view.new_surface() {
+        view.surface = on;
+        // 칸을 다른 창으로 옮기면 그 창 렌더러에는 장이 없다 — 멈춘 화면이면 새 장이 안 오니 마지막 장을 다시 올린다.
+        let fresh = view.new_surface().or_else(|| if g.has_image(&key) { None } else { view.current_surface() });
+        if let Some((surface, surface_key, fw, fh)) = fresh {
             let started = std::time::Instant::now();
             // 복사 없이 디코더 표면(IOSurface·D3D11 공유 텍스처)을 텍스처로. 못 하면(다른 백엔드 등) 장을 CPU 로 한 번 올린다.
             #[cfg(target_os = "macos")]
@@ -91,8 +96,8 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
 }
 
 impl App {
-    /// 그 기기 화면을 이 창의 칸 탭으로 연다. 이미 열려 있으면 그 탭으로 간다. 못 열면 false — 부른 쪽이 JPEG
-    /// 웹 칸으로 연다.
+    /// 그 기기 화면을 이 창의 칸 탭으로 연다. 이미 열려 있으면 그 탭으로 간다. 지금 못 붙으면(옛 판·직통 아님) 칸에
+    /// 까닭을 띄우고 길이 서면 붙는다. 칸을 둘 자리가 없을 때만 false.
     pub(crate) fn open_screen_pane(&mut self, label: &str, base: &str) -> bool {
         let existing = {
             let ws = self.ws.lock().unwrap();
@@ -164,16 +169,19 @@ impl App {
                 })
                 .collect()
         };
-        if tabs.is_empty() && self.screen_views.is_empty() {
+        if tabs.is_empty() && self.screen_views.is_empty() && self.screen_windows.is_empty() {
             return;
         }
         let shown = self.visible_pane_ids();
-        let live: Vec<(u64, String, bool)> = tabs
+        let mut live: Vec<(u64, String, bool)> = tabs
             .into_iter()
             .filter(|(id, ..)| self.window_of_pane(id).is_some())
             .map(|(id, v, l, front)| (v, l, front && shown.contains(&id)))
             .collect();
+        // 꺼낸 화면 창은 늘 보인다.
+        live.extend(self.screen_windows.iter().map(|w| (w.view_id, w.label.clone(), true)));
         let now = std::time::Instant::now();
+        let mut retry: Vec<(u64, String)> = Vec::new();
         let gone: Vec<u64> = self
             .screen_views
             .iter_mut()
@@ -181,7 +189,16 @@ impl App {
                 let Some((_, _, visible)) = live.iter().find(|(v, ..)| v == id) else { return Some(*id) };
                 if *visible {
                     view.hidden_since = None;
-                    return None;
+                    if !view.closed() {
+                        view.closed_since = None;
+                        return None;
+                    }
+                    let since = *view.closed_since.get_or_insert(now);
+                    if now.duration_since(since) < RETRY_AFTER {
+                        return None;
+                    }
+                    retry.push((*id, view.status()));
+                    return Some(*id);
                 }
                 let since = *view.hidden_since.get_or_insert(now);
                 (now.duration_since(since) >= HIDDEN_GRACE).then_some(*id)
@@ -201,12 +218,16 @@ impl App {
             let proxy = self.proxy.clone();
             let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || drop(proxy.send_event(UserEvent::Redraw)));
             if let Some(view) = ScreenView::open(&label, &machine.base, wake) {
+                if let Some((_, previous)) = retry.iter().find(|(v, _)| *v == view_id) {
+                    view.carry_status(previous);
+                }
                 self.screen_views.insert(view_id, view);
             }
         }
     }
 
+    /// 본창에 그려지는 보기에 새 장이 있나 — 꺼낸 창의 보기는 그 창만 다시 그린다(`redraw_screen_windows`).
     pub(crate) fn screen_views_have_new_frame(&self) -> bool {
-        self.screen_views.values().any(ScreenView::has_new_frame)
+        self.screen_views.values().any(|v| v.surface == Surface::Main && v.has_new_frame())
     }
 }

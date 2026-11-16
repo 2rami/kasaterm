@@ -14,7 +14,6 @@
 
 ```
 폰 ScreenMirrorScreen ──(직통이면 카사넷, 아니면 관문)──┐
-PC 웹 칸 /m/<기기>/screen ──(이 기기 HTTP → 그 기기 길)──┤
                                                      ▼
                          그 기기 카사텀  GET /screen/ws  (kasa-http http/screen.rs → screen_mirror.rs)
                                                      │  Source::capture (앱이 꽂는다)
@@ -24,9 +23,9 @@ PC 웹 칸 /m/<기기>/screen ──(이 기기 HTTP → 그 기기 길)──�
 
 - 화면을 뜨는 법은 OS 마다 달라 앱이 부팅 때 `kasa_remote::screen_mirror::install` 로 꽂는다. 관문·`kasa-device`·lite 처럼 꽂지
   않은 곳은 `unavailable` 로 답한다.
-- PC 는 Info 「다른 기계」 줄 메뉴의 **「화면 거울」**로 연다(연결된 기기만). 그 기기가 화면 스트림을 보내는 판이고 카사넷
-  직통·믿는 중계면 하드웨어 영상 칸(`docs/screen-stream.md`)으로, 아니면 이 창의 웹 칸(`/screen` 보기 페이지)으로 뜬다.
-  화면공유(「화면 보기」)·「KVM 보기」는 그대로 둔다.
+- PC 는 Info 「다른 기계」 줄 메뉴의 **「화면 거울」**로 연다(연결된 기기만). 늘 하드웨어 영상 화면 칸(`docs/screen-stream.md`)으로
+  뜬다 — 이 소켓의 JPEG 를 그리던 웹 칸(`/screen` 보기 페이지)은 느려 2026-11-16 에 걷어냈다. 그 기기가 옛 판이거나 카사넷
+  직통이 아니면 칸에 까닭을 띄우고 길이 서면 붙는다. 화면공유(「화면 보기」)·「KVM 보기」는 그대로 둔다.
 - 폰은 허브의 기기 머리글 **모니터 단추**로 연다(연결된 기기만).
 
 ## 계약
@@ -76,8 +75,6 @@ PC 웹 칸 /m/<기기>/screen ──(이 기기 HTTP → 그 기기 길)──�
 - 폰(`mobile/lib/screen_session.dart`·`screens/screen_mirror.dart`): 직통이면 1920·q60, 관문이면 1280·q50, 8fps. 수명은 터미널과
   같다 — 앱이 뒤로 가면 닫고, 돌아오면 관문부터 다시 붙고, 길이 바뀌면(`routeChanges`) 옮겨 붙는다. 화면은 가운데 맞춤,
   핀치(최대 8배)·두 번 탭(그 자리 3배 ↔ 전체). 두 장을 함께 풀어 늦게 끝난 옛 장이 새 장을 덮지 않게 seq 로 거른다.
-- 웹(`crates/kasa-http/assets/screen/index.html`): 창 픽셀(×devicePixelRatio, 160 단위)만큼 받고 창 크기가 바뀌면 `tune`.
-  `?name=` 이 탭 제목(「화면 · 이름」)이 된다. 「실제 크기」로 1:1 스크롤 보기.
 
 ## 조작
 
@@ -95,9 +92,6 @@ PC 웹 칸 /m/<기기>/screen ──(이 기기 HTTP → 그 기기 길)──�
   뗀다) 탭 = 클릭, 길게 = 오른쪽 클릭, 한 손가락 끌기 = 휠(손가락 아래 내용이 따라온다 — 문턱 전 거리도 굴린다)이다. 아래에 키 줄
   (esc·tab·화살표·⌫·⏎)과 「그 기기에 글 넣기」 입력줄이 붙고, 본문을 2px 강조 테로 두른다. 권한이 없으면 위에 안내 띠.
   둘로 나누는 까닭은 크롬 거울과 같다 — 핀치·끌기가 확대·이동과 같은 손짓이고, 보다가 잘못 누르면 그 기기에서 일이 일어난다.
-- **웹**(`assets/screen/index.html`): 「조작」 단추. 마우스는 `e.buttons` 그대로·움직임은 화면 틀마다 하나, 휠은 브라우저와 부호가
-  반대, 이름 붙은 키와 단축키(ctrl·⌘·alt)만 키로, 나머지 글은 숨은 입력칸에 이 기기 입력기가 조합을 끝낸 글째 보낸다. 조합 끝과
-  `input` 차례가 엔진마다 달라(웹킷은 끝 뒤에 input 이 한 번 더 온다) 칸에 남은 글을 보내고 비운다.
 
 ## OS 별
 
@@ -133,11 +127,11 @@ PC 웹 칸 /m/<기기>/screen ──(이 기기 HTTP → 그 기기 길)──�
 - Windows 쪽은 이 맥에서 `ring` 의 C 빌드 때문에 앱 통째 교차 검사가 안 된다. `screen_input.rs` 만 같은 `windows` 판으로 떼어
   `cargo check --target x86_64-pc-windows-msvc` 했다.
 - 격리 리그 둘(A 원본, B 가 `KASATERM_MACHINES` 로 A 를 가리킴): B 의 `/m/rigA/screen/ws` 로 실제 화면이 오고 ack 를 안 하면 2장에서
-  멈춘다. B 웹 칸에 `/m/rigA/screen` 을 열어 웹뷰 스냅샷(`web.drive shot`)으로 화면이 그려진 것을 봤다.
+  멈춘다.
 
 ## 남은 것
 
-- 조작 중 끌어 고르기(왼쪽 단추 끌기)는 폰에 없다 — 한 손가락 끌기가 휠이다. 웹은 된다.
-- 붙여넣기(보는 쪽 클립보드 → 그 기기)는 폰·웹에 없다. 글 넣기로 대신한다. PC 화면 칸(`docs/screen-stream.md` S1b)은 ⌘V 로 된다.
+- 조작 중 끌어 고르기(왼쪽 단추 끌기)는 폰에 없다 — 한 손가락 끌기가 휠이다. PC 화면 칸은 된다.
+- 붙여넣기(보는 쪽 클립보드 → 그 기기)는 폰에 없다. 글 넣기로 대신한다. PC 화면 칸(`docs/screen-stream.md` S1b)은 ⌘V 로 된다.
 - 많이 움직이는 화면은 JPEG 장마다 보내 무겁다. ScreenCaptureKit + 하드웨어 HEVC + 카사넷 QUIC 으로 가는 길과 실측은
   `docs/screen-stream.md`.

@@ -833,25 +833,17 @@ impl App {
     /// 그 기기 화면 거울을 연다. 그 기기가 화면 스트림을 보내는 판이고 카사넷 직통·믿는 중계면 하드웨어 영상 칸으로
     /// (`screen_stream`, docs/screen-stream.md), 아니면 JPEG 웹 칸으로 — 이 기기 HTTP 의 `/m/<기기>/` 문을 지나
     /// 그 기기 길(터널·카사넷)을 그대로 탄다. 웹 칸은 이벤트 루프가 있어야 해서 소켓 열기와 같은 이벤트로 넘긴다.
+    /// 기기 화면은 이 창의 화면 칸으로만 연다 — 웹 칸(JPEG)은 느려 걷어냈다. 지금 못 붙으면 칸이 까닭을 띄우고 길이
+    /// 서면 붙는다.
     fn open_screen_mirror(&mut self, label: &str) {
-        if let Some(machine) = kasa_device::machines::find(label) {
-            if crate::screen_stream::can_view(&machine.base) && self.open_screen_pane(label, &machine.base) {
-                self.info.machine_menu = None;
-                return;
-            }
-        }
-        let Some(port) = self.statusbar.port.clone() else {
-            self.set_toast("이 기기 HTTP 가 꺼져 있어 화면 거울을 못 열어요".to_string());
+        self.info.machine_menu = None;
+        let Some(machine) = kasa_device::machines::find(label) else {
+            self.set_toast(format!("{label} 을(를) 기기 명부에서 못 찾았어요"));
             return;
         };
-        let name = crate::render::pane_identity::device_name(label);
-        let url = format!(
-            "http://127.0.0.1:{port}/m/{}/screen?name={}",
-            crate::webpane::url_query_encode(label),
-            crate::webpane::url_query_encode(&name),
-        );
-        self.info.machine_menu = None;
-        let _ = self.proxy.send_event(UserEvent::SocketOpenWeb(url, None));
+        if !self.open_screen_pane(label, &machine.base) {
+            self.set_toast("화면 칸을 못 열었어요".to_string());
+        }
     }
 
     /// 메뉴 항목 하나를 실행한다. 학생 줄 우클릭 메뉴(보내기·데려오기)도 여기로

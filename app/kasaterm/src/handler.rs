@@ -307,6 +307,7 @@ impl ApplicationHandler<UserEvent> for App {
             crate::turn_probe::lag_received();
             self.drain_drag_transfers();
             self.aux_request_redraws();
+            self.redraw_screen_windows();
         }
         // 어떤 이벤트가 루프를 깨우는지 — 종류별로 센다. 「UserEvent 쪽이
         // 원인」까지는 옆 계측이 말해 주지만, 그 다음 질문(무엇이)에는 답이 없다.
@@ -8091,7 +8092,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoundock(event_loop);
         self.run_pending_autoundock_dock();
         self.run_pending_autoremotecolor();
-        self.run_pending_screen_view_test();
+        self.run_pending_screen_view_test(event_loop);
         self.run_pending_autostudent(event_loop);
         self.run_pending_autotabcycle();
         self.run_pending_autoboxlabel();

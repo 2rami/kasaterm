@@ -10,7 +10,7 @@ use kasa_remote::screen_stream::{self, Config, Event, Frame, Keyframes, Watch};
 use serde_json::json;
 
 use super::platform::{Picture, VideoDecoder};
-use super::{contains, Layout};
+use super::{contains, Layout, Surface};
 
 /// GPU 에 넘긴 뒤 쥐고 있을 장 수 — 60fps 에서 50ms. 그려지는 동안 디코더가 그 버퍼에 다음 장을 풀지 않게.
 const HELD: usize = 3;
@@ -62,10 +62,16 @@ pub(crate) struct ScreenView {
     /// 마지막 장을 GPU 로 올리는 데 든 시간(ms)과 올린 장 수 — 검증 리그가 읽는다.
     pub upload_ms: f64,
     pub uploads: u64,
+    /// 지금 그려지는 창 — 누름은 그 창에서 온 것만 받는다(본창 칸 또는 꺼낸 화면 창).
+    pub surface: Surface,
+    /// 연결이 닫힌 때 — 보이는 동안 잠시 뒤 다시 붙는다(`pane.rs sync_screen_views`).
+    pub closed_since: Option<std::time::Instant>,
 }
 
 impl ScreenView {
     /// 그 기기(base) 화면을 본다. 새 장이 풀릴 때마다 `wake` 를 부른다 — GUI 를 깨워 다시 그리게.
+    /// 그 기기가 화면 스트림을 모르는 판이거나 카사넷 직통이 아니면 연결 없이 까닭만 들고 연다 — 칸은 그대로 두고
+    /// 길이 서면 다시 붙는다.
     pub(crate) fn open(label: &str, base: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
         let shared = Arc::new(Shared {
             latest: Mutex::new(None),
@@ -97,7 +103,7 @@ impl ScreenView {
                     };
                     set_status(&shared, &wake, text);
                 }
-                Event::Closed(why) => set_status(&shared, &wake, &format!("끊겼어요 — {why}")),
+                Event::Closed(why) => set_status(&shared, &wake, &closed_text(&why)),
                 Event::Input { ok, reason } => {
                     let note = (!ok).then(|| {
                         if reason.as_deref() == Some("permission") {
@@ -111,14 +117,53 @@ impl ScreenView {
                 }
             }
         };
-        let watch = screen_stream::watch(base.to_string(), config.clone(), on)?;
-        *keyframes.lock().unwrap_or_else(|e| e.into_inner()) = Some(watch.keyframes());
+        let watch = if kasa_device::kasanet::screen_capable(base) {
+            let watch = screen_stream::watch(base.to_string(), config.clone(), on)?;
+            *keyframes.lock().unwrap_or_else(|e| e.into_inner()) = Some(watch.keyframes());
+            Some(watch)
+        } else {
+            *shared.status.lock().unwrap_or_else(|e| e.into_inner()) = match kasa_device::kasanet::path(base) {
+                Some((p, _)) if p != "ssh" => "그 기기 카사텀이 화면 스트림을 모르는 판이에요 — 그 기기를 업데이트하면 보여요".into(),
+                _ => "카사넷 직통을 기다리는 중 — 길이 서면 바로 붙어요".into(),
+            };
+            None
+        };
         let worker_shared = shared.clone();
         std::thread::Builder::new()
             .name("screen-stream-decode".into())
             .spawn(move || decode_loop(rx, keyframes, &worker_shared, &wake))
             .ok()?;
-        Some(Self { label: label.to_string(), shared, watch: Some(watch), uploaded: 0, upload_ms: 0.0, uploads: 0, control: false, layout: None, buttons: 0, preedit: String::new(), frame: (0, 0), held: VecDeque::new(), zero_copy: false, hidden_since: None })
+        Some(Self {
+            label: label.to_string(),
+            shared,
+            watch,
+            uploaded: 0,
+            upload_ms: 0.0,
+            uploads: 0,
+            control: false,
+            layout: None,
+            buttons: 0,
+            preedit: String::new(),
+            frame: (0, 0),
+            held: VecDeque::new(),
+            zero_copy: false,
+            hidden_since: None,
+            surface: Surface::Main,
+            closed_since: None,
+        })
+    }
+
+    /// 연결이 없거나 닫혔다.
+    pub(crate) fn closed(&self) -> bool {
+        self.watch.as_ref().is_none_or(Watch::is_closed)
+    }
+
+    /// 다시 붙을 때 이전 까닭을 이어 보인다 — 붙는 중 글로 덮으면 왜 안 되는지가 깜빡이며 사라진다.
+    pub(crate) fn carry_status(&self, previous: &str) {
+        let mut status = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
+        if *status == "카사넷으로 붙는 중" {
+            *status = previous.to_string();
+        }
     }
 
     /// 지난번에 가져간 뒤 새로 풀린 장이 있으면 복사 없이 텍스처로 삼을 표면(macOS IOSurface·Windows D3D11 공유 핸들, 없으면
@@ -129,6 +174,18 @@ impl ScreenView {
             return None;
         }
         self.uploaded = serial;
+        self.take_latest()
+    }
+
+    /// 새 장을 기다리지 않고 마지막 장을 다시 낸다 — 칸을 다른 창으로 옮겨 그 창 렌더러가 아직 장을 안 가졌을 때.
+    pub(crate) fn current_surface(&mut self) -> Option<(*mut std::ffi::c_void, u64, u32, u32)> {
+        if self.uploaded == 0 {
+            return None;
+        }
+        self.take_latest()
+    }
+
+    fn take_latest(&mut self) -> Option<(*mut std::ffi::c_void, u64, u32, u32)> {
         let px = self.shared.latest.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
         let (w, h) = px.size();
         let (surface, key) = px.surface();
@@ -244,6 +301,17 @@ impl Drop for ScreenView {
                 s.latency_sum / s.frames as f64
             );
         }
+    }
+}
+
+/// 카사넷 연결 실패 말(`kasanet::connect`)을 칸에 띄울 말로.
+fn closed_text(why: &str) -> String {
+    if why.contains("직통도 믿는 중계도 아니다") || why.contains("이은 길이 없다") {
+        "카사넷 직통을 기다리는 중 — 길이 서면 바로 붙어요".into()
+    } else if why.contains("주소를 아직 모른다") {
+        "그 기기를 찾는 중".into()
+    } else {
+        format!("끊겼어요 — {why} · 곧 다시 붙어요")
     }
 }
 

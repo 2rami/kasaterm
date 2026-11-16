@@ -2530,7 +2530,7 @@ impl App {
                 );
                 g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
             }
-            crate::screen_stream::paint(g, &mut self.screen_views, &screen_slots);
+            crate::screen_stream::paint(g, &mut self.screen_views, &screen_slots, crate::screen_stream::Surface::Main);
             paint_inline_images(g, &inline_slots);
             crate::inline_result::verify_frame(g, &inline_slots);
             self.image_preview.collect(preview_window_id, self.active_window, g, &inline_slots);
@@ -4503,8 +4503,9 @@ impl App {
                             let p = ws.panes.get(fid.as_str());
                             (
                                 p.is_some_and(|p| p.has_header()),
+                                // 화면 탭도 별도 창으로 꺼낸다(`screen_stream/window.rs`).
                                 p.is_some_and(|p| {
-                                    p.tabs.get(p.active_tab).is_some_and(|t| t.term().is_some())
+                                    p.tabs.get(p.active_tab).is_some_and(|t| t.term().is_some() || t.screen().is_some())
                                 }),
                             )
                         };
