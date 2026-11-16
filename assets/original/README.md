@@ -7,9 +7,9 @@ blue and amber rainwear. The reference itself is not redistributed here.
 
 | File | Purpose | SHA-256 |
 |---|---|---|
-| `twins.png` | Shared KASA identity | `7fdd93e2afcfef8c178ac4554f7d30d16fc758ca3dde68ad025ac7af39266dbf` |
-| `sky.png` | Sky, internal slug `kasa_sky` | `23337f1558858300cb92a7c73b77c0fd2f29d7418c9a756cc792df256ef12d0c` |
-| `amber.png` | Amber, internal slug `kasa_amber` | `1570b5ce9abaa7d80a162b3f2d628e7f81170b1d1e03318517606f1432d2612c` |
+| `mobile/assets/original/twins.png` | Shared KASA identity | `7fdd93e2afcfef8c178ac4554f7d30d16fc758ca3dde68ad025ac7af39266dbf` |
+| `mobile/assets/original/sky.png` | Sky, internal slug `kasa_sky` | `23337f1558858300cb92a7c73b77c0fd2f29d7418c9a756cc792df256ef12d0c` |
+| `mobile/assets/original/amber.png` | Amber, internal slug `kasa_amber` | `1570b5ce9abaa7d80a162b3f2d628e7f81170b1d1e03318517606f1432d2612c` |
 
 All files are 1024×1024 RGBA PNGs. Their four corners have alpha zero;
 transparent-pixel counts are 509,920, 632,348 and 741,059 respectively.
