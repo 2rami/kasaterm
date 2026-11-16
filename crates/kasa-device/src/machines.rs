@@ -114,6 +114,25 @@ pub fn build_id() -> String {
         .cloned()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
+/// 두 빌드 표식이 같은 커밋인가. git 짧은 해시는 저장소마다 길이가 다르다(맥 8자리, Windows CI 7자리 — 같은
+/// 커밋이 「빌드 다름」으로 떴다) — 둘 다 해시면 짧은 쪽이 긴 쪽의 앞이면 같다. 고친 작업 트리(`+`)는 그 표시까지 같아야 한다.
+pub fn same_build(a: &str, b: &str) -> bool {
+    fn split(s: &str) -> (&str, bool) {
+        let s = s.trim();
+        s.strip_suffix('+').map_or((s, false), |h| (h, true))
+    }
+    let ((ha, da), (hb, db)) = (split(a), split(b));
+    let hash = |h: &str| h.len() >= 7 && h.chars().all(|c| c.is_ascii_hexdigit());
+    if da != db {
+        return false;
+    }
+    if hash(ha) && hash(hb) {
+        let (short, long) = if ha.len() <= hb.len() { (ha, hb) } else { (hb, ha) };
+        return long.to_ascii_lowercase().starts_with(&short.to_ascii_lowercase());
+    }
+    ha == hb
+}
+
 fn build_slot() -> &'static OnceLock<String> {
     static B: OnceLock<String> = OnceLock::new();
     &B
@@ -1904,7 +1923,7 @@ fn snapshot_machine(
         // 빌드 대조 — 같다고 확인된 것만 true. 모르는 것(옛 판·아직 못 물음)은
         // false 로 두어 경고가 서게 한다. 오프라인이면 물을 게 없어 true.
         "build": build,
-        "build_match": !online || build.as_deref() == Some(local_build),
+        "build_match": !online || build.as_deref().is_some_and(|b| same_build(b, local_build)),
         "panes": if direct_online {
             hit.map(|seen| seen.panes.clone()).unwrap_or_default()
         } else {
@@ -1952,6 +1971,18 @@ mod tunnel_backoff_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::same_build;
+
+    #[test]
+    fn short_hashes_of_different_lengths_are_the_same_build() {
+        assert!(same_build("3a8c445", "3a8c4451"), "Windows 7자리와 맥 8자리");
+        assert!(same_build("3A8C4451", "3a8c445"));
+        assert!(!same_build("3a8c445", "3a8c4461"));
+        assert!(!same_build("3a8c4451+", "3a8c4451"), "고친 작업 트리는 다른 판이다");
+        assert!(same_build("3a8c445+", "3a8c4451+"));
+        assert!(same_build("0.2.241", "0.2.241") && !same_build("0.2.24", "0.2.241"), "해시가 아니면 그대로 견준다");
+    }
+
     #[test]
     fn windows_and_mac_roots_map_both_ways_with_the_other_separator() {
         let win = r"C:\Users\2rami\Desktop\KASA";

@@ -224,7 +224,8 @@ fn git_date() -> Option<String> {
 
 fn git_rev() -> Option<String> {
     let short = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
+        // 길이를 박는다 — `--short` 는 저장소 크기로 길이가 바뀌어 같은 커밋이 맥 8자리·Windows CI 7자리로 갈렸다.
+        .args(["rev-parse", "--short=8", "HEAD"])
         .output()
         .ok()?;
     if !short.status.success() {
