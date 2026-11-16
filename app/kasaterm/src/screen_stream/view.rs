@@ -64,6 +64,8 @@ pub(crate) struct ScreenView {
     held: VecDeque<Pixels>,
     /// 마지막 장을 복사 없이 올렸나 — 검증 리그가 읽는다.
     pub zero_copy: bool,
+    /// 안 보이기 시작한 때 — 오래 안 보이면 연결을 닫는다(`pane.rs sync_screen_views`).
+    pub hidden_since: Option<std::time::Instant>,
     /// 마지막 장을 GPU 로 올리는 데 든 시간(ms)과 올린 장 수 — 검증 리그가 읽는다.
     pub upload_ms: f64,
     pub uploads: u64,
@@ -124,7 +126,7 @@ impl ScreenView {
             .name("screen-stream-decode".into())
             .spawn(move || decode_loop(codec, rx, keyframes, &worker_shared, &wake))
             .ok()?;
-        Some(Self { label: label.to_string(), shared, watch: Some(watch), uploaded: 0, upload_ms: 0.0, uploads: 0, control: false, layout: None, buttons: 0, preedit: String::new(), frame: (0, 0), held: VecDeque::new(), zero_copy: false })
+        Some(Self { label: label.to_string(), shared, watch: Some(watch), uploaded: 0, upload_ms: 0.0, uploads: 0, control: false, layout: None, buttons: 0, preedit: String::new(), frame: (0, 0), held: VecDeque::new(), zero_copy: false, hidden_since: None })
     }
 
     /// 지난번에 가져간 뒤 새로 풀린 장이 있으면 그 IOSurface(가로·세로)를 내준다. 장은 `held` 에 쥔다.

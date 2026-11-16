@@ -64,6 +64,7 @@ pub(crate) struct ScreenView {
     pub buttons: u8,
     pub preedit: String,
     pub zero_copy: bool,
+    pub hidden_since: Option<std::time::Instant>,
 }
 
 #[cfg(not(target_os = "macos"))]

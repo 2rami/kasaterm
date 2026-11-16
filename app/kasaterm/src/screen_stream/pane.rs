@@ -9,6 +9,8 @@ use crate::{gpu, theme, App, PaneContent, PaneTab, ScreenPane, UserEvent};
 const STATUS_FONT: f32 = 13.0;
 const HUD_FONT: f32 = 11.0;
 const HUD_PAD: f32 = 6.0;
+/// 안 보인 지 이만큼이면 연결을 닫는다 — 탭을 잠깐 넘겨 보는 동안 다시 붙느라 키프레임을 기다리지 않게.
+const HIDDEN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn texture_key(view: u64) -> String {
     format!("screen:{view}")
@@ -143,30 +145,51 @@ impl App {
         true
     }
 
-    /// 창에 실재하는 화면 탭만 연결을 쥔다. 닫혀 되살리기 목록으로 물러난 탭은 연결을 버리고(장을 계속 풀지 않게),
-    /// 되살아난 탭은 다시 붙는다. 칸이 어디서 닫혔든 다음 루프 턴에 여기서 따라잡는다.
+    /// 보이는 화면 탭만 연결을 쥔다. 뒤 탭·다른 방으로 가 `HIDDEN_GRACE` 넘게 안 보이면 연결을 닫고(장을 계속 받아 풀지 않게),
+    /// 닫혀 되살리기 목록으로 물러난 탭은 바로 닫는다. 다시 보이면 붙는다. 칸이 어디서 바뀌었든 다음 루프 턴에 여기서 따라잡는다.
     pub(crate) fn sync_screen_views(&mut self) {
-        let tabs: Vec<(String, u64, String)> = {
+        let tabs: Vec<(String, u64, String, bool)> = {
             let ws = self.ws.lock().unwrap();
             ws.panes
                 .iter()
-                .flat_map(|(id, p)| p.tabs.iter().filter_map(|t| t.screen().map(|s| (id.clone(), s.view_id, s.label.clone()))))
+                .flat_map(|(id, p)| {
+                    p.tabs.iter().enumerate().filter_map(move |(i, t)| {
+                        t.screen().map(|s| (id.clone(), s.view_id, s.label.clone(), i == p.active_tab))
+                    })
+                })
                 .collect()
         };
         if tabs.is_empty() && self.screen_views.is_empty() {
             return;
         }
-        let live: Vec<(u64, String)> =
-            tabs.into_iter().filter(|(id, ..)| self.window_of_pane(id).is_some()).map(|(_, v, l)| (v, l)).collect();
-        let gone: Vec<u64> = self.screen_views.keys().copied().filter(|id| !live.iter().any(|(v, _)| v == id)).collect();
+        let shown = self.visible_pane_ids();
+        let live: Vec<(u64, String, bool)> = tabs
+            .into_iter()
+            .filter(|(id, ..)| self.window_of_pane(id).is_some())
+            .map(|(id, v, l, front)| (v, l, front && shown.contains(&id)))
+            .collect();
+        let now = std::time::Instant::now();
+        let gone: Vec<u64> = self
+            .screen_views
+            .iter_mut()
+            .filter_map(|(id, view)| {
+                let Some((_, _, visible)) = live.iter().find(|(v, ..)| v == id) else { return Some(*id) };
+                if *visible {
+                    view.hidden_since = None;
+                    return None;
+                }
+                let since = *view.hidden_since.get_or_insert(now);
+                (now.duration_since(since) >= HIDDEN_GRACE).then_some(*id)
+            })
+            .collect();
         for id in gone {
             self.screen_views.remove(&id);
             if let Some(g) = self.gpu.as_mut() {
                 g.drop_image(&texture_key(id));
             }
         }
-        for (view_id, label) in live {
-            if self.screen_views.contains_key(&view_id) {
+        for (view_id, label, visible) in live {
+            if !visible || self.screen_views.contains_key(&view_id) {
                 continue;
             }
             let Some(machine) = kasa_device::machines::find(&label) else { continue };
