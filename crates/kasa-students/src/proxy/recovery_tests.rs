@@ -49,9 +49,11 @@ impl Plan {
             .header("x-upstream-response", "kept")
             .header(header::CONNECTION, "close");
         if let Some(utilization) = self.weekly_utilization {
+            // A window whose reset has passed is not used, so a fixed instant broke the test once it went by.
+            let reset = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) + 7 * 86_400;
             builder = builder
                 .header("anthropic-ratelimit-unified-7d-utilization", utilization)
-                .header("anthropic-ratelimit-unified-7d-reset", "1794812400");
+                .header("anthropic-ratelimit-unified-7d-reset", reset.to_string());
         }
         builder.body(Body::from(self.body)).unwrap()
     }
