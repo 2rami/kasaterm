@@ -1010,6 +1010,40 @@ impl GridRenderer {
         );
     }
 
+    /// 영상 장처럼 매 장 바뀌는 BGRA 그림. 디코더 버퍼의 줄 간격(`stride`)을 그대로 받아 RGBA 로 바꿔 담지 않고 올린다.
+    /// 같은 크기면 텍스처를 다시 쓴다.
+    pub fn update_image_bgra(&mut self, id: &str, bgra: &[u8], w: u32, h: u32, stride: u32) {
+        let need = u64::from(stride) * u64::from(h.saturating_sub(1)) + u64::from(w) * 4;
+        if w == 0 || h == 0 || stride < w * 4 || need > bgra.len() as u64 {
+            return;
+        }
+        if self.images.get(id).is_some_and(|entry| entry.w != w || entry.h != h) {
+            self.drop_image(id);
+        }
+        if !self.images.contains_key(id) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("kasaterm video frame"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let bind_group = self.image_pipeline.make_bind_group(&self.device, &view, &self.image_sampler);
+            self.images.insert(id.to_string(), ImageEntry { _texture: texture, _view: view, bind_group, w, h });
+        }
+        let Some(entry) = self.images.get(id) else { return };
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &entry._texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &bgra[..need as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(stride), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+    }
+
     /// Free a pane's image texture when the pane closes.
     pub fn drop_image(&mut self, id: &str) {
         self.images.remove(id);

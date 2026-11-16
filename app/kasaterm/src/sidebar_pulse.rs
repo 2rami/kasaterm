@@ -434,6 +434,7 @@ impl App {
             let ws = self.ws.lock().unwrap();
             let kind = match ws.panes.get(id).map(|p| &p.content) {
                 Some(PaneContent::Web(_)) => "웹",
+                Some(PaneContent::Screen(_)) => "화면",
                 Some(PaneContent::Image(_)) => "이미지",
                 Some(PaneContent::Markdown(_)) => "문서",
                 Some(PaneContent::Settings) => "설정",

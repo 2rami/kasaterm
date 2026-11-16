@@ -142,6 +142,11 @@ impl Link {
         *self.inner.state.borrow()
     }
 
+    /// 지금 거는 상대 주소 — 같은 상대에게 다른 ALPN 연결을 따로 열 때 쓴다.
+    pub fn addr(&self) -> EndpointAddr {
+        self.inner.addr.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// 종류(끊김·중계·직통)가 바뀔 때만 깨운다. 왕복 값의 흔들림으로는 안 깨운다.
     pub fn subscribe(&self) -> watch::Receiver<LinkState> {
         self.inner.state.subscribe()

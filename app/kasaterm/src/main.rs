@@ -59,6 +59,7 @@ mod rich_document;
 mod vault;
 mod vault_graph;
 mod screen_capture;
+mod screen_stream;
 mod screen_input;
 mod screenread;
 mod session;
@@ -2080,6 +2081,8 @@ enum PaneContent {
     Image(Arc<ImagePane>),
     Markdown(MarkdownPane),
     Web(WebPane),
+    /// 다른 기기 화면(`screen_stream`). 연결·풀린 장은 `App.screen_views` 가 쥔다 — `Workspace` 는 PTY 스레드와 공유라.
+    Screen(ScreenPane),
     /// PTY 없는 네이티브 설정 방. 화면 상태는 `App.settings_scene`가 소유한다.
     Settings,
     SharedRooms,
@@ -2095,6 +2098,12 @@ struct WebPane {
     /// `App.web_hosts` 의 키. pane/tab 이 트리를 옮겨 다녀도 이 번호로 창을
     /// 따라붙인다.
     host_id: u64,
+}
+
+/// 화면 칸의 그리드 쪽 상태 — 어느 기기인지와 `App.screen_views` 의 키뿐이다.
+struct ScreenPane {
+    label: String,
+    view_id: u64,
 }
 
 /// 웹 pane 헤더 주소창의 인라인 편집 상태(`App.web_addr`). 버퍼는 **빈 채로**
@@ -2345,6 +2354,13 @@ impl PaneTab {
     fn web(&self) -> Option<&WebPane> {
         if let PaneContent::Web(w) = &self.content {
             Some(w)
+        } else {
+            None
+        }
+    }
+    fn screen(&self) -> Option<&ScreenPane> {
+        if let PaneContent::Screen(s) = &self.content {
+            Some(s)
         } else {
             None
         }
@@ -6203,6 +6219,9 @@ struct App {
     /// 웹 pane 실물(자식 창 + webview). 키 = `WebPane.host_id`. GUI 스레드
     /// 전용 — `Workspace` 는 PTY 스레드와 공유라 !Send 인 webview 를 못 담는다.
     web_hosts: HashMap<u64, webpane::WebHost>,
+    /// 화면 칸의 연결·풀린 장(`PaneContent::Screen` 의 view_id). 칸이 닫히면 `sync_screen_views` 가 버린다.
+    screen_views: HashMap<u64, screen_stream::ScreenView>,
+    screen_view_seq: u64,
     /// `WebPane.host_id` 발급 시퀀스.
     web_host_seq: u64,
     /// 웹 pane 헤더 주소창의 인라인 편집(한 번에 하나). None = 편집 아님.
@@ -6656,6 +6675,8 @@ impl App {
             pending_open_md: Vec::new(),
             aux: auxwin::AuxWindows::load(viewer_only),
             web_hosts: HashMap::new(),
+            screen_views: HashMap::new(),
+            screen_view_seq: 1,
             web_host_seq: 0,
             web_addr: None,
             web_find: None,

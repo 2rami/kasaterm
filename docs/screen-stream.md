@@ -8,7 +8,8 @@
 | 단계 | 내용 | 끝 조건 |
 |---|---|---|
 | S0 | 측정기 `spikes/screen-stream` — ScreenCaptureKit + VideoToolbox + iroh QUIC. 지연·선명도·대역폭 | 맥북↔미니 수치를 이 문서에 기록 |
-| S1 | 맥 → 맥: 카사텀 칸 안에서 네이티브로 보기(웹 칸이 아니다). 직통이 아니면 지금 JPEG 거울로 | 격리 앱 둘에서 60fps·지연 측정 |
+| S1 | 맥 → 맥: 카사텀 칸 안에서 네이티브로 보기(웹 칸이 아니다). 직통이 아니면 지금 JPEG 거울로 | 격리 앱 둘에서 60fps·지연 측정 — 됐다(아래 「S1」) |
+| S1b | 화면 칸에서 조작(마우스·키·글자) — 기존 거울의 조작 메시지·`screen_input` 을 그대로 싣는다. GPU 복사 없애기(IOSurface → Metal) | |
 | S2 | 폰에서 보기 — `kasa-net-ffi` 에 풀기를 더한다 | 실기에서 60fps |
 | S3 | Windows 뜨기·압축(DXGI·Media Foundation)과 보기 | |
 | S4 | 소리·클립보드·상대 마우스·패드 | |
@@ -112,3 +113,72 @@ screen-stream view <ADDR> --key PATH [--secs N] [--codec hevc|h264] [--mbps N] [
 - 직통에서는 장마다 신뢰 스트림으로 충분했다(손실 없음, p99 36ms). 손실 많은 길에서는 늦은 장을 버리고 키프레임을 청하는
   쪽으로 바꾼다 — 지금 압축은 매 장이 앞 장을 참조해 장을 버리면 다음 키프레임까지 화면이 깨진다.
 - 보는 쪽은 웹 칸이 아니라 카사텀 칸 안에 네이티브로 그린다 — VT 가 내는 IOSurface 를 Metal 텍스처로 바로 쓴다(복사 없음).
+
+## S1 — 카사텀 칸 안에서 보기 (2026-11-16)
+
+### 흐름
+
+```
+보는 앱  Info 「화면 거울」 ─ machinescol.rs open_screen_mirror
+  └ screen_stream::can_view(base)?  (이 판 macOS · 그 기기 /version kasanet.screen · 카사넷 직통·믿는 중계)
+       ├ 아니면 → 지금 JPEG 웹 칸
+       └ 맞으면 → open_screen_pane → ScreenView::open → kasa_remote::screen_stream::watch
+                    kasanet::connect(base, "kasa/screen/1")  ── QUIC ──▶  그 기기 ScreenAccept → screen_stream::serve
+                    풀기 일꾼(view.rs, VT) ◀── 장마다 단방향 스트림 ──  Host(host.rs): SCK 420v → VT HEVC
+                    GUI(pane.rs paint): 새 장만 BGRA 로 GPU 에 올려 칸 본문에 비율 맞춰 그림
+```
+
+### 계약 (`kasa_remote::screen_stream`)
+
+- 제어 스트림 `[u8 종류][u32 길이][내용]` — `P` 핑(보는 쪽 시계)·`p` 퐁(+보내는 쪽 시계)·`C` 설정 JSON·`I` 압축 정보 JSON·
+  `K` 키프레임 청·`X` 거절 `{reason: permission|unavailable}`·`Q` 끝. 보는 쪽은 **핑 20번으로 시계를 맞춘 뒤** 설정을 보낸다.
+- 장 `'F'` + seq·cap_id·key·t_cap·t_enc·가로·세로·파라미터 셋 + AVCC/HVCC NAL. 옛 장일수록 우선순위가 높다.
+- 설정 `{codec, bitrate, fps, scale, refine}` — 보내는 쪽이 범위로 깎는다(1–200Mbps·1–120fps·0.25–1·다듬기 ≤240). 기본은
+  S0 결정 그대로(HEVC 30Mbps 60fps 원래 해상도, 다듬기 30장).
+- 못 보낸 장이 8장 쌓이면 다 버리고 키프레임부터 — 장마다 앞 장을 참조해 골라 버릴 수 없다. 보는 쪽은 풀기에 실패하면 키프레임을
+  청하고 그 전 장은 버린다.
+- 보내는 쪽은 거절 까닭을 쓰고 연결이 닫힐 때까지(최대 3초) 기다린다 — 바로 돌아가면 연결이 먼저 닫혀 보는 쪽은 「끊김」만 봤다
+  (시험이 잡았다).
+- 화면 기록 권한이 없으면 `permission` 을 알리고 연결마다 한 번 그 기기 앞에 권한 창을 띄운다. 칸에는 「그 기기 카사텀에 화면 기록
+  권한이 없어요」.
+
+### 칸
+
+- `PaneContent::Screen { label, view_id }` 는 연 칸의 앞 탭이다. 연결·풀린 장은 `App.screen_views`(Workspace 는 PTY 스레드와
+  공유라 실물을 못 둔다 — 웹 칸과 같은 까닭). `sync_screen_views` 가 루프마다 **창 트리에 실재하는 탭만** 연결을 쥐게 한다 —
+  닫혀 되살리기 목록으로 물러난 탭은 연결을 버리고, 되살아나면 다시 붙는다.
+- 재시작하면 화면 탭은 복원되지 않는다(세션 기록은 PTY 칸 기준이라 그 칸의 터미널만 남는다). 다시 연다.
+- 아직 보기만 한다. 화면 탭이 앞이면 키를 어디에도 보내지 않는다.
+- 새 장은 풀기 일꾼이 `UserEvent::Redraw` 로 GUI 를 깨운다. GUI 는 그 장을 줄 간격 그대로 `Bgra8Unorm` 텍스처에 올린다
+  (`GridRenderer::update_image_bgra`, RGBA 로 바꿔 담지 않는다).
+
+### 실측 — 격리 앱 둘, 같은 맥(M3 Max), release
+
+원본 리그 B 가 실제 화면(3024×1964)을 보내고 보는 리그 A 가 칸으로 본다. 카사넷은 루프백 직통(왕복 1ms).
+
+| 경우 | 새 장 fps | 화면→풀림 p50 | GPU 올리기 | GUI 가 올린 장 |
+|---|---|---|---|---|
+| 실제 화면(거의 멈춤) | 1–3 | 21ms | 2.4ms | 새 장마다 |
+| 검증 스크롤 8줄/장 | 60–61 | 21–22ms | 2.8–3.4ms | 초당 약 60 |
+| 검증 스크롤 300줄/장 · 30Mbps | 60–61 | 21ms | 2.1–2.7ms | 초당 56–60 |
+
+- 칸을 닫으면 보는 쪽 연결이 닫히고 보내는 쪽 뜨기·압축이 멈춘다(B CPU 6.6% → 2.3%, 스레드 52 → 48).
+- 화면→풀림에는 GPU 올리기(약 3ms)와 화면에 내보내기가 빠져 있다. 600만 화소 장을 장마다 CPU 로 한 번 복사하는 값이라 S1b 에서
+  IOSurface 를 Metal 텍스처로 바로 쓰면 없어진다.
+
+### 리그
+
+- 리그 포트는 실행마다 바뀌어 서로의 명부에 미리 못 적는다. 고정 포트 TCP 중계 둘(47821→A, 47822→B)을 먼저 띄우고 명부에는 그
+  주소를 적는다 — 카사넷은 루프백 base 로 물은 `/version` 의 id 만 배우므로 중계를 거쳐도 그대로 배운다.
+- 둘 다 `docs/verify-app.md` 격리 env + `KASATERM_KASANET_BIND=127.0.0.1:0`. B 는 화면 기록 권한이 있는 앱(카사텀 칸) 안에서 띄운다.
+- A 에 `KASATERM_TEST_SCREEN_LABEL=<B 라벨>` 이면 직통이 선 뒤 화면 칸을 열고 2초마다 `[screen-view-test] … hud=60fps · 21ms · 직통
+  upload=2.6ms uploads=N` 을 로그에 적는다(`testkit.rs run_pending_screen_view_test`).
+- B 에 `KASATERM_TEST_SCREEN_SCROLL=<줄>` 이면 사람 화면을 건드리지 않고 마지막 화면을 장마다 밀어 60fps 로 움직이는 화면을 만든다
+  (`screen_stream/scroll_probe.rs`, 검증 실행에서만).
+
+### 남은 것
+
+- S1b: 조작. 화면 칸 클릭·휠·키를 기존 거울 조작 메시지로 보내고 그 기기가 `screen_input` 으로 넣는다.
+- 여러 화면(지금은 첫 화면), 재시작 뒤 화면 탭 복원, 보이지 않는 탭에서 받기 멈추기.
+- Windows 보내기·보기(S3), 폰 보기(S2).
+

@@ -919,6 +919,8 @@ impl App {
             u8,
             (f32, f32),
         )> = Vec::new();
+        // 화면 칸 — (App.screen_views 키, 본문 박스 LOGICAL px). 새로 풀린 장을 올리고 비율을 지켜 그린다.
+        let mut screen_slots: Vec<(u64, (f32, f32, f32, f32))> = Vec::new();
         // Claude Code 시작 배너의 Clawd 아트 자리에 그릴 학생 도트:
         // (에셋 슬러그, 배너 박스 LOGICAL px). 셀 스냅샷에서 감지·수집.
         // (slug, 배너 박스 rect, pane 세로 클립(y0, y1)) — 박스는 스크롤로
@@ -1152,6 +1154,7 @@ impl App {
                 // makes draw_cells a no-op and the content (texture or laid-out
                 // document) is painted into the pane box instead (queued below).
                 let img = pane.image().cloned();
+                let screen_view = pane.screen().map(|s| s.view_id);
                 let img_zoom = pane.image_view_zoom();
                 let img_rot = pane.image_rot % 4;
                 let img_pan = (pane.image_pan_x, pane.image_pan_y);
@@ -1358,6 +1361,9 @@ impl App {
                 body_rects.push((id.clone(), (bx, by, bw, bh)));
                 if let Some(f) = &chat_frame {
                     self.note_chat_frame(&id, f, (bx, by, bw, bh), (self.cell.w * pane_font_scale, self.cell.h * pane_font_scale));
+                }
+                if let Some(view) = screen_view {
+                    screen_slots.push((view, (bx, by, bw, bh)));
                 }
                 if let Some(image) = img {
                     image_slots.push((
@@ -2077,6 +2083,7 @@ impl App {
                         .get(id)
                         .map(|p| match &p.content {
                             PaneContent::Web(_) => "globe",
+                            PaneContent::Screen(_) => "monitor",
                             PaneContent::Image(_) => "image",
                             PaneContent::Markdown(_) => "file-text",
                             PaneContent::Settings => "settings",
@@ -2523,6 +2530,7 @@ impl App {
                 );
                 g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
             }
+            crate::screen_stream::paint(g, &mut self.screen_views, &screen_slots);
             paint_inline_images(g, &inline_slots);
             crate::inline_result::verify_frame(g, &inline_slots);
             self.image_preview.collect(preview_window_id, self.active_window, g, &inline_slots);

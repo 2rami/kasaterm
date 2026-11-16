@@ -138,10 +138,14 @@ block2 = "0.6"
 # 인라인 오디오·비디오 재생(media_player.rs). AVPlayer 가 오디오 장치 시계로 진행하고
 # AVPlayerItemVideoOutput 이 그 시계에 맞는 프레임을 내준다 — 직접 디코딩·동기화를 짜지 않는다.
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video", "AVAsset", "AVAssetImageGenerator", "AVAssetTrack", "AVAsynchronousKeyValueLoading", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVPlayerItemTrack"] }
-objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
-objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
+# 화면 스트림(screen_stream/) — ScreenCaptureKit 으로 원래 해상도 화면을 받고 VideoToolbox 하드웨어로 압축·푼다.
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "SCStream", "SCShareableContent", "block2", "dispatch2", "objc2-core-media"] }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFString"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFString", "CFArray", "CFDictionary", "CFNumber"] }
 # Sparkle.framework 를 런타임 dlopen 하기 위한 libc::dlopen/RTLD_NOW (macos_sparkle.rs).
 libc.workspace = true
 

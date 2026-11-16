@@ -17,6 +17,7 @@ crossbeam-channel = { workspace = true }
 futures-util = { workspace = true }
 kasa-device = { workspace = true }
 kasa-identity = { workspace = true }
+kasa-net = { workspace = true }
 kasa-pty = { workspace = true, default-features = true }
 kasa-socket = { workspace = true, default-features = true }
 kasa-wire = { workspace = true }

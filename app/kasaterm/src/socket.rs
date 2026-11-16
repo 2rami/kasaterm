@@ -9472,6 +9472,7 @@ fn where_kind(content: &crate::PaneContent) -> &'static str {
     match content {
         crate::PaneContent::Terminal(_) => "terminal",
         crate::PaneContent::Web(_) => "web",
+        crate::PaneContent::Screen(_) => "screen",
         crate::PaneContent::Markdown(_) => "doc",
         crate::PaneContent::Image(_) => "image",
         crate::PaneContent::Settings => "settings",

@@ -303,7 +303,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         if matches!(&event, UserEvent::Redraw) {
-            if crate::inline_media::cache::changed() || self.image_preview.pending_result() || self.media_preview.tick(&self.proxy) || self.media_preview.active() { self.chrome_dirty = true; }
+            if crate::inline_media::cache::changed() || self.image_preview.pending_result() || self.media_preview.tick(&self.proxy) || self.media_preview.active() || self.screen_views_have_new_frame() { self.chrome_dirty = true; }
             crate::turn_probe::lag_received();
             self.drain_drag_transfers();
             self.aux_request_redraws();
@@ -7690,6 +7690,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 턴에 배치까지 끝난다.
         self.drain_pending_web_hosts(event_loop);
         self.sync_web_hosts();
+        self.sync_screen_views();
         self.tick_update_notice();
         // gif 애니: 멀티프레임 이미지 pane 의 현재 프레임이 delay 를 넘겼으면 다음 프레임으로
         // 넘기고 redraw. gif 가 있을 때만 WaitUntil(다음 전환 시각)로 타이머를 잡아 부드럽게
@@ -8087,6 +8088,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoundock(event_loop);
         self.run_pending_autoundock_dock();
         self.run_pending_autoremotecolor();
+        self.run_pending_screen_view_test();
         self.run_pending_autostudent(event_loop);
         self.run_pending_autotabcycle();
         self.run_pending_autoboxlabel();

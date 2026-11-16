@@ -7003,6 +7003,47 @@ impl App {
         STEP.store(step + 1, Ordering::Relaxed);
     }
 
+    /// 검증 실행에서 `KASATERM_TEST_SCREEN_LABEL` 기기의 화면 칸을 연다(docs/screen-stream.md S1 리그). 카사넷이 그 기기를
+    /// 배워 직통이 설 때까지 기다렸다 열고, 2초마다 칸 위 표시(fps·지연·길)를 로그에 적는다.
+    pub(crate) fn run_pending_screen_view_test(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Mutex, OnceLock};
+        static LABEL: OnceLock<Option<String>> = OnceLock::new();
+        static OPENED: AtomicBool = AtomicBool::new(false);
+        static LOGGED: Mutex<Option<Instant>> = Mutex::new(None);
+        let Some(label) = LABEL.get_or_init(|| {
+            crate::verification_run().then(|| std::env::var("KASATERM_TEST_SCREEN_LABEL").ok()).flatten()
+        }) else {
+            return;
+        };
+        if !OPENED.load(Ordering::Relaxed) {
+            let Some(machine) = kasa_device::machines::find(label) else { return };
+            if !crate::screen_stream::can_view(&machine.base) {
+                return;
+            }
+            OPENED.store(true, Ordering::Relaxed);
+            let opened = self.open_screen_pane(label, &machine.base);
+            eprintln!("[screen-view-test] {label} opened={opened}");
+            return;
+        }
+        let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
+        if logged.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+            return;
+        }
+        *logged = Some(Instant::now());
+        for view in self.screen_views.values() {
+            eprintln!(
+                "[screen-view-test] {} frame={} hud={} upload={:.1}ms uploads={} status={}",
+                view.label,
+                view.has_frame(),
+                view.hud(),
+                view.upload_ms,
+                view.uploads,
+                view.status()
+            );
+        }
+    }
+
     /// Loopback-only remote color lifecycle: a real remote view is attached as
     /// a tab, switched away and back, then replaced through `bring_pane_home`.
     /// The live machine list and user panes are never consulted.

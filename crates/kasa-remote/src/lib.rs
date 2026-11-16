@@ -7,6 +7,7 @@ pub mod reposync;
 pub mod remoteboard;
 pub mod layout_watch;
 pub mod screen_mirror;
+pub mod screen_stream;
 pub mod media_stream;
 pub mod agent_stop;
 pub mod codexhome;

@@ -830,9 +830,16 @@ impl App {
         Some((pos.x, pos.y, size.width, size.height))
     }
 
-    /// 그 기기 화면 거울을 웹 칸으로 연다. 이 기기 HTTP 의 `/m/<기기>/` 문을 지나므로 그 기기 길(터널·카사넷)을
-    /// 그대로 탄다. 칸을 만들려면 이벤트 루프가 있어야 해서 소켓 열기와 같은 이벤트로 넘긴다.
+    /// 그 기기 화면 거울을 연다. 그 기기가 화면 스트림을 보내는 판이고 카사넷 직통·믿는 중계면 하드웨어 영상 칸으로
+    /// (`screen_stream`, docs/screen-stream.md), 아니면 JPEG 웹 칸으로 — 이 기기 HTTP 의 `/m/<기기>/` 문을 지나
+    /// 그 기기 길(터널·카사넷)을 그대로 탄다. 웹 칸은 이벤트 루프가 있어야 해서 소켓 열기와 같은 이벤트로 넘긴다.
     fn open_screen_mirror(&mut self, label: &str) {
+        if let Some(machine) = kasa_device::machines::find(label) {
+            if crate::screen_stream::can_view(&machine.base) && self.open_screen_pane(label, &machine.base) {
+                self.info.machine_menu = None;
+                return;
+            }
+        }
         let Some(port) = self.statusbar.port.clone() else {
             self.set_toast("이 기기 HTTP 가 꺼져 있어 화면 거울을 못 열어요".to_string());
             return;

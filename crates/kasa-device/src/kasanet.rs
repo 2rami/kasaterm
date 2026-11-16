@@ -19,8 +19,8 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use kasa_net::iroh::endpoint::presets;
-use kasa_net::iroh::protocol::Router;
+use kasa_net::iroh::endpoint::{presets, Connection};
+use kasa_net::iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use kasa_net::iroh::{Endpoint, EndpointId, SecretKey};
 use kasa_net::{fwd, identity, peer, AllowList, FwdServer, Link, LinkState, RelayTrust, Route};
 use serde_json::Value;
@@ -43,6 +43,8 @@ struct Node {
     handle: tokio::runtime::Handle,
     links: Mutex<HashMap<EndpointId, Link>>,
     routes: Mutex<HashMap<String, Arc<Route>>>,
+    /// base → 상대 id 와 화면 스트림을 받는 판인지. `connect` 가 base 로 상대를 찾는다.
+    bases: Mutex<HashMap<String, (EndpointId, bool)>>,
     /// 등록된 폰 → 수명이 끝나는 때.
     phones: Mutex<HashMap<EndpointId, Instant>>,
 }
@@ -55,6 +57,37 @@ const PHONE_SWEEP: Duration = Duration::from_secs(30);
 static PHONE_INGRESS: OnceLock<u16> = OnceLock::new();
 
 static NODE: OnceLock<Node> = OnceLock::new();
+
+/// 화면 스트림(`docs/screen-stream.md`). 받는 일은 위층(`kasa_remote::screen_stream`)이 꽂는다 — 이 층은 화면을 모른다.
+pub const SCREEN_ALPN: &[u8] = b"kasa/screen/1";
+pub type ScreenHandler =
+    Arc<dyn Fn(Connection) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+static SCREEN: OnceLock<ScreenHandler> = OnceLock::new();
+
+/// 앱이 부팅 때 한 번. 꽂기 전·꽂지 않은 판(관문·lite)은 화면 연결을 바로 닫고 `/version` 에 알리지 않는다.
+pub fn set_screen_handler(handler: ScreenHandler) {
+    let _ = SCREEN.set(handler);
+}
+
+#[derive(Debug, Clone)]
+struct ScreenAccept;
+
+impl ProtocolHandler for ScreenAccept {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        // 허용 목록 훅을 이미 지났다. 그래도 명부 기기와 등록된 주인 폰만 받는다 — 화면에는 메일·비밀번호 창까지
+        // 보인다. 지금 `/screen/ws` 에 카사넷으로 닿을 수 있는 범위와 같다.
+        let peer = conn.remote_id();
+        let known = NODE.get().is_some_and(|n| {
+            n.links.lock().is_ok_and(|l| l.contains_key(&peer))
+                || n.phones.lock().is_ok_and(|p| p.contains_key(&peer))
+        });
+        match SCREEN.get() {
+            Some(handler) if known => handler(conn).await,
+            _ => conn.close(403u32.into(), b"kasanet: screen refused"),
+        }
+        Ok(())
+    }
+}
 
 fn disabled() -> bool {
     std::env::var(OFF_ENV).is_ok_and(|v| matches!(v.trim(), "0" | "off" | "false"))
@@ -123,6 +156,7 @@ pub async fn start(mcp_port: u16) {
     let fwd_server = FwdServer::new([mcp_port, crate::machines::KASACHROME_PORT]);
     let router = Router::builder(endpoint.clone())
         .accept(fwd::ALPN, fwd_server.clone())
+        .accept(SCREEN_ALPN, ScreenAccept)
         .spawn();
     eprintln!(
         "[kasanet] {} 준비 — 받는 포트 {mcp_port}·{}",
@@ -140,6 +174,7 @@ pub async fn start(mcp_port: u16) {
         handle: tokio::runtime::Handle::current(),
         links: Mutex::new(HashMap::new()),
         routes: Mutex::new(HashMap::new()),
+        bases: Mutex::new(HashMap::new()),
         phones: Mutex::new(HashMap::new()),
     };
     if NODE.set(node).is_err() {
@@ -190,6 +225,7 @@ pub fn info() -> Option<Value> {
         "relay": addr.relay_urls().next().map(|u| u.to_string()),
         "addrs": addr.ip_addrs().map(|a| a.to_string()).collect::<Vec<_>>(),
         "port": n.mcp_port,
+        "screen": SCREEN.get().is_some(),
     }))
 }
 
@@ -270,6 +306,10 @@ pub fn learn(base: &str, kasanet: &Value) {
             }
         }
     };
+    if let Ok(mut bases) = n.bases.lock() {
+        let screen = kasanet.get("screen").and_then(Value::as_bool).unwrap_or(false);
+        bases.insert(key(base), (link.id(), screen));
+    }
     if fresh {
         eprintln!(
             "[kasanet] {base} = {} 허용·연결 시작",
@@ -423,6 +463,47 @@ async fn log_changes(base: String, link: Link) {
         };
         eprintln!("[kasanet] {base} ({}) {what}", link.id().fmt_short());
     }
+}
+
+/// 그 기기가 화면 스트림을 받는 판인가(`/version` 의 `kasanet.screen`).
+pub fn screen_capable(base: &str) -> bool {
+    NODE.get()
+        .and_then(|n| n.bases.lock().ok()?.get(&key(base)).map(|(_, screen)| *screen))
+        .unwrap_or(false)
+}
+
+/// 카사넷 일꾼 런타임 — 위층이 같은 런타임에서 연결을 돌린다.
+pub fn runtime() -> Option<tokio::runtime::Handle> {
+    NODE.get().map(|n| n.handle.clone())
+}
+
+/// base 의 기기에 `alpn` 연결을 따로 연다. 데이터를 실어도 되는 길(직통·믿는 중계)일 때만 — 아니면 그 까닭을
+/// 돌려준다. 돌려주는 글은 `path` 와 같은 길 이름이다.
+pub async fn connect(base: &str, alpn: &[u8]) -> Result<(Connection, &'static str), String> {
+    let n = NODE.get().ok_or("카사넷이 꺼져 있다")?;
+    let id = n
+        .bases
+        .lock()
+        .ok()
+        .and_then(|b| b.get(&key(base)).map(|(id, _)| *id))
+        .ok_or("그 기기의 카사넷 주소를 아직 모른다")?;
+    let link = n
+        .links
+        .lock()
+        .ok()
+        .and_then(|l| l.get(&id).cloned())
+        .ok_or("그 기기와 이은 길이 없다")?;
+    let path = match link.state() {
+        LinkState::Direct { .. } => "kasanet",
+        LinkState::TrustedRelay { .. } => "kasanet-relay",
+        _ => return Err("직통도 믿는 중계도 아니다".into()),
+    };
+    let conn = n
+        .endpoint
+        .connect(link.addr(), alpn)
+        .await
+        .map_err(|e| format!("연결 실패: {e}"))?;
+    Ok((conn, path))
 }
 
 /// 기기 상태에 싣는 길. 직통이면 ("kasanet", 왕복), 믿는 중계면 ("kasanet-relay", 왕복), 아니면 ("ssh", None).

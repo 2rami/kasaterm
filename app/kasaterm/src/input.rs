@@ -3420,6 +3420,10 @@ impl App {
         // drop any tree selection — a later Cmd+Backspace then edits the shell
         // line, not the previously-clicked file.
         self.file_tree.selected = None;
+        // 화면 칸은 아직 보기만 한다 — 키를 같은 칸 다른 탭의 셸로 흘리지 않는다.
+        if self.ws.lock().unwrap().active().is_some_and(|p| p.screen().is_some()) {
+            return;
+        }
         // Image panes have no PTY — repurpose keys for view control.
         //   +/=      zoom in     -    zoom out
         //   0        reset       r/R  rotate 90° CW

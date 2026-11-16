@@ -311,6 +311,15 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   화면을 닫으면 입구가 닫혀 고리가 끝나고, 돌아온 화면에 「첫 화면을 못 받았어요」가 뜬다.
 - 남은 것: 실기 아이폰에서 같은 번호·iCloud 비밀번호 자동 채우기·구글 로그인 확인(TestFlight 판).
 
+## 화면 스트림 입구 (2026-11-16, `docs/screen-stream.md`)
+
+- 같은 엔드포인트가 ALPN `kasa/screen/1` 도 받는다(`kasanet::SCREEN_ALPN`, 라우터에 `fwd` 와 나란히). 받는 일은 이 층이 모르고
+  `kasa_remote::screen_stream::install` 이 꽂는다. 꽂지 않은 판(관문·lite·Windows)은 연결을 바로 닫는다.
+- 허용 목록 훅을 지난 뒤에도 **명부로 배운 기기와 등록된 주인 폰만** 받는다 — 지금 카사넷으로 `/screen/ws` 에 닿는 범위와 같다.
+- `/version` 의 `kasanet` 에 `screen: true`(꽂았을 때만). `learn` 이 base 마다 상대 id 와 이 값을 적어 둔다(`screen_capable`).
+- `kasanet::connect(base, alpn)` 은 그 base 의 링크 주소로 **ALPN 이 다른 QUIC 연결을 따로** 연다. 링크 연결은 `fwd` 전용이라
+  섞지 않는다 — 구멍 뚫기·경로는 엔드포인트가 같이 써서 따로 열어도 직통이 바로 선다. 링크가 직통·믿는 중계일 때만 연다.
+
 ## 국내 중계 (2026-10-02, 네이버 클라우드 서울)
 
 직통이 안 서는 자리(셀룰러 폰, 이중 NAT 집 망)에서 관문(Cloudflare, 홍콩·도쿄 edge) 대신 서울에 둔 iroh 중계로 데이터를
