@@ -316,16 +316,30 @@ fn trust_info(key: &serde_json::Value) -> String {
     )
 }
 
-/// 폰 열쇠 믿기 — 두 화면의 지문을 사람이 맞춰 본다. Return 은 취소다(치던 Enter 가 새도 믿음이 나가지 않게).
-#[cfg(target_os = "macos")]
+/// 폰 열쇠 믿기 — 두 화면의 지문을 사람이 맞춰 본다.
 fn trust_sheet(window: &winit::window::Window, key: &serde_json::Value) -> Option<usize> {
+    let id = key["id"].as_str().unwrap_or_default().to_string();
+    confirm_sheet(window, TRUST_TITLE, &trust_info(key), "믿기", &TRUST_ANSWER, id)
+}
+
+/// 사람이 맞춰 보고 누르는 확인 창. 누르면 `answer` 에 `value` 를 두고 다음 poll 이 꺼내 간다.
+/// Return 은 취소다(치던 Enter 가 새도 믿음이 나가지 않게).
+#[cfg(target_os = "macos")]
+pub(crate) fn confirm_sheet(
+    window: &winit::window::Window,
+    title: &str,
+    info: &str,
+    primary: &str,
+    answer: &'static Mutex<Option<String>>,
+    value: String,
+) -> Option<usize> {
     use objc2::msg_send;
     use objc2::runtime::{AnyObject, Bool};
     use objc2_foundation::NSString;
-    let (alert, ns_window) = alert(window, TRUST_TITLE, &trust_info(key))?;
-    let id = key["id"].as_str().unwrap_or_default().to_string();
+    let (alert, ns_window) = alert(window, title, info)?;
+    let id = value;
     unsafe {
-        let trust: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*NSString::from_str("믿기")];
+        let trust: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*NSString::from_str(primary)];
         let cancel: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*NSString::from_str("취소")];
         let _: () = msg_send![trust, setKeyEquivalent: &*NSString::from_str("")];
         let _: () = msg_send![cancel, setKeyEquivalent: &*NSString::from_str("\r")];
@@ -333,8 +347,8 @@ fn trust_sheet(window: &winit::window::Window, key: &serde_json::Value) -> Optio
         let addr = alert as usize;
         let handler = block2::RcBlock::new(move |resp: isize| {
             if resp == 1000 {
-                if let Ok(mut answer) = TRUST_ANSWER.lock() {
-                    *answer = Some(id.clone());
+                if let Ok(mut slot) = answer.lock() {
+                    *slot = Some(id.clone());
                 }
             }
             let _: () = msg_send![addr as *mut AnyObject, release];
@@ -390,14 +404,19 @@ fn shot_alert(alert: usize, path: &str) {
 
 /// 맥 시트와 같은 글·단추 — 원문 칸 없이 지문만, Enter 는 취소.
 #[cfg(windows)]
-fn trust_sheet(window: &winit::window::Window, key: &serde_json::Value) -> Option<usize> {
-    let id = key["id"].as_str().unwrap_or_default().to_string();
-    let info = trust_info(key);
-    let spec = crate::win_sheet::Spec { title: TRUST_TITLE, info: &info, body: None, buttons: ["믿기", "취소"], primary_enabled: true };
+pub(crate) fn confirm_sheet(
+    window: &winit::window::Window,
+    title: &str,
+    info: &str,
+    primary: &str,
+    answer: &'static Mutex<Option<String>>,
+    value: String,
+) -> Option<usize> {
+    let spec = crate::win_sheet::Spec { title, info, body: None, buttons: [primary, "취소"], primary_enabled: true };
     crate::win_sheet::open(window, &spec, move |choice| {
         if choice == Some(0) {
-            if let Ok(mut answer) = TRUST_ANSWER.lock() {
-                *answer = Some(id.clone());
+            if let Ok(mut slot) = answer.lock() {
+                *slot = Some(value.clone());
             }
         }
     })
@@ -412,7 +431,14 @@ fn shot_alert(alert: usize, path: &str) {
 fn shot_alert(_alert: usize, _path: &str) {}
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn trust_sheet(_window: &winit::window::Window, _key: &serde_json::Value) -> Option<usize> {
+pub(crate) fn confirm_sheet(
+    _window: &winit::window::Window,
+    _title: &str,
+    _info: &str,
+    _primary: &str,
+    _answer: &'static Mutex<Option<String>>,
+    _value: String,
+) -> Option<usize> {
     None
 }
 

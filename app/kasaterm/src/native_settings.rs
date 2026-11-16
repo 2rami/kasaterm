@@ -4404,6 +4404,7 @@ fn paint_accounts(
     device_account::paint(g, s, hits, caret, x, y, w);
     device_account::work::paint(g, s, hits, x, y, w);
     device_account::op::paint(g, s, hits, x, y, w);
+    device_account::vault::paint(g, s, hits, x, y, w);
 }
 
 /// 한도 자동 전환과 그 기준. 넘어갈 곳은 계정 목록의 차례다.

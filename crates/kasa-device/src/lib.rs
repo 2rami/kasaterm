@@ -16,6 +16,9 @@ pub mod push;
 pub mod workspace_assistant;
 pub mod feedback_client;
 pub mod op_approval;
+pub mod login_vault;
+#[cfg(windows)]
+pub(crate) mod wincred;
 pub mod access;
 pub use access::{remote_token, session_token, VerifiedClaudeIdentity, verified_claude_identity_for_token};
 pub use workspace_assistant::DesktopSession as WorkspaceDesktopSession;

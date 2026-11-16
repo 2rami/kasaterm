@@ -52,6 +52,12 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
     return public == null ? null : approvalFingerprint(approvalKeyId(base64.decode(public)));
   }
 
+  /// 사람이 보는 지문 줄 — 맞춰 보는 비교는 짧은 [_fingerprint] 로 그대로 한다.
+  String? get _longFingerprint {
+    final public = _public;
+    return public == null ? null : approvalFingerprintLong(approvalKeyId(base64.decode(public)));
+  }
+
   /// 이 폰을 믿는 맥들의 상태 — 하나라도 토큰까지 있으면 바로 쓸 수 있다.
   Iterable<OpLink> get _trusting {
     final print = _fingerprint;
@@ -315,7 +321,7 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
             const SizedBox(height: Look.groupGap),
             Text(
               '개인 키는 이 폰 밖으로 나가지 않고, 비밀 값은 이 폰과 관문을 지나지 않아요.'
-              '${print == null ? '' : ' 열쇠 지문 $print'}',
+              '${_longFingerprint == null ? '' : ' 열쇠 지문 $_longFingerprint'}',
               key: const Key('approval-key-fingerprint'),
               style: dim,
             ),

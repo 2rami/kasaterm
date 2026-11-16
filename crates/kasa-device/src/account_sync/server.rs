@@ -23,23 +23,13 @@ impl Store {
     fn load(&self, account: &str, cache: &mut HashMap<String, Snapshot>) -> Result<Snapshot, Error> {
         if !kasa_identity::relay_auth::valid_account_name(account) { return Err(Error::Storage); }
         if let Some(snapshot) = cache.get(account) { return Ok(snapshot.clone()); }
-        let snapshot = if let Some(dir) = &self.dir {
-            if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) { return Err(Error::Storage); }
-            let path = dir.join(format!("{account}.json"));
-            match std::fs::symlink_metadata(&path) {
-                Ok(meta) => {
-                    if !meta.is_file() || meta.len() > MAX_BODY as u64 { return Err(Error::Storage); }
-                    #[cfg(unix)] {
-                        use std::os::unix::fs::PermissionsExt;
-                        if meta.permissions().mode() & 0o077 != 0 { return Err(Error::Storage); }
-                    }
-                    serde_json::from_slice(&std::fs::read(&path).map_err(|_| Error::Storage)?)
-                        .map_err(|_| Error::Storage)?
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Snapshot::default(),
-                Err(_) => return Err(Error::Storage),
-            }
-        } else { Snapshot::default() };
+        let snapshot = match &self.dir {
+            Some(dir) => match read_account_file(dir, account, MAX_BODY).map_err(|_| Error::Storage)? {
+                Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?,
+                None => Snapshot::default(),
+            },
+            None => Snapshot::default(),
+        };
         validate_snapshot(&snapshot).map_err(|_| Error::Storage)?;
         cache.insert(account.into(), snapshot.clone());
         Ok(snapshot)
@@ -77,14 +67,36 @@ impl Store {
         if current == previous { return Ok(current); }
         current.revision = current.revision.checked_add(1).ok_or(Error::Storage)?;
         if let Some(dir) = &self.dir {
-            write_snapshot(dir, account, &current).map_err(|_| Error::Storage)?;
+            write_account_file(dir, account, &current).map_err(|_| Error::Storage)?;
         }
         cache.insert(account.into(), current.clone());
         Ok(current)
     }
 }
 
-fn write_snapshot(dir: &Path, account: &str, snapshot: &Snapshot) -> std::io::Result<()> {
+/// 관문의 계정별 파일 하나. 없으면 `None`. 링크·남이 읽을 수 있는 파일·한도 넘는 파일은 거절한다 — 빈 값으로 덮지 않게.
+pub(crate) fn read_account_file(dir: &Path, account: &str, max: usize) -> Result<Option<Vec<u8>>, ()> {
+    if !kasa_identity::relay_auth::valid_account_name(account) { return Err(()); }
+    if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) { return Err(()); }
+    let path = dir.join(format!("{account}.json"));
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) => {
+            if !meta.is_file() || meta.len() > max as u64 { return Err(()); }
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                if meta.permissions().mode() & 0o077 != 0 { return Err(()); }
+            }
+            std::fs::read(&path).map(Some).map_err(|_| ())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+pub(crate) fn write_account_file<T: serde::Serialize>(dir: &Path, account: &str, snapshot: &T) -> std::io::Result<()> {
+    if !kasa_identity::relay_auth::valid_account_name(account) {
+        return Err(std::io::Error::other("invalid account name"));
+    }
     if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(std::io::Error::other("account sync directory is a symlink"));
     }

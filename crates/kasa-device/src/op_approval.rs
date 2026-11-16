@@ -39,6 +39,10 @@ pub struct Trusted {
     pub id: String,
     pub public: String,
     pub added: u64,
+    /// 사람이 이 데스크톱 화면에서 직접 믿었다. 자동으로 믿은 열쇠(처음 연결·같은 폰의 갈아 끼움)는 거짓이다 —
+    /// 관문이 끼워 넣은 열쇠일 수 있어, 로그인 금고 열쇠를 넘기는 승인(`login_vault::join`)에는 못 쓴다.
+    #[serde(default)]
+    pub manual: bool,
 }
 
 /// 요청한 쪽 — 소켓이 peer 프로세스로 찾은 칸·학생과, 그 프로세스가 아직 살아 있나.
@@ -133,61 +137,12 @@ mod keychain {
 /// 맥의 접근 허용 창 같은 둘째 문은 없다 — 값은 폰 Face ID 허락 뒤에만 꺼낸다.
 #[cfg(windows)]
 mod keychain {
-    use windows::core::{HSTRING, PWSTR};
-    use windows::Win32::Foundation::ERROR_NOT_FOUND;
-    use windows::Win32::Security::Credentials::{
-        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
-    };
+    pub(super) use crate::wincred::{decode, delete, write};
+    use crate::wincred::{read, Cred};
 
     /// 자격 증명 하나에 담기는 값의 상한(CRED_MAX_CREDENTIAL_BLOB_SIZE). 믿은 폰이 여럿이면 열쇠 목록이 넘으므로 뒤는
     /// `<대상>#2`, `#3` … 에 잇고, 머리의 설명 칸에 조각 수를 적는다.
     const BLOB_MAX: usize = 5 * 512;
-
-    struct Cred {
-        blob: Vec<u8>,
-        user: String,
-        comment: String,
-    }
-
-    fn read(target: &str) -> anyhow::Result<Option<Cred>> {
-        let mut found: *mut CREDENTIALW = std::ptr::null_mut();
-        match unsafe { CredReadW(&HSTRING::from(target), CRED_TYPE_GENERIC, None, &mut found) } {
-            Ok(()) => unsafe {
-                let c = &*found;
-                let blob = if c.CredentialBlob.is_null() {
-                    Vec::new()
-                } else {
-                    std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec()
-                };
-                let text = |p: PWSTR| if p.is_null() { String::new() } else { p.to_string().unwrap_or_default() };
-                let cred = Cred { blob, user: text(c.UserName), comment: text(c.Comment) };
-                CredFree(found as *const _);
-                Ok(Some(cred))
-            },
-            Err(error) if error.code() == ERROR_NOT_FOUND.to_hresult() => Ok(None),
-            Err(error) => anyhow::bail!("credential: {:#x}", error.code().0),
-        }
-    }
-
-    pub(super) fn write(target: &str, user: &str, blob: &[u8], comment: &str) -> anyhow::Result<()> {
-        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-        let (mut target, mut comment, mut user) = (wide(target), wide(comment), wide(user));
-        let cred = CREDENTIALW {
-            Type: CRED_TYPE_GENERIC,
-            TargetName: PWSTR(target.as_mut_ptr()),
-            Comment: PWSTR(comment.as_mut_ptr()),
-            CredentialBlobSize: blob.len() as u32,
-            CredentialBlob: blob.as_ptr() as *mut u8,
-            Persist: CRED_PERSIST_LOCAL_MACHINE,
-            UserName: PWSTR(user.as_mut_ptr()),
-            ..Default::default()
-        };
-        unsafe { CredWriteW(&cred, 0) }.map_err(|error| anyhow::anyhow!("credential: {:#x}", error.code().0))
-    }
-
-    pub(super) fn delete(target: &str) {
-        let _ = unsafe { CredDeleteW(&HSTRING::from(target), CRED_TYPE_GENERIC, None) };
-    }
 
     fn target(account: &str) -> String {
         format!("{}/{account}", super::SERVICE)
@@ -221,21 +176,6 @@ mod keychain {
             delete(&format!("{base}#{i}"));
         }
         Ok(())
-    }
-
-    /// 남이 넣은 값은 UTF-16 으로 적힌 것이 많다(cmdkey·Python keyring·Git 자격 증명 관리자). ASCII 의 UTF-16 은
-    /// 늘 0 바이트를 품고, UTF-8 문자열은 0 을 안 품으니 그것으로 가른다. 끝의 NUL 은 C 문자열 꼬리라 뗀다.
-    pub(super) fn decode(blob: Vec<u8>) -> Vec<u8> {
-        if !blob.contains(&0) && std::str::from_utf8(&blob).is_ok() {
-            return blob;
-        }
-        if blob.len() % 2 == 0 {
-            let units: Vec<u16> = blob.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
-            if let Ok(text) = String::from_utf16(&units) {
-                return text.trim_end_matches('\0').as_bytes().to_vec();
-            }
-        }
-        blob
     }
 
     /// 학생이 고른 항목의 값. 대상 하나에 사용자는 하나뿐이라, 같은 서비스에 계정이 여럿이면 `<계정>@<서비스>`
@@ -602,6 +542,11 @@ pub fn sync() -> anyhow::Result<(Value, Vec<Value>)> {
     Ok((status(), rest))
 }
 
+/// 자동으로 들어온 열쇠가 사람이 믿은 같은 폰의 열쇠를 갈아 끼우려는가 — 그러면 갈아 끼우지 않는다.
+fn holds_manual(list: &[Trusted], device: &str, id: &str, event: &str) -> bool {
+    event != "key_trusted" && list.iter().any(|t| t.device == device && t.manual && t.id != id)
+}
+
 /// 사람이 맥 화면에서 누른 「믿기」.
 pub fn trust(key: &Value) -> anyhow::Result<()> {
     keep(key, "key_trusted")
@@ -615,6 +560,12 @@ fn keep(key: &Value, event: &str) -> anyhow::Result<()> {
     anyhow::ensure!(raw.len() == 65 && raw[0] == 4 && key_id(&raw) == id, "bad_key");
     let device = key["device"].as_str().unwrap_or_default().to_string();
     let mut list = trusted()?;
+    // 사람이 믿은 열쇠는 자동 갈아 끼움으로 지우지 않는다 — 관문이 같은 폰 이름으로 끼워 넣은 열쇠일 수 있다.
+    // 새 열쇠는 믿지 않은 채 남아 화면이 「새 열쇠」로 알리고, 사람이 맞춰 보고 믿어야 바뀐다.
+    if holds_manual(&list, &device, id, event) {
+        audit(json!({"event": "key_auto_held", "device": device, "key": id}));
+        return Ok(());
+    }
     list.retain(|t| t.device != device);
     list.push(Trusted {
         device: device.clone(),
@@ -622,6 +573,7 @@ fn keep(key: &Value, event: &str) -> anyhow::Result<()> {
         id: id.to_string(),
         public: public.to_string(),
         added: now_ms(),
+        manual: event == "key_trusted",
     });
     store_set(TRUSTED, &serde_json::to_string(&list)?)?;
     let mut no = refused()?;
@@ -631,6 +583,17 @@ fn keep(key: &Value, event: &str) -> anyhow::Result<()> {
     }
     CHANGED.store(true, Ordering::Relaxed);
     audit(json!({"event": event, "device": device, "key": id}));
+    Ok(())
+}
+
+/// 사람이 맥·PC 화면에서 지문을 보고 「금고 승인에 믿기」를 눌렀다 — 이미 믿은 열쇠를 직접 믿은 것으로 올린다.
+pub fn confirm(id: &str) -> anyhow::Result<()> {
+    let mut list = trusted()?;
+    let Some(t) = list.iter_mut().find(|t| t.id == id) else { bail!("not_trusted") };
+    t.manual = true;
+    store_set(TRUSTED, &serde_json::to_string(&list)?)?;
+    CHANGED.store(true, Ordering::Relaxed);
+    audit(json!({"event": "key_confirmed", "key": id}));
     Ok(())
 }
 
@@ -677,7 +640,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(sig.as_ref())
         }
         fn trusted(&self) -> Trusted {
-            Trusted { device: "p1".into(), label: "폰".into(), id: self.id(), public: self.public(), added: 0 }
+            Trusted { device: "p1".into(), label: "폰".into(), id: self.id(), public: self.public(), added: 0, manual: false }
         }
         fn live(&self) -> Value {
             json!({"device": "p1", "label": "폰", "id": self.id(), "public": self.public()})
@@ -850,6 +813,17 @@ mod tests {
         assert!(keychain::value(&format!("{SERVICE}/probe-parts#2"), None).is_err(), "a stale tail part was left behind");
         keychain::delete(&format!("{SERVICE}/probe-parts"));
         assert_eq!(keychain::get("probe-parts").unwrap(), None);
+    }
+
+    #[test]
+    fn a_person_trusted_key_is_not_replaced_by_an_automatic_renewal() {
+        let mine = Trusted { device: "p1".into(), label: "폰".into(), id: "old".into(), public: String::new(), added: 0, manual: true };
+        let list = vec![mine.clone()];
+        assert!(holds_manual(&list, "p1", "new", "key_auto_trusted"), "자동 갈아 끼움은 사람이 믿은 열쇠를 못 지운다");
+        assert!(!holds_manual(&list, "p1", "new", "key_trusted"), "사람이 새 열쇠를 믿으면 바뀐다");
+        assert!(!holds_manual(&list, "p2", "new", "key_auto_trusted"), "다른 폰은 상관없다");
+        let auto = vec![Trusted { manual: false, ..mine }];
+        assert!(!holds_manual(&auto, "p1", "new", "key_auto_trusted"), "자동으로 믿은 열쇠끼리는 지금처럼 갈아 끼운다");
     }
 
     #[test]

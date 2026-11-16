@@ -15,6 +15,8 @@ impl App {
             proxy.send_event(UserEvent::AccountSyncApply(request, tx)).map_err(|_| "app closed".to_string())?;
             rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| "app sync apply timed out".to_string())?
         }));
+        // 금고 열쇠가 있는 기기에서만 일한다 — 사람이 설정에서 금고를 만들거나 등록해야 생긴다.
+        kasa_device::login_vault::spawn();
     }
 
     pub(crate) fn apply_account_sync(&mut self, request: kasa_device::account_sync::PendingApply) -> Result<(), String> {

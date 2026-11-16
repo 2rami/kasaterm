@@ -13,6 +13,8 @@ pub(crate) mod profile;
 
 #[path = "native_op_approval.rs"]
 pub(crate) mod op;
+#[path = "native_login_vault.rs"]
+pub(crate) mod vault;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -33,6 +35,7 @@ pub(crate) enum Action {
     CancelChoice,
     Work(work::Act),
     Op(op::Act),
+    Vault(vault::Act),
     Profile(profile::Act),
 }
 
@@ -66,6 +69,7 @@ pub(crate) struct State {
     choice: Option<Choice>,
     pub(crate) work: work::State,
     pub(crate) op: op::State,
+    pub(crate) vault: vault::State,
     pub(crate) profile: profile::State,
     /// 검증 실행의 로그인 화면 — 느린 틱이 실제 로그인 상태로 덮지 않는다.
     pinned: bool,
@@ -86,6 +90,7 @@ pub(crate) struct View {
     choice: Option<Choice>,
     work: work::View,
     op: op::View,
+    vault: vault::View,
     profile: profile::View,
 }
 
@@ -166,6 +171,7 @@ impl State {
             choice: self.choice.clone(),
             work: self.work.view(self.status["logged_in"] == true),
             op: self.op.view(self.status["logged_in"] == true),
+            vault: self.vault.view(self.status["logged_in"] == true),
             profile: self.profile.view(),
         }
     }
@@ -329,6 +335,7 @@ impl App {
     pub(crate) fn device_account_poll(&mut self) {
         self.work_permissions_poll();
         self.op_approval_poll();
+        self.login_vault_poll();
         let profile = self.account_profile_poll();
         if self.device_account.poll() || profile {
             self.device_account.refresh();
@@ -378,6 +385,10 @@ impl App {
         }
         if let Action::Op(act) = action {
             self.op_approval_action(act);
+            return;
+        }
+        if let Action::Vault(act) = action {
+            self.login_vault_action(act);
             return;
         }
         if let Action::Profile(act) = action {
@@ -443,6 +454,7 @@ impl App {
             | Action::CancelOAuth
             | Action::Work(_)
             | Action::Op(_)
+            | Action::Vault(_)
             | Action::Profile(_) => {}
             Action::OpenClaim => {
                 if let Some(choice) = self.device_account.choice.as_mut() {

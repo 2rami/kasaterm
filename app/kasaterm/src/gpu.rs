@@ -3396,6 +3396,7 @@ impl GpuRenderer {
             "pencil" => include_str!("../assets/icons/pencil.svg"),
             "trash-2" => include_str!("../assets/icons/trash-2.svg"),
             "shield" => include_str!("../assets/icons/shield.svg"),
+            "lock" => include_str!("../assets/icons/lock.svg"),
             "plus" => include_str!("../assets/icons/plus.svg"),
             "minus" => include_str!("../assets/icons/minus.svg"),
             "panel-left" => include_str!("../assets/icons/panel-left.svg"),

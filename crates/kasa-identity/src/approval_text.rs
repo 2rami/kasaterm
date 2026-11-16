@@ -288,6 +288,13 @@ pub fn key_fingerprint(id: &str) -> String {
     head.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-")
 }
 
+/// 로그인 금고 승인에 믿기 전에 맞춰 보는 64비트 지문 — 키 id 앞 16자를 넷씩. 짧은 지문은 같은 앞자리 키를 미리
+/// 갈아 둘 수 있는 길이라, 열쇠를 넘기는 승인에는 이것을 쓴다(폰 설정의 열쇠 지문 줄도 이 길이로 보인다).
+pub fn key_fingerprint_long(id: &str) -> String {
+    let head: Vec<char> = id.to_uppercase().chars().take(16).collect();
+    head.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-")
+}
+
 /// 폰 서명(DER ECDSA P-256/SHA-256)이 머리+도전값에 맞나. 관문과 요청한 맥이 같은 함수로 본다.
 pub fn signature_ok(public: &[u8], challenge: &str, sig: &[u8]) -> bool {
     let mut message = SECRET_PREFIX.to_vec();
@@ -313,6 +320,8 @@ mod tests {
         let id = super::key_id(&public);
         assert_eq!(id, "0ed3a6ab957ff6f59a9630a473d31a7d");
         assert_eq!(super::key_fingerprint(&id), "0ED3-A6AB-957F");
+        assert!(super::key_fingerprint_long(&id).starts_with("0ED3-A6AB-957F-"));
+        assert_eq!(super::key_fingerprint_long(&id).len(), 19);
         assert!(super::SECRET_PREFIX.ends_with(b"\n"));
     }
 

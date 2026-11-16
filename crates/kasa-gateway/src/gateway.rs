@@ -51,6 +51,8 @@ mod push_alert;
 mod conversations;
 #[path = "gateway_shared_rooms.rs"]
 mod shared_rooms;
+#[path = "gateway_login_vault.rs"]
+mod login_vault;
 
 use kasa_device::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
@@ -244,6 +246,8 @@ pub struct Gate {
     usage: Arc<admin::Meter>,
     limiter: Arc<kasa_identity::relay_auth::Limiter>,
     account_sync: Arc<kasa_device::account_sync::server::Store>,
+    /// 웹 로그인 동기화의 잠긴 사본(`gateway_login_vault.rs`). 관문은 풀 열쇠가 없다.
+    login_vault: Arc<kasa_device::login_vault::server::Store>,
     conversations: Option<Arc<conversations::Service>>,
     /// 계정 간 공유방(`gateway_shared_rooms.rs`). 상태 폴더가 없으면 `None`.
     shared_rooms: Option<Arc<shared_rooms::Service>>,
@@ -355,6 +359,9 @@ impl Gate {
             limiter: Arc::new(kasa_identity::relay_auth::Limiter::default()),
             account_sync: Arc::new(kasa_device::account_sync::server::Store::new(
                 state_path.as_ref().map(|p| p.with_file_name("account-sync")),
+            )),
+            login_vault: Arc::new(kasa_device::login_vault::server::Store::new(
+                state_path.as_ref().map(|p| p.with_file_name("login-vault")),
             )),
             conversations: conversations::Service::open(state_path.as_deref()),
             shared_rooms: shared_rooms::Service::open(state_path.as_deref()),
@@ -518,6 +525,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(push_alert::routes())
         .merge(conversations::routes())
         .merge(shared_rooms::routes())
+        .merge(login_vault::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))

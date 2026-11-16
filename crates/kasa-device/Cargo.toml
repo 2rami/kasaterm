@@ -35,10 +35,15 @@ tokio-stream = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true }
 uuid = { workspace = true }
+# Login-sync plaintext (passwords, the vault key) is wiped when dropped.
+zeroize = { version = "1", features = ["serde"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Existing credential handlers need the platform keychain APIs.
 security-framework = "3"
+# Login sync creates items with a named-app access list, which only the raw Security calls expose.
+core-foundation-sys = "0.8"
+security-framework-sys = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = ["Win32_Security_Credentials"] }

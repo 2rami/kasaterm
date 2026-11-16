@@ -4697,6 +4697,11 @@ impl App {
                 self.device_account.fixture(false, false);
                 self.chrome_dirty = true;
             }
+            action if action.starts_with("device-vault-") && crate::verification_run() => {
+                self.device_account.vault.fixture(action.trim_start_matches("device-vault-"));
+                self.device_account.fixture(false, false);
+                self.chrome_dirty = true;
+            }
             "device-op" | "device-op-empty" if crate::verification_run() => {
                 self.device_account.op.fixture(std::env::var("KASATERM_AUTOSETTINGS_ACTION").as_deref() == Ok("device-op-empty"));
                 self.device_account.fixture(false, false);

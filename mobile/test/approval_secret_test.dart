@@ -80,6 +80,8 @@ void main() {
     final id = approvalKeyId(base64.decode(vectorPublic));
     expect(id, '0ed3a6ab957ff6f59a9630a473d31a7d');
     expect(approvalFingerprint(id), '0ED3-A6AB-957F');
+    expect(approvalFingerprintLong(id).startsWith('0ED3-A6AB-957F-'), isTrue);
+    expect(approvalFingerprintLong(id).length, 19);
   });
 
   test('비밀 요청은 도전값에서 편 것만 보인다 — 관문이 실은 다른 칸·학생은 쓰지 않는다', () {
@@ -113,6 +115,35 @@ void main() {
     c.debugSeed([Approval.fromJson(secretPending())!]);
     return c;
   }
+
+  test('로그인 동기화의 새 기기 등록 승인도 서명할 수 있는 모양으로 읽고, Face ID 문구는 열쇠 주기다', () {
+    final text = jsonEncode({
+      'v': 1,
+      'kind': 'login-vault.join',
+      'nonce': '00112233445566778899aabbccddeeff',
+      'account': 'geno',
+      'device': 'dev_pc',
+      'student': '집 PC',
+      'pane': '',
+      'cwd': '',
+      'command': '이 기기에 로그인 금고 열쇠 주기 · 기기 지문 7F3A-91C2',
+      'refs': ['login-vault://join'],
+      'join': '7f3a91c20b5de44a' + 'cd' * 24,
+      'exp': 120000,
+    });
+    final a = Approval.fromJson({...secretPending(text: text), 'tool': '로그인 금고'})!;
+    expect(a.secretValid, isTrue);
+    expect(a.student, '집 PC');
+    expect(a.secretTitle, '로그인 금고 승인 요청');
+    expect(a.fields.first.label, '기기 지문');
+    expect(a.joinCode, '7F3A-91C2-0B5D-E44A', reason: '지문은 서명하는 join 에서 직접 계산한다');
+    expect(a.fields.first.text, '7F3A-91C2-0B5D-E44A');
+    expect(a.signReason, '집 PC 에 로그인 금고 열쇠 주기를 이번 한 번 허락 · 지문 7F3A-91C2-0B5D-E44A');
+    final noJoin = jsonDecode(text) as Map<String, Object?>..remove('join');
+    expect(Approval.fromJson(secretPending(text: jsonEncode(noJoin)))!.secretValid, isFalse, reason: 'join 이 없으면 맞춰 볼 지문이 없어 허락을 막는다');
+    final wrongPrefix = text.replaceFirst('login-vault://join', 'keychain://join');
+    expect(Approval.fromJson(secretPending(text: wrongPrefix))!.secretValid, isFalse, reason: '종류와 참조 꼴이 짝이 아니면 허락을 막는다');
+  });
 
   test('Face ID 로 서명한 허락은 도전값 그대로에 서명하고 키 id·서명을 함께 보낸다', () async {
     final sent = <Map<String, Object?>>[];

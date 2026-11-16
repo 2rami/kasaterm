@@ -174,6 +174,8 @@ pub(super) fn parse_challenge(text: &str, account: &str, device: &str, now: u64)
     let (source, prefix) = match v["kind"].as_str() {
         Some("keychain.read") => ("키체인", "keychain://"),
         Some("op.read") => ("1Password", "op://"),
+        // 새 기기에 로그인 금고 열쇠를 넘기는 승인. 서명 확인은 열쇠를 가진 기기가 다시 한다(login_vault::join).
+        Some("login-vault.join") => ("로그인 금고", "login-vault://"),
         _ => return Err(Refuse::ChallengeInvalid),
     };
     let ok = v["v"] == 1
