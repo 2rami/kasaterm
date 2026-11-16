@@ -242,6 +242,10 @@ fn read_inner(path: &std::path::Path, offset: u64, budget: Option<usize>) -> std
     Ok(TranscriptChunk { raw, offset: next, reset, source })
 }
 
+/// 원본이 처음 한 번에 보내는 걸러 낸 기록 전체의 상한. 원격 GET 기본(16MB)이면 긴 세션이 넘친다 — 90MB 기록이
+/// 걸러도 18MB 였고, 넘치면 그려서 보기가 빈 대화로 남았다(2026-11-16 실측).
+const REMOTE_HISTORY_MAX: usize = 96 << 20;
+
 /// 원본 기기의 `/transcript-raw` 한 조각 — 처음부터 걸러 받는다(`read`, 모르는 옛 원본은 꼬리).
 /// `source` 는 `offset` 이 가리키는 파일 — 원본 칸이 다른 파일로 옮겨 갔으면 새 파일이 `reset` 으로
 /// 온다. 묶인 기록이 없으면 None.
@@ -251,7 +255,7 @@ pub(crate) fn remote(base: &str, surface: &str, offset: u64, source: &str) -> an
         kasa_remote::remote::urlencode(surface),
         kasa_remote::remote::urlencode(source),
     );
-    let v = kasa_remote::remote::remote_get_json(base, &path)?;
+    let v = kasa_remote::remote::remote_get_json_bounded(base, &path, REMOTE_HISTORY_MAX)?;
     if v["ok"].as_bool() != Some(true) {
         return Ok(None);
     }
@@ -380,5 +384,31 @@ mod tests {
         let hook = serde_json::json!({"type":"attachment","attachment":{"type":"hook_success","stdout":serde_json::json!({"systemMessage":"visible","internal":"private"}).to_string()}});
         let kept = slim_for(&hook.to_string(), HistoryView::Archive).unwrap();
         assert!(!kept.contains("private")); assert!(kept.contains("visible"));
+    }
+
+    #[test]
+    fn a_long_mirrored_history_past_the_default_remote_limit_still_arrives() {
+        use std::io::{BufRead, BufReader, Write};
+        let raw = format!("{}\n", "a".repeat(18 << 20));
+        let body = serde_json::json!({"ok": true, "raw": raw, "offset": 90_000_000u64, "reset": true, "source": "s.jsonl"}).to_string();
+        assert!(body.len() > 16 << 20);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 2 {
+                line.clear();
+            }
+            let mut stream = stream;
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+        });
+        let chunk = remote(&format!("http://127.0.0.1:{port}"), "%2", 0, "").unwrap().unwrap();
+        server.join().unwrap();
+        assert_eq!(chunk.raw.len(), raw.len());
+        assert!(chunk.reset);
+        assert_eq!(chunk.offset, 90_000_000);
     }
 }

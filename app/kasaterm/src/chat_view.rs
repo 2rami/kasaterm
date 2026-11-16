@@ -27,6 +27,9 @@ type Rect = (f32, f32, f32, f32);
 
 /// 기록을 읽는 간격. 폰과 같다 — 더 잦으면 긴 턴에서 다시 펴는 값만 늘어난다.
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(1000);
+/// 처음 읽기가 실패한 칸의 다시 읽기 간격 — 거울의 처음 읽기는 원본이 기록 전체를 걸러 보내는 일이라, 매초 되풀이하면
+/// 원본 기기가 수십 MB 를 계속 읽는다.
+const RETRY_FAILED: std::time::Duration = std::time::Duration::from_secs(30);
 /// 이보다 크게 화면을 덮는 창(편집 승인의 긴 diff 같은)은 진짜 터미널로 본다.
 const REGION_MAX: f32 = 0.6;
 /// 빈 입력칸에서 Esc 를 이 안에 두 번 치면 claude 는 되감기(Rewind) 창을 연다 — 둘째 것은 삼킨다.
@@ -108,6 +111,8 @@ pub(crate) struct ChatPane {
     /// 다음 프레임에 이 칸이 맨 위에 서게 옮긴다(Info 「내 프롬프트」).
     jump: Cell<Option<usize>>,
     polled: Option<Instant>,
+    /// 기록을 한 번도 못 받았다 — 빈 대화 대신 진짜 화면을 그리고, 거울이면 원본 크기를 잡는다.
+    failed: Cell<bool>,
     painted: Cell<u64>,
     live_tab: Option<String>,
     /// 거울이면 원본 (주소, 칸). 기록을 거기서 받는다.
@@ -137,6 +142,7 @@ impl ChatPane {
             cache: RefCell::new(classic::Cache::default()),
             jump: Cell::new(None),
             polled: None,
+            failed: Cell::new(false),
             painted: Cell::new(0),
             live_tab: None,
             remote: None,
@@ -161,6 +167,7 @@ impl ChatPane {
         self.live_tab = Some(tab.to_string());
         self.remote = remote.cloned();
         self.polled = None;
+        self.failed.set(false);
         self.painted.set(0);
         self.open.clear();
         self.back.set(0);
@@ -393,6 +400,11 @@ impl App {
         self.chat_view.panes.contains_key(id)
     }
 
+    /// 그려서 보기를 켰지만 기록을 한 번도 못 받은 칸 — 진짜 화면을 대신 그린다.
+    pub(crate) fn chat_view_failed(&self, id: &str) -> bool {
+        self.chat_view.panes.get(id).is_some_and(|p| p.failed.get())
+    }
+
     /// 이번 프레임에 대화로 그려진 pane 인가 — 휠·선택을 가로챌지의 판정.
     pub(crate) fn chat_view_showing(&self, id: &str) -> bool {
         self.chat_view.drawn.borrow().contains_key(id)
@@ -471,7 +483,14 @@ impl App {
             let proxy = self.proxy.clone();
             let Some(pane) = self.chat_view.panes.get_mut(&id) else { continue };
             pane.use_source(&tab, remote.as_ref());
-            if pane.polled.is_none_or(|t| now.duration_since(t) >= POLL_EVERY) {
+            if let Ok(f) = pane.feed.try_lock() {
+                if pane.failed.get() != f.error.is_some() {
+                    pane.failed.set(f.error.is_some());
+                    self.chrome_dirty = true;
+                }
+            }
+            let every = if pane.failed.get() { RETRY_FAILED } else { POLL_EVERY };
+            if pane.polled.is_none_or(|t| now.duration_since(t) >= every) {
                 pane.polled = Some(now);
                 poll_feed(Arc::clone(&pane.feed), source, proxy);
             }
@@ -497,7 +516,7 @@ impl App {
     /// 바닥을 못 찾으면 None(진짜 터미널을 그린다).
     pub(crate) fn chat_frame(&self, ws: &Workspace, pane: &PaneState, id: &str, cols: usize, rows: usize) -> Option<ChatFrame> {
         let chat = self.chat_view.panes.get(id)?;
-        if !self.pane_can_chat(ws, id) || cols < 8 || rows < 4 {
+        if chat.failed.get() || !self.pane_can_chat(ws, id) || cols < 8 || rows < 4 {
             return None;
         }
         let src = pane.term()?;

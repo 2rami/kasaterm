@@ -42,9 +42,11 @@ impl App {
         }
     }
 
-    /// 이 거울을 다시 그릴 수 없나 — 그럴 때만 보는 동안 원본 격자를 이 칸 크기로 잡는다.
+    /// 이 거울을 다시 그릴 수 없나 — 그럴 때만 보는 동안 원본 격자를 이 칸 크기로 잡는다. 기록을 못 받아
+    /// 그려서 보기가 진짜 화면으로 물러선 칸도 원본 격자를 본다.
     pub(crate) fn mirror_needs_source(&self, id: &str, tab: &str) -> bool {
-        needs_source(self.mirror_kind(tab), self.chat_view_on(id), kasa_remote::remote::cached_agent_running(tab).is_some())
+        let drawn = self.chat_view_on(id) && !self.chat_view_failed(id);
+        needs_source(self.mirror_kind(tab), drawn, kasa_remote::remote::cached_agent_running(tab).is_some())
     }
 
     /// 보이는 Claude·코덱스 거울을 그려서 열고, 원본 TUI를 보는 거울만 뷰어 크기를 빌려 원본 앱이 그 폭으로 다시 그리게 한다.
