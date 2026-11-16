@@ -15,6 +15,8 @@ mod view;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
+mod win_agent;
+#[cfg(windows)]
 mod win_view;
 
 #[cfg(target_os = "macos")]
@@ -40,6 +42,12 @@ pub(crate) fn host_now() -> f64 {
 #[cfg(target_os = "macos")]
 pub(crate) fn install() {
     kasa_remote::screen_stream::install(std::sync::Arc::new(host::Host));
+}
+
+/// `kasaterm.exe --screen-service`·`--screen-agent` 면 Windows 화면 도우미로 돌고 참 — 앱 초기화 전에 부른다.
+#[cfg(windows)]
+pub(crate) fn run_helper(args: &[std::ffi::OsString]) -> bool {
+    win_agent::run(args)
 }
 
 /// 부팅 때 한 번 — Windows 는 DXGI 복제·Media Foundation 하드웨어 인코더로 보낸다(S3).

@@ -6720,6 +6720,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // renamed bundle executable and `kasaterm --viewer` share the same code,
     // but only the terminal app may perform startup maintenance.
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // 화면 도우미 서비스·도우미(SYSTEM)는 사용자 설정·로그를 건드리지 않고 그 일만 한다.
+    #[cfg(windows)]
+    if screen_stream::run_helper(&args) { return Ok(()); }
     if inline_image::run(&args)? { return Ok(()); }
     if inline_media::run(&args)? { return Ok(()); }
     let executable = std::env::current_exe()

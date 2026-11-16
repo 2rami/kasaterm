@@ -117,7 +117,7 @@
   폰은 `mobile/lib/screen_session.dart`·`screens/screen_mirror.dart`(허브 기기 머리글 모니터 단추). 계약 [screen-mirror.md](screen-mirror.md)
 - 화면 스트림(하드웨어 영상) — `kasa-remote/src/screen_stream.rs`(카사넷 `kasa/screen/1` 틀·보내기·보기, 앱이 꽂는 `Capture`)·
   `kasa-device/src/kasanet.rs`(입구 `SCREEN_ALPN`·`connect`·`screen_capable`), 앱 `screen_stream/`(macOS: `capture.rs` SCK·`codec.rs`
-  VT 압축·풀기·`host.rs` 보내는 세션과 정지 화면 다듬기·`view.rs` 풀기 일꾼·`pane.rs` 화면 칸 여닫기·그리기·`input.rs` 조작(누름·휠·키·한글·⌘V)·`scroll_probe.rs` 검증 스크롤; Windows: `win.rs` DXGI 복제·MF 하드웨어 압축·`win_view.rs` MF 풀기와 D3D11
+  VT 압축·풀기·`host.rs` 보내는 세션과 정지 화면 다듬기·`view.rs` 풀기 일꾼·`pane.rs` 화면 칸 여닫기·그리기·`input.rs` 조작(누름·휠·키·한글·⌘V)·`scroll_probe.rs` 검증 스크롤; Windows: `win.rs` DXGI 복제(입력 데스크톱 따라가기)·MF 하드웨어 압축·`win_agent.rs` SYSTEM 화면 도우미 서비스와 파이프(UAC·잠금 화면, 설치기 `wix/main.wxs` 가 서비스 등록)·`win_view.rs` MF 풀기와 D3D11
   공유 텍스처·`annexb.rs` Annex-B↔길이 머리 NAL, 칸 들여오기는 `GpuRenderer::set_image_d3d11`). 폰은 `/screen/ws` 영상 방식(`screen_stream::serve_ws`)을
   `mobile/lib/screen_video.dart`·`ios/Runner/ScreenVideo.swift`(VT 풀기 → `FlutterTexture`)로 본다. 칸 탭은
   `PaneContent::Screen`, 연결은 `App.screen_views`. 계약·실측 [screen-stream.md](screen-stream.md)

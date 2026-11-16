@@ -13,6 +13,7 @@
 | S1c | GPU 복사 없애기(VT 의 IOSurface → Metal 텍스처) — 됐다(아래 「S1c」). 여러 화면, 재시작 뒤 화면 탭 복원은 남았다 | |
 | S2 | 폰에서 보기 — `/screen/ws` 에 영상 방식(`codec=hevc`, 직통일 때만)을 더하고 폰은 Swift 플러그인이 VT 로 풀어 Flutter `Texture` 로 그린다 | 실기에서 60fps |
 | S3 | Windows 뜨기·압축(DXGI·Media Foundation)과 보기(MF 디코더·D3D11 공유 텍스처) — 됐다(아래 「S3」) | 격리 앱 둘(같은 PC)·장 덤프로 확인 |
+| S3b | Windows 보안 데스크톱(UAC·잠금 화면)까지 보고 누르기 — Parsec 처럼 SYSTEM 서비스가 세션에 도우미를 띄운다(아래 「S3b」) | 시험 서비스로 UAC 창이 보이고 원격 Esc 로 닫혔다 |
 | S4 | 소리·클립보드·상대 마우스·패드 | |
 
 ## S0 측정기
@@ -321,4 +322,42 @@ screen-stream view <ADDR> --key PATH [--secs N] [--codec hevc|h264] [--mbps N] [
 ### 남은 것
 
 - 맥 칸에서 Windows 화면·Windows 칸에서 맥 화면을 실기 판으로 보고 지연을 잰다. 마우스 커서 그리기(복제에 없다), 여러 화면.
+
+## S3b — Windows 보안 데스크톱까지 (2026-11-16)
+
+UAC 확인 창·잠금 화면은 Windows 가 보안 데스크톱(Winlogon)에 띄운다. 사용자 프로세스는 그 데스크톱을 열 수 없어 복제가
+끊기고(JPEG 거울은 까만 화면) SendInput 도 막힌다. 그래서 Parsec 과 같은 꼴로 간다 — 집 PC 의 Parsec 을 들여다보면
+`pservice.exe`(LocalSystem 서비스, 세션 0) → `parsecd.exe`(**SYSTEM, 사용자 세션**) → `parsecd.exe`(사용자, IPC 로 잇는다)다.
+
+- 서비스 `KasatermScreen`(설치기가 건다, `kasaterm.exe --screen-service`) — 자기 SYSTEM 토큰을 복제해 세션 번호만 지금 콘솔
+  세션으로 바꿔 도우미(`kasaterm.exe --screen-agent`)를 띄운다. 세션이 바뀌면 옮겨 띄우고, 죽으면 1–30초 물러서며 다시
+  띄운다. 잡 오브젝트(닫히면 죽임)라 서비스가 어떻게 끝나도 도우미가 남지 않는다. 기록은 `%ProgramData%\kasaterm\screen-service.log`.
+- 도우미(`win_agent.rs`)는 S3 의 뜨기·압축(`win::start_local`)과 조작(`screen_input`)을 그대로 쓴다. 다른 점은 뜨기·조작 스레드가
+  입력 데스크톱을 따라간다는 것 — 복제가 `DXGI_ERROR_ACCESS_LOST`(UAC 에서 돌아올 때는 `DXGI_ERROR_INVALID_CALL` 도 온다)로
+  끊기면 `OpenInputDesktop`·`SetThreadDesktop` 으로 그 데스크톱에 옮겨 다시 연다. 앱이 직접 뜰 때도 같은 길이지만 Winlogon 을
+  못 열어 돌아올 때까지 기다린다(전에는 끊겼다).
+- **뜨기는 데스크톱마다 새 스레드**다. DXGI 를 한 번 쓴 스레드는 `SetThreadDesktop` 으로 Winlogon 에 못 옮겨, 조작은 들어가는데
+  화면은 UAC 동안 한 장도 안 나왔다.
+- **새 복제의 첫 장은 버리지 않는다.** 멈춘 UAC 화면의 첫 장은 마우스 변화만 있는 장(`LastPresentTime` 0)으로 온다 — 바뀐 장만
+  보내던 규칙으로 버리면 다음 변화가 없어 보는 쪽은 마우스를 움직일 때까지 그 화면을 못 봤다.
+- 앱은 세션 파이프 `\\.\pipe\kasaterm-screen-<세션>` 으로 붙는다. 도우미가 없으면(서비스 없는 설치·옛 판) 앱이 직접 뜬다.
+  장 시각은 두 프로세스가 같이 읽는 QPC 로 찍는다(`Instant` 는 프로세스마다 기점이 다르다).
+- 연결 하나는 한 방향으로만 흐른다 — 장 연결(앱 `S` 설정 → 도우미 `N`·`F`·1초 `H`)과 조작 연결(앱 `C` → `K`·`I`). 동기 파이프
+  핸들은 읽기가 막혀 있는 동안 같은 핸들의 쓰기도 막혀서다. 숨(`H`)으로 앱이 떠난 것을 도우미가 1초 안에 안다.
+
+### 막아 둔 것
+
+- 파이프 DACL 은 SYSTEM 과 그 세션 사용자뿐, 원격 클라이언트는 거절. 도우미는 붙은 프로세스가, 앱은 파이프를 연 프로세스가
+  같은 kasaterm.exe(설치판은 관리자만 쓰는 Program Files)인지 본다. 이름을 먼저 차지한 프로그램이 있으면 도우미는 물러난다.
+- 남는 위험은 Parsec 과 같다 — 사용자 권한으로 도는 악성 코드가 그 kasaterm 프로세스를 조종하면 UAC 「예」를 누를 수 있다.
+  원격 쪽은 기존 화면 거울과 같은 인증(카사넷 허용 기기)만 통과한다.
+
+### 검증 (집 PC, 디버그 판)
+
+- 시험 서비스: 관리자 ssh 에서 `sc.exe create KasatermScreenTest binPath= "\"<리그 exe>\" --screen-service" obj= LocalSystem`
+  → `sc.exe start`. 서비스 SYSTEM·세션 0 → 도우미 **SYSTEM·세션 1** → 파이프 `kasaterm-screen-1`(Parsec 과 같은 꼴). 사용자 쓰기
+  폴더의 exe 를 SYSTEM 으로 돌리는 셈이라 시험 뒤 바로 `sc.exe delete` 한다. 리그 exe 가 도우미와 같은 파일이어야 붙는다.
+- 리그 웹소켓으로 받는 중에 `Start-Process cmd -Verb RunAs` 로 UAC 창을 띄우자 장에 UAC 창이 그대로 실렸고(`info.agent=true`),
+  웹소켓으로 보낸 `Escape` 가 그 창을 닫았다(consent.exe 1 → 0). 돌아온 뒤에도 끊기지 않고 60fps 로 이어졌다.
+- 잠금 화면은 사람 화면을 잠그게 되어 재지 않았다 — 같은 Winlogon 데스크톱이라 같은 길을 탄다.
 

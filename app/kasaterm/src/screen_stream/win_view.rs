@@ -494,29 +494,12 @@ mod tests {
     }
 
     fn parse(raw: &[u8]) -> Vec<Frame> {
-        let be32 = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
         let mut frames = Vec::new();
         let mut i = 0;
-        while i + 4 <= raw.len() {
-            let len = be32(&raw[i..]) as usize;
-            let m = &raw[i + 4..i + 4 + len];
+        while let Some(head) = raw.get(i..i + 4) {
+            let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            frames.extend(raw.get(i + 4..i + 4 + len).and_then(Frame::decode));
             i += 4 + len;
-            // 'F'·seq u32·cap_id u64·key u8·t_cap f64·t_enc f64·가로 u32·세로 u32·셋 수 u8·(u16 길이 + 셋)…·NAL.
-            let mut at = 1 + 4 + 8;
-            let key = m[at] != 0;
-            at += 1 + 16;
-            let (width, height) = (be32(&m[at..]), be32(&m[at + 4..]));
-            at += 8;
-            let count = m[at] as usize;
-            at += 1;
-            let mut param_sets = Vec::new();
-            for _ in 0..count {
-                let n = u16::from_be_bytes([m[at], m[at + 1]]) as usize;
-                param_sets.push(m[at + 2..at + 2 + n].to_vec());
-                at += 2 + n;
-            }
-            let data = m[at..].to_vec();
-            frames.push(Frame { seq: 0, cap_id: 0, key, t_cap: 0.0, t_enc: 0.0, width, height, param_sets, data });
         }
         frames
     }

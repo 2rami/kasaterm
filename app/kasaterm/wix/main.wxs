@@ -120,6 +120,27 @@
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\kasaterm.exe'
                                 KeyPath='yes'/>
+                            <!-- 화면 도우미(screen_stream/win_agent.rs, docs/screen-stream.md S3b) — Parsec 처럼 SYSTEM
+                                 서비스가 사용자 세션에 도우미를 SYSTEM 으로 띄워 UAC·잠금 화면까지 보고 누른다. 서비스가
+                                 못 떠도 설치는 이어 간다(앱이 직접 뜨는 길로 물러난다). -->
+                            <ServiceInstall
+                                Id='ScreenService'
+                                Name='KasatermScreen'
+                                DisplayName='kasaterm Screen Helper'
+                                Description='Lets kasaterm show and control the secure desktop (UAC, lock screen) when this PC is viewed remotely.'
+                                Type='ownProcess'
+                                Start='auto'
+                                ErrorControl='normal'
+                                Account='LocalSystem'
+                                Arguments='--screen-service'
+                                Vital='no'/>
+                            <ServiceControl
+                                Id='ScreenServiceControl'
+                                Name='KasatermScreen'
+                                Start='install'
+                                Stop='both'
+                                Remove='uninstall'
+                                Wait='no'/>
                         </Component>
                         <!-- WinSparkle 자동 업데이트 런타임 DLL — exe 옆(bin\)에 두면
                              win_sparkle.rs 의 LoadLibrary 가 찾는다. CI 가 빌드 산출물

@@ -223,6 +223,15 @@ windows = { workspace = true, features = [
     "Win32_System_Com_StructuredStorage",
     # 화면 스트림 Windows 보내기(screen_stream/win.rs): 하드웨어 인코더의 저지연·키프레임 설정이 ICodecAPI(VARIANT)를 쓴다.
     "Win32_System_Ole",
+    # 화면 도우미(screen_stream/win_agent.rs): SYSTEM 서비스가 사용자 세션에 도우미를 띄우고 앱과 이름 있는 파이프로 잇는다.
+    # 장 시각은 두 프로세스가 같이 읽는 QPC.
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
     "Win32_System_Variant",
 ] }
 # `#[implement]`(토스트 활성화기·Media Foundation 알림·바이트 스트림)가 펼친 코드가 찾는 이름.

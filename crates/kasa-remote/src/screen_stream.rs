@@ -60,7 +60,7 @@ impl Default for Config {
 }
 
 impl Config {
-    fn to_json(&self) -> Value {
+    pub fn to_json(&self) -> Value {
         json!({ "codec": self.codec, "bitrate": self.bitrate, "fps": self.fps, "scale": self.scale, "refine": self.refine })
     }
 
@@ -100,7 +100,8 @@ pub struct Frame {
 }
 
 impl Frame {
-    fn encode(&self) -> Vec<u8> {
+    /// `'F'` 틀 — 카사넷 장·폰 웹소켓 장·Windows 화면 도우미 파이프가 같은 꼴을 쓴다.
+    pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.data.len() + 64);
         out.push(b'F');
         out.extend_from_slice(&self.seq.to_be_bytes());
@@ -119,7 +120,7 @@ impl Frame {
         out
     }
 
-    fn decode(buf: &[u8]) -> Option<Self> {
+    pub fn decode(buf: &[u8]) -> Option<Self> {
         let mut r = Reader { buf, at: 0 };
         if r.take::<1>()? != *b"F" {
             return None;
