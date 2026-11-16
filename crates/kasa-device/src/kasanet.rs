@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use kasa_net::iroh::endpoint::{presets, Connection};
+use kasa_net::iroh::endpoint::{presets, Connection, PortmapperConfig};
 use kasa_net::iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use kasa_net::iroh::{Endpoint, EndpointId, SecretKey};
 use kasa_net::{fwd, identity, peer, AllowList, FwdServer, Link, LinkState, RelayTrust, Route};
@@ -133,10 +133,11 @@ pub async fn start(mcp_port: u16) {
     let own_relays = kasa_net::relay::own_relays();
     let mut builder = kasa_net::builder(presets::Minimal, key, &allow)
         .relay_mode(kasa_net::relay::relay_mode(&own_relays));
-    if let Some(at) = std::env::var(BIND_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<SocketAddr>().ok())
-    {
+    let rig_bind = std::env::var(BIND_ENV).ok().and_then(|v| v.trim().parse::<SocketAddr>().ok());
+    // 루프백 리그는 공유기에 묻지 않는다 — UPnP 찾기·매핑·정리가 0.0.0.0 UDP 를 열어 Windows 방화벽이 사람 화면에
+    // 「이 앱에 액세스를 허용할까요」를 띄운다(2026-11-16 Windows 리그). 루프백 길에는 공유기 매핑이 쓸모도 없다.
+    let loopback_rig = rig_bind.is_some_and(|a| a.ip().is_loopback());
+    if let Some(at) = rig_bind {
         builder = match builder.clear_ip_transports().bind_addr(at) {
             Ok(b) => b,
             Err(e) => {
@@ -144,6 +145,9 @@ pub async fn start(mcp_port: u16) {
                 return;
             }
         };
+    }
+    if loopback_rig {
+        builder = builder.portmapper_config(PortmapperConfig::Disabled);
     }
     let bound = builder.bind().await;
     let endpoint = match bound {
@@ -181,7 +185,7 @@ pub async fn start(mcp_port: u16) {
         return;
     }
     tokio::spawn(sweep_phones());
-    if let Some(n) = NODE.get() {
+    if let Some(n) = NODE.get().filter(|_| !loopback_rig) {
         tokio::spawn(kasa_net::portmap::keep_swept(n.endpoint.clone(), |s| {
             eprintln!("[kasanet] 공유기 UPnP 매핑 정리 — 이 기기 것 {}칸 중 {}칸 지움", s.mine, s.removed);
         }));
