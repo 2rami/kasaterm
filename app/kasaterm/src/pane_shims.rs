@@ -105,6 +105,10 @@ done
 /// 셰임은 전부 뺀다. CLI 는 이 shim dir 로만 pane PATH 에 오르므로 shim 을 통째로
 /// 끄는 `shim_inject=off` 와는 다르다(그러면 lite 안에서 split/send 가 안 된다).
 pub(crate) fn install_pane_shims(lite: bool) {
+    // 칸 안에서 띄운 앱(검증 리그)은 그 칸의 값을 물려받는다. 남겨 두면 아래에서 shim 을 안 깔고
+    // 돌아갈 때 설정 저장(`regen_pane_shims`)이 띄운 쪽 앱의 shim 을 이 앱 값으로 덮는다 — 리그가 사용자
+    // 앱의 claude 래퍼를 가짜 계정 폴더로 바꿔 새 학생이 로그아웃 상태로 떴다(2026-11-16).
+    std::env::remove_var("KASATERM_TMUX_SHIM_DIR");
     // 전역 shim 스위치 OFF → shim dir 자체를 안 만든다. KASATERM_TMUX_SHIM_DIR 이 미설정
     // 이면 pty-backend(state.rs)가 PATH prepend·ZDOTDIR 를 건드리지 않아 자식 셸이 순정
     // 이 된다 — claude wrapper·imgopen·훅·프록시 배선 전무(진짜 독립). 기본 ON(하위호환).

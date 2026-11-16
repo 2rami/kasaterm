@@ -47,6 +47,7 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
   `[System.IO.Directory]::GetFiles("\\.\pipe\")` 로 내 리그가 그 이름을 잡았는지 확인한다.
 - Windows 리그의 설정 파일은 BOM 없이 써라 — Windows PowerShell 5.1 `Set-Content -Encoding utf8` 은 BOM 을 붙이고, 앱은
   그 파일을 못 읽어 기본값(셸·셰임)으로 뜬 뒤 덮어쓴다. `[IO.File]::WriteAllText` 를 쓴다.
+- **칸 안에서 띄운 리그는 칸의 `KASATERM_*` 를 물려받는다.** 앱은 부팅 때 물려받은 `KASATERM_TMUX_SHIM_DIR` 을 지운다 — 예전엔 `shim_inject:false` 리그가 그 값을 그대로 들고 있다가 설정 저장 때 사용자 앱의 shim(claude 래퍼·codex 계정 파일·학생 셰임)을 리그의 가짜 계정 경로로 덮어, 그사이 뜬 학생이 로그아웃 상태로 떴다(2026-11-16). 옛 판으로 리그를 띄울 때는 `env -u KASATERM_TMUX_SHIM_DIR` 를 붙인다.
 - **칸 안에서 claude·codex 를 따로 띄워 화면을 재 볼 때(격리 tmux 등)는 `env -i` 로 칸 환경을 걷어라.** 물려받은
   `KASATERM_PANE_ID` 로 그 실행이 내 칸 이름으로 학생·대화를 묻는다. 앱은 칸 터미널 밖 실행에 자리를 주지 않고 앉은
   학생을 빌려 줄 뿐이지만(`agent_identity.rs`), 그 실행의 훅이 알리는 대화 번호는 여전히 내 칸으로 간다. 2026-10-14 에는
