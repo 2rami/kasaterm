@@ -250,7 +250,7 @@ pub fn known_setting(key: &str) -> bool {
         | "file_tree_default" | "pane_footer_default" | "usage_compact" | "sidebar_pulse"
         | "statusbar_hidden" | "statusbar_order" | "statusbar_separators" | "statusbar_colors"
         | "machine_colors" | "device_icons" | "custom_themes" | "custom_theme" | "weather" | "character_picks"
-        | "device_names" | super::choice::KEY)
+        | "device_names" | super::choice::KEY | super::order::KEY)
 }
 
 pub fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
@@ -333,6 +333,19 @@ mod tests {
         let kept = known_only(snapshot);
         assert!(validate_snapshot(&kept).is_ok());
         assert_eq!(kept.settings.len(), 1);
+    }
+
+    #[test]
+    fn every_opt_in_key_survives_on_the_clients_that_ask_for_it() {
+        // A key the sender validates but the receiver drops as unknown never reaches another device.
+        for key in OPT_IN_KEYS {
+            assert!(known_setting(key), "{key}");
+        }
+        let order = super::super::order::value(&[("00000000-0000-0000-0000-000000000001".into(), "10000000-0000-0000-0000-000000000001".into())]);
+        let mut snapshot = Snapshot::default();
+        snapshot.settings.insert(super::super::order::KEY.into(), order.clone());
+        let got = known_only(visible(snapshot, &accepted_keys(Some(&opt_in_header()))));
+        assert_eq!(got.settings.get(super::super::order::KEY), Some(&order));
     }
 
     #[test]
