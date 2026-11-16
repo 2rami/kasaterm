@@ -7,10 +7,12 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use kasa_remote::screen_stream::{self, Config, Event, Frame, Keyframes, Watch};
+use serde_json::json;
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
 
 use super::codec::{self, Codec, Decoder};
+use super::{contains, Layout};
 
 struct Pixels(CFRetained<CVPixelBuffer>);
 // VT 가 내준 IOSurface 버퍼 — 일꾼이 넣고 GUI 가 읽기만 한다.
@@ -35,13 +37,24 @@ struct Shared {
     serial: AtomicU64,
     status: Mutex<String>,
     stats: Mutex<Stats>,
+    /// 조작을 못 넣는 까닭 — 넣을 수 있으면 None.
+    input_note: Mutex<Option<String>>,
 }
+
 
 pub(crate) struct ScreenView {
     pub label: String,
     shared: Arc<Shared>,
     watch: Option<Watch>,
     uploaded: u64,
+    /// 조작 중 — 칸 위 누름·휠·키를 그 기기에 넣는다. 처음엔 보기만 한다(보다가 잘못 누르면 그 기기에서 일이 일어난다).
+    pub control: bool,
+    pub layout: Option<Layout>,
+    /// 지금 그 기기에 눌려 있는 단추 — 칸 밖으로 끌어 나가도 뗄 때까지 이어 보낸다.
+    pub buttons: u8,
+    /// 조합 중인 한글 — 그 기기에는 다 된 글자만 가니 칸 위에 보여 준다.
+    pub preedit: String,
+    frame: (u32, u32),
     /// 마지막 장을 GPU 로 올리는 데 든 시간(ms)과 올린 장 수 — 검증 리그가 읽는다.
     pub upload_ms: f64,
     pub uploads: u64,
@@ -55,6 +68,7 @@ impl ScreenView {
             serial: AtomicU64::new(0),
             status: Mutex::new("카사넷으로 붙는 중".into()),
             stats: Mutex::new(Stats::default()),
+            input_note: Mutex::new(None),
         });
         let config = Config::default();
         let (tx, rx) = mpsc::channel::<Incoming>();
@@ -80,6 +94,17 @@ impl ScreenView {
                     set_status(&shared, &wake, text);
                 }
                 Event::Closed(why) => set_status(&shared, &wake, &format!("끊겼어요 — {why}")),
+                Event::Input { ok, reason } => {
+                    let note = (!ok).then(|| {
+                        if reason.as_deref() == Some("permission") {
+                            "그 기기 카사텀에 손쉬운 사용 권한이 없어 조작을 못 넣어요".to_string()
+                        } else {
+                            "그 기기에 조작을 넣을 수 없어요".to_string()
+                        }
+                    });
+                    *shared.input_note.lock().unwrap_or_else(|e| e.into_inner()) = note;
+                    wake();
+                }
             }
         };
         let watch = screen_stream::watch(base.to_string(), config.clone(), on)?;
@@ -90,7 +115,7 @@ impl ScreenView {
             .name("screen-stream-decode".into())
             .spawn(move || decode_loop(codec, rx, keyframes, &worker_shared, &wake))
             .ok()?;
-        Some(Self { label: label.to_string(), shared, watch: Some(watch), uploaded: 0, upload_ms: 0.0, uploads: 0 })
+        Some(Self { label: label.to_string(), shared, watch: Some(watch), uploaded: 0, upload_ms: 0.0, uploads: 0, control: false, layout: None, buttons: 0, preedit: String::new(), frame: (0, 0) })
     }
 
     /// 지난번에 가져간 뒤 새로 풀린 장이 있으면 BGRA 바이트(가로·세로·줄 간격)로 넘긴다.
@@ -102,7 +127,12 @@ impl ScreenView {
         let started = std::time::Instant::now();
         let latest = self.shared.latest.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(px) = latest.as_ref() {
-            codec::with_bgra(&px.0, f);
+            if let Some(size) = codec::with_bgra(&px.0, |bgra, w, h, stride| {
+                f(bgra, w, h, stride);
+                (w, h)
+            }) {
+                self.frame = size;
+            }
         }
         drop(latest);
         self.upload_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -116,6 +146,61 @@ impl ScreenView {
 
     pub(crate) fn has_frame(&self) -> bool {
         self.uploaded != 0
+    }
+
+    pub(crate) fn frame_size(&self) -> (u32, u32) {
+        self.frame
+    }
+
+    pub(crate) fn input_note(&self) -> Option<String> {
+        self.shared.input_note.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(crate) fn on_toggle(&self, p: (f64, f64)) -> bool {
+        self.layout.is_some_and(|l| contains(l.toggle, p))
+    }
+
+    pub(crate) fn on_image(&self, p: (f64, f64)) -> bool {
+        self.layout.is_some_and(|l| contains(l.image, p))
+    }
+
+    /// 칸 위 자리 → 그 화면 안의 비율(0–1). 끌어 나간 자리는 가장자리로 붙인다.
+    fn at(&self, (px, py): (f64, f64)) -> Option<(f64, f64)> {
+        let (x, y, w, h) = self.layout?.image;
+        (w > 0.0 && h > 0.0).then(|| {
+            (((px - f64::from(x)) / f64::from(w)).clamp(0.0, 1.0), ((py - f64::from(y)) / f64::from(h)).clamp(0.0, 1.0))
+        })
+    }
+
+    fn send(&self, event: serde_json::Value) {
+        if let Some(w) = &self.watch {
+            w.send_input(&event);
+        }
+    }
+
+    /// 단추 상태 통째(1 왼쪽·2 오른쪽·4 가운데) — 그 기기가 직전 상태와 견줘 누름·뗌·끌기를 가른다.
+    pub(crate) fn pointer(&mut self, p: (f64, f64), buttons: u8, mods: u8) {
+        let Some((x, y)) = self.at(p) else { return };
+        self.buttons = buttons;
+        self.send(json!({ "t": "pointer", "x": x, "y": y, "b": buttons, "m": mods }));
+    }
+
+    /// 양수 dy 는 위로 굴림(내용이 내려온다) — 그 기기 화면 포인트 단위.
+    pub(crate) fn scroll(&self, p: (f64, f64), dx: f64, dy: f64) {
+        let Some((x, y)) = self.at(p) else { return };
+        self.send(json!({ "t": "scroll", "x": x, "y": y, "dx": dx.round() as i64, "dy": dy.round() as i64 }));
+    }
+
+    /// 이름 붙은 키(웹 `KeyboardEvent.code`)를 눌렀다 뗀다.
+    pub(crate) fn key(&self, code: &str, mods: u8) {
+        self.send(json!({ "t": "key", "k": code, "m": mods }));
+    }
+
+    /// 이 기기 입력기가 조합을 끝낸 글 — 그 기기 입력기를 다시 거치지 않게 글자째 넣는다.
+    pub(crate) fn text(&self, s: &str) {
+        if !s.is_empty() {
+            self.send(json!({ "t": "text", "s": s }));
+        }
     }
 
     pub(crate) fn status(&self) -> String {

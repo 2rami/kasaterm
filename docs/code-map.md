@@ -117,7 +117,7 @@
   폰은 `mobile/lib/screen_session.dart`·`screens/screen_mirror.dart`(허브 기기 머리글 모니터 단추). 계약 [screen-mirror.md](screen-mirror.md)
 - 화면 스트림(하드웨어 영상) — `kasa-remote/src/screen_stream.rs`(카사넷 `kasa/screen/1` 틀·보내기·보기, 앱이 꽂는 `Capture`)·
   `kasa-device/src/kasanet.rs`(입구 `SCREEN_ALPN`·`connect`·`screen_capable`), 앱 `screen_stream/`(macOS: `capture.rs` SCK·`codec.rs`
-  VT 압축·풀기·`host.rs` 보내는 세션과 정지 화면 다듬기·`view.rs` 풀기 일꾼·`pane.rs` 화면 칸 여닫기·그리기). 칸 탭은
+  VT 압축·풀기·`host.rs` 보내는 세션과 정지 화면 다듬기·`view.rs` 풀기 일꾼·`pane.rs` 화면 칸 여닫기·그리기·`input.rs` 조작(누름·휠·키·한글·⌘V)·`scroll_probe.rs` 검증 스크롤). 칸 탭은
   `PaneContent::Screen`, 연결은 `App.screen_views`. 계약·실측 [screen-stream.md](screen-stream.md)
 - `kasa-wire/src/terminal_wire.rs` — PC 터미널 미러의 협상된 무손실 압축·64KiB 해제 상한. `http/socket.rs`가 보내고 `remote.rs`가 VT 파서 앞에서 푼다. 구판 연결은 원문 바이트를 유지한다.
 - `kasa-device/src/access/claude_account/live_limits.rs` — Claude 사용량의 실시간 몫. 관측은 세 갈래다: 캡처 프록시(`kasa-students/src/proxy.rs`)가 `/v1/messages` 응답의 `anthropic-ratelimit-unified-*` 헤더를 Bearer 지문별로 남기고(경고선을 넘은 창만 실린다), 칸의 mod 측정(`claude_mod` 의 `usage`, 상태줄 `rate_limits` 와 같은 값)이 경고선 아래 5시간 창까지 그 칸이 프록시로 보낸 Bearer 에 묶이며, `peer_loop` 가 협업 판이 닿는 다른 기기와 `/claude-usage/live`(계정·조직 UUID 별, 토큰 없음)로 주고받는다 — 이 기기에서 새 관측을 보면 그 자리에서 밀고(POST), 15초마다 당겨 와(GET) 막 켜진 기기도 맞춘다. `/claude-usage`(`claude_account.rs`)는 같은 계정의 창마다 가장 새 관측을 `oauth/usage` 값에 덧입히고, 초기화 시각이 지난 창은 쓰지 않는다. 관측이 3분 안이면 상류 캐시를 5분으로 늘려 429 를 줄인다. 앱 폴러는 새 관측에 그 자리에서 깨어(`wait_dirty`) `?cached=1` 로 가진 값에 관측만 덧입혀 받아 다시 그린다 — 상류·토큰·키체인은 정기 조회 몫이다.

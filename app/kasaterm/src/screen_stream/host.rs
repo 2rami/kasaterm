@@ -62,6 +62,7 @@ struct HostSession {
     capture: Option<capture::Capture>,
     ticker: Option<JoinHandle<()>>,
     info: Value,
+    display: u32,
 }
 
 impl Session for HostSession {
@@ -73,6 +74,10 @@ impl Session for HostSession {
 
     fn info(&self) -> Value {
         self.info.clone()
+    }
+
+    fn display(&self) -> u32 {
+        self.display
     }
 }
 
@@ -177,13 +182,29 @@ impl Capture for Host {
                 move || refine_loop(&shared, fps)
             })
             .ok();
-        Ok(Box::new(HostSession { shared, capture: Some(cap), ticker, info }))
+        let display = cap.display;
+        Ok(Box::new(HostSession { shared, capture: Some(cap), ticker, info, display }))
     }
 
     fn request_permission(&self) {
         if let Some(source) = kasa_remote::screen_mirror::installed() {
             source.request_permission();
         }
+    }
+
+    fn input(&self, display: u32, input: &kasa_remote::screen_mirror::Input) -> Result<(), Denied> {
+        // 검증 리그는 사람 화면에 누름·키를 넣지 않고 받은 조작만 적는다 — 넣는 길은 화면 거울의 `screen_input` 그대로다.
+        if let Some(path) = crate::verification_run().then(|| std::env::var_os("KASATERM_TEST_SCREEN_INPUT_LOG")).flatten() {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|_| Denied::Unavailable)?;
+            let _ = writeln!(f, "{display} {input:?}");
+            return Ok(());
+        }
+        crate::screen_input::put(display, input)
+    }
+
+    fn request_input_permission(&self) {
+        crate::screen_input::request_permission();
     }
 
     fn now(&self) -> f64 {

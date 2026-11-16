@@ -187,6 +187,14 @@ enum Control {
 /// 글자 넣기 한 번의 상한 — 폰 입력줄 한 번에 보내는 글이라 이보다 길 일이 없다.
 const TEXT_MAX: usize = 4096;
 
+/// 조작 메시지 하나(`pointer`·`scroll`·`key`·`text`) — 화면 스트림이 같은 말을 쓴다(`screen_stream`).
+pub(crate) fn input_of(raw: &str) -> Option<Input> {
+    match control(raw)? {
+        Control::Input(input) => Some(input),
+        _ => None,
+    }
+}
+
 fn control(raw: &str) -> Option<Control> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let unit = |k: &str| v.get(k).and_then(serde_json::Value::as_f64).filter(|f| f.is_finite()).map(|f| f.clamp(0.0, 1.0));

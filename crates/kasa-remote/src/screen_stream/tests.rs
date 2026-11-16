@@ -15,12 +15,15 @@ struct Counts {
     stopped: AtomicUsize,
     keyframes: AtomicUsize,
     prompts: AtomicUsize,
+    input_prompts: AtomicUsize,
+    inputs: Mutex<Vec<(u32, Input)>>,
 }
 
 /// 5ms 마다 장을 낸다. 첫 장·청한 다음 장이 키프레임이다.
 struct FakeCapture {
     counts: Arc<Counts>,
     deny: Option<Denied>,
+    deny_input: Option<Denied>,
 }
 
 struct FakeSession {
@@ -65,6 +68,18 @@ impl Capture for FakeCapture {
         self.counts.prompts.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn input(&self, display: u32, input: &Input) -> Result<(), Denied> {
+        if let Some(d) = self.deny_input {
+            return Err(d);
+        }
+        self.counts.inputs.lock().unwrap().push((display, input.clone()));
+        Ok(())
+    }
+
+    fn request_input_permission(&self) {
+        self.counts.input_prompts.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn now(&self) -> f64 {
         now() + 100.0
     }
@@ -78,6 +93,10 @@ impl Session for FakeSession {
 
     fn info(&self) -> Value {
         json!({ "width": 64, "height": 32 })
+    }
+
+    fn display(&self) -> u32 {
+        7
     }
 }
 
@@ -119,7 +138,7 @@ async fn node() -> Endpoint {
 
 /// 보내는 쪽 라우터와 보는 쪽 연결, 그리고 보는 쪽 사건을 받는 채널.
 /// 보는 쪽 엔드포인트도 함께 돌려준다 — 버리면 연결이 닫힌다.
-async fn session(capture: FakeCapture) -> (Router, Endpoint, mpsc::UnboundedReceiver<Event>, mpsc::UnboundedSender<u8>, tokio::task::JoinHandle<String>) {
+async fn session(capture: FakeCapture) -> (Router, Endpoint, mpsc::UnboundedReceiver<Event>, mpsc::UnboundedSender<(u8, Vec<u8>)>, tokio::task::JoinHandle<String>) {
     let host = node().await;
     let router = Router::builder(host.clone()).accept(SCREEN_ALPN, Host(Arc::new(capture))).spawn();
     let viewer = node().await;
@@ -144,7 +163,7 @@ async fn next_frame(rx: &mut mpsc::UnboundedReceiver<Event>) -> (Frame, f64) {
 #[tokio::test(flavor = "multi_thread")]
 async fn frames_arrive_in_order_from_a_keyframe_and_closing_stops_capture() {
     let counts = Arc::new(Counts::default());
-    let (_router, _viewer, mut rx, ctl, run) = session(FakeCapture { counts: counts.clone(), deny: None }).await;
+    let (_router, _viewer, mut rx, ctl, run) = session(FakeCapture { counts: counts.clone(), deny: None, deny_input: None }).await;
     let (first, offset) = next_frame(&mut rx).await;
     assert!(first.key && first.param_sets == vec![vec![1, 2], vec![3]], "첫 장은 파라미터 셋을 실은 키프레임");
     assert!((offset - 100.0).abs() < 0.05, "시계 차이를 장이 흐르기 전에 잡는다: {offset}");
@@ -155,7 +174,7 @@ async fn frames_arrive_in_order_from_a_keyframe_and_closing_stops_capture() {
         assert_eq!(f.data, vec![f.seq as u8; 100]);
         last = f.seq;
     }
-    ctl.send(ctl::KEYFRAME).unwrap();
+    ctl.send((ctl::KEYFRAME, Vec::new())).unwrap();
     let key = loop {
         let (f, _) = next_frame(&mut rx).await;
         if f.key {
@@ -164,7 +183,7 @@ async fn frames_arrive_in_order_from_a_keyframe_and_closing_stops_capture() {
     };
     assert!(!key.param_sets.is_empty());
     assert_eq!(counts.keyframes.load(Ordering::Relaxed), 1);
-    ctl.send(ctl::QUIT).unwrap();
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
     assert_eq!(tokio::time::timeout(T, run).await.unwrap().unwrap(), "닫음");
     let waited = Instant::now();
     while counts.stopped.load(Ordering::Relaxed) == 0 && waited.elapsed() < T {
@@ -176,7 +195,7 @@ async fn frames_arrive_in_order_from_a_keyframe_and_closing_stops_capture() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_capture_without_permission_says_so_and_asks_once() {
     let counts = Arc::new(Counts::default());
-    let (_router, _viewer, mut rx, _ctl, run) = session(FakeCapture { counts: counts.clone(), deny: Some(Denied::Permission) }).await;
+    let (_router, _viewer, mut rx, _ctl, run) = session(FakeCapture { counts: counts.clone(), deny: Some(Denied::Permission), deny_input: None }).await;
     let why = tokio::time::timeout(T, run).await.unwrap().unwrap();
     assert_eq!(why, "거절: permission");
     let mut denied = None;
@@ -187,6 +206,73 @@ async fn a_capture_without_permission_says_so_and_asks_once() {
     }
     assert_eq!(denied.as_deref(), Some("permission"));
     assert_eq!(counts.prompts.load(Ordering::Relaxed), 1, "그 기기 앞에 권한 창을 한 번");
+}
+
+fn input(v: Value) -> (u8, Vec<u8>) {
+    (ctl::INPUT, v.to_string().into_bytes())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_lands_on_the_captured_display_in_order_and_held_buttons_are_released() {
+    let counts = Arc::new(Counts::default());
+    let (_router, _viewer, mut rx, ctl, run) = session(FakeCapture { counts: counts.clone(), deny: None, deny_input: None }).await;
+    next_frame(&mut rx).await;
+    ctl.send(input(json!({ "t": "pointer", "x": 0.25, "y": 0.5, "b": 1 }))).unwrap();
+    ctl.send(input(json!({ "t": "pointer", "x": 0.3, "y": 0.5, "b": 1 }))).unwrap();
+    ctl.send(input(json!({ "t": "text", "s": "안녕" }))).unwrap();
+    ctl.send(input(json!({ "t": "nonsense" }))).unwrap();
+    let waited = Instant::now();
+    while counts.inputs.lock().unwrap().len() < 3 && waited.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
+    tokio::time::timeout(T, run).await.unwrap().unwrap();
+    while counts.inputs.lock().unwrap().len() < 4 && waited.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let got = counts.inputs.lock().unwrap().clone();
+    assert!(got.iter().all(|(d, _)| *d == 7), "세션이 뜨는 화면에 넣는다");
+    let kinds: Vec<Input> = got.into_iter().map(|(_, i)| i).collect();
+    assert_eq!(kinds[0], Input::Pointer { x: 0.25, y: 0.5, buttons: 1, prev: 0, mods: 0 }, "첫 누름");
+    assert_eq!(kinds[1], Input::Pointer { x: 0.3, y: 0.5, buttons: 1, prev: 1, mods: 0 }, "끌기는 직전 단추와 견준다");
+    assert_eq!(kinds[2], Input::Text("안녕".into()));
+    assert_eq!(kinds[3], Input::Pointer { x: 0.3, y: 0.5, buttons: 0, prev: 1, mods: 0 }, "끊길 때 눌린 단추를 그 자리에서 뗀다");
+    assert_eq!(kinds.len(), 4, "모르는 메시지는 버린다");
+    let mut told = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        if let Event::Input { ok, reason } = e {
+            told.push((ok, reason));
+        }
+    }
+    assert_eq!(told, vec![(true, None)], "사정은 바뀔 때만 한 번");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_without_permission_says_so_once_and_asks_once() {
+    let counts = Arc::new(Counts::default());
+    let (_router, _viewer, mut rx, ctl, run) =
+        session(FakeCapture { counts: counts.clone(), deny: None, deny_input: Some(Denied::Permission) }).await;
+    next_frame(&mut rx).await;
+    for _ in 0..3 {
+        ctl.send(input(json!({ "t": "key", "k": "Enter" }))).unwrap();
+    }
+    let mut told = Vec::new();
+    let waited = Instant::now();
+    while told.is_empty() && waited.elapsed() < T {
+        if let Ok(Some(Event::Input { ok, reason })) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+            told.push((ok, reason));
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while let Ok(e) = rx.try_recv() {
+        if let Event::Input { ok, reason } = e {
+            told.push((ok, reason));
+        }
+    }
+    assert_eq!(told, vec![(false, Some("permission".into()))]);
+    assert_eq!(counts.input_prompts.load(Ordering::Relaxed), 1, "권한 창은 연결마다 한 번");
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
+    tokio::time::timeout(T, run).await.unwrap().unwrap();
 }
 
 #[test]

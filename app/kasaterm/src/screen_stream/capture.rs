@@ -87,6 +87,8 @@ pub struct Capture {
     _output: Retained<Output>,
     pub width: usize,
     pub height: usize,
+    /// 뜨는 화면의 CGDirectDisplayID — 조작(`screen_input`)도 이 화면에 넣는다.
+    pub display: u32,
 }
 
 // SCK 객체는 어느 스레드에서 멈춰도 된다. 프레임은 SCK 자기 큐에서 온다.
@@ -95,8 +97,18 @@ unsafe impl Send for Capture {}
 impl Capture {
     pub fn start(fps: u32, pixel_format: u32, scale_by: f64, sink: impl Fn(Frame) + Send + Sync + 'static) -> Result<Self> {
         let content = shareable_content()?;
+        extern "C" {
+            fn CGMainDisplayID() -> u32;
+        }
+        // 주 화면(메뉴 막대가 있는 화면) — 화면 거울의 기본 화면과 같다. SCK 목록의 첫째가 주 화면이라는 보장은 없다.
+        let main = unsafe { CGMainDisplayID() };
         let displays = unsafe { content.displays() };
-        let display = displays.firstObject().context("화면이 없다")?;
+        let display = displays
+            .iter()
+            .find(|d| unsafe { d.displayID() } == main)
+            .or_else(|| displays.firstObject())
+            .context("화면이 없다")?;
+        let display_id = unsafe { display.displayID() };
         let filter = unsafe {
             SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &NSArray::new())
         };
@@ -146,7 +158,7 @@ impl Capture {
             Ok(Err(e)) => bail!("화면 캡처 시작 실패(화면 기록 권한?): {e}"),
             Err(_) => bail!("화면 캡처 시작이 10초 안에 끝나지 않았다"),
         }
-        Ok(Self { stream, _output: output, width, height })
+        Ok(Self { stream, _output: output, width, height, display: display_id })
     }
 }
 

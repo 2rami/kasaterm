@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::ScreenView;
+use super::{Layout, ScreenView};
 use crate::{gpu, theme, App, PaneContent, PaneTab, ScreenPane, UserEvent};
 
 const STATUS_FONT: f32 = 13.0;
@@ -15,24 +15,57 @@ fn texture_key(view: u64) -> String {
 }
 
 /// 새로 풀린 장을 올리고 칸 본문 안에 비율을 지켜 그린다. 아직 장이 없으면 상태 글을 가운데에, 장이 흐르면 오른쪽
-/// 위에 `fps · 지연 · 길` 을 작게 얹는다.
+/// 위에 「조작」 단추와 `fps · 지연 · 길` 을 작게 얹는다. 조작 중이면 장을 강조색 테로 두르고, 조작을 못 넣으면 그 까닭을
+/// 아래에 띄운다. 그린 자리는 누름 판정에 쓰도록 보기에 적어 둔다.
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenView>, slots: &[(u64, (f32, f32, f32, f32))]) {
+    let white = [255, 255, 255, 235];
+    let dim = [0, 0, 0, 150];
+    let opts = |font_size, color| gpu::DrawOpts { font_size, color, bold: false, italic: false };
     for (view_id, (x, y, w, h)) in slots {
         let Some(view) = views.get_mut(view_id) else { continue };
         let key = texture_key(*view_id);
         view.take_new(|bgra, fw, fh, stride| g.update_image_bgra(&key, bgra, fw, fh, stride));
-        if view.has_frame() {
-            g.queue_image_contain(&key, *x, *y, *w, *h);
-            let hud = view.hud();
-            let tw = g.measure_chrome_text(&hud, HUD_FONT, false);
-            let (hx, hy) = (x + w - tw - HUD_PAD * 3.0, y + HUD_PAD);
-            g.rect(hx, hy, tw + HUD_PAD * 2.0, HUD_FONT + HUD_PAD * 1.5, [0, 0, 0, 150]);
-            g.draw_text(hx + HUD_PAD, hy + HUD_PAD * 0.5, &hud, gpu::DrawOpts { font_size: HUD_FONT, color: [255, 255, 255, 235], bold: false, italic: false });
-        } else {
+        if !view.has_frame() {
+            view.layout = None;
             let text = view.status();
             let tw = g.measure_chrome_text(&text, STATUS_FONT, false);
-            g.draw_text(x + (w - tw) / 2.0, y + (h - STATUS_FONT) / 2.0, &text, gpu::DrawOpts { font_size: STATUS_FONT, color: theme::text_mute(), bold: false, italic: false });
+            g.draw_text(x + (w - tw) / 2.0, y + (h - STATUS_FONT) / 2.0, &text, opts(STATUS_FONT, theme::text_mute()));
+            continue;
         }
+        g.queue_image_contain(&key, *x, *y, *w, *h);
+        let (fw, fh) = view.frame_size();
+        let fit = (w / fw.max(1) as f32).min(h / fh.max(1) as f32);
+        let (dw, dh) = (fw as f32 * fit, fh as f32 * fit);
+        let image = (x + (w - dw) / 2.0, y + (h - dh) / 2.0, dw, dh);
+        let box_h = HUD_FONT + HUD_PAD * 1.5;
+        let hud = view.hud();
+        let hw = g.measure_chrome_text(&hud, HUD_FONT, false) + HUD_PAD * 2.0;
+        let hud_box = (x + w - hw - HUD_PAD, y + HUD_PAD, hw, box_h);
+        let label = if view.control { "조작 중" } else { "조작" };
+        let tw = g.measure_chrome_text(label, HUD_FONT, false) + HUD_PAD * 2.0;
+        let toggle = (hud_box.0 - HUD_PAD - tw, y + HUD_PAD, tw, box_h);
+        if view.control {
+            g.round_rect_stroke(image.0, image.1, image.2, image.3, 0.0, 2.0, theme::accent());
+        }
+        g.round_rect_fill(toggle.0, toggle.1, toggle.2, toggle.3, 4.0, if view.control { theme::accent() } else { dim });
+        g.draw_text(toggle.0 + HUD_PAD, toggle.1 + HUD_PAD * 0.75, label, opts(HUD_FONT, white));
+        g.round_rect_fill(hud_box.0, hud_box.1, hud_box.2, hud_box.3, 4.0, dim);
+        g.draw_text(hud_box.0 + HUD_PAD, hud_box.1 + HUD_PAD * 0.75, &hud, opts(HUD_FONT, white));
+        if view.control && !view.preedit.is_empty() {
+            let pw = g.measure_chrome_text(&view.preedit, STATUS_FONT, false) + HUD_PAD * 2.0;
+            let ph = STATUS_FONT + HUD_PAD * 1.5;
+            let (px, py) = (image.0 + HUD_PAD, image.1 + image.3 - ph - HUD_PAD);
+            g.round_rect_fill(px, py, pw, ph, 4.0, dim);
+            g.draw_text(px + HUD_PAD, py + HUD_PAD * 0.75, &view.preedit, opts(STATUS_FONT, white));
+            g.rect(px + HUD_PAD, py + ph - HUD_PAD * 0.5, pw - HUD_PAD * 2.0, 1.0, white);
+        }
+        if let Some(note) = view.input_note().filter(|_| view.control) {
+            let nw = g.measure_chrome_text(&note, HUD_FONT, false) + HUD_PAD * 2.0;
+            let (nx, ny) = (x + (w - nw) / 2.0, y + h - box_h - HUD_PAD);
+            g.round_rect_fill(nx, ny, nw, box_h, 4.0, dim);
+            g.draw_text(nx + HUD_PAD, ny + HUD_PAD * 0.75, &note, opts(HUD_FONT, white));
+        }
+        view.layout = Some(Layout { image, toggle });
     }
 }
 

@@ -16,7 +16,7 @@ use kasa_net::iroh::endpoint::{Connection, RecvStream, SendStream};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::screen_mirror::Denied;
+use crate::screen_mirror::{Denied, Input};
 
 pub use kasa_device::kasanet::SCREEN_ALPN;
 
@@ -26,6 +26,10 @@ pub mod ctl {
     pub const PING: u8 = b'P';
     pub const PONG: u8 = b'p';
     pub const KEYFRAME: u8 = b'K';
+    /// 조작 — 내용은 화면 거울과 같은 JSON(`{"t":"pointer",x,y,b,m}` 등, `docs/screen-mirror.md` 「조작」).
+    pub const INPUT: u8 = b'U';
+    /// 조작을 넣을 수 있는지가 바뀔 때 — `{ok, reason?}`.
+    pub const INPUT_STATE: u8 = b'N';
     pub const DENIED: u8 = b'X';
     pub const QUIT: u8 = b'Q';
 }
@@ -161,6 +165,12 @@ pub trait Capture: Send + Sync {
     fn start(&self, config: &Config, out: Box<dyn Fn(Frame) + Send + Sync>) -> Result<Box<dyn Session>, Denied>;
     /// 그 기기 앞에 화면 기록 권한 창을 띄운다 — 연결마다 한 번.
     fn request_permission(&self) {}
+    /// 조작을 그 화면에 넣는다. macOS 는 손쉬운 사용 권한이 없으면 `Permission`.
+    fn input(&self, _display: u32, _input: &Input) -> Result<(), Denied> {
+        Err(Denied::Unavailable)
+    }
+    /// 조작 권한 창을 그 기기 앞에 띄운다 — 연결마다 한 번.
+    fn request_input_permission(&self) {}
     /// 장의 시각과 같은 호스트 시계(초).
     fn now(&self) -> f64;
 }
@@ -168,6 +178,8 @@ pub trait Capture: Send + Sync {
 pub trait Session: Send {
     /// 다음 장을 키프레임으로.
     fn keyframe(&self);
+    /// 뜨는 화면 — 조작을 이 화면에 넣는다(`screen_mirror::Source::input` 의 화면 번호).
+    fn display(&self) -> u32;
     /// 보는 쪽에 알리는 압축 정보(크기·코덱·하드웨어 여부 등).
     fn info(&self) -> Value;
 }
@@ -268,8 +280,10 @@ async fn serve_with(
         }
     };
     write_msg(send, ctl::INFO, session.info().to_string().as_bytes()).await?;
+    let display = session.display();
     let session: Arc<Mutex<Box<dyn Session>>> = Arc::new(Mutex::new(session));
     let sender = tokio::spawn(send_frames(conn.clone(), rx, session.clone()));
+    let mut input = Inputs::default();
     let result = loop {
         let (kind, body) = match read_msg(recv).await {
             Ok(m) => m,
@@ -281,14 +295,70 @@ async fn serve_with(
                 write_msg(send, ctl::PONG, &pair(t0, capture.now())).await?;
             }
             ctl::KEYFRAME => session.lock().unwrap_or_else(|e| e.into_inner()).keyframe(),
+            ctl::INPUT => {
+                let Some(event) = std::str::from_utf8(&body).ok().and_then(crate::screen_mirror::input_of) else { continue };
+                if let Some(told) = input.put(&capture, display, event).await {
+                    write_msg(send, ctl::INPUT_STATE, told.to_string().as_bytes()).await?;
+                }
+            }
             ctl::QUIT => break Ok(()),
             _ => {}
         }
     };
+    input.release(&capture, display).await;
     sender.abort();
     // 세션은 압축 일꾼 스레드에서 멈추게 한다 — 멈추기가 SCK·VT 를 기다린다.
     let _ = tokio::task::spawn_blocking(move || drop(session)).await;
     result
+}
+
+/// 연결이 쥔 조작 상태 — 화면 거울과 같은 규칙(`docs/screen-mirror.md` 「조작」).
+#[derive(Default)]
+struct Inputs {
+    /// 지금 눌린 단추(1 왼쪽·2 오른쪽·4 가운데). 다음 누름과 견줘 누름·뗌·끌기를 가른다.
+    buttons: u8,
+    last_at: (f64, f64),
+    /// 마지막으로 알린 사정. 바뀔 때만 다시 알린다.
+    told: Option<Option<Denied>>,
+    asked: bool,
+}
+
+impl Inputs {
+    /// 받은 차례대로 하나씩 넣고 끝날 때까지 기다린다 — 섞이면 누름과 뗌이 뒤바뀐다. 사정이 바뀌면 알릴 말을 돌려준다.
+    async fn put(&mut self, capture: &Arc<dyn Capture>, display: u32, mut event: Input) -> Option<Value> {
+        if let Input::Pointer { x, y, buttons, prev, .. } = &mut event {
+            *prev = self.buttons;
+            self.buttons = *buttons;
+            self.last_at = (*x, *y);
+        }
+        let c = capture.clone();
+        let got = tokio::task::spawn_blocking(move || c.input(display, &event)).await.unwrap_or(Err(Denied::Unavailable));
+        let now = got.err();
+        if now == Some(Denied::Permission) && !self.asked {
+            self.asked = true;
+            let c = capture.clone();
+            let _ = tokio::task::spawn_blocking(move || c.request_input_permission()).await;
+        }
+        if self.told == Some(now) {
+            return None;
+        }
+        self.told = Some(now);
+        Some(match now {
+            None => json!({ "ok": true }),
+            Some(d) => json!({ "ok": false, "reason": if d == Denied::Permission { "permission" } else { "unavailable" } }),
+        })
+    }
+
+    /// 끊길 때 눌린 단추를 그 자리에서 뗀다 — 그 기기에 단추가 눌린 채 남으면 그 앞의 사람이 마우스를 못 쓴다.
+    async fn release(&mut self, capture: &Arc<dyn Capture>, display: u32) {
+        if self.buttons == 0 || self.told != Some(None) {
+            return;
+        }
+        let up = Input::Pointer { x: self.last_at.0, y: self.last_at.1, buttons: 0, prev: self.buttons, mods: 0 };
+        let c = capture.clone();
+        let _ = tokio::task::spawn_blocking(move || c.input(display, &up)).await;
+        self.buttons = 0;
+    }
 }
 
 /// 장마다 단방향 스트림. 보내지 못한 장이 쌓이면 다 버리고 키프레임부터 다시 — 압축은 앞 장을 참조해 장을 골라
@@ -333,22 +403,24 @@ pub enum Event {
     Frame { frame: Frame, t_recv: f64, offset: f64 },
     /// 그쪽이 못 보낸다 — `permission`(화면 기록 권한)·`unavailable`(꽂지 않은 판).
     Denied(String),
+    /// 조작을 넣을 수 있는지가 바뀌었다 — 안 되면 `permission`(손쉬운 사용 권한)·`unavailable`.
+    Input { ok: bool, reason: Option<String> },
     Closed(String),
 }
 
 /// 보는 연결의 손잡이. 버리면 닫는다.
 pub struct Watch {
-    ctl: mpsc::UnboundedSender<u8>,
+    ctl: mpsc::UnboundedSender<(u8, Vec<u8>)>,
     closed: Arc<AtomicBool>,
 }
 
 /// 풀기에 실패한 일꾼이 키프레임을 청하는 손잡이 — `Watch` 와 달리 버려도 연결을 닫지 않는다.
 #[derive(Clone)]
-pub struct Keyframes(mpsc::UnboundedSender<u8>);
+pub struct Keyframes(mpsc::UnboundedSender<(u8, Vec<u8>)>);
 
 impl Keyframes {
     pub fn request(&self) {
-        let _ = self.0.send(ctl::KEYFRAME);
+        let _ = self.0.send((ctl::KEYFRAME, Vec::new()));
     }
 }
 
@@ -360,11 +432,16 @@ impl Watch {
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
     }
+
+    /// 조작 하나 — 화면 거울과 같은 JSON(`{"t":"pointer",…}`).
+    pub fn send_input(&self, event: &Value) {
+        let _ = self.ctl.send((ctl::INPUT, event.to_string().into_bytes()));
+    }
 }
 
 impl Drop for Watch {
     fn drop(&mut self) {
-        let _ = self.ctl.send(ctl::QUIT);
+        let _ = self.ctl.send((ctl::QUIT, Vec::new()));
     }
 }
 
@@ -400,7 +477,7 @@ pub async fn run_watch(
     conn: Connection,
     config: Config,
     on: Arc<dyn Fn(Event) + Send + Sync>,
-    mut ctl_rx: mpsc::UnboundedReceiver<u8>,
+    mut ctl_rx: mpsc::UnboundedReceiver<(u8, Vec<u8>)>,
 ) -> String {
     let (mut send, mut recv) = match conn.open_bi().await {
         Ok(s) => s,
@@ -448,17 +525,22 @@ pub async fn run_watch(
                     }
                 }
                 Ok((ctl::INFO, body)) => on(Event::Info(serde_json::from_slice(&body).unwrap_or(Value::Null))),
+                Ok((ctl::INPUT_STATE, body)) => {
+                    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    let reason = v.get("reason").and_then(Value::as_str).map(str::to_string);
+                    on(Event::Input { ok: v.get("ok").and_then(Value::as_bool).unwrap_or(false), reason });
+                }
                 Ok((ctl::DENIED, body)) => break denied(&on, &body),
                 Ok(_) => {}
                 Err(e) => break format!("끊김: {e}"),
             },
             c = ctl_rx.recv() => match c {
-                Some(ctl::QUIT) | None => {
+                Some((ctl::QUIT, _)) | None => {
                     let _ = write_msg(&mut send, ctl::QUIT, &[]).await;
                     break "닫음".into();
                 }
-                Some(kind) => {
-                    if let Err(e) = write_msg(&mut send, kind, &[]).await {
+                Some((kind, body)) => {
+                    if let Err(e) = write_msg(&mut send, kind, &body).await {
                         break format!("끊김: {e}");
                     }
                 }

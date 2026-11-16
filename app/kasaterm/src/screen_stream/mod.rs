@@ -12,6 +12,7 @@ mod host;
 mod scroll_probe;
 #[cfg(target_os = "macos")]
 mod view;
+mod input;
 mod pane;
 
 pub(crate) use pane::paint;
@@ -38,11 +39,30 @@ pub(crate) fn can_view(base: &str) -> bool {
         && kasa_device::kasanet::path(base).is_some_and(|(p, _)| p != "ssh")
 }
 
+/// 칸 위에 그린 자리(LOGICAL px) — 누름이 어디에 떨어졌는지 가른다.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Layout {
+    /// 장이 그려진 사각형(비율 맞춤 뒤).
+    pub image: (f32, f32, f32, f32),
+    /// 「조작」 단추.
+    pub toggle: (f32, f32, f32, f32),
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn contains((x, y, w, h): (f32, f32, f32, f32), (px, py): (f64, f64)) -> bool {
+    let (px, py) = (px as f32, py as f32);
+    px >= x && px < x + w && py >= y && py < y + h
+}
+
 #[cfg(not(target_os = "macos"))]
 pub(crate) struct ScreenView {
     pub label: String,
     pub upload_ms: f64,
     pub uploads: u64,
+    pub control: bool,
+    pub layout: Option<Layout>,
+    pub buttons: u8,
+    pub preedit: String,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -58,10 +78,26 @@ impl ScreenView {
     pub(crate) fn has_frame(&self) -> bool {
         false
     }
+    pub(crate) fn frame_size(&self) -> (u32, u32) {
+        (0, 0)
+    }
     pub(crate) fn status(&self) -> String {
         String::new()
     }
     pub(crate) fn hud(&self) -> String {
         String::new()
     }
+    pub(crate) fn input_note(&self) -> Option<String> {
+        None
+    }
+    pub(crate) fn on_toggle(&self, _p: (f64, f64)) -> bool {
+        false
+    }
+    pub(crate) fn on_image(&self, _p: (f64, f64)) -> bool {
+        false
+    }
+    pub(crate) fn pointer(&mut self, _p: (f64, f64), _buttons: u8, _mods: u8) {}
+    pub(crate) fn scroll(&self, _p: (f64, f64), _dx: f64, _dy: f64) {}
+    pub(crate) fn key(&self, _code: &str, _mods: u8) {}
+    pub(crate) fn text(&self, _s: &str) {}
 }

@@ -3389,6 +3389,13 @@ impl ApplicationHandler<UserEvent> for App {
             };
             if used { window.request_redraw(); return; }
         }
+        if matches!(event, WindowEvent::MouseInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseWheel { .. })
+            && !self.main_pointer_modal()
+            && self.screen_pointer_event(&event)
+        {
+            window.request_redraw();
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 if self.aux_flush_for_app_close() { return; }
@@ -7232,6 +7239,7 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if self.shared_ime(&ime) { window.request_redraw(); return; }
+                if self.screen_ime(&ime) { window.request_redraw(); return; }
                 if self.side_column_covers_workspace() && !self.git.commit_focused
                     && self.mcp_col.add.is_none() {
                     self.discard_modal_ime(&ime);
