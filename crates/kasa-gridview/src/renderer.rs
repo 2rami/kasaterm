@@ -1044,6 +1044,68 @@ impl GridRenderer {
         );
     }
 
+    /// 영상 장의 IOSurface(BGRA)를 복사 없이 텍스처로 삼는다. 못 하면 false — 부른 쪽이 `update_image_bgra` 로 올린다.
+    ///
+    /// # Safety
+    /// `surface` 는 살아 있는 `IOSurfaceRef` 여야 하고, 부른 쪽은 GPU 가 그 장을 다 그릴 때까지(뒤의 몇 장이 올 때까지)
+    /// 그 버퍼를 쥐고 있어야 한다 — 디코더가 같은 버퍼에 다음 장을 풀면 그리던 장이 바뀐다.
+    #[cfg(target_os = "macos")]
+    pub unsafe fn set_image_iosurface(&mut self, id: &str, surface: *mut std::ffi::c_void, w: u32, h: u32) -> bool {
+        use metal::foreign_types::ForeignType;
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        if surface.is_null() || w == 0 || h == 0 {
+            return false;
+        }
+        let raw = {
+            let Some(hal) = (unsafe { self.device.as_hal::<wgpu_hal::api::Metal>() }) else { return false };
+            let device: &metal::DeviceRef = hal.raw_device();
+            let desc = metal::TextureDescriptor::new();
+            desc.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+            desc.set_width(u64::from(w));
+            desc.set_height(u64::from(h));
+            desc.set_usage(metal::MTLTextureUsage::ShaderRead);
+            desc.set_storage_mode(metal::MTLStorageMode::Shared);
+            let device_ptr = device as *const metal::DeviceRef as *mut AnyObject;
+            let desc_ptr = desc.as_ptr() as *mut AnyObject;
+            let tex: *mut AnyObject =
+                unsafe { msg_send![device_ptr, newTextureWithDescriptor: desc_ptr, iosurface: surface, plane: 0usize] };
+            if tex.is_null() {
+                return false;
+            }
+            unsafe { metal::Texture::from_ptr(tex.cast()) }
+        };
+        let hal_texture = unsafe {
+            wgpu_hal::metal::Device::texture_from_raw(
+                raw,
+                wgpu::TextureFormat::Bgra8Unorm,
+                metal::MTLTextureType::D2,
+                1,
+                1,
+                wgpu_hal::CopyExtent { width: w, height: h, depth: 1 },
+            )
+        };
+        let texture = unsafe {
+            self.device.create_texture_from_hal::<wgpu_hal::api::Metal>(
+                hal_texture,
+                &wgpu::TextureDescriptor {
+                    label: Some("kasaterm video surface"),
+                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Bgra8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+            )
+        };
+        let view = texture.create_view(&Default::default());
+        let bind_group = self.image_pipeline.make_bind_group(&self.device, &view, &self.image_sampler);
+        self.images.insert(id.to_string(), ImageEntry { _texture: texture, _view: view, bind_group, w, h });
+        true
+    }
+
     /// Free a pane's image texture when the pane closes.
     pub fn drop_image(&mut self, id: &str) {
         self.images.remove(id);

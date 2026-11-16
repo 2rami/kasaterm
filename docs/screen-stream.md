@@ -10,7 +10,7 @@
 | S0 | 측정기 `spikes/screen-stream` — ScreenCaptureKit + VideoToolbox + iroh QUIC. 지연·선명도·대역폭 | 맥북↔미니 수치를 이 문서에 기록 |
 | S1 | 맥 → 맥: 카사텀 칸 안에서 네이티브로 보기(웹 칸이 아니다). 직통이 아니면 지금 JPEG 거울로 | 격리 앱 둘에서 60fps·지연 측정 — 됐다(아래 「S1」) |
 | S1b | 화면 칸에서 조작(마우스·휠·키·글자·붙여넣기) — 기존 거울의 조작 메시지·`screen_input` 을 그대로 싣는다 | 됐다(아래 「S1b」) |
-| S1c | GPU 복사 없애기(VT 의 IOSurface → Metal 텍스처), 여러 화면, 재시작 뒤 화면 탭 복원 | |
+| S1c | GPU 복사 없애기(VT 의 IOSurface → Metal 텍스처) — 됐다(아래 「S1c」). 여러 화면, 재시작 뒤 화면 탭 복원은 남았다 | |
 | S2 | 폰에서 보기 — `kasa-net-ffi` 에 풀기를 더한다 | 실기에서 60fps |
 | S3 | Windows 뜨기·압축(DXGI·Media Foundation)과 보기 | |
 | S4 | 소리·클립보드·상대 마우스·패드 | |
@@ -150,8 +150,8 @@ screen-stream view <ADDR> --key PATH [--secs N] [--codec hevc|h264] [--mbps N] [
   닫혀 되살리기 목록으로 물러난 탭은 연결을 버리고, 되살아나면 다시 붙는다.
 - 재시작하면 화면 탭은 복원되지 않는다(세션 기록은 PTY 칸 기준이라 그 칸의 터미널만 남는다). 다시 연다.
 - 조작은 S1b — 「조작」 단추를 켠 칸만 넣는다.
-- 새 장은 풀기 일꾼이 `UserEvent::Redraw` 로 GUI 를 깨운다. GUI 는 그 장을 줄 간격 그대로 `Bgra8Unorm` 텍스처에 올린다
-  (`GridRenderer::update_image_bgra`, RGBA 로 바꿔 담지 않는다).
+- 새 장은 풀기 일꾼이 `UserEvent::Redraw` 로 GUI 를 깨운다. GUI 는 그 장의 IOSurface 를 복사 없이 텍스처로 삼는다(S1c).
+  못 하면 줄 간격 그대로 `Bgra8Unorm` 텍스처에 올린다(`GridRenderer::update_image_bgra`, RGBA 로 바꿔 담지 않는다).
 
 ### 실측 — 격리 앱 둘, 같은 맥(M3 Max), release
 
@@ -215,4 +215,16 @@ screen-stream view <ADDR> --key PATH [--secs N] [--codec hevc|h264] [--mbps N] [
   `[screen-view-test] … toggle=… image=…` 로그로 먼저 읽는다.
 - 결과(2026-11-16): 단추로 조작이 켜지고, 장 가운데 클릭이 `(0.497, 0.496)` 누름·뗌으로(계산값과 같다), `ab` 글자 둘·Enter·⌘A 가
   `KeyA`+command 로, 자모 `ㅎㅏㄴ` 이 「한」 한 글자로 주 화면(id 1)에 들어갔다.
+
+## S1c — GPU 복사 없애기 (2026-11-16)
+
+- 풀린 장은 VT 가 내준 IOSurface 기반 BGRA `CVPixelBuffer` 다. GUI 는 `CVPixelBufferGetIOSurface` 로 그 IOSurface 를 꺼내
+  `MTLDevice newTextureWithDescriptor:iosurface:plane:` 로 Metal 텍스처를 만들고, `wgpu_hal::metal::Device::texture_from_raw` →
+  `Device::create_texture_from_hal` 로 wgpu 텍스처에 감싸 그린다(`GridRenderer::set_image_iosurface`). 픽셀은 한 번도 CPU 를 안 지난다.
+  `metal` 판은 wgpu-hal 28 이 쓰는 0.33 과 같아야 타입이 이어진다.
+- 디코더는 다 쓴 버퍼를 풀에서 다시 쓴다. GPU 가 그리는 중에 같은 버퍼에 다음 장을 풀면 그리던 장이 바뀌므로 보기는 GPU 에 넘긴
+  최근 장 3개(60fps 에서 50ms)를 쥐고 있는다(`view.rs HELD`).
+- 텍스처를 못 만들면(다른 백엔드 등) 마지막 장을 CPU 로 한 번 올리는 S1 길로 물러난다.
+- 실측(격리 앱 둘, release, 3024×1964, 검증 스크롤 300줄/장): GPU 올리기 장마다 **0.10–0.15ms**(CPU 복사 2.1–3.4ms), 60–61fps·
+  화면→풀림 21–23ms 그대로, GUI 가 초당 약 60장. 색·글자는 원본대로 나왔다(창 캡처로 확인).
 

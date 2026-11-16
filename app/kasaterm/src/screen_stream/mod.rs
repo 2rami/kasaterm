@@ -63,6 +63,7 @@ pub(crate) struct ScreenView {
     pub layout: Option<Layout>,
     pub buttons: u8,
     pub preedit: String,
+    pub zero_copy: bool,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -71,7 +72,11 @@ impl ScreenView {
     pub(crate) fn open(_label: &str, _base: &str, _wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
         None
     }
-    pub(crate) fn take_new(&mut self, _f: impl FnOnce(&[u8], u32, u32, u32)) {}
+    pub(crate) fn new_surface(&mut self) -> Option<(*mut std::ffi::c_void, u32, u32)> {
+        None
+    }
+    pub(crate) fn copy_latest(&self, _f: impl FnOnce(&[u8], u32, u32, u32)) {}
+    pub(crate) fn note_upload(&mut self, _took: std::time::Duration, _zero_copy: bool) {}
     pub(crate) fn has_new_frame(&self) -> bool {
         false
     }

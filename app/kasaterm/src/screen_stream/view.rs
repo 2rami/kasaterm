@@ -14,9 +14,13 @@ use objc2_core_video::CVPixelBuffer;
 use super::codec::{self, Codec, Decoder};
 use super::{contains, Layout};
 
+#[derive(Clone)]
 struct Pixels(CFRetained<CVPixelBuffer>);
 // VT 가 내준 IOSurface 버퍼 — 일꾼이 넣고 GUI 가 읽기만 한다.
 unsafe impl Send for Pixels {}
+
+/// GPU 에 넘긴 뒤 쥐고 있을 장 수 — 60fps 에서 50ms. 그려지는 동안 디코더가 그 버퍼에 다음 장을 풀지 않게.
+const HELD: usize = 3;
 
 struct Incoming {
     frame: Frame,
@@ -55,6 +59,11 @@ pub(crate) struct ScreenView {
     /// 조합 중인 한글 — 그 기기에는 다 된 글자만 가니 칸 위에 보여 준다.
     pub preedit: String,
     frame: (u32, u32),
+    /// GPU 에 넘긴 최근 장들 — 복사 없이 IOSurface 를 텍스처로 쓰므로 GPU 가 다 그릴 때까지 디코더가 같은 버퍼를 다시 못
+    /// 쓰게 쥐고 있는다. 마지막 것은 텍스처를 못 만들 때 CPU 로 올리는 밑감이다.
+    held: VecDeque<Pixels>,
+    /// 마지막 장을 복사 없이 올렸나 — 검증 리그가 읽는다.
+    pub zero_copy: bool,
     /// 마지막 장을 GPU 로 올리는 데 든 시간(ms)과 올린 장 수 — 검증 리그가 읽는다.
     pub upload_ms: f64,
     pub uploads: u64,
@@ -115,29 +124,44 @@ impl ScreenView {
             .name("screen-stream-decode".into())
             .spawn(move || decode_loop(codec, rx, keyframes, &worker_shared, &wake))
             .ok()?;
-        Some(Self { label: label.to_string(), shared, watch: Some(watch), uploaded: 0, upload_ms: 0.0, uploads: 0, control: false, layout: None, buttons: 0, preedit: String::new(), frame: (0, 0) })
+        Some(Self { label: label.to_string(), shared, watch: Some(watch), uploaded: 0, upload_ms: 0.0, uploads: 0, control: false, layout: None, buttons: 0, preedit: String::new(), frame: (0, 0), held: VecDeque::new(), zero_copy: false })
     }
 
-    /// 지난번에 가져간 뒤 새로 풀린 장이 있으면 BGRA 바이트(가로·세로·줄 간격)로 넘긴다.
-    pub(crate) fn take_new(&mut self, f: impl FnOnce(&[u8], u32, u32, u32)) {
+    /// 지난번에 가져간 뒤 새로 풀린 장이 있으면 그 IOSurface(가로·세로)를 내준다. 장은 `held` 에 쥔다.
+    pub(crate) fn new_surface(&mut self) -> Option<(*mut std::ffi::c_void, u32, u32)> {
+        extern "C" {
+            fn CVPixelBufferGetIOSurface(pixel_buffer: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+        }
         let serial = self.shared.serial.load(Ordering::Acquire);
         if serial == self.uploaded {
-            return;
+            return None;
         }
-        let started = std::time::Instant::now();
-        let latest = self.shared.latest.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(px) = latest.as_ref() {
-            if let Some(size) = codec::with_bgra(&px.0, |bgra, w, h, stride| {
-                f(bgra, w, h, stride);
-                (w, h)
-            }) {
-                self.frame = size;
-            }
-        }
-        drop(latest);
-        self.upload_ms = started.elapsed().as_secs_f64() * 1000.0;
-        self.uploads += 1;
         self.uploaded = serial;
+        let px = self.shared.latest.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+        let (w, h) = (
+            objc2_core_video::CVPixelBufferGetWidth(&px.0) as u32,
+            objc2_core_video::CVPixelBufferGetHeight(&px.0) as u32,
+        );
+        let surface = unsafe { CVPixelBufferGetIOSurface((&*px.0 as *const CVPixelBuffer).cast()) };
+        self.held.push_back(px);
+        while self.held.len() > HELD {
+            self.held.pop_front();
+        }
+        self.frame = (w, h);
+        Some((surface, w, h))
+    }
+
+    /// 마지막 장을 BGRA 바이트(가로·세로·줄 간격)로 — IOSurface 텍스처를 못 만들 때.
+    pub(crate) fn copy_latest(&self, f: impl FnOnce(&[u8], u32, u32, u32)) {
+        if let Some(px) = self.held.back() {
+            codec::with_bgra(&px.0, f);
+        }
+    }
+
+    pub(crate) fn note_upload(&mut self, took: std::time::Duration, zero_copy: bool) {
+        self.upload_ms = took.as_secs_f64() * 1000.0;
+        self.uploads += 1;
+        self.zero_copy = zero_copy;
     }
 
     pub(crate) fn has_new_frame(&self) -> bool {

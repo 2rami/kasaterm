@@ -7033,11 +7033,12 @@ impl App {
         *logged = Some(Instant::now());
         for view in self.screen_views.values() {
             eprintln!(
-                "[screen-view-test] {} frame={} hud={} upload={:.1}ms uploads={} control={} toggle={:?} image={:?} status={}",
+                "[screen-view-test] {} frame={} hud={} upload={:.2}ms zero_copy={} uploads={} control={} toggle={:?} image={:?} status={}",
                 view.label,
                 view.has_frame(),
                 view.hud(),
                 view.upload_ms,
+                view.zero_copy,
                 view.uploads,
                 view.control,
                 view.layout.map(|l| l.toggle),

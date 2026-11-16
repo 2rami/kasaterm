@@ -21,6 +21,8 @@ image.workspace = true
 # 그 자리를 막지 않게 한다(본판은 다른 의존이 켜 줘서 드러나지 않았다).
 objc2 = { workspace = true, features = ["relax-void-encoding"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSGeometry"] }
+# 영상 장(IOSurface)을 복사 없이 텍스처로 — wgpu-hal 28 이 쓰는 metal 판과 같아야 `texture_from_raw` 에 넘어간다.
+metal = "0.33"
 
 [lints]
 workspace = true

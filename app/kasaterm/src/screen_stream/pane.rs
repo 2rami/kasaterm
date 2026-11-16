@@ -24,7 +24,21 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
     for (view_id, (x, y, w, h)) in slots {
         let Some(view) = views.get_mut(view_id) else { continue };
         let key = texture_key(*view_id);
-        view.take_new(|bgra, fw, fh, stride| g.update_image_bgra(&key, bgra, fw, fh, stride));
+        if let Some((surface, fw, fh)) = view.new_surface() {
+            let started = std::time::Instant::now();
+            // 복사 없이 IOSurface 를 텍스처로. 못 하면(다른 백엔드 등) 장을 CPU 로 한 번 올린다.
+            #[cfg(target_os = "macos")]
+            let zero_copy = unsafe { g.set_image_iosurface(&key, surface, fw, fh) };
+            #[cfg(not(target_os = "macos"))]
+            let zero_copy = {
+                let _ = (surface, fw, fh);
+                false
+            };
+            if !zero_copy {
+                view.copy_latest(|bgra, w, h, stride| g.update_image_bgra(&key, bgra, w, h, stride));
+            }
+            view.note_upload(started.elapsed(), zero_copy);
+        }
         if !view.has_frame() {
             view.layout = None;
             let text = view.status();
