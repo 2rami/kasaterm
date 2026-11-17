@@ -2835,7 +2835,9 @@ pub(crate) fn find_agy_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
     for r in 0..rows.len() {
         let mut c = 0usize;
         while c + AGY_COLS <= rows[r].len() {
-            if hit(&rows[r], c, SHAPE[AGY_ROWS - 1].1) {
+            // 거의 모든 칸이 첫 글리프에서 갈린다 — 무늬 전체를 매 칸 풀어 맞추면 일하는 칸을 다시 합성할 때마다
+            // 이 판정 하나가 0.1ms 를 먹었다.
+            if rows[r][c].ch == '▄' && hit(&rows[r], c, SHAPE[AGY_ROWS - 1].1) {
                 let top = r as isize - (AGY_ROWS as isize - 1);
                 let ok = SHAPE[..AGY_ROWS - 1].iter().enumerate().all(|(i, &(ind, pat))| {
                     let gr = top + i as isize;
