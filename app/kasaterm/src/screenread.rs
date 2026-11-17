@@ -3903,10 +3903,14 @@ fn spinner_candidate_rows(rows: &[Vec<GridCell>]) -> impl DoubleEndedIterator<It
     let end = rows.iter()
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))
         .map_or(0, |last| last + 1);
-    let filled = match prompt_box(rows) {
-        Some(PromptBox::Filled { rows }) => Some(rows),
-        _ => None,
+    let (filled, boxed_top) = match prompt_box(rows) {
+        Some(PromptBox::Filled { rows }) => (Some(rows), None),
+        Some(PromptBox::Bordered { top, .. }) => (None, Some(top)),
+        None => (None, None),
     };
+    // claude 스피너는 늘 입력창 위다. 테두리부터 아래는 상태줄·모드 줄이고, 상태줄은 폭이 모자라면 `…` 로
+    // 잘려 관대한 판정에 스피너로 읽혔다.
+    let end = boxed_top.map_or(end, |top| end.min(top));
     (end.saturating_sub(30)..end).filter(move |&r| {
         let Some(filled) = &filled else { return true };
         if filled.contains(&r) { return false; }
@@ -4066,6 +4070,16 @@ pub(crate) fn lenient_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
         return spinner_is_live(rows, r).then_some((r, first));
     }
     None
+}
+
+/// 입력창 아래 모드 줄이 「esc to interrupt」를 말하나 — 지금 claude 는 턴이 도는 동안만 이 힌트를
+/// 거기에 찍는다. 일하는 중이라는 신호일 뿐 스피너 **자리**가 아니라서 `find_claude_spinner` 와 따로 둔다.
+pub(crate) fn footer_shows_interrupt(rows: &[Vec<GridCell>]) -> bool {
+    let Some(PromptBox::Bordered { bottom, .. }) = prompt_box(rows) else { return false };
+    rows[bottom + 1..].iter().take(3).any(|row| {
+        let text: String = row.iter().map(|c| if c.ch == '\0' { ' ' } else { c.ch }).collect();
+        text.contains("esc to interrupt")
+    })
 }
 
 /// 그 스피너 행이 **지금 도는 것**인가, 아니면 스크롤백에 굳은 옛 텍스트인가.
@@ -4275,11 +4289,14 @@ pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
         .iter()
         .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
         .collect();
-    // 옛 claude code 는 스피너 행에 이 힌트를 붙였다. 있으면 그것만으로 확정.
-    if rest.contains("esc to interrupt") {
+    let g = row[first].ch;
+    // 옛 claude code 와 codex(`• Working (3s • esc to interrupt)`)는 스피너 행에 이 힌트를 붙인다. 지금
+    // claude 는 같은 힌트를 입력창 아래 모드 줄(`⏵⏵ bypass permissions on … · esc to interrupt`)에도 찍어
+    // 학생 도트가 그 줄 위에 섰다(2026-11-17 스샷) — 입력창 아래는 후보에서 빠지고, 모드 표시로 시작하는
+    // 줄은 여기서도 거른다.
+    if rest.contains("esc to interrupt") && !matches!(g, '⏵' | '⏸') {
         return Some(first);
     }
-    let g = row[first].ch;
     if is_particle(g) {
         // 점자 한 칸이 행 머리에 있다고 곧바로 스피너로 치면 codex 의 Astra 효과에
         // 통째로 걸린다 — 그건 입력창 둘레 행에 점자를 **흩뿌리기만** 하고 말은 없다
@@ -7536,5 +7553,67 @@ mod pinned_input_tests {
         let rows: Vec<Vec<GridCell>> =
             ["빌드 로그 한 줄", "또 한 줄"].iter().map(|s| row(s)).collect();
         assert_eq!(pinned_input_top(&rows), None);
+    }
+}
+
+
+#[cfg(test)]
+mod footer_hint_tests {
+    use super::*;
+
+    fn row(s: &str) -> Vec<GridCell> {
+        let mut out = Vec::new();
+        for c in s.chars() {
+            let mut cell = GridCell::blank();
+            cell.ch = c;
+            out.push(cell);
+            if ('\u{ac00}'..='\u{d7a3}').contains(&c) {
+                out.push(GridCell::blank());
+            }
+        }
+        out.resize(110, GridCell::blank());
+        out
+    }
+
+    /// 2026-11-17 Windows 실측 화면 — 모드 줄이 `esc to interrupt` 를, 상태줄이 잘림 `…` 을 단다.
+    fn screen(spinner: Option<&str>) -> Vec<Vec<GridCell>> {
+        let rule = "─".repeat(100);
+        let titled = format!("{} 학생 그림이 상태 줄 위에 엉뚱하게 그려짐 ─", "─".repeat(60));
+        let mut rows = vec![row("     im = Image.open(sp).convert(\"RGB\")…"), row("")];
+        if let Some(line) = spinner {
+            rows.push(row(line));
+            rows.push(row(""));
+        }
+        rows.extend([
+            row(&titled),
+            row("❯ "),
+            row(&rule),
+            row("  \u{e0c0} Opus 5.5 1M │ kei/done-route │ kei-done-route │ 40% │ $105.04 │ ⚡…"),
+            row("  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← 1 a…"),
+        ]);
+        rows
+    }
+
+    #[test]
+    fn the_student_walks_at_the_spinner_not_on_the_mode_line() {
+        let rows = screen(Some("* 케이가 확인하는 중… (2m 1s · ↓ 8.7k tokens)"));
+        assert_eq!(find_claude_spinner(&rows), Some((2, 0)));
+    }
+
+    #[test]
+    fn rows_below_the_prompt_box_are_never_the_spinner() {
+        let rows = screen(None);
+        assert_eq!(find_claude_spinner(&rows), None);
+        assert_eq!(unconfirmed_spinner_row(&rows), None);
+        assert_eq!(lenient_spinner_row(&rows).map(|(r, _)| r), Some(0), "상태줄(…)이 아니라 입력창 위 줄");
+        assert!(footer_shows_interrupt(&rows), "모드 줄 힌트는 일하는 중 신호로 남는다");
+        assert!(!footer_shows_interrupt(&rows[..6]));
+    }
+
+    #[test]
+    fn the_old_spinner_with_the_hint_is_still_a_spinner() {
+        assert_eq!(spinner_row_col(&row("✻ Cerebrating… (12s · esc to interrupt)")), Some(0));
+        assert_eq!(spinner_row_col(&row("  ⏵⏵ accept edits on · esc to interrupt")), None);
+        assert_eq!(spinner_row_col(&row("  ⏸ plan mode on · esc to interrupt")), None);
     }
 }

@@ -4456,7 +4456,7 @@ pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
     // 저기 30행). 그래서 todo 트리가 끼어 스피너가 10행 밖으로 밀리면 학생은 걷는데
     // 헤더 바는 멈추는 어긋남이 남았고, 「스피너 아래에 대화 마커가 없어야 한다」는
     // 문맥 조건도 행 하나만 봐서는 못 건다. 창까지 통째로 넘긴다.
-    crate::render::find_claude_spinner(cells).is_some()
+    crate::render::find_claude_spinner(cells).is_some() || crate::screenread::footer_shows_interrupt(cells)
 }
 
 /// claude 가 대화를 compact 하는 중인가 — 화면 하단에 그 알림이 떠 있는지 본다.
