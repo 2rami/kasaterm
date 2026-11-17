@@ -15,11 +15,18 @@ pub struct Http {
     runtime: tokio::runtime::Runtime,
     relay: String,
     token: String,
+    /// 관문 경로 — 로그인 금고는 `/relay/login-vault`, 북마크·탭 동기화는 `/relay/browser-sync`.
+    base: &'static str,
 }
 
 impl Http {
     pub fn new(credential: &DeviceCred) -> anyhow::Result<Self> {
+        Self::at(credential, "/relay/login-vault")
+    }
+
+    pub fn at(credential: &DeviceCred, base: &'static str) -> anyhow::Result<Self> {
         Ok(Self {
+            base,
             client: reqwest::Client::builder().timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,
             runtime: tokio::runtime::Builder::new_current_thread().enable_all().build()?,
             relay: credential.relay.trim_end_matches('/').to_string(),
@@ -29,7 +36,7 @@ impl Http {
 
     fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, RemoteError> {
         self.runtime.block_on(async {
-            let mut request = self.client.request(method, format!("{}/relay/login-vault{path}", self.relay)).bearer_auth(&self.token);
+            let mut request = self.client.request(method, format!("{}{}{path}", self.relay, self.base)).bearer_auth(&self.token);
             if let Some(body) = body {
                 request = request.json(&body);
             }
