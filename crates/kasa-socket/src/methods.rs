@@ -268,6 +268,13 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "collab.activity" => collab_activity(backend, id, &req.params),
         "surface.attention" => surface_attention(backend, id, &req.params),
         "surface.done" => surface_done(backend, id, &req.params),
+        "login_vault.status" | "login_vault.create" | "login_vault.join" => {
+            let action = req.method.trim_start_matches("login_vault.");
+            match backend.login_vault(action) {
+                Ok(result) => Response::success(id, result),
+                Err(e) => backend_err(id, e),
+            }
+        }
         "surface.agent_status" => surface_agent_status(backend, id, &req.params),
         "surface.turn" => surface_turn(backend, id, &req.params),
         #[cfg(feature = "app-update")]

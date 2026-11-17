@@ -2075,6 +2075,7 @@ const HELP_GROUPS: &[(&str, &[&str])] = &[
         "secret run -e 이름=<서비스>[#계정] [-e …] -- <명령…>   이 맥 키체인의 값을 그 명령의 환경으로만, 출력에 나오면 가림",
         "secret read <서비스>[#계정]               값을 표준출력으로(끝 줄바꿈 없음) — x=$(…) 로 담아 쓴다",
         "secret status                             믿는 폰 열쇠(값 없음)",
+        "login-vault status|create|join            로그인 금고 상태·금고 만들기·이 기기 등록(폰 Face ID·지문 확인은 사람)",
     ]),
     ("앱", &[
         "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·승인 필요)",
@@ -2341,6 +2342,14 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
     // a process-id-based string for the CLI path where nobody cares.
     let id = json!(format!("cli-{}", std::process::id()));
     let (method, params): (&str, Value) = match cmd {
+        // 설정 화면 버튼과 같은 일 — 재시작 뒤 사람 손을 폰 Face ID·지문 확인만 남기려고 둔다. 지문이 같다는 확인은
+        // 사람이 두 기기 화면을 맞춰 보는 보안 단계라 열지 않는다.
+        "login-vault" => match args.first().map(String::as_str).unwrap_or("status") {
+            "status" => ("login_vault.status", json!({})),
+            "create" => ("login_vault.create", json!({})),
+            "join" => ("login_vault.join", json!({})),
+            other => return Err(anyhow!("login-vault status|create|join — 「{other}」은 없어요(지문 확인은 설정 화면에서 사람이)")),
+        },
         // 계정 일 권한(docs/account-connections.md) — 관문이 대신 부르고, 쓰기는 사람이 앱 화면에서 승인할 때까지 기다린다.
         "pr" => match args.first().map(String::as_str) {
             Some("create") => {
@@ -4560,6 +4569,15 @@ fn run_statusline() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn login_vault_commands_never_include_the_fingerprint_confirmation() {
+        let method = |args: &[&str]| super::build_request("login-vault", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).map(|r| r.method);
+        assert_eq!(method(&[]).unwrap(), "login_vault.status");
+        assert_eq!(method(&["create"]).unwrap(), "login_vault.create");
+        assert_eq!(method(&["join"]).unwrap(), "login_vault.join");
+        assert!(method(&["confirm"]).is_err(), "지문 확인은 사람 몫");
+    }
+
     #[test]
     fn launch_carries_the_calling_pane_as_the_new_parent() {
         let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();

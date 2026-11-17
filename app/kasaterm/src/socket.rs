@@ -4280,6 +4280,19 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn login_vault(&self, action: &str) -> Result<serde_json::Value> {
+        use kasa_device::login_vault as vault;
+        match action {
+            "status" => Ok(vault::status()),
+            "create" => vault::create_vault().map(|fingerprint| serde_json::json!({"fingerprint": fingerprint})).map_err(anyhow::Error::msg),
+            "join" => {
+                let label = crate::render::pane_identity::local_device_name().unwrap_or_else(|| "새 기기".into());
+                vault::start_join(&label).map(|()| serde_json::json!({"started": true})).map_err(anyhow::Error::msg)
+            }
+            other => anyhow::bail!("login_vault.{other} 은 없다"),
+        }
+    }
+
     fn pane_done(&self, surface_id: &str, outcome: &str, summary: &str) -> Result<()> {
         // 보고만 기록 — 표시는 board 빌더가, 데스크톱 알림은 어차피 그 턴 끝의
         // Stop 훅(notify)이 한다. notify 가 attention 처럼 이 맵을 지우면 안 된다:

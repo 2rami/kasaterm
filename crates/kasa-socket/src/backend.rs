@@ -1135,6 +1135,11 @@ pub trait Backend: Send + Sync {
     fn pane_done(&self, _surface_id: &str, _outcome: &str, _summary: &str) -> Result<()> {
         anyhow::bail!("pane_done unsupported by this backend")
     }
+    /// 로그인 금고의 상태·만들기·등록 시작 — 설정 화면의 「금고 만들기」·「이 기기 등록」과 같은 일이다. 열쇠 지문
+    /// 확인과 폰 믿기는 사람이 두 화면을 맞춰 보는 자리라 여기 없다.
+    fn login_vault(&self, _action: &str) -> Result<serde_json::Value> {
+        anyhow::bail!("login vault unsupported by this backend")
+    }
     /// `child` 칸의 `done` 보고를 `parent` 칸으로 보내게 적는다. 칸을 쪼개거나 탭을 열 때와, 이미 있는 칸에
     /// 학생을 다시 띄울 때(`surface.launch`) 부른다. 보고를 전하지 않는 백엔드는 아무것도 안 한다.
     fn remember_spawner(&self, _child: &str, _parent: &str) {}
