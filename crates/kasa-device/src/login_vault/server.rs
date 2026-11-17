@@ -145,15 +145,33 @@ pub struct Join {
     pub created_ms: u64,
 }
 
+/// 한 금고의 한도. 로그인 금고는 [`Limits::LOGINS`], 북마크·탭 동기화는 제 것을 쓴다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub items: usize,
+    pub blob: usize,
+    /// 파일 하나(계정 하나)의 한도 — 덩어리 크기가 들쭉날쭉한 쓰임도 읽지 못할 만큼 커지지 않게.
+    pub file: usize,
+}
+
+impl Limits {
+    pub const LOGINS: Limits = Limits { items: MAX_ITEMS, blob: MAX_BLOB, file: MAX_FILE };
+}
+
 pub struct Store {
     dir: Option<PathBuf>,
+    limits: Limits,
     vaults: Mutex<HashMap<String, Vault>>,
     joins: Mutex<HashMap<String, Vec<Join>>>,
 }
 
 impl Store {
     pub fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir, vaults: Mutex::new(HashMap::new()), joins: Mutex::new(HashMap::new()) }
+        Self::with_limits(dir, Limits::LOGINS)
+    }
+
+    pub fn with_limits(dir: Option<PathBuf>, limits: Limits) -> Self {
+        Self { dir, limits, vaults: Mutex::new(HashMap::new()), joins: Mutex::new(HashMap::new()) }
     }
 
     fn load(&self, account: &str, cache: &mut HashMap<String, Vault>) -> Result<Vault, Error> {
@@ -164,7 +182,7 @@ impl Store {
             return Ok(vault.clone());
         }
         let vault = match &self.dir {
-            Some(dir) => match read_account_file(dir, account, MAX_FILE).map_err(|_| Error::Storage)? {
+            Some(dir) => match read_account_file(dir, account, self.limits.file).map_err(|_| Error::Storage)? {
                 Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?,
                 None => Vault::default(),
             },
@@ -213,7 +231,7 @@ impl Store {
             return Err(Error::Invalid("bad_batch"));
         }
         for put in puts {
-            if !valid_id(&put.id) || put.blob.as_deref().is_some_and(|b| !valid_b64(b, MAX_BLOB)) {
+            if !valid_id(&put.id) || put.blob.as_deref().is_some_and(|b| !valid_b64(b, self.limits.blob)) {
                 return Err(Error::Invalid("bad_item"));
             }
         }
@@ -229,6 +247,8 @@ impl Store {
             return Err(Error::BadSignature);
         }
         let mut outcomes = Vec::with_capacity(puts.len());
+        let size = |item: &Item| item.blob.len() + 128;
+        let mut total: usize = vault.items.values().map(size).sum();
         for put in puts {
             let current = vault.items.get(&put.id);
             if current.map_or(0, |item| item.rev) != put.expected_rev {
@@ -238,7 +258,12 @@ impl Store {
             }
             match &put.blob {
                 Some(blob) => {
-                    if current.is_none() && vault.items.len() >= MAX_ITEMS {
+                    if current.is_none() && vault.items.len() >= self.limits.items {
+                        return Err(Error::TooMany);
+                    }
+                    total = total - current.map_or(0, size) + blob.len() + 128;
+                    // 머리(열쇠 표식·서명 공개키·차례)를 남긴 자리. 로그인 금고는 항목 수 한도가 먼저 걸린다.
+                    if total > self.limits.file.saturating_sub(4096) {
                         return Err(Error::TooMany);
                     }
                     vault.revision = vault.revision.checked_add(1).ok_or(Error::Storage)?;
@@ -246,6 +271,7 @@ impl Store {
                     outcomes.push(PutOutcome::Ok { id: put.id.clone(), rev: vault.revision, at_ms: now_ms });
                 }
                 None => {
+                    total -= current.map_or(0, size);
                     vault.items.remove(&put.id);
                     outcomes.push(PutOutcome::Ok { id: put.id.clone(), rev: 0, at_ms: now_ms });
                 }

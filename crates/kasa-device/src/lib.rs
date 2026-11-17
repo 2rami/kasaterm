@@ -17,6 +17,7 @@ pub mod workspace_assistant;
 pub mod feedback_client;
 pub mod op_approval;
 pub mod login_vault;
+pub mod browser_sync;
 #[cfg(windows)]
 pub(crate) mod wincred;
 pub mod access;

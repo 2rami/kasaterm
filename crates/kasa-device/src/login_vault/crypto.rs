@@ -106,6 +106,12 @@ impl VaultKey {
         hkdf32(self.0.as_ref(), label.as_bytes())
     }
 
+    /// 같은 금고 열쇠에서 다른 쓰임(`browser-sync` 등)의 열쇠를 가른다. 그 열쇠의 표식·서명·봉인은 이 열쇠의 것과 섞이지
+    /// 않아, 한 쓰임의 덩어리나 서명을 다른 쓰임에 끼워 넣지 못한다. 기기에 금고 열쇠가 있으면 따로 등록하지 않는다.
+    pub fn subkey(&self, purpose: &str) -> VaultKey {
+        VaultKey(self.derive(&format!("subkey:{purpose}")))
+    }
+
     /// 관문에 두는 열쇠 표식 — 잘못된 열쇠를 항목을 풀어 보기 전에 가린다. 열쇠는 여기서 거꾸로 못 구한다.
     pub fn key_id(&self) -> String {
         hex(&self.derive("key-id")[..16])
@@ -134,6 +140,12 @@ impl VaultKey {
         hex(hmac::sign(&key, format!("web:{host}\n{}", username.to_lowercase()).as_bytes()).as_ref())
     }
 
+    /// 이름 하나의 항목 이름 — [`Self::item_id`] 와 같은 이름 키로, 쓰임이 정한 글을 그대로 넣는다.
+    pub fn name_id(&self, name: &str) -> String {
+        let key = hmac::Key::new(hmac::HMAC_SHA256, self.derive("item-id").as_ref());
+        hex(hmac::sign(&key, name.as_bytes()).as_ref())
+    }
+
     /// 로컬 상태 파일에 남기는 값 지문. 열쇠 없는 해시면 그 파일만으로 비밀번호를 대입해 맞혀 볼 수 있다.
     pub fn value_mac(&self, value: &[u8]) -> String {
         let key = hmac::Key::new(hmac::HMAC_SHA256, self.derive("state").as_ref());
@@ -146,8 +158,13 @@ impl VaultKey {
 
     /// 항목 하나를 봉인한다. AAD 에 계정·항목 이름을 넣어 관문이 덩어리를 다른 항목 자리로 옮기면 풀리지 않는다.
     pub fn seal(&self, account: &str, id: &str, plain: &[u8]) -> anyhow::Result<String> {
-        let padded = (4 + plain.len()).div_ceil(PAD) * PAD;
-        ensure!(padded <= MAX_PLAIN, "too_large");
+        self.seal_padded(account, id, plain, PAD, MAX_PLAIN)
+    }
+
+    /// [`Self::seal`] 을 다른 채움 단위·한도로. 열린 탭 목록처럼 큰 평문은 큰 단위로 채운다.
+    pub fn seal_padded(&self, account: &str, id: &str, plain: &[u8], pad: usize, max: usize) -> anyhow::Result<String> {
+        let padded = (4 + plain.len()).div_ceil(pad) * pad;
+        ensure!(padded <= max, "too_large");
         let mut buf = Zeroizing::new(Vec::with_capacity(padded));
         buf.extend_from_slice(&(plain.len() as u32).to_le_bytes());
         buf.extend_from_slice(plain);
@@ -158,7 +175,7 @@ impl VaultKey {
     pub fn open(&self, account: &str, id: &str, blob: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let sealed = b64().decode(blob).map_err(|_| anyhow!("bad_blob"))?;
         let padded = aead_open(&self.derive("enc"), &Self::item_aad(account, id), &sealed)?;
-        ensure!(padded.len() >= 4 && padded.len() % PAD == 0, "bad_padding");
+        ensure!(padded.len() >= 4, "bad_padding");
         let len = u32::from_le_bytes(padded[..4].try_into().expect("4 bytes")) as usize;
         ensure!(len <= padded.len() - 4, "bad_padding");
         Ok(Zeroizing::new(padded[4..4 + len].to_vec()))
@@ -294,6 +311,24 @@ mod tests {
         assert_ne!(key.value_mac(b"pw"), other.value_mac(b"pw"), "값 지문은 열쇠마다 달라 대입으로 못 맞힌다");
         assert_ne!(key.key_id(), other.key_id());
         assert!(VaultKey::from_base64("c2hvcnQ=").is_err());
+    }
+
+    #[test]
+    fn a_subkey_shares_nothing_with_its_vault_key() {
+        let key = VaultKey::generate().unwrap();
+        let sub = key.subkey("browser-sync");
+        assert_eq!(sub.key_id(), VaultKey::from_base64(&key.to_base64()).unwrap().subkey("browser-sync").key_id(), "같은 열쇠면 같은 갈래");
+        assert_ne!(sub.key_id(), key.key_id());
+        assert_ne!(sub.sign_pub(), key.sign_pub());
+        assert_ne!(sub.key_id(), key.subkey("other").key_id());
+        let id = sub.name_id("mark
+c
+m1");
+        let blob = sub.seal_padded("acct", &id, &[b'x'; 3000], 4096, 8192).unwrap();
+        assert_eq!(sub.open("acct", &id, &blob).unwrap().len(), 3000);
+        assert!(key.open("acct", &id, &blob).is_err(), "금고 열쇠로는 갈래의 덩어리가 안 풀린다");
+        assert!(!signature_ok(&key.sign_pub(), b"m", &sub.sign(b"m")), "갈래의 서명은 금고 쓰기로 못 쓴다");
+        assert!(sub.seal_padded("acct", &id, &[0u8; 9000], 4096, 8192).is_err());
     }
 
     #[test]
