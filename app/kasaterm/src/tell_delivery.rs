@@ -29,12 +29,12 @@ const WORKERS: usize = 4;
 /// 첨부 표시는 1초 안팎이라 넉넉히 잡았다. 그 뒤는 화면이 정본이다 — Esc·Ctrl+C 로 비운 입력칸이 Enter 를
 /// 칠 때까지 초안으로 남아 tell 을 15분 붙들다 버리던 자리다(2026-10-01, 하루 61건 중 21건).
 const DRAFT_TRUST: Duration = Duration::from_secs(5);
-/// claude 의 초안 치우기 키(`chat:stash`, 기본 Ctrl+S). 치운 초안은 다음 제출 직후 claude 가 입력칸에 스스로
-/// 되돌린다 — 쉬는 칸·일하는 칸(줄 선 제출) 모두, 접힌 붙여넣기까지(2.1.300 실측). 빈 입력칸에서 한 번 더 치면
-/// 곧바로 되돌린다. 사람 초안이 쪽지를 사람이 Enter 칠 때까지 붙들던 자리다(2026-10-15).
-const CLAUDE_STASH: &[u8] = b"\x13";
-/// 치운 뒤 입력칸이 비어 보이기를 기다리는 한도. 넘으면 되돌리고 물러선다.
-const STASH_DEADLINE: Duration = Duration::from_secs(3);
+/// 받는 칸에서 사람이 마지막으로 친 뒤 이만큼 조용해야 넣는다. 0.3초만 보던 때는 치다 잠깐 멈춘 사이에 쪽지가
+/// 들어가 사람이 치던 글·도구 실행이 끊겼다(2026-11-18 「Request interrupted」).
+const TYPING_QUIET: Duration = Duration::from_secs(3);
+/// 쪽지를 넣은 칸이 그 쪽지로 일을 시작하기를 기다리는 한도. 시작한 것이 보이면 그 일이 끝난 뒤에, 끝내 안
+/// 보이면 이 시간이 지나서 다음 쪽지를 넣는다.
+const TAKE_DEADLINE: Duration = Duration::from_secs(15);
 
 #[derive(Clone,Debug)]
 struct Proof {
@@ -51,8 +51,25 @@ pub(crate) struct Commit {
     proof: std::result::Result<Proof,String>,
     /// 붙여넣은 시각 — 반영을 기다릴 한도의 기준. 붙여넣기 전에는 `None`.
     pasted_at: Option<Instant>,
-    /// 사람 초안을 치운 시각(claude). 그때부터 Enter 까지 사람 입력은 붙들려 있다.
-    stashed_at: Option<Instant>,
+}
+
+/// 쪽지를 넣고 그 칸이 받아 가기를 기다리는 중 — 칸 하나에 쪽지가 여럿 줄 서도 앞 것이 모델 차례로 들어간 뒤에
+/// 다음 것을 넣는다. 일하는 칸에 이어 넣으면 claude 가 줄 선 입력을 한 덩어리로 합쳐 제출했다(2026-11-18).
+#[derive(Clone,Copy,Debug)]
+struct Taking { submitted: Instant, seen_busy: bool }
+
+fn taking() -> &'static std::sync::Mutex<HashMap<String,Taking>> {
+    static T: std::sync::OnceLock<std::sync::Mutex<HashMap<String,Taking>>> = std::sync::OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// 앞 쪽지를 아직 받는 중인가. 일하는 동안, 또는 넣은 뒤 일을 시작하는 것이 아직 안 보였고 한도 안이면 그렇다.
+fn still_taking(taking: Option<Taking>, busy: bool) -> bool {
+    match taking {
+        None => false,
+        Some(_) if busy => true,
+        Some(t) => !t.seen_busy && t.submitted.elapsed() < TAKE_DEADLINE,
+    }
 }
 
 #[derive(Default)]
@@ -177,20 +194,6 @@ fn commit_step(blocked: Option<&'static str>, echoed: bool, proof: ProofState, s
     if echoed { CommitStep::Prove } else { CommitStep::Wait }
 }
 
-#[derive(Debug,PartialEq,Eq)]
-enum ReadyStep { Paste, Stash, Recheck, Hold(Hold) }
-
-/// 붙여넣기 전 한 번 볼 때의 판정. 사람 초안은 치울 수 있으면(claude) 치우고 넣는다. 치운 뒤에는 입력칸이 비어
-/// 보일 때까지, 또 치우기 쓰기로 낡은 증명을 새로 받는 동안 한도 안에서 다시 본다.
-fn ready_step(hold: Option<Hold>, can_stash: bool, stashed_for: Option<Duration>) -> ReadyStep {
-    match (hold,stashed_for) {
-        (None,_) => ReadyStep::Paste,
-        (Some(Hold::Draft),None) if can_stash => ReadyStep::Stash,
-        (Some(Hold::Draft | Hold::Identity),Some(waited)) if waited < STASH_DEADLINE => ReadyStep::Recheck,
-        (Some(hold),_) => ReadyStep::Hold(hold),
-    }
-}
-
 /// 증명 실패 중 다시 받으면 되는 것 — 일꾼이 다 찼거나 기한을 넘긴 것. 나머지는 대상이 바뀐 것이다.
 fn proof_transient(reason: &str) -> bool { reason.contains("occupied") || reason.contains("deadline") }
 
@@ -213,29 +216,6 @@ fn schedule_commit(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_
     });
 }
 
-/// 초안을 치운 뒤 입력칸이 비었는지 다시 보게 한다. 치우기 쓰기로 증명이 낡으므로 새로 받아 간다.
-fn schedule_ready(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>, mut delivery: Commit) {
-    std::thread::spawn(move || {
-        std::thread::sleep(ECHO_POLL);
-        match collect_proof(backend,delivery.record.clone(),delivery.pty.clone()) {
-            Ok(proof) => delivery.proof = Ok(proof),
-            Err(reason) if proof_transient(&reason) => {}
-            Err(reason) => delivery.proof = Err(reason),
-        }
-        if proxy.send_event(UserEvent::SafeTellReady(delivery.clone())).is_err() {
-            let _ = delivery.pty.release_input();
-            finish(&delivery.record,State::Uncertain,"GUI stopped after stashing the draft; automatic retry prohibited");
-        }
-    });
-}
-
-/// claude 가 치운 초안을 이미 들고 있나 — 입력박스 위 알림 줄 끝의 `› stashed`. 자리는 하나라 그 위에 또 치우면
-/// 먼저 것이 사라진다(2.1.300 실측). 입력박스를 못 찾으면 들고 있다고 친다.
-fn stash_held(cells: &[Vec<GridCell>]) -> bool {
-    let Some(crate::screenread::PromptBox::Bordered { top, .. }) = crate::screenread::prompt_box(cells) else { return true };
-    cells[top.saturating_sub(2)..top].iter().any(|row|row.iter().map(|cell|cell.ch).collect::<String>().contains("stashed"))
-}
-
 fn begin_proof(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>, record: Record) {
     std::thread::spawn(move || {
         let Some(pty) = kasa_pty::lookup_session(&record.address.surface_id) else {
@@ -251,7 +231,7 @@ fn begin_proof(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop
         if kasa_collab::tell_service::transition(&record.message_id,State::Dispatching,"identity proven; awaiting guarded first write").is_err() {
             release(&record.address.surface_id); return;
         }
-        let delivery = Commit {record,pty,revision,proof,pasted_at:None,stashed_at:None};
+        let delivery = Commit {record,pty,revision,proof,pasted_at:None};
         if proxy.send_event(UserEvent::SafeTellReady(delivery.clone())).is_err() {
             finish(&delivery.record,State::Failed,"GUI stopped before the first write");
         }
@@ -509,12 +489,14 @@ impl App {
             && delivery.record.expires_at_ms > kasa_socket::tell::now_ms()
     }
 
-    /// `stashed` — 사람 초안을 치운 뒤라 사람 입력이 붙들려 있다. 그 뒤의 타이핑·조합은 쪽지에 안 섞인다.
-    fn tell_ready(&self, record: &Record, pty: &kasa_pty::PtySession, harness: kasa_pty::AgentKind, empty: bool, stashed: bool) -> std::result::Result<(),Hold> {
+    /// `empty` — 붙여넣기 전 판정. 사람이 쓰던 글·막 친 키·조합 중인 글이 있거나, 칸이 일하는 중이거나 앞 쪽지를
+    /// 아직 받는 중이면 넣지 않고 기다린다. 사람 초안을 치우고 넣던 길은 걷었다 — 치우기·되돌리기 사이에 사람이
+    /// 치던 입력과 도구 실행이 끊겼다(2026-11-18).
+    fn tell_ready(&self, record: &Record, pty: &kasa_pty::PtySession, harness: kasa_pty::AgentKind, empty: bool) -> std::result::Result<(),Hold> {
         if pty.input_closed() { return Err(Hold::Closed); }
         // 붙여넣은 뒤(`empty` 가 거짓)에 시작된 한글 조합은 입력이 붙들려 있어 본문에 안 섞인다 — 그것 때문에
         // Enter 를 보류하면 본문이 입력창에 남아 사람 글과 함께 제출된다.
-        if empty && !stashed && self.tell_composing(&record.address.surface_id) { return Err(Hold::Composition); }
+        if empty && self.tell_composing(&record.address.surface_id) { return Err(Hold::Composition); }
         let (cells,screen) = live_cells(pty);
         if !screen.bracketed_paste { return Err(Hold::PasteMode); }
         // 사람 차례(승인·질문)면 글을 안 넣는다 — 판정이 정본이고, 아래 화면 검사는 지금
@@ -522,9 +504,22 @@ impl App {
         if self.collab.hub.state(&record.address.surface_id).needs_you()
             || crate::input::rows_show_approval_prompt(&cells).is_some() { return Err(Hold::Approval); }
         if !empty { return Ok(()); }
-        if !stashed && (pty.input_draft_recent(DRAFT_TRUST) || !pty.input_quiet_for(Duration::from_millis(300))) { return Err(Hold::Typing); }
+        let surface = record.address.surface_id.as_str();
+        let busy = self.collab.hub.state(surface).is_busy();
+        if busy || still_taking(taking().lock().unwrap().get(surface).copied(), busy) { return Err(Hold::Busy); }
+        if pty.input_draft_recent(DRAFT_TRUST) || !pty.input_quiet_for(TYPING_QUIET) { return Err(Hold::Typing); }
         if !prompt_empty_at(&cells,screen.cursor_row as usize,screen.cursor_col as usize,harness) { return Err(Hold::Draft); }
         Ok(())
+    }
+
+    /// 쪽지를 넣은 칸이 일을 시작했나 본다 — 시작한 것을 본 칸은 쉬면 다음 쪽지를 받는다. 다 받은 칸은 놓는다.
+    fn tell_watch_taking(&self) {
+        let mut taking = taking().lock().unwrap();
+        taking.retain(|surface,t| {
+            let busy = self.collab.hub.state(surface).is_busy();
+            t.seen_busy |= busy;
+            still_taking(Some(*t), busy)
+        });
     }
 
     pub(crate) fn safe_tell_tick(&mut self) {
@@ -535,6 +530,7 @@ impl App {
             if last.is_some_and(|at|at.elapsed() < Duration::from_millis(500)) { return; }
             *last = Some(Instant::now());
         }
+        self.tell_watch_taking();
         let Some(backend) = self.socket_backend.clone() else { return };
         if BATCH_ACTIVE.swap(true,Ordering::AcqRel) { return; }
         let proxy = self.proxy.clone();
@@ -547,66 +543,21 @@ impl App {
         });
     }
 
-    /// 사람 초안을 claude 에게 치우게 하고 입력칸이 빈 것을 다시 본다. 그동안 사람 입력은 붙들었다가 Enter 뒤
-    /// 되돌아온 초안 끝에 친 순서대로 흘려보낸다.
-    fn tell_stash(&mut self, delivery: &Commit) {
-        let Some(backend) = self.socket_backend.clone() else {
-            finish(&delivery.record,State::Accepted,Hold::Draft.reason()); return;
-        };
-        delivery.pty.hold_input(HOLD_FOR);
-        match delivery.pty.send_bytes_guarded(CLAUDE_STASH,Some(delivery.revision)) {
-            Ok(revision) => {
-                let mut next = delivery.clone(); next.revision = revision; next.stashed_at = Some(Instant::now());
-                schedule_ready(backend,self.proxy.clone(),next);
-            }
-            Err(_) => {
-                let _ = delivery.pty.release_input();
-                finish(&delivery.record,State::Accepted,Hold::Draft.reason());
-            }
-        }
-    }
-
-    /// 넣지 못하고 물러설 때 치웠던 초안을 되돌린다. 입력칸이 비어 있지 않으면(승인 화면 등) 그대로 둔다 —
-    /// claude 가 다음 제출 뒤 돌려준다.
-    fn tell_unstash(&self, delivery: &Commit) {
-        if delivery.stashed_at.is_none() { return; }
-        let (cells,screen) = live_cells(&delivery.pty);
-        if prompt_empty_at(&cells,screen.cursor_row as usize,screen.cursor_col as usize,kasa_pty::AgentKind::Claude) {
-            let _ = delivery.pty.send_bytes_guarded(CLAUDE_STASH,Some(delivery.revision));
-        }
-        let _ = delivery.pty.release_input();
-    }
-
     pub(crate) fn safe_tell_ready(&mut self, delivery: &Commit) {
         if let Some(why) = self.tell_target_change(delivery) {
-            self.tell_unstash(delivery);
-            let when = if delivery.stashed_at.is_some() { "after stashing the draft" } else { "before the first write" };
             eprintln!("[tell] {} → {} 실패: {why}", delivery.record.message_id, delivery.record.address.surface_id);
-            finish(&delivery.record,State::Failed,&format!("{why} {when}"));
+            finish(&delivery.record,State::Failed,&format!("{why} before the first write"));
             return;
         }
-        // 연결 mod 가 실린 claude 칸도 여기로 붙여넣는다. mod 의 `$.prompt.submit` 에 맡기던 때는 엔진이 쉰 뒤에야
-        // 돌려 일하는 칸에 턴 내내 묶였고, 받는 쪽 대화에 plugin 머리가 붙었다(2026-10-06 걷음). 붙여넣고 Enter 를
-        // 치면 쉬는 칸은 새 턴, 일하는 칸은 사람이 일하는 중에 친 말처럼 진행 중인 턴 안으로 들어간다.
+        // 쉬는 칸에만 붙여넣는다. 일하는 칸에 넣으면 claude 가 줄 세웠다가 그 사이 온 다른 쪽지·사람 글과 한 입력으로
+        // 합쳐 제출했고, 진행 중인 도구 실행이 끊기기도 했다(2026-11-18) — 차례가 끝난 뒤 넣는다.
         let proof = delivery.proof.as_ref().unwrap();
-        let stashed = delivery.stashed_at.is_some();
-        let hold = if self.tell_proof_current(delivery) { self.tell_ready(&delivery.record,&delivery.pty,proof.harness,true,stashed).err() }
+        let hold = if self.tell_proof_current(delivery) { self.tell_ready(&delivery.record,&delivery.pty,proof.harness,true).err() }
             else { Some(Hold::Identity) };
-        let can_stash = hold == Some(Hold::Draft) && proof.harness == kasa_pty::AgentKind::Claude
-            && !stash_held(&live_cells(&delivery.pty).0);
-        match ready_step(hold,can_stash,delivery.stashed_at.map(|at|at.elapsed())) {
-            ReadyStep::Paste => {}
-            ReadyStep::Stash => { self.tell_stash(delivery); return; }
-            ReadyStep::Recheck if self.socket_backend.is_some() => {
-                schedule_ready(self.socket_backend.clone().unwrap(),self.proxy.clone(),delivery.clone()); return;
-            }
-            step => {
-                self.tell_unstash(delivery);
-                let hold = if let ReadyStep::Hold(hold) = step { hold } else { Hold::Identity };
-                let state = if delivery.record.reject_if_busy { State::Failed } else { State::Accepted };
-                finish(&delivery.record,state,hold.reason());
-                return;
-            }
+        if let Some(hold) = hold {
+            let state = if delivery.record.reject_if_busy { State::Failed } else { State::Accepted };
+            finish(&delivery.record,state,hold.reason());
+            return;
         }
         let payload = format!("\x1b[200~{}\x1b[201~",delivery.record.body);
         // 붙여넣기와 Enter 사이에 사람이 친 글이 본문 뒤에 붙어 함께 제출되던 자리다(2026-09-29 「빈 입력창에 뭐 치면
@@ -637,7 +588,7 @@ impl App {
         let blocked = commit.proof.as_ref().ok().and_then(|proof| self.tell_target_change(commit)
             .or_else(||(commit.pty.input_revision() != commit.revision).then_some("input changed after paste"))
             .or_else(||(commit.record.expires_at_ms <= kasa_socket::tell::now_ms()).then_some("tell expired"))
-            .or_else(||self.tell_ready(&commit.record,&commit.pty,proof.harness,false,false).err().map(Hold::reason)));
+            .or_else(||self.tell_ready(&commit.record,&commit.pty,proof.harness,false).err().map(Hold::reason)));
         // 입력창 안을 본다. 화면 맨 아래 30줄만 보면, 대화가 아직 없는 새 세션은 입력창이 화면
         // **위쪽**에 있어 큰 창에서 그 범위 밖이었다 — 글은 들어갔는데 에코를 못 찾아 Enter 를
         // 영영 보류했다(2026-09-28 실측: 44행 창, 입력창 9행). 입력창을 못 찾는 하네스만 옛 방식.
@@ -669,6 +620,7 @@ impl App {
         }
         let result = commit.pty.send_bytes_guarded(b"\r",Some(commit.revision));
         if result.is_err() { session_titles().lock().unwrap().remove(&surface); }
+        else { taking().lock().unwrap().insert(surface.clone(),Taking { submitted: Instant::now(), seen_busy: false }); }
         let _ = commit.pty.release_input();
         let (state,reason) = if result.is_ok() { (State::Submitted,"paste and Enter writes succeeded; model read is unconfirmed") }
             else { (State::Uncertain,"Enter write unconfirmed; automatic retry prohibited") };
@@ -986,30 +938,18 @@ mod tests {
         assert!(!fresh.input_draft_present());
     }
 
-    /// 사람 초안: claude 는 치우고 넣고, 치운 뒤엔 빈 입력칸이 보일 때까지 다시 본다. 치울 수 없으면(codex·이미
-    /// 치운 초안이 있음) 입력칸이 빌 때까지 기다린다.
+    /// 칸 하나에 쪽지 여럿: 앞 것을 넣은 뒤 그 칸이 일을 시작해 끝낼 때까지 다음 것은 기다린다. 시작이 끝내 안
+    /// 보이면 한도 뒤에 넣는다. 일하는 칸은 앞 쪽지가 없어도 기다린다(`tell_ready` 의 일하는 중 판정).
     #[test]
-    fn a_claude_draft_is_stashed_then_rechecked_until_the_box_is_empty() {
-        let ms = Duration::from_millis;
-        assert_eq!(ready_step(None,false,None),ReadyStep::Paste);
-        assert_eq!(ready_step(Some(Hold::Draft),true,None),ReadyStep::Stash);
-        assert_eq!(ready_step(Some(Hold::Draft),false,None),ReadyStep::Hold(Hold::Draft));
-        assert_eq!(ready_step(Some(Hold::Draft),true,Some(ms(200))),ReadyStep::Recheck, "두 번 치우지 않는다");
-        assert_eq!(ready_step(Some(Hold::Identity),false,Some(ms(200))),ReadyStep::Recheck, "치우기 쓰기로 낡은 증명");
-        assert_eq!(ready_step(None,false,Some(ms(200))),ReadyStep::Paste);
-        assert_eq!(ready_step(Some(Hold::Draft),true,Some(STASH_DEADLINE)),ReadyStep::Hold(Hold::Draft));
-        assert_eq!(ready_step(Some(Hold::Approval),true,Some(ms(200))),ReadyStep::Hold(Hold::Approval), "승인 화면이 뜨면 물러선다");
-        assert_eq!(ready_step(Some(Hold::Typing),true,None),ReadyStep::Hold(Hold::Typing), "치는 중에는 안 치운다");
-    }
-
-    #[test]
-    fn a_held_stash_is_read_from_the_line_above_the_input_box() {
-        let rule = row(&"─".repeat(40));
-        let screen = |note: &str| vec![row("⏺ 답"), row(note), rule.clone(), row("❯ 초안"), rule.clone(), row("  footer")];
-        assert!(stash_held(&screen("                       › stashed")));
-        assert!(!stash_held(&screen("                  Draft restored")));
-        assert!(!stash_held(&screen("")));
-        assert!(stash_held(&[row("$ plain shell")]), "입력박스를 못 찾으면 치우지 않는다");
+    fn one_tell_at_a_time_and_never_into_a_working_turn() {
+        let just = Taking { submitted: Instant::now(), seen_busy: false };
+        assert!(!still_taking(None,false));
+        assert!(still_taking(Some(just),true), "앞 쪽지로 일하는 중이면 기다린다");
+        assert!(still_taking(Some(just),false), "넣은 직후 아직 일을 시작 안 했으면 기다린다");
+        assert!(!still_taking(Some(Taking { seen_busy: true, ..just }),false), "일을 시작했다 끝냈으면 다음 것");
+        let stale = Taking { submitted: Instant::now() - TAKE_DEADLINE, seen_busy: false };
+        assert!(!still_taking(Some(stale),false), "시작이 끝내 안 보이면 한도 뒤에 넣는다");
+        assert!(TYPING_QUIET >= Duration::from_secs(3), "치다 잠깐 멈춘 사이에 넣지 않는다");
     }
 
     #[test]

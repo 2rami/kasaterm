@@ -37,14 +37,14 @@ impl Hold {
     }
     pub fn reason(self) -> &'static str {
         match self {
-            Hold::Draft => "waiting:draft — receiver input box has text that cannot be stashed (Codex, or a Claude stash already held); delivered once it is empty",
+            Hold::Draft => "waiting:draft — receiver input box has text; delivered once it is empty",
             Hold::Typing => "waiting:typing — receiver typed within the last seconds",
             Hold::Composition => "waiting:composition — receiver is composing with an IME",
             Hold::Approval => "waiting:approval — approval or question on the receiver screen",
             Hold::Closed => "waiting:closed — receiver input is closed",
             Hold::PasteMode => "waiting:paste_mode — receiver screen does not accept a paste now",
             Hold::Identity => "waiting:identity — identity proof went stale; retrying",
-            Hold::Busy => "waiting:busy — receiver is mid-turn; its in-session mod takes it once it rests",
+            Hold::Busy => "waiting:busy — receiver is mid-turn or has not taken the previous message yet; delivered once it rests",
         }
     }
     /// 영수증 사유 → 까닭. 옛 판이 쓴 뭉친 문장은 `None`.
@@ -55,14 +55,14 @@ impl Hold {
     /// 사람에게 하는 말 — 무엇이 막았나.
     pub fn cause(self) -> &'static str {
         match self {
-            Hold::Draft => "받는 창 입력칸에 쓰던 글이 있어요(코덱스거나 이미 치워 둔 글이 있어요)",
+            Hold::Draft => "받는 창 입력칸에 쓰던 글이 있어요",
             Hold::Typing => "받는 창에서 방금 키를 쳤어요",
             Hold::Composition => "받는 창에서 글자를 조합하는 중이에요",
             Hold::Approval => "받는 창이 승인·질문 화면이에요",
             Hold::Closed => "받는 창 입력이 닫혀 있어요",
             Hold::PasteMode => "받는 창 화면이 지금 붙여넣기를 안 받아요",
             Hold::Identity => "받는 창 확인이 늦어 다시 보는 중이에요",
-            Hold::Busy => "받는 창이 일하는 중이에요",
+            Hold::Busy => "받는 창이 일하는 중이거나 앞 쪽지를 아직 받는 중이에요",
         }
     }
     /// 사람에게 하는 말 — 언제 들어가나.

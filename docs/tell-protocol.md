@@ -65,15 +65,18 @@ Restarted dispatching records become uncertain. Expired or
 replaced sessions are never retargeted. Queue policy is independent of readiness.
 
 Delivery requires a live Claude/Codex PTY, full current identity,
-an empty supported input prompt, and no approval/question or IME composition.
+an empty supported input prompt, no approval/question or IME composition, a resting
+receiver, and no earlier message to that pane still being taken.
 A Claude pane whose in-session bridge mod is live (`docs/claude-mod-bridge.md`) is pasted into like any other.
 From 2026-10-02 to 2026-10-06 such a pane got the message through the mod's `$.prompt.submit` instead. The engine
 runs a plugin's prompt only once the session is idle, so a working pane held every message as `waiting:busy` until
 its turn ended, and the receiver's transcript showed it under a "The kasaterm-bridge plugin sent a message" header.
-A paste with Enter starts a turn in a resting pane and joins the running turn in a working one, the way a person's
-mid-turn message does. Older receivers may still report `waiting:busy`; the CLI keeps reading it.
-Working/thinking/building alone does not defer a message. Approval/question
-screens defer it until the selection UI is gone.
+A working receiver defers the message as `waiting:busy` until its turn ends. From 2026-10-06 to 2026-11-18 a
+paste with Enter joined the running turn the way a person's mid-turn message does, but Claude queues such input
+and submits everything queued as one prompt when the turn ends: several messages and the person's own text went
+in as a single input, and a tool run was cut off ("Request interrupted"). For the same reason one pane takes one
+message at a time: after an Enter the next message to that pane waits until the receiver is seen working and
+then resting, or 15 s pass without it starting. Approval/question screens defer it until the selection UI is gone.
 
 Screen menu options require a separator after their numbered dot (`1. Yes`); decimals
 such as `1.1000배` or `6.2px` are draft text. Claude can put those numbers immediately
@@ -81,18 +84,12 @@ after `❯` when a long pasted report scrolls inside a small input box. Treating
 menu options withheld Enter and left subsequent messages queued until a person submitted
 the first report (2026-10-27, Claude Code 2.1.309 at 59 columns and 24–29 rows).
 
-A Claude draft does not hold the message: the receiver presses Claude's own stash key
-(`chat:stash`, Ctrl+S), waits up to
-3 s for the input box to look empty, pastes and submits, and Claude puts the draft back
-into the input right after that submit — in a resting pane and for a submit queued in a
-working one, collapsed pastes included (Claude Code 2.1.300). Keystrokes from the stash
-to the Enter are held and replayed after the restored draft. Claude keeps one stash, and
-stashing again replaces it, so a pane already showing `› stashed` above its input box
-waits as before; if the box does not empty in time or an approval appears, the receiver
-presses the key once more on the empty input to take the draft back and defers. Before
-this, a draft held every message until the person pressed Enter (2026-10-15). Codex has
-no stash, so a Codex draft or any IME composition is preserved and the message remains
-queued.
+A draft holds the message until the input box is empty, and so does a keystroke in the
+last 3 s. From 2026-10-15 to 2026-11-18 the receiver instead stashed a Claude draft with
+Claude's own stash key (`chat:stash`, Ctrl+S), pasted, submitted and let Claude restore the
+draft; a person who paused mid-sentence for more than 0.3 s lost the turn to the message
+and saw their input and a running tool interrupted. Any IME composition is preserved and
+the message remains queued.
 The screen decides whether the input is empty. A keystroke that is not a separate
 Enter marks a draft that is trusted for 5 seconds only (the echo or an image
 attachment lands well inside that); after that the screen is authoritative. Mouse
@@ -101,8 +98,9 @@ Ctrl+C, arrow or click held every later message until the 15-minute expiry while
 the input box was visibly empty — 21 of 61 messages on one machine in a day.
 
 Each deferral writes a specific reason, `waiting:<word> — …`, with `<word>` one of
-`draft` (input box has text), `typing` (keystroke in the last 5 s), `composition`,
-`approval`, `closed`, `paste_mode` or `identity` (`busy` only from older receivers, above).
+`draft` (input box has text), `typing` (keystroke in the last 3 s), `composition`,
+`approval`, `closed`, `paste_mode`, `identity` or `busy` (mid-turn, or the previous message
+to that pane not yet taken).
 Messages to one pane go in order and only the oldest is examined; a deferral copies its
 reason onto the messages queued behind it on that pane, so every receipt, the sender
 notice and the waiting count tell the same story. Before this, a later message kept its
