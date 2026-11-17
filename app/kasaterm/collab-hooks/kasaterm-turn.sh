@@ -6,7 +6,8 @@
 # 첫 인자가 phase 다. 페이로드의 `permission_mode` 도 함께 실어 bypass 여부를 앱이 안다.
 #
 # start 때 tell 이 「지금 일」(`--title`)과 함께 들어온 턴이면 CLI 가 `sessionTitle` JSON 한 줄을 낸다 —
-# claude 세션 이름(`/resume`·agents 목록)을 맞추는 공식 창구다. 그것만 stdout 으로 넘긴다.
+# claude 세션 이름(`/resume`·agents 목록)을 맞추는 공식 창구다. end 때 기다리던 tell 이 있으면 세션이 그것을
+# 받아 가고 CLI 가 차례를 막는 `decision` JSON 을 낸다 — 앱은 그 차례를 끝난 것으로 치지 않는다. 그 둘만 넘긴다.
 #
 # ⚠️ 프롬프트 핫패스다 — bash 와 sed 만 쓰고 인터프리터를 안 띄운다. 무슨 일이 있어도
 # exit 0(훅이 실패하면 claude 의 턴이 막힌다).
@@ -21,6 +22,6 @@ else
   out="$(kasaterm-cli turn "$phase" 2>/dev/null)"
 fi
 case "$phase:$out" in
-  'start:{"hookSpecificOutput"'*) printf '%s\n' "$out" ;;
+  'start:{"hookSpecificOutput"'*|'end:{"decision"'*) printf '%s\n' "$out" ;;
 esac
 exit 0

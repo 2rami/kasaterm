@@ -1183,6 +1183,11 @@ pub trait Backend: Send + Sync {
     fn take_session_title(&self, _surface_id: &str) -> Option<String> {
         None
     }
+    /// 이 pane 의 세션이 도구 사이(`tool`)나 차례 끝(`end`) 훅에서 기다리던 tell 하나를 직접 받아 간다
+    /// (docs/tell-protocol.md 「세션이 받아 가기」). 받은 것이 있으면 `{message_id, body}`. Default none.
+    fn tell_take(&self, _surface_id: &str, _via: &str) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
     /// Multi-session (tmux-style tab) state for the session panel. Default
     /// is a single session — backends that don't support sessions just
     /// report one.

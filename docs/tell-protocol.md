@@ -179,6 +179,41 @@ write; failures do not fall back to unprotected storage. Windows does not perfor
 the POSIX directory fsync. These storage checks do not bypass the separate live
 identity and input-readiness checks above.
 
+## Session take (세션이 받아 가기)
+
+A waiting message no longer has to wait for the input box. A Claude receiver takes it
+itself from two hooks the pane already runs, without the GUI writing a byte:
+
+- Between tools: the PostToolUse hook (`kasaterm-steer-hook.sh`) runs `kasaterm-cli turn tool`.
+  A taken message comes back as `additionalContext`, so a working receiver reads it at its
+  next tool boundary instead of `waiting:busy` until the turn ends.
+- At the end of a turn: the Stop hook (`kasaterm-turn.sh end`) runs `kasaterm-cli turn end`.
+  A taken message comes back as `{"decision":"block","reason":…}`, so the turn goes on with
+  it; the app does not count that turn as ended. This also covers a receiver whose input
+  box holds a person's draft when its turn ends — the draft stays where it is.
+
+Both carry a `systemMessage` (`쪽지를 입력칸 대신 세션이 받았어요 — <first line>`) so a
+person watching the pane sees the arrival; `additionalContext` itself is not drawn.
+Claude Code 2.1.326 shows it as `PostToolUse:<tool> says: …` or `Stop says: …`; a Stop block
+also raises its own `stop hook reported a problem` notice, which is Claude Code's wording
+for any blocked stop, not a failure (checked 2026-11-18 with a real session: the model
+answered from the tool-boundary context and continued the blocked turn with the message).
+
+`surface.turn` with phase `tool` or `end` calls `Backend::tell_take`
+(`tell_service::take_for_session`). It takes the oldest `accepted` message for that pane,
+only when no message to the pane is `dispatching` (a paste in flight finishes on its own
+path) and only when the pane's live identity equals the message address and receiving
+process and the harness is Claude. Codex receivers keep the paste path. The take is
+`accepted → dispatching → submitted` under the ledger lock, so the GUI scheduler and the
+hook never deliver one message twice: whichever moves it to `dispatching` first owns it.
+The receipt reason says `handed to the session through its <tool|end> hook, not the input
+box`. One message per hook call keeps the order; the next waits for the next boundary.
+A tell `title` still renames the pane; Claude's own session name follows only on the paste
+path (it is set by the turn-start hook).
+
+An idle receiver with a draft and no turn running has no hook to run. That message waits
+as `waiting:draft` as before and is taken by the next turn's first tool or its end.
+
 ## Native integration fixture
 
 `app/kasaterm/tests/fixtures/tell_harness.rs` is a byte-recording fake harness

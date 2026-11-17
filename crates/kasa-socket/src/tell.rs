@@ -383,6 +383,12 @@ impl Ledger {
             && !self.records.values().any(|other|other.address.surface_id == r.address.surface_id && other.state == State::Dispatching))
             .cloned().collect()
     }
+    /// 이 칸이 다음에 받을 쪽지 — 칸마다 맨 앞 하나다. 그 칸에 이미 넣는 중인 쪽지가 있으면 없다.
+    pub fn next_for(&self, surface: &str) -> Option<Record> {
+        let mut mine = self.records.values().filter(|r| r.address.surface_id == surface);
+        if mine.clone().any(|r| r.state == State::Dispatching) { return None; }
+        mine.find(|r| r.state == State::Accepted).cloned()
+    }
     pub fn transition(&mut self, id: &str, state: State, reason: &str) -> Result<Record> {
         let old = self.records.get(id).context("unknown message_id")?.clone();
         let allowed = matches!((old.state, state), (State::Accepted, State::Dispatching | State::Failed) | (State::Dispatching, State::Submitted | State::Uncertain | State::Accepted | State::Failed));
@@ -605,6 +611,21 @@ mod tests {
         let receipt = ledger.transition(&id,State::Submitted,"writes succeeded").unwrap().receipt();
         assert!(receipt.get("read").is_none());
         assert!(ledger.transition(&id,State::Dispatching,"retry").is_err());
+    }
+    #[test] fn a_session_takes_its_oldest_waiting_message_but_never_beside_a_paste() {
+        let mut ledger = ledger();
+        let first = new_message_id();
+        ledger.accept(&first,address(),"first".into(),900).unwrap();
+        let second = new_message_id();
+        ledger.accept(&second,address(),"second".into(),900).unwrap();
+        let mut other = address(); other.surface_id = "%2".into();
+        ledger.accept(&new_message_id(),other,"elsewhere".into(),900).unwrap();
+        assert_eq!(ledger.next_for("%1").unwrap().message_id,first);
+        assert!(ledger.next_for("%3").is_none());
+        ledger.transition(&first,State::Dispatching,"pasting").unwrap();
+        assert!(ledger.next_for("%1").is_none(),"붙여넣는 중인 칸의 다음 쪽지는 그 길이 끝난 뒤");
+        ledger.transition(&first,State::Submitted,"writes succeeded").unwrap();
+        assert_eq!(ledger.next_for("%1").unwrap().message_id,second);
     }
     #[test] fn bounded_retention_never_reaccepts_a_forgotten_id() {
         let mut ledger = ledger();

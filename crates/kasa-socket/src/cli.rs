@@ -683,8 +683,11 @@ fn run() -> Result<Option<Response>> {
     // 턴 시작 훅이 부른다 — 이 pane 에 tell 로 「지금 일」이 들어왔으면 claude 의 공식 창구(UserPromptSubmit
     // 훅 출력의 `sessionTitle`)로 세션 이름을 맞춘다. 그 밖엔 아무것도 안 낸다: 훅 stdout 은 claude 가 읽는다.
     if cmd == "turn" {
-        if let Some(title) = response.result.as_ref().and_then(|r| r.get("session_title")).and_then(Value::as_str) {
-            println!("{}", json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": title}}));
+        let phase = args.get(if args.first().is_some_and(|a| a == "--surface") { 2 } else { 0 });
+        if let (Some(phase), Some(result)) = (phase, response.result.as_ref()) {
+            if let Some(out) = turn_hook_output(phase, result) {
+                println!("{out}");
+            }
         }
         return if response.ok { Ok(None) } else { Ok(Some(response)) };
     }
@@ -695,6 +698,24 @@ fn run() -> Result<Option<Response>> {
         return Ok(None);
     }
     Ok(Some(response))
+}
+
+/// 턴 훅이 claude 에 돌려줄 한 줄. 시작은 tell 의 「지금 일」을 세션 이름으로 맞추고, 도구 사이·차례 끝은 세션이
+/// 받아 간 쪽지를 그 훅의 공식 창구로 넘긴다 — 도구 사이는 맥락 덧붙이기, 차례 끝은 멈추지 말고 이어 가라는 결정.
+/// `systemMessage` 는 사람이 칸에서 쪽지가 들어온 것을 보게 한다(맥락 덧붙이기는 화면에 안 그려진다).
+fn turn_hook_output(phase: &str, result: &Value) -> Option<Value> {
+    if let Some(body) = result.get("tell").and_then(|tell| tell["body"].as_str()) {
+        let first: String = body.lines().next().unwrap_or_default().chars().take(80).collect();
+        let notice = format!("쪽지를 입력칸 대신 세션이 받았어요 — {first}");
+        let context = format!("기다리던 카사텀 쪽지예요. 입력칸이 아니라 훅으로 넘어왔으니 사람이 보낸 프롬프트처럼 읽고 처리하세요.\n\n{body}");
+        return match phase {
+            "tool" => Some(json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": context}, "systemMessage": notice})),
+            "end" => Some(json!({"decision": "block", "reason": context, "systemMessage": notice})),
+            _ => None,
+        };
+    }
+    let title = result.get("session_title").and_then(Value::as_str)?;
+    Some(json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": title}}))
 }
 
 /// 붙여넣기와 Enter 가 끝날 때까지만 기다린다. 상대가 일하는 중이면 큐에 남아 보관
@@ -4561,6 +4582,24 @@ fn run_statusline() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_taken_tell_goes_out_through_each_hooks_own_channel() {
+        use serde_json::json;
+        let tell = json!({"ok": true, "tell": {"message_id": "kt1.1.0", "body": "⟦아로나⟧ 첫 줄\n둘째 줄"}});
+        let tool = super::turn_hook_output("tool", &tell).unwrap();
+        assert_eq!(tool["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        assert!(tool["hookSpecificOutput"]["additionalContext"].as_str().unwrap().ends_with("⟦아로나⟧ 첫 줄\n둘째 줄"));
+        assert!(tool.to_string().starts_with("{\"hookSpecificOutput\""), "steer 훅이 이 머리로 가른다");
+        let end = super::turn_hook_output("end", &tell).unwrap();
+        assert_eq!(end["decision"], "block");
+        assert!(end.to_string().starts_with("{\"decision\""), "턴 훅이 이 머리로 가른다");
+        assert_eq!(end["systemMessage"], "쪽지를 입력칸 대신 세션이 받았어요 — ⟦아로나⟧ 첫 줄");
+        assert!(super::turn_hook_output("start", &tell).is_none());
+        assert!(super::turn_hook_output("end", &json!({"ok": true})).is_none());
+        let titled = super::turn_hook_output("start", &json!({"ok": true, "session_title": "지금 일"})).unwrap();
+        assert_eq!(titled["hookSpecificOutput"]["sessionTitle"], "지금 일");
+    }
+
     #[test]
     fn login_vault_commands_never_include_the_fingerprint_confirmation() {
         let method = |args: &[&str]| super::build_request("login-vault", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).map(|r| r.method);

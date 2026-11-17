@@ -756,11 +756,11 @@ fn surface_turn(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         None => return param_err(id, "surface.turn requires `surface_id` (string)"),
     };
     let phase = match params.get("phase").and_then(|v| v.as_str()) {
-        Some(p @ ("start" | "end" | "compact_start" | "compact_end" | "reset")) => p,
+        Some(p @ ("start" | "end" | "tool" | "compact_start" | "compact_end" | "reset")) => p,
         Some(other) => {
             return param_err(
                 id,
-                format!("surface.turn `phase` must be start|end|compact_start|compact_end|reset, got \"{other}\""),
+                format!("surface.turn `phase` must be start|end|tool|compact_start|compact_end|reset, got \"{other}\""),
             )
         }
         None => return param_err(id, "surface.turn requires `phase`"),
@@ -769,10 +769,24 @@ fn surface_turn(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     if mode.len() > 64 || !mode.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         return param_err(id, "surface.turn `permission_mode` must be a short identifier");
     }
+    // 일하는 세션은 입력칸이 바빠 쪽지가 차례 끝까지 기다렸다 — 도구 사이(`tool`)와 차례 끝(`end`)에 세션이 직접
+    // 받아 간다. 차례 끝에 받았으면 그 차례는 끝나지 않고 이어진다. 받기가 실패해도 턴 경계는 그대로 알린다.
+    let mut take_error = None;
+    if matches!(phase, "tool" | "end") {
+        match backend.tell_take(surface_id, phase) {
+            Ok(Some(tell)) => return Response::success(id, json!({"ok": true, "tell": tell})),
+            Ok(None) => {}
+            Err(e) => take_error = Some(e.to_string()),
+        }
+        if phase == "tool" {
+            return Response::success(id, json!({"ok": true, "tell_error": take_error}));
+        }
+    }
     match backend.turn(surface_id, phase, mode) {
         Ok(()) if phase == "start" => {
             Response::success(id, json!({"ok": true, "session_title": backend.take_session_title(surface_id)}))
         }
+        Ok(()) if take_error.is_some() => Response::success(id, json!({"ok": true, "tell_error": take_error})),
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
@@ -1677,9 +1691,19 @@ mod tests {
         // 소환 관계 기록 — (아이 칸, 부른 칸).
         spawners: Mutex<Vec<(String, String)>>,
         // 나쵸 인박스 보고 — 디스크 대신 여기 쌓는다(검증은 실물 build 를 그대로 탄다).
+        // 세션이 받아 갈 쪽지 본문과, 앱에 알려진 턴 경계.
+        waiting_tell: Mutex<Option<String>>,
+        turns: Mutex<Vec<String>>,
     }
 
     impl Backend for FakeBackend {
+        fn turn(&self, _surface_id: &str, phase: &str, _permission_mode: &str) -> anyhow::Result<()> {
+            self.turns.lock().unwrap().push(phase.into());
+            Ok(())
+        }
+        fn tell_take(&self, _surface_id: &str, _via: &str) -> anyhow::Result<Option<Value>> {
+            Ok(self.waiting_tell.lock().unwrap().take().map(|body| json!({"message_id": "kt1.1.0", "body": body})))
+        }
         fn prepare_action(&self) -> anyhow::Result<()> {
             anyhow::ensure!(!self.restoring, "app_restoring: no action performed");
             Ok(())
@@ -1769,6 +1793,21 @@ mod tests {
         fn remember_spawner(&self, child: &str, parent: &str) {
             self.spawners.lock().unwrap().push((child.to_string(), parent.to_string()));
         }
+    }
+
+    #[test]
+    fn a_waiting_tell_is_taken_between_tools_and_keeps_the_turn_going_at_its_end() {
+        let backend = FakeBackend::default();
+        let turn = |phase: &str| dispatch(&backend, Request { id: json!(1), method: "surface.turn".into(),
+            params: json!({"surface_id": "%1", "phase": phase}) });
+        *backend.waiting_tell.lock().unwrap() = Some("⟦아로나⟧ 하나".into());
+        assert_eq!(turn("tool").result.unwrap()["tell"]["body"], "⟦아로나⟧ 하나");
+        assert!(turn("tool").result.unwrap().get("tell").is_none());
+        *backend.waiting_tell.lock().unwrap() = Some("⟦아로나⟧ 둘".into());
+        assert_eq!(turn("end").result.unwrap()["tell"]["body"], "⟦아로나⟧ 둘");
+        assert!(backend.turns.lock().unwrap().is_empty(), "받아 간 차례는 끝나지 않는다·도구 사이는 턴 경계가 아니다");
+        assert!(turn("end").ok);
+        assert_eq!(*backend.turns.lock().unwrap(), vec!["end".to_string()]);
     }
 
     #[test]

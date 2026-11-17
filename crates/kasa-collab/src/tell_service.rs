@@ -33,6 +33,31 @@ pub fn transition(id: &str, state: State, reason: &str) -> Result<Record> {
     ledger()?.lock().map_err(|_|anyhow::anyhow!("tell ledger lock failed"))?.transition(id,state,reason)
 }
 
+/// 받는 세션이 훅으로 직접 받아 가는 쪽지 하나(docs/tell-protocol.md 「세션이 받아 가기」). 입력칸을 거치지 않아
+/// 일하는 차례·사람 초안과 다투지 않는다. 칸의 지금 신원이 쪽지 주소·받는 프로세스와 같은 claude 일 때만 넘기고,
+/// 그 칸에 붙여넣는 중인 쪽지가 있으면 그 길에 맡긴다.
+pub fn take_for_session(backend: &dyn Backend, surface: &str, via: &str) -> Result<Option<Record>> {
+    let candidate = {
+        let mut store = ledger()?.lock().map_err(|_|anyhow::anyhow!("tell ledger lock failed"))?;
+        store.expire_pending(tell::now_ms())?;
+        store.next_for(surface)
+    };
+    let Some(record) = candidate else { return Ok(None) };
+    let identity = backend.collab_tell_identity(surface)?;
+    // 코덱스 훅은 claude 의 차례 막기·맥락 덧붙이기 꼴을 모른다 — 붙여넣기 길에 둔다.
+    if Address::parse(&identity).ok().as_ref() != Some(&record.address)
+        || identity["agent_pid"].as_u64() != Some(record.receiver_agent_pid as u64)
+        || identity["harness"].as_str().and_then(kasa_pty::AgentKind::from_id) != Some(kasa_pty::AgentKind::Claude) {
+        return Ok(None);
+    }
+    let mut store = ledger()?.lock().map_err(|_|anyhow::anyhow!("tell ledger lock failed"))?;
+    // 신원을 보는 사이 GUI 가 붙여넣기를 시작했으면 그 쪽지는 그 길이 낸다.
+    if store.transition(&record.message_id,State::Dispatching,&format!("taken by the receiving session's {via} hook")).is_err() {
+        return Ok(None);
+    }
+    store.transition(&record.message_id,State::Submitted,&format!("handed to the session through its {via} hook, not the input box; model read is unconfirmed")).map(Some)
+}
+
 pub fn current_address(backend: &dyn Backend, surface: &str) -> Result<Address> {
     let live = kasa_pty::lookup_session(surface).context("target is not a live local PTY")?;
     ensure!(!live.input_closed(), "target pane is closed");

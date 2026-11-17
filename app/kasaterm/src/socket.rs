@@ -4407,6 +4407,15 @@ impl Backend for PtyBackend {
     fn take_session_title(&self, surface_id: &str) -> Option<String> {
         crate::tell_delivery::take_session_title(surface_id)
     }
+
+    fn tell_take(&self, surface_id: &str, via: &str) -> Result<Option<serde_json::Value>> {
+        let Some(record) = kasa_collab::tell_service::take_for_session(self, surface_id, via)? else { return Ok(None) };
+        if !record.title.is_empty() {
+            let _ = self.proxy.send_event(UserEvent::SocketRename(surface_id.to_owned(), record.title.clone()));
+        }
+        kasa_collab::board_service::poke();
+        Ok(Some(serde_json::json!({"message_id": record.message_id, "body": record.body})))
+    }
 }
 
 /// 레지스트리의 PTY 중 칸으로 셀 것의 셸 pid. 창 없는 웹 셸(`web-…`)은 GUI 가 칸으로 든 것만 — GUI 의 PTY 표
