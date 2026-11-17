@@ -1,7 +1,9 @@
 // Release builds hide the console window so kasaterm launches as a pure GUI
 // app (Start menu / .msi install). Debug builds keep the console so stderr
-// startup/IME logs stay visible for the self-test cycle.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// startup/IME logs stay visible for the self-test cycle. Test builds keep it
+// too: tests that relaunch this binary as a ConPTY child (bridge::attach_tests)
+// get no console as a GUI program, print nothing, and fail under --release.
+#![cfg_attr(all(not(debug_assertions), not(test)), windows_subsystem = "windows")]
 //! kasaterm — sugarloaf-rendered terminal driven by
 //! tmux-bridge. Multi-pane: tmux's split-window creates additional
 //! panes, layout-change events tell us how to lay them out, and we
