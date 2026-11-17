@@ -72,6 +72,9 @@ class HubScreen extends StatefulWidget {
   /// 새 판을 묻지 못했거나(끊김·관리자 아님) 붙들어 주지 않는 옛 관문이면 이만큼 쉬고 다시 묻는다.
   static const releaseRetry = Duration(seconds: 30);
 
+  /// 새 판 띠를 두는 시간 — 놓쳐도 설정 「앱 판」 줄이 같은 판을 늘 보인다.
+  static const releaseOffer = Duration(seconds: 12);
+
   @override
   State<HubScreen> createState() => _HubScreenState();
 }
@@ -148,10 +151,15 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
   void _offerRelease(AppRelease r) {
     if (!r.newer || r.build == _offered) return;
     _offered = r.build;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('새 판 ${r.version} (${r.build})이 있어요'),
-      duration: const Duration(seconds: 10),
-      action: SnackBarAction(label: '설치', onPressed: () => unawaited(installRelease(context, r, from: '허브 띠'))),
+    ScaffoldMessenger.of(context).showSnackBar(releaseBand(
+      title: '새 판 ${r.version} 있어요',
+      body: '빌드 ${r.build} · 설치하는 동안 앱이 잠깐 비켜서요',
+      plain: '나중에',
+      primary: '설치',
+      duration: HubScreen.releaseOffer,
+      onPressed: (label) {
+        if (label == '설치' && mounted) unawaited(installRelease(context, r, from: '허브 띠'));
+      },
     ));
   }
 

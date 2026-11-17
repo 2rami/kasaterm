@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'look.dart';
+
 /// 이 판의 빌드 번호 — `tool/ios-archive.sh` 가 KASA_BUILD 로 굽는다. 개발 설치(phone.sh·flutter run)는 비어 있다.
 const kasaBuild = String.fromEnvironment('KASA_BUILD');
 
@@ -80,11 +82,11 @@ Future<void> installRelease(
   if (first == null && !watch.left) {
     releaseLog('${releaseLeaveGrace.inSeconds}초 안에 비활성이 안 됨 — [앱 닫기] 띠');
     manual = messenger.showSnackBar(
-      SnackBar(
-        content: const Text('설치를 눌렀다면 앱이 비켜서야 설치가 시작돼요'),
+      releaseBand(
+        title: '앱이 비켜서야 설치가 시작돼요',
+        body: '확인 창에서 설치를 눌렀다면 앱을 닫아 주세요',
+        primary: '앱 닫기',
         duration: releaseManualBand,
-        persist: false,
-        action: SnackBarAction(label: '앱 닫기', onPressed: () {}),
       ),
     );
     unawaited(
@@ -104,12 +106,11 @@ Future<void> installRelease(
     case _Return.back:
       manual?.close();
       final band = messenger.showSnackBar(
-        SnackBar(
-          content: const Text('새 판을 설치하려고 앱을 닫아요 · 끝나면 알림을 눌러 열어요'),
+        releaseBand(
+          title: '새 판을 설치하려고 앱을 닫아요',
+          body: '설치가 끝나면 알림을 눌러 다시 열어요',
+          plain: '취소',
           duration: releaseStepAsideDelay,
-          // 단추가 달린 띠는 기본으로 안 사라진다 — 그러면 영영 비켜서지 않는다.
-          persist: false,
-          action: SnackBarAction(label: '취소', onPressed: () {}),
         ),
       );
       final closed = await band.closed;
@@ -122,6 +123,136 @@ Future<void> installRelease(
     'after': releaseOpenNoticeAfter.inSeconds,
     if (release.page case final page?) 'page': page.toString(),
   });
+}
+
+/// 새 판·설치 단계의 띠 — 머티리얼 기본 띠(검은 줄) 대신 앱의 판으로 선다: 쌍둥이 물 아이콘 타일 · 제목 15/600 ·
+/// 설명 13 · 단추 줄(일반 [plain] 톤 채움, 주 동작 [primary] 강조 채움). 어느 단추든 누르면 띠가
+/// `SnackBarClosedReason.action` 으로 닫히고 [onPressed] 가 그 이름을 받는다 — 부르는 쪽은 예전처럼 `closed` 로 안다.
+/// 단추가 있어도 [duration] 뒤 걷힌다. 머티리얼이 붙잡아 두는 것은 `SnackBarAction` 띠뿐이고, 비켜서기 띠가 안 걷히면
+/// 앱이 영영 비켜서지 않는다.
+SnackBar releaseBand({
+  required String title,
+  required String body,
+  String? plain,
+  String? primary,
+  required Duration duration,
+  void Function(String label)? onPressed,
+}) => SnackBar(
+  content: _ReleaseBand(
+    title: title,
+    body: body,
+    plain: plain,
+    primary: primary,
+    onPressed: onPressed,
+  ),
+  duration: duration,
+  behavior: SnackBarBehavior.floating,
+  backgroundColor: Colors.transparent,
+  elevation: 0,
+  padding: EdgeInsets.zero,
+  // 판 그림자가 띠 밖으로 번진다 — 잘리면 판이 바탕에 붙어 보인다.
+  clipBehavior: Clip.none,
+  margin: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.pagePad),
+);
+
+class _ReleaseBand extends StatelessWidget {
+  const _ReleaseBand({
+    required this.title,
+    required this.body,
+    this.plain,
+    this.primary,
+    this.onPressed,
+  });
+
+  final String title;
+  final String body;
+  final String? plain;
+  final String? primary;
+  final void Function(String label)? onPressed;
+
+  void _press(BuildContext context, String label) {
+    ScaffoldMessenger.of(
+      context,
+    ).hideCurrentSnackBar(reason: SnackBarClosedReason.action);
+    onPressed?.call(label);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final twin = TwinTone.of(context);
+    final buttons = [
+      if (plain case final label?)
+        OutlinedButton(
+          onPressed: () => _press(context, label),
+          child: Text(label),
+        ),
+      if (primary case final label?)
+        FilledButton(
+          onPressed: () => _press(context, label),
+          child: Text(label),
+        ),
+    ];
+    return Container(
+      decoration: twin.cardBox(),
+      padding: const EdgeInsets.all(Look.cardPad),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: Look.tile,
+                height: Look.tile,
+                decoration: BoxDecoration(
+                  color: twin.skyWash,
+                  borderRadius: Look.smallCorners,
+                ),
+                alignment: Alignment.center,
+                child: Icon(
+                  Icons.system_update_outlined,
+                  size: Look.iconSize,
+                  color: twin.skyInk,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(title, style: theme.textTheme.titleSmall),
+                    const SizedBox(height: Look.rowGap),
+                    Text(
+                      body,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (buttons.isNotEmpty) ...[
+            const SizedBox(height: Look.fieldGap),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                for (final (i, b) in buttons.indexed) ...[
+                  if (i > 0) const SizedBox(width: 8),
+                  b,
+                ],
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 /// 비켜서기 전에 [취소]를 누를 틈.
