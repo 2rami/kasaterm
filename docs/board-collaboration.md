@@ -109,6 +109,12 @@ kasaterm-cli attach <pane> [--on <machine>] [--into <pane>] [--focus]
 kasaterm-cli machines [--json] · identify --machine <machine>   # route: local|direct|relay|none; exit 0 reachable, 1 not
 ```
 
+A pane title on an agent pane is that harness's own session name; kasaterm keeps no separate name for it. For a Claude
+pane `rename-window <pane> <title>` types `/rename <title>` through the safe `tell` path (only into an idle, empty
+prompt, so a busy pane gets it after its turn), and the pane title follows once Claude records the name. Codex's rename
+asks for the name in its own prompt, so kasaterm does not type it and a Codex pane refuses the rename; rename it in
+that pane.
+
 `summon --machine` places the shell (`spawn`), types `cd <folder> && <boot>`
 (`send_text`), waits for the row with that `surface_key` to carry a session, then
 sends the brief with a remote `tell`. Its result is the pane's board address

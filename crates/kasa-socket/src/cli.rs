@@ -2038,6 +2038,7 @@ const HELP_GROUPS: &[(&str, &[&str])] = &[
         "focus %N · closed [%N]                    포커스 · 되살리기 목록(%N 을 주면 진짜 끈다)",
         "close %N… [--force]                       칸 닫기(미커밋 변경이 있으면 안 닫는다)",
         "rename-window [%N] <이름> | rename-window [%N] --color #rrggbb   %N 이면 그 칸 이름·색, 없으면 방 이름",
+        "  claude 칸 이름 = 진짜 세션 이름: 쉬는 차례에 /rename 을 쳐 넣는다(일하는 중이면 끝난 뒤). codex 칸은 그 칸의 /rename",
         "rename-window --room <칸> <이름>          그 칸이 든 방 이름",
         "  다른 기기 칸: focus·close·move·rename-window 의 %N 자리에 %N@기계 · 이름@기계 · --address JSON",
         "attach <%N@기계|주소> [--on 기계] [--into 칸] [--focus]   다른 기기 칸을 거울 탭으로(--on 그 기계 화면에)",

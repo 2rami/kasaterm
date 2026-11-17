@@ -613,9 +613,10 @@ impl App {
                 return;
             }
         }
-        // 제목은 Enter **앞에** 맡긴다 — Enter 가 닿자마자 claude 의 제출 훅이 가져가러 온다.
+        // 제목은 Enter **앞에** 맡긴다 — Enter 가 닿자마자 claude 의 제출 훅이 가져가러 온다. 슬래시 명령(`/rename`)은
+        // 제출 훅을 안 거쳐, 맡겨 두면 다음 프롬프트까지 남았다가 그 사이 사람이 바꾼 이름을 되돌린다.
         let surface = commit.record.address.surface_id.clone();
-        if !commit.record.title.is_empty() {
+        if !commit.record.title.is_empty() && !commit.record.body.starts_with('/') {
             session_titles().lock().unwrap().insert(surface.clone(),(commit.record.title.clone(),Instant::now()));
         }
         let result = commit.pty.send_bytes_guarded(b"\r",Some(commit.revision));

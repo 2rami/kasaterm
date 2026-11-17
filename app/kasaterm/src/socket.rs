@@ -1688,6 +1688,23 @@ impl Backend for PtyBackend {
 
     fn rename_surface(&self, surface_id: &str, title: &str) -> Result<()> {
         self.prepare_action()?;
+        // 학생 칸의 이름은 그 하네스의 진짜 세션 이름 하나다. 칸 제목에 따로 핀을 꽂으면 입력칸·`/resume` 의 이름은
+        // 그대로인 채 칸 제목만 바뀌고, 그 핀이 뒤에 붙는 진짜 이름까지 가렸다(2026-11-18 「진짜 이름으로만」). claude 는
+        // 사람이 하듯 `/rename` 을 안전 전달로 쳐 넣고(쉬는 차례에만 들어간다), 칸 제목은 들어간 뒤 그 이름을 따른다.
+        match kasa_pty::lookup_session(surface_id).and_then(|live| live.active_agent()) {
+            Some(kasa_pty::AgentKind::Claude) => {
+                let name = kasa_socket::tell::normalize_title(title)?;
+                anyhow::ensure!(!name.is_empty(), "claude 세션 이름이 비었어요");
+                let params = serde_json::json!({ "message_id": kasa_socket::tell::new_message_id(), "surface_id": surface_id,
+                    "body": format!("/rename {name}"), "title": name });
+                let receipt = kasa_collab::tell_service::submit(self, &params, || self.proxy.send_event(UserEvent::SafeTellWake)
+                    .map_err(|_| anyhow::anyhow!("GUI delivery event loop stopped")))?;
+                anyhow::ensure!(receipt["state"] != "failed", "이름 바꾸기를 못 넣었어요: {}", receipt["reason"].as_str().unwrap_or_default());
+                return Ok(());
+            }
+            Some(kasa_pty::AgentKind::Codex) => anyhow::bail!("codex 칸의 이름은 그 칸에서 /rename 으로 바꿔요 — 카사텀이 따로 붙이는 이름은 없어요"),
+            _ => {}
+        }
         let _ = self.proxy.send_event(UserEvent::SocketRename(
             surface_id.to_string(),
             title.to_string(),
