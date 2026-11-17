@@ -581,6 +581,57 @@ impl App {
     }
 }
 
+/// 안 바뀐 칸의 합성을 다시 쓰는 상한. 합성은 격자 말고도 인라인 그림·결과, 학생 결속, 에이전트 목록
+/// 같은 바깥 상태를 읽어 내용 번호만으로는 다 못 잡는다 — 그 변화도 이 시간 안에는 화면에 닿는다.
+const COMPOSE_REUSE: std::time::Duration = std::time::Duration::from_millis(250);
+
+pub(crate) struct ComposeMemo {
+    key: u64,
+    viewer: Option<kasa_pty::ViewerRevision>,
+    at: std::time::Instant,
+    value: TerminalComposition,
+}
+
+impl ComposeMemo {
+    fn reusable(&self, key: u64, viewer: Option<kasa_pty::ViewerRevision>, now: std::time::Instant) -> bool {
+        self.key == key && self.viewer == viewer && now.saturating_duration_since(self.at) < COMPOSE_REUSE
+    }
+}
+
+#[cfg(test)]
+mod compose_memo_tests {
+    use super::*;
+
+    #[test]
+    fn a_memo_is_reused_only_for_the_same_key_and_viewer_within_its_bound() {
+        let at = std::time::Instant::now();
+        let memo = ComposeMemo { key: 7, viewer: None, at, value: TerminalComposition::default() };
+        assert!(memo.reusable(7, None, at + COMPOSE_REUSE / 2));
+        assert!(!memo.reusable(8, None, at), "another grid, size or student is another composition");
+        assert!(!memo.reusable(7, None, at + COMPOSE_REUSE), "outside state the key cannot see reaches the screen in time");
+    }
+
+    #[test]
+    fn every_mutable_borrow_of_a_grid_moves_its_revision_and_reading_does_not() {
+        let mut tab = crate::PaneTab::default();
+        let first = tab.term_mut().unwrap().revision;
+        let read = tab.term().unwrap().revision;
+        let second = tab.term_mut().unwrap().revision;
+        assert_eq!(first, read);
+        assert!(second > first, "a write path that skips the bump would keep an old composition");
+    }
+
+    #[test]
+    fn a_reused_composition_never_carries_the_ime_caret() {
+        let mut fresh = TerminalComposition::default();
+        fresh.rows = vec![vec![GridCell::blank(); 3]];
+        fresh.tab_pid = "%3".into();
+        let reused = fresh.reuse();
+        assert!(reused.preedit_cursor.is_none());
+        assert_eq!((reused.rows, reused.tab_pid), (fresh.rows, fresh.tab_pid));
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TerminalComposition {
     pub(crate) preedit_cursor: Option<preedit::Placement>,
@@ -603,6 +654,34 @@ pub(crate) struct TerminalComposition {
     pub(crate) runs_claude: bool,
     pub(crate) true_char: Option<String>,
     pub(crate) tab_pid: String,
+}
+
+impl TerminalComposition {
+    /// 다시 쓸 사본. IME 자리는 활성 칸에만 있어 재사용하는 합성에는 없다.
+    fn reuse(&self) -> Self {
+        Self {
+            preedit_cursor: None,
+            animated_cells: self.animated_cells,
+            rows: self.rows.clone(),
+            banner_slots: self.banner_slots.clone(),
+            spinner_slots: self.spinner_slots.clone(),
+            waiting_slots: self.waiting_slots.clone(),
+            standing_slots: self.standing_slots.clone(),
+            profile_slots: self.profile_slots.clone(),
+            inline_slots: self.inline_slots.clone(),
+            schale_logo_slots: self.schale_logo_slots.clone(),
+            title_outline_slots: self.title_outline_slots.clone(),
+            status_model_icons: self.status_model_icons.clone(),
+            view_shifts: self.view_shifts.clone(),
+            tip_hit: self.tip_hit.clone(),
+            agents_view_panes: self.agents_view_panes.clone(),
+            mirror_claude_panes: self.mirror_claude_panes.clone(),
+            agents_view: self.agents_view,
+            runs_claude: self.runs_claude,
+            true_char: self.true_char.clone(),
+            tab_pid: self.tab_pid.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -877,10 +956,96 @@ mod visual_scene_tests {
 }
 
 impl App {
+    /// 그리기마다 모든 칸을 다시 합성하면(격자 복사·스피너·상태줄·학생 그림 판정) 칸 수에 비례해 한 장이
+    /// 길어졌다 — 3840x1600 리그 24칸에 한 장 p50 7.5~9ms 중 합성만 2.4ms(2026-11-18). 쉬는 칸은
+    /// 지난 합성을 그대로 쓴다. 활성 칸(커서·IME)·일하거나 사람을 기다리는 칸·깜빡이는 칸·마우스 아래
+    /// 칸·움직이는 그림이 있는 칸은 매번 짓는다.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn compose_terminal_pane(
+        &self,
+        ws: &Workspace,
+        pane: &PaneState,
+        term: Option<&TerminalPane>,
+        id: &String,
+        tab_pid: String,
+        cols_now: usize,
+        rows_now: usize,
+        body_left: f32,
+        body_top: f32,
+        font_scale: f32,
+        desktop_view: bool,
+    ) -> TerminalComposition {
+        let memo = term.and_then(|t| {
+            self.compose_memo_key(ws, t, id, &tab_pid, (cols_now, rows_now), (body_left, body_top, font_scale), desktop_view)
+        });
+        if let Some((key, viewer)) = memo {
+            if let Some(hit) = self.compose_memo.borrow().get(id).filter(|m| m.reusable(key, viewer, std::time::Instant::now())) {
+                return hit.value.reuse();
+            }
+        }
+        let composition = self.compose_terminal_pane_now(
+            ws, pane, term, id, tab_pid, cols_now, rows_now, body_left, body_top, font_scale, desktop_view,
+        );
+        let mut memos = self.compose_memo.borrow_mut();
+        match memo.filter(|_| !composition.animated_cells && composition.preedit_cursor.is_none()) {
+            Some((key, viewer)) => {
+                memos.retain(|_, m| m.at.elapsed() < COMPOSE_REUSE * 40);
+                memos.insert(id.clone(), ComposeMemo { key, viewer, at: std::time::Instant::now(), value: composition.reuse() });
+            }
+            None => {
+                memos.remove(id);
+            }
+        }
+        composition
+    }
+
+    /// 지난 합성을 다시 써도 되는 칸이면 그 열쇠. 열쇠에 못 담는 것(커서·IME·일하는 중·깜빡임·마우스)이
+    /// 걸린 칸은 `None` 이라 매번 짓는다.
+    #[allow(clippy::too_many_arguments)]
+    fn compose_memo_key(
+        &self,
+        ws: &Workspace,
+        term: &TerminalPane,
+        id: &String,
+        tab_pid: &str,
+        (cols, rows): (usize, usize),
+        (left, top, scale): (f32, f32, f32),
+        desktop_view: bool,
+    ) -> Option<(u64, Option<kasa_pty::ViewerRevision>)> {
+        use std::hash::{Hash, Hasher};
+        if !desktop_view || term.laid_out || ws.active_pane.as_ref() == Some(id) {
+            return None;
+        }
+        let state = self.agent_state(tab_pid);
+        if state.is_busy() || state.needs_you() || self.notify_flash_factor(tab_pid).is_some() {
+            return None;
+        }
+        let (w, h) = (cols as f32 * self.cell.w * scale, rows as f32 * self.cell.h * scale);
+        let (x, y) = self.cursor_px;
+        if x >= left && x < left + w && y >= top && y < top + h {
+            return None;
+        }
+        let viewer = if kasa_remote::remote::is_view_pane(tab_pid) {
+            Some(self.pty.get(tab_pid)?.viewer_revision())
+        } else {
+            None
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (term.revision, id, tab_pid, cols, rows, left.to_bits(), top.to_bits(), scale.to_bits()).hash(&mut hasher);
+        // 글자 칸 크기만 바뀌어도(확대) 그림 자리(px)가 옮겨 간다.
+        (self.cell.w.to_bits(), self.cell.h.to_bits()).hash(&mut hasher);
+        (ws.pane_character.get(tab_pid), theme::character_ordinal(&ws.pane_character, tab_pid)).hash(&mut hasher);
+        (theme::accent(), theme::pane_bg(), theme::cursor(), theme::fg()).hash(&mut hasher);
+        (self.pane_claude_sid.get(tab_pid), self.pane_ultracode.contains(tab_pid), self.pane_cwd_cache.get(tab_pid)).hash(&mut hasher);
+        (self.turn_done_panes.contains(tab_pid), std::mem::discriminant(&state)).hash(&mut hasher);
+        (self.mirror_view_scroll.get(tab_pid), self.turn.mirror_target(tab_pid)).hash(&mut hasher);
+        Some((hasher.finish(), viewer))
+    }
+
     /// A live consumer supplies its own offset-zero term and no desktop chrome.
     /// Placeholder erasure and the matching art always leave in the same result.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn compose_terminal_pane(
+    fn compose_terminal_pane_now(
         &self,
         ws: &Workspace,
         pane: &PaneState,
