@@ -729,7 +729,7 @@ impl App {
         if self.tmux.is_some() || self.restore_applying.is_some() {
             return;
         }
-        let snap = kasa_device::machines::snapshot();
+        let snap = kasa_device::machines::snapshot_shared();
         for i in 0..self.windows.len() {
             let Some((label, _)) = self.remote_view_of_window(i) else { continue };
             let Some(m) = kasa_device::machines::find(&label) else { continue };
@@ -1196,7 +1196,7 @@ impl App {
                     return;
                 }
                 if since < std::time::Duration::from_secs(15) {
-                    let stale = kasa_device::machines::snapshot().iter().any(|m| {
+                    let stale = kasa_device::machines::snapshot_shared().iter().any(|m| {
                         m.get("ago_secs").and_then(|v| v.as_u64())
                             .is_some_and(|ago| ago as f32 > since.as_secs_f32())
                     });

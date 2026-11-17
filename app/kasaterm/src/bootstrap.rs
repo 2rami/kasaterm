@@ -475,9 +475,14 @@ pub(crate) fn apply_lite_env() {
 /// 않는다: 창 크기를 저장하지 않고(`save_window_frame`), 저장 세션 복원도 묻지 않는다.
 /// 설정 파일이 인스턴스 사이에 공유되기 때문이고, 실제로 한쪽만 막았다가 나머지에
 /// 당했다(430x700 검증 실행이 `window.json` 을 덮었고, 복원 대화상자가 캡처를 가렸다).
+///
+/// 그림마다 칸마다 묻는 자리(사이드바 방 요약 등)가 있어 한 번만 읽는다 — Windows 의 env 읽기는 이름을 UTF-16 으로
+/// 옮기고 프로세스 env 잠금을 잡는다(2026-11-18 집 PC 덤프에 그 자리가 메인 스레드로 찍혔다).
 pub(crate) fn verification_run() -> bool {
-    std::env::var_os("KASATERM_WINDOW_SIZE").is_some()
-        || std::env::var_os("KASATERM_WINDOW_POS").is_some()
+    static RUN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RUN.get_or_init(|| {
+        std::env::var_os("KASATERM_WINDOW_SIZE").is_some() || std::env::var_os("KASATERM_WINDOW_POS").is_some()
+    })
 }
 
 /// 끝난 태스크를 며칠 뒤에 지울지. `KASATERM_TASK_KEEP_DAYS` 로 조절.

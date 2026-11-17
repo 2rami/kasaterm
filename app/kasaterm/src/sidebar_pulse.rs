@@ -307,7 +307,8 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
 }
 
 pub(crate) fn fixture_on() -> bool {
-    crate::verification_run() && std::env::var_os("KASATERM_SIDEBAR_FIXTURE").is_some()
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::verification_run() && std::env::var_os("KASATERM_SIDEBAR_FIXTURE").is_some())
 }
 
 /// 격리 검증 앱의 가짜 학생 — 진짜 claude 없이 줄 모양·순서·강조와 배치도 띠를 잰다. pane id 의

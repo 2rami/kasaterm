@@ -80,7 +80,7 @@ fn push_toast(msg: String) {
 /// 아무 일도 안 난다.
 pub(crate) fn home_target() -> Option<(String, String)> {
     let m = kasa_device::machines::home_machine()?;
-    let online = kasa_device::machines::snapshot()
+    let online = kasa_device::machines::snapshot_shared()
         .iter()
         .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(m.label.as_str()))
         .and_then(|v| v.get("online").and_then(serde_json::Value::as_bool))

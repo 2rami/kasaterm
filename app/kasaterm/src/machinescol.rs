@@ -466,7 +466,7 @@ pub(crate) fn status_links() -> Vec<StatusLink> {
     if let Some(links) = LAST.with(|l| l.borrow().as_ref().filter(|(at, _)| at.elapsed() < KEEP).map(|(_, v)| v.clone())) {
         return links;
     }
-    let links: Vec<StatusLink> = kasa_device::machines::snapshot().iter()
+    let links: Vec<StatusLink> = kasa_device::machines::snapshot_shared().iter()
         .map(|m| StatusLink {
             label: m["label"].as_str().unwrap_or("기기").to_string(),
             online: m["online"].as_bool() == Some(true),
@@ -661,8 +661,8 @@ impl App {
         // 기계 섹션 — 폴링 캐시 스냅샷을 그대로 편다. host(화면공유 주소)는
         // 캐시에 없어 명부에서 라벨로 찾는다 — 한 번만 읽어 루프에 물린다.
         let registry = kasa_device::machines::machines();
-        let mut machines: Vec<state::MachinesColMachine> = kasa_device::machines::snapshot()
-            .into_iter()
+        let mut machines: Vec<state::MachinesColMachine> = kasa_device::machines::snapshot_shared()
+            .iter()
             .filter_map(|m| {
                 let label = m.get("label")?.as_str()?.to_string();
                 let reg = registry.iter().find(|r| r.label == label);

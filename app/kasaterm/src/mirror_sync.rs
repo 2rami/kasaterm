@@ -82,7 +82,7 @@ impl App {
         }
         self.mirror_sync.last_poll = Some(Instant::now());
         self.mirror_sync.last_generation = generation;
-        let machines = kasa_device::machines::snapshot();
+        let machines = kasa_device::machines::snapshot_shared();
         let now = Instant::now();
         self.mirror_sync.first_seen.retain(|local, _| self.pty.contains_key(local));
         for local in self.pty.keys() {
@@ -124,7 +124,7 @@ impl App {
             self.remote_keep.insert(local.clone());
             self.remove_finished_surface(&local);
         }
-        for machine in &machines {
+        for machine in machines.iter() {
             let Some(base) = machine.get("base").and_then(|v| v.as_str()) else { continue };
             let mirrors = self.mirror_sync_anchors(base);
             let rows = source_rows(machine);
@@ -228,7 +228,7 @@ impl App {
         let ready: Vec<_> = self.mirror_sync.receiver.as_ref()
             .map(|rx| rx.try_iter().collect()).unwrap_or_default();
         if ready.is_empty() { return; }
-        let machines = kasa_device::machines::snapshot();
+        let machines = kasa_device::machines::snapshot_shared();
         for mut ready in ready {
             self.mirror_sync.pending.remove(&ready.local);
             let views = self.mirror_sync_anchors(&ready.candidate.base);

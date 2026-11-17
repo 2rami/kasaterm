@@ -27,7 +27,7 @@ fn account_lines(g: &mut gpu::GpuRenderer, x: f32, y: f32, width: f32, account: 
 }
 
 pub(super) fn paint(g: &mut gpu::GpuRenderer, sb: &mut state::StatusbarState, cursor: (f32, f32), anchor: Rect, viewport: (f32, f32)) {
-    let machines = kasa_device::machines::snapshot();
+    let machines = kasa_device::machines::snapshot_shared();
     let entries = kasa_device::machines::entries();
     let w = 420.0_f32.min((viewport.0 - 16.0).max(1.0));
     let stacked = w < 350.0;

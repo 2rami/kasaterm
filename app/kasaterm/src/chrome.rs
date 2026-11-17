@@ -796,12 +796,12 @@ impl App {
             }
             return;
         }
-        let snapshot = kasa_device::machines::snapshot();
+        let snapshot = kasa_device::machines::snapshot_shared();
         let mut known_routes = std::collections::HashSet::new();
         let mut online_routes = std::collections::HashSet::new();
         let mut seats = Vec::new();
         let mut rows = Vec::new();
-        for machine in &snapshot {
+        for machine in snapshot.iter() {
             let Some(label) = machine.get("label").and_then(|v| v.as_str()) else { continue };
             let route = machine.get("route").and_then(|v| v.as_str()).unwrap_or(label);
             known_routes.insert(route.to_string());
