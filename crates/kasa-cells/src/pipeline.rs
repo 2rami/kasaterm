@@ -360,13 +360,42 @@ impl Pipeline {
         queue.write_buffer(&self.uniform_buffer, off, bytemuck::bytes_of(&time));
     }
 
+    /// 장마다 시간을 `belt` 로 그 장의 인코더 안에서 쓴다 — `queue.write_buffer` 는 부를 때마다
+    /// 새 스테이징 버퍼를 만들고 제출 뒤 버린다.
+    pub fn write_time_with(&self, encoder: &mut wgpu::CommandEncoder, belt: &mut wgpu::util::StagingBelt, time: f32) {
+        let off = std::mem::offset_of!(Uniforms, time) as u64;
+        let size = wgpu::BufferSize::new(std::mem::size_of::<f32>() as u64).expect("f32 has a size");
+        belt.write_buffer(encoder, &self.uniform_buffer, off, size).copy_from_slice(bytemuck::bytes_of(&time));
+    }
+
+    /// `write_instances` 의 `belt` 판. 인스턴스는 쌓인 그대로 매핑된 조각에 바로 들어간다.
+    pub fn write_instances_with(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        belt: &mut wgpu::util::StagingBelt,
+        instances: &[CellInstance],
+    ) {
+        self.reserve(device, instances.len() as u32);
+        let bytes: &[u8] = bytemuck::cast_slice(instances);
+        if let Some(size) = wgpu::BufferSize::new(bytes.len() as u64) {
+            belt.write_buffer(encoder, &self.instance_buffer, 0, size).copy_from_slice(bytes);
+        }
+    }
+
     pub fn write_instances(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         instances: &[CellInstance],
     ) {
-        let needed = instances.len() as u32;
+        self.reserve(device, instances.len() as u32);
+        if !instances.is_empty() {
+            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
+        }
+    }
+
+    fn reserve(&mut self, device: &wgpu::Device, needed: u32) {
         if needed > self.instance_capacity {
             // Grow geometrically so a burst of new glyphs doesn't
             // trigger an allocation every frame.
@@ -378,9 +407,6 @@ impl Pipeline {
                 mapped_at_creation: false,
             });
             self.instance_capacity = new_cap;
-        }
-        if !instances.is_empty() {
-            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
         }
     }
 

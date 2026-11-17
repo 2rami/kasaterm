@@ -105,6 +105,92 @@ pub struct GridRenderer {
     pub palette: Palette,
     /// 실제로 실린 주 글꼴 경로 — 호스트가 같은 글꼴로 보조 shaper 를 세울 때 쓴다.
     pub font_path: String,
+    /// 장마다 올리는 시간·인스턴스의 스테이징. `queue.write_buffer` 는 부를 때마다 스테이징
+    /// 버퍼를 새로 만들어(Vulkan 에선 메모리 할당) 제출 뒤 버렸고, 그 만들고 버리기가 한 장의
+    /// 올리기·제출 시간 대부분이었다. 매핑된 조각을 돌려 쓴다.
+    belt: wgpu::util::StagingBelt,
+    /// 넘긴 장이 제출된 뒤에야 조각을 되돌려 받는다 — 제출 전에 매핑을 걸면 그 제출이 막힌다.
+    belt_owed: bool,
+    /// 그림·아이콘 인스턴스를 한 버퍼로 모으는 자리 — 장마다 Vec 을 새로 만들지 않는다.
+    image_scratch: Vec<CellInstance>,
+    #[cfg(windows)]
+    presenter: Option<Presenter>,
+}
+
+/// Windows: 장의 제출과 내보내기를 GUI 스레드 밖에서 한다. 3840x1600 칸 24개 리그에서 둘이 한 장에
+/// 0.45~0.55ms(제출 ~0.24·내보내기 ~0.22~0.35, Vulkan·DX12 둘 다 드라이버 몫)를 GUI 스레드에서 먹었다.
+/// 기록을 마친 명령과 그 장의 텍스처를 넘기고 곧바로 돌아간다. 다음 장의 텍스처를 받기 전, 표면을 다시
+/// 짜기 전에는 넘긴 장이 다 내보내졌는지 기다린다 — 장 사이가 그보다 길어 보통은 기다림이 없다.
+/// macOS 는 Metal 층을 장마다 손보는 길이 있어 그대로 GUI 스레드에서 낸다.
+#[cfg(windows)]
+struct Presenter {
+    tx: std::sync::mpsc::Sender<(wgpu::CommandBuffer, wgpu::SurfaceTexture)>,
+    left: Arc<(std::sync::Mutex<u32>, std::sync::Condvar)>,
+}
+
+#[cfg(windows)]
+struct Done<'a>(&'a (std::sync::Mutex<u32>, std::sync::Condvar));
+
+#[cfg(windows)]
+impl Drop for Done<'_> {
+    fn drop(&mut self) {
+        let (n, cv) = self.0;
+        *n.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        cv.notify_all();
+    }
+}
+
+#[cfg(windows)]
+impl Presenter {
+    fn new(queue: wgpu::Queue) -> Option<Self> {
+        let (tx, rx) = std::sync::mpsc::channel::<(wgpu::CommandBuffer, wgpu::SurfaceTexture)>();
+        let left = Arc::new((std::sync::Mutex::new(0u32), std::sync::Condvar::new()));
+        let done = left.clone();
+        std::thread::Builder::new()
+            .name("gpu-present".into())
+            .spawn(move || {
+                for (commands, frame) in rx {
+                    // 제출이 패닉해도(wgpu 의 잡히지 않은 오류) 그 장은 끝난 것으로 센다 — 안 그러면 GUI
+                    // 스레드가 영영 기다린다. 일꾼이 죽으면 다음 장부터는 GUI 스레드가 그 자리에서 낸다.
+                    let _done = Done(&done);
+                    queue.submit(Some(commands));
+                    frame.present();
+                }
+            })
+            .ok()?;
+        Some(Self { tx, left })
+    }
+
+    /// 넘긴다. 일꾼이 없으면(끝났으면) 돌려준다 — 부른 쪽이 그 자리에서 낸다.
+    fn hand(
+        &self,
+        commands: wgpu::CommandBuffer,
+        frame: wgpu::SurfaceTexture,
+    ) -> Result<(), (wgpu::CommandBuffer, wgpu::SurfaceTexture)> {
+        *self.left.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.tx.send((commands, frame)).map_err(|e| {
+            *self.left.0.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+            e.0
+        })
+    }
+
+    fn settle(&self) {
+        let (n, cv) = &*self.left;
+        let mut left = n.lock().unwrap_or_else(|e| e.into_inner());
+        while *left > 0 {
+            left = cv.wait(left).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// 표면보다 먼저 넘긴 장을 다 내보낸다.
+impl Drop for GridRenderer {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(p) = self.presenter.as_ref() {
+            p.settle();
+        }
+    }
 }
 
 impl GridRenderer {
@@ -349,6 +435,9 @@ impl GridRenderer {
             ..Default::default()
         });
 
+        let device_for_belt = device.clone();
+        #[cfg(windows)]
+        let queue_for_presenter = queue.clone();
         Ok(Self {
             window,
             surface,
@@ -380,7 +469,24 @@ impl GridRenderer {
             clip_runs: Vec::new(),
             palette: Palette::default(),
             font_path,
+            belt: wgpu::util::StagingBelt::new(device_for_belt, 1 << 20),
+            belt_owed: false,
+            image_scratch: Vec::new(),
+            #[cfg(windows)]
+            presenter: Presenter::new(queue_for_presenter),
         })
+    }
+
+    /// 넘긴 장이 다 내보내질 때까지 기다린다 — 표면에서 텍스처를 새로 받거나 표면을 다시 짜기 전에.
+    /// 그 장이 제출된 뒤이므로 스테이징 조각도 여기서 되돌려 받는다.
+    pub fn settle_present(&mut self) {
+        #[cfg(windows)]
+        if let Some(p) = self.presenter.as_ref() {
+            p.settle();
+        }
+        if std::mem::take(&mut self.belt_owed) {
+            self.belt.recall();
+        }
     }
 
     /// 이번 장에 쌓은 그리기를 비운다. 호스트가 장마다 맨 앞에서 부른다.
@@ -1351,6 +1457,7 @@ impl GridRenderer {
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
+        self.settle_present();
         self.config.width = w.max(1);
         self.config.height = h.max(1);
         self.surface.configure(&self.device, &self.config);
@@ -1917,26 +2024,9 @@ impl GridRenderer {
         // pane is busy — skip re-uploading the instance buffers entirely, so a
         // working pane costs one uniform write + the draw, not a full chrome
         // rebuild. The cached instance buffer redraws as-is.
-        self.pipeline.write_time(&self.queue, time_secs);
-        let instance_count = self.chrome.len();
-        let n_img = self.image_quads.len();
-        if chrome_changed {
-            self.pipeline
-                .write_instances(&self.device, &self.queue, &self.chrome);
-            // Upload this frame's image + icon quads (images first, icons
-            // appended) into one buffer. Buffer position is just storage —
-            // the draw order comes from the watermarks below.
-            if !self.image_quads.is_empty() || !self.icon_quads.is_empty() {
-                let all_instances: Vec<CellInstance> = self
-                    .image_quads
-                    .iter()
-                    .chain(self.icon_quads.iter())
-                    .map(|(_, inst, ..)| *inst)
-                    .collect();
-                self.image_pipeline
-                    .write_instances(&self.device, &self.queue, &all_instances);
-            }
-        }
+        // 텍스처를 먼저 받는다 — 못 받으면 아무것도 기록하지 않은 채 돌아간다(올리기는 이
+        // 장의 인코더 안에 기록되므로, 반쯤 기록된 인코더를 버리면 그 올리기도 사라진다).
+        self.settle_present();
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self
@@ -1944,6 +2034,24 @@ impl GridRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("kasaterm gpu encoder"),
             });
+        self.pipeline.write_time_with(&mut encoder, &mut self.belt, time_secs);
+        let instance_count = self.chrome.len();
+        let n_img = self.image_quads.len();
+        if chrome_changed {
+            self.pipeline
+                .write_instances_with(&self.device, &mut encoder, &mut self.belt, &self.chrome);
+            // Upload this frame's image + icon quads (images first, icons
+            // appended) into one buffer. Buffer position is just storage —
+            // the draw order comes from the watermarks below.
+            if !self.image_quads.is_empty() || !self.icon_quads.is_empty() {
+                self.image_scratch.clear();
+                self.image_scratch
+                    .extend(self.image_quads.iter().chain(self.icon_quads.iter()).map(|(_, inst, ..)| *inst));
+                self.image_pipeline
+                    .write_instances_with(&self.device, &mut encoder, &mut self.belt, &self.image_scratch);
+            }
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kasaterm gpu pass"),
@@ -2106,8 +2214,21 @@ impl GridRenderer {
         } else {
             None
         };
-        self.queue.submit(Some(encoder.finish()));
-        frame.present();
+        self.belt.finish();
+        self.belt_owed = true;
+        let commands = encoder.finish();
+        // 캡처는 바로 뒤에 그 장을 읽어 내므로 여기서 낸다.
+        #[cfg(windows)]
+        let left = match self.presenter.as_ref() {
+            Some(p) if cap.is_none() => p.hand(commands, frame).err(),
+            _ => Some((commands, frame)),
+        };
+        #[cfg(not(windows))]
+        let left = Some((commands, frame));
+        if let Some((commands, frame)) = left {
+            self.queue.submit(Some(commands));
+            frame.present();
+        }
         if let (Some(path), Some((buf, w, h, bpr))) = (capture, cap) {
             buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
             let _ = self.device.poll(wgpu::PollType::Wait {
@@ -2513,3 +2634,4 @@ pub fn fit_terminal_art(
         dh,
     )
 }
+

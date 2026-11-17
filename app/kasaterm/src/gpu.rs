@@ -3321,6 +3321,7 @@ impl GpuRenderer {
         }
         #[cfg(target_os = "macos")]
         apply_p3_via_hal(&self.grid.surface);
+        self.grid.settle_present();
         let frame = self.grid.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.grid.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("weather only") });
