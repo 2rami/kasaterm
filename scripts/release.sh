@@ -31,6 +31,7 @@ DMG="dist/kasaterm-$VERSION.dmg"
 STAGE="$(mktemp -d)"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
+bash "$(dirname "$0")/dmg-layout.sh" "$STAGE"
 
 # 3. Compressed DMG (UDZO).
 rm -f "$DMG"

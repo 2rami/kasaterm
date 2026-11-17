@@ -293,6 +293,7 @@ jobs:
           STAGE="$(mktemp -d)"
           cp -R dist/kasaterm.app "$STAGE/"
           ln -s /Applications "$STAGE/Applications"
+          bash scripts/dmg-layout.sh "$STAGE"
           hdiutil create -volname "kasaterm" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
           rm -rf "$STAGE"
           echo "built $DMG ($(du -h "$DMG" | cut -f1))"

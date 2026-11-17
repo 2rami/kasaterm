@@ -63,24 +63,24 @@
         Name='kasaterm'
         UpgradeCode='A1542FC9-61D1-49B9-86EE-48C2EEE0485D'
         Manufacturer='momewomo'
-        Language='1033'
-        Codepage='1252'
+        Language='1042'
+        Codepage='949'
         Version='$(var.Version)'>
 
         <Package Id='*'
             Keywords='Installer'
-            Description='kasaterm - Cross-platform terminal multiplexer. winit + cell-renderer (wgpu, sRGB to DisplayP3 shader matrix) with a direct portable-pty + alacritty_terminal backend (Phase C, default) and a legacy kasa-bridge backend behind KASATERM_BACKEND=tmux. Exposes a cmux-compatible JSON-RPC socket so external agents can drive it.'
+            Description='카사텀: 학생들과 함께 일하는 작업 OS'
             Manufacturer='momewomo'
             InstallerVersion='450'
-            Languages='1033'
+            Languages='1042'
             Compressed='yes'
             InstallScope='perMachine'
-            SummaryCodepage='1252'
+            SummaryCodepage='949'
             />
 
         <MajorUpgrade
             Schedule='afterInstallInitialize'
-            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+            DowngradeErrorMessage='더 새로운 [ProductName] 이 이미 깔려 있어요. 설치를 마칠게요.'/>
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
         <Property Id='DiskPrompt' Value='kasaterm Installation'/>
@@ -127,7 +127,7 @@
                                 Id='ScreenService'
                                 Name='KasatermScreen'
                                 DisplayName='kasaterm Screen Helper'
-                                Description='Lets kasaterm show and control the secure desktop (UAC, lock screen) when this PC is viewed remotely.'
+                                Description='다른 기기에서 이 PC 화면을 볼 때 보안 화면(UAC·잠금 화면)까지 보이고 조작하게 해요.'
                                 Type='ownProcess'
                                 Start='auto'
                                 ErrorControl='normal'
@@ -234,7 +234,7 @@
         <DirectoryRef Id='ApplicationProgramsFolder'>
             <Component Id='StartMenuShortcut' Guid='*'>
                 <Shortcut Id='AppStartMenuShortcut' Name='kasaterm'
-                    Description='kasaterm terminal'
+                    Description='카사텀'
                     Target='[Bin]kasaterm.exe' WorkingDirectory='Bin' Icon='ProductICO'/>
                 <RemoveFolder Id='RemoveApplicationProgramsFolder' On='uninstall'/>
                 <RegistryValue Root='HKCU' Key='Software\kasaterm' Name='installed' Type='integer' Value='1' KeyPath='yes'/>
@@ -243,7 +243,7 @@
         <DirectoryRef Id='DesktopFolder'>
             <Component Id='DesktopShortcut' Guid='*'>
                 <Shortcut Id='AppDesktopShortcut' Name='kasaterm'
-                    Description='kasaterm terminal'
+                    Description='카사텀'
                     Target='[Bin]kasaterm.exe' WorkingDirectory='Bin' Icon='ProductICO'/>
                 <RegistryValue Root='HKCU' Key='Software\kasaterm' Name='desktop' Type='integer' Value='1' KeyPath='yes'/>
             </Component>

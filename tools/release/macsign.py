@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import re
 
 DEFAULT_KEYCHAIN = str(Path.home() / "Library/Keychains/codesign.keychain-db")
@@ -189,6 +190,14 @@ def bundle_version(app):
     except (OSError, plistlib.InvalidFileException):
         return None
     return info.get("CFBundleShortVersionString")
+
+
+def stage_dmg_layout(stage, root):
+    """DMG 창 겉모습(배경·아이콘 자리) — scripts/dmg-layout.sh 와 같은 두 파일. 그 파일이 없는 옛 커밋은 맨 창 그대로 낸다."""
+    for src, name in (("assets/dmg/background.tiff", ".background.tiff"), ("assets/dmg/DS_Store", ".DS_Store")):
+        path = Path(root) / src
+        if path.is_file():
+            shutil.copyfile(path, Path(stage) / name)
 
 
 def dmg_commands(tools, stage, dmg, sign=None):

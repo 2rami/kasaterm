@@ -1446,3 +1446,14 @@ PC 미러의 `[[ki:…]]` 이미지 표식은 원본 기기의 인증된 이미�
 - QR 은 앱 하단바와 웹이 같은 모양이다 — 둥근 점, **각진 남색 찾기 무늬**, 가운데 강조색 판의 흰 우산(High 정정, 가린 면적 약 5%).
   찾기 무늬를 둥글리거나 강조색으로 칠하면 판독기가 못 찾았다(2026-11-18 비교). 바탕은 다크 모드에서도 흰색.
   설치 페이지의 QR 카드는 마우스가 있는 화면(`hover: hover` · `pointer: fine`)에서만 보인다 — 컴퓨터로 연 사람을 폰으로 옮긴다.
+
+### 설치 화면 — Windows MSI · 맥 DMG
+
+- 그림은 `scripts/installer-art.py` 가 앱 아이콘(`assets/AppIcon.png`)과 클린 블루로 그린다 — MSI `Banner.bmp`(493×58, 왼쪽은
+  설치기가 검은 제목을 쓰니 흰색, 오른쪽 끝에 아이콘)·`Dialog.bmp`(493×312, 왼쪽 164px 강조색 판에 아이콘과 `KASATERM · 작업 OS`,
+  오른쪽은 약관 칸 자리라 흰색), DMG `assets/dmg/background.tiff`(660×400 과 @2x). 아이콘·색을 바꾸면 다시 돌려 함께 넣는다.
+- MSI 는 `-cultures:ko-kr` 에 `app/kasaterm/wix/ko-kr.wxl` 로 WixUI 기본 한국어(「~하십시오」)를 앱 말투로 덮는다. 코드 페이지
+  949 라 `—` 같은 글자는 MSI 문자열에 못 쓴다(light LGHT0311) — 주석은 괜찮다.
+- DMG 는 `scripts/dmg-layout.sh`(발행기는 `macsign.stage_dmg_layout`)가 배경과 `assets/dmg/DS_Store`(창 660×400, 아이콘 112,
+  앱 (170,205)·Applications (490,205))를 스테이징 맨 위에 놓는다. DS_Store 의 배경 별칭은 볼륨 이름 `kasaterm` 을 가리키니
+  `hdiutil -volname` 을 바꾸면 dmgbuild 로 DS_Store 를 다시 만든다.

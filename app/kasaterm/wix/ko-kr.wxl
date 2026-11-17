@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WixUI 기본 한국어(「~하십시오」)를 앱 말투로 덮는다. 설치기가 쓰는 화면(WixUI_Minimal)에 보이는 줄만.
+     코드 페이지 949 에 없는 글자(— 등)는 light 가 거절한다(LGHT0311). -->
+<WixLocalization Culture="ko-kr" Codepage="949" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="WelcomeEulaDlgTitle" Overridable="yes">{\WixUI_Font_Title}[ProductName]을 설치할게요</String>
+  <String Id="WelcomeEulaDlgLicenseAcceptedCheckBox" Overridable="yes">사용권 계약에 동의해요(&amp;A)</String>
+  <String Id="ProgressDlgTitleInstalling" Overridable="yes">{\WixUI_Font_Title}[ProductName] 설치하는 중</String>
+  <String Id="ProgressDlgTextInstalling" Overridable="yes">잠깐이면 끝나요. 다 되면 바로 열 수 있어요.</String>
+  <String Id="ProgressDlgTitleUpdating" Overridable="yes">{\WixUI_Font_Title}[ProductName] 새 판으로 바꾸는 중</String>
+  <String Id="ProgressDlgTextUpdating" Overridable="yes">잠깐이면 끝나요. 하던 일과 설정은 그대로 남아요.</String>
+  <String Id="ProgressDlgTitleChanging" Overridable="yes">{\WixUI_Font_Title}[ProductName] 바꾸는 중</String>
+  <String Id="ProgressDlgTextChanging" Overridable="yes">잠깐이면 끝나요.</String>
+  <String Id="ProgressDlgTitleRepairing" Overridable="yes">{\WixUI_Font_Title}[ProductName] 고치는 중</String>
+  <String Id="ProgressDlgTextRepairing" Overridable="yes">잠깐이면 끝나요. 하던 일과 설정은 그대로 남아요.</String>
+  <String Id="ProgressDlgTitleRemoving" Overridable="yes">{\WixUI_Font_Title}[ProductName] 지우는 중</String>
+  <String Id="ProgressDlgTextRemoving" Overridable="yes">잠깐이면 끝나요.</String>
+  <String Id="ExitDialogTitle" Overridable="yes">{\WixUI_Font_Bigger}[ProductName]을 설치했어요</String>
+  <String Id="ExitDialogDescription" Overridable="yes">「마침」을 누르고 시작 메뉴나 바탕 화면에서 열어요.</String>
+  <String Id="UserExitTitle" Overridable="yes">{\WixUI_Font_Bigger}설치를 멈췄어요</String>
+  <String Id="UserExitDescription1" Overridable="yes">PC 에는 아무것도 바뀌지 않았어요. 언제든 다시 설치할 수 있어요.</String>
+  <String Id="UserExitDescription2" Overridable="yes">「마침」을 누르면 닫혀요.</String>
+  <String Id="FatalErrorTitle" Overridable="yes">{\WixUI_Font_Bigger}설치하지 못했어요</String>
+  <String Id="FatalErrorDescription1" Overridable="yes">오류로 멈췄고 PC 에는 아무것도 바뀌지 않았어요. 다시 설치해 보고, 또 안 되면 카사텀 앱의 피드백으로 알려 주세요.</String>
+  <String Id="FatalErrorDescription2" Overridable="yes">「마침」을 누르면 닫혀요.</String>
+  <String Id="CancelDlgText" Overridable="yes">[ProductName] 설치를 그만할까요?</String>
+</WixLocalization>

@@ -476,6 +476,8 @@ class RealBackend:
         if not c.ok:
             raise Refused(f"dmg 스테이징 실패 — {c.tail(2)}")
         os.symlink("/Applications", stage / "Applications")
+        # app 은 계획 체크아웃의 dist/kasaterm.app — 그 체크아웃의 assets/dmg 를 쓴다(구운 커밋과 같은 판의 그림).
+        macsign.stage_dmg_layout(stage, Path(app).parents[1])
         dmg = out / asset_names(plan["tag"])["macos"]
         (out / "notary.json").unlink(missing_ok=True)
         for argv in macsign.dmg_commands(self.tools, stage, dmg, local):

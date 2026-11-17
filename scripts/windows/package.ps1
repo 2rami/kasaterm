@@ -270,7 +270,8 @@ if (Test-Path -LiteralPath $wixPdbPath) {
     Remove-Item -LiteralPath $wixPdbPath -Force
 }
 Invoke-External -FilePath $lightExe -ArgumentList @(
-    "-nologo", "-spdb", "-ext", $wixUiExtension, "-cultures:en-us", "-out", $msiPath,
+    "-nologo", "-spdb", "-ext", $wixUiExtension, "-cultures:ko-kr",
+    "-loc", (Join-Path $repoRoot "app\kasaterm\wix\ko-kr.wxl"), "-out", $msiPath,
     $mainObj, $aronaObj, $collabObj
 )
 
