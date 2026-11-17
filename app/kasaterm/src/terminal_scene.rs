@@ -536,7 +536,7 @@ impl App {
                 && cache.fingerprints.get(&id).is_some_and(
                     |(old_source, old_cells, old_overlays)| {
                         *old_source == source_key
-                            && *old_cells == composition.rows
+                            && *old_cells == *composition.rows
                             && *old_overlays == overlay_key
                     },
                 )
@@ -557,7 +557,7 @@ impl App {
                 rows: raw.rows,
                 offset: 0,
                 raw_snapshot: raw,
-                composed_cells: composition.rows.clone(),
+                composed_cells: composition.rows.to_vec(),
                 overlays,
             };
             if visual::publish(frame) {
@@ -573,7 +573,7 @@ impl App {
                 );
                 cache
                     .fingerprints
-                    .insert(id, (source_key, composition.rows, overlay_key));
+                    .insert(id, (source_key, Arc::unwrap_or_clone(composition.rows), overlay_key));
             }
         }
         self.web_visual = cache;
@@ -624,7 +624,7 @@ mod compose_memo_tests {
     #[test]
     fn a_reused_composition_never_carries_the_ime_caret() {
         let mut fresh = TerminalComposition::default();
-        fresh.rows = vec![vec![GridCell::blank(); 3]];
+        fresh.rows = Arc::new(vec![vec![GridCell::blank(); 3]]);
         fresh.tab_pid = "%3".into();
         let reused = fresh.reuse();
         assert!(reused.preedit_cursor.is_none());
@@ -636,7 +636,8 @@ mod compose_memo_tests {
 pub(crate) struct TerminalComposition {
     pub(crate) preedit_cursor: Option<preedit::Placement>,
     pub(crate) animated_cells: bool,
-    pub(crate) rows: Vec<Vec<GridCell>>,
+    /// 쉬는 칸은 지난 합성을 다시 쓰므로 프레임마다 격자를 복사하지 않게 나눠 든다.
+    pub(crate) rows: Arc<Vec<Vec<GridCell>>>,
     pub(crate) banner_slots: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))>,
     pub(crate) spinner_slots: Vec<(&'static str, (f32, f32, f32, f32))>,
     pub(crate) waiting_slots: Vec<(&'static str, (f32, f32, f32, f32))>,
@@ -872,7 +873,7 @@ mod visual_scene_tests {
         assert_eq!(slots.len(), 1);
         assert!(slots[0].1 .1 < 0.0);
         let scene = TerminalComposition {
-            rows,
+            rows: Arc::new(rows),
             banner_slots: slots,
             ..Default::default()
         };
@@ -923,7 +924,7 @@ mod visual_scene_tests {
         let left = stand_left_col(&rows, 5, 59).unwrap();
         for cell in [(9.0, 18.0), (6.506, 17.540)] {
             let scene = TerminalComposition {
-                rows: rows.clone(),
+                rows: Arc::new(rows.clone()),
                 standing_slots: vec![(
                     "arona",
                     "idle",
@@ -2300,7 +2301,7 @@ impl App {
         TerminalComposition {
             preedit_cursor,
             animated_cells,
-            rows: composed,
+            rows: Arc::new(composed),
             banner_slots,
             spinner_slots,
             waiting_slots,

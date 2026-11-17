@@ -779,7 +779,7 @@ impl App {
         // lock so the render call below can run without re-locking
         // (matches the sugarloaf path's design).
         struct PaneSlot {
-            rows: Vec<Vec<GridCell>>,
+            rows: Arc<Vec<Vec<GridCell>>>,
             origin_px: (f32, f32),
             dim: bool,
             font_scale: f32,
