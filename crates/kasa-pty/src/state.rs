@@ -45,6 +45,7 @@ mod vt;
 mod reader;
 mod shell_editor;
 mod blocks;
+mod emoji;
 mod inline;
 mod process;
 mod agents;

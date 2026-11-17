@@ -756,6 +756,7 @@ mod snapshot_fidelity_tests {
             // ★reader 와 **똑같이** NFC 정규화를 거쳐 넘긴다. 이걸 빼면 실제 경로가
             // 아니다 — 비-ASCII 청크만 정규화되므로 한글이 든 스트림에서만 갈린다.
             let mut u8buf = Utf8Buffer::new();
+            let mut clusters = super::emoji::EmojiClusters::default();
             for part in raw.chunks(chunk) {
                 use unicode_normalization::UnicodeNormalization;
                 let batch = u8buf.process(part);
@@ -766,7 +767,8 @@ mod snapshot_fidelity_tests {
                 };
                 let fed: &[u8] =
                     nfc_holder.as_deref().map(str::as_bytes).unwrap_or(batch.as_slice());
-                proc.advance(&mut term, fed);
+                let fed = clusters.process(fed);
+                proc.advance(&mut term, &fed);
                 if proc.sync_bytes_count() > 0 {
                     continue; // reader 와 같은 규칙
                 }

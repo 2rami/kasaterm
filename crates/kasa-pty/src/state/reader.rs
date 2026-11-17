@@ -220,6 +220,7 @@ pub(super) fn spawn_reader_thread(
         // never sees a half codepoint (a multibyte char split between
         // two reads).
         let mut utf8_buf = Utf8Buffer::new();
+        let mut emoji_clusters = super::emoji::EmojiClusters::default();
         let mut shell_editor = super::shell_editor::Scanner::new(shell_editor);
         // OSC 1337 inline-image capture state (a payload can span reads).
         // img_buf/img_capturing 은 레거시 탭 모드 전용, inline_scan 은 셀-흐름
@@ -384,6 +385,8 @@ pub(super) fn spawn_reader_thread(
             };
             let processed_bytes: &[u8] =
                 nfc_holder.as_deref().map(str::as_bytes).unwrap_or(batch.as_slice());
+            let clustered = emoji_clusters.process(processed_bytes);
+            let processed_bytes: &[u8] = clustered.as_ref();
             let prompt_marks = prompt_mark.feed(processed_bytes);
             // Sniff for iTerm OSC 1337 inline images. The scan walks the
             // byte slice, so we cheaply prefix-check first — most reads have
