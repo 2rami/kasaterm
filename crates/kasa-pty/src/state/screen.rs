@@ -32,6 +32,17 @@ pub struct ViewerSnapshot {
     pub history_size: usize,
 }
 
+/// `viewer_snapshot` 이 같은 보기 크기에 같은 답을 내는 동안 같은 값. 파싱한 바이트·스크롤·크기·기록 길이를
+/// 함께 본다 — 파싱 번호만 보면 출력 없이 스크롤만 한 거울이 옛 투영에 머문다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewerRevision {
+    content: u64,
+    display_offset: usize,
+    history_size: usize,
+    columns: usize,
+    lines: usize,
+}
+
 impl PtySession {
     pub fn output_closed(&self) -> bool {
         self.output_closed.load(std::sync::atomic::Ordering::Acquire)
@@ -261,6 +272,17 @@ impl PtySession {
 
     pub fn publish_full_snapshot(&self) {
         self.publish_screen(self.full_snapshot());
+    }
+
+    pub fn viewer_revision(&self) -> ViewerRevision {
+        let t = self.term.lock().unwrap();
+        ViewerRevision {
+            content: self.content_rev.load(std::sync::atomic::Ordering::Acquire),
+            display_offset: t.grid().display_offset(),
+            history_size: t.grid().history_size(),
+            columns: t.grid().columns(),
+            lines: t.grid().screen_lines(),
+        }
     }
 
     pub fn viewer_snapshot(&self, viewer_cols: usize, viewer_rows: usize) -> ViewerSnapshot {

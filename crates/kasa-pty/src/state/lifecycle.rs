@@ -144,6 +144,10 @@ impl Wiring {
         let (tx, rx) = bounded::<ScreenUpdate>(256);
         let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::new(Mutex::new(VecDeque::new()));
         let block_rev = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // 세션마다 다른 자리에서 센다 — 같은 칸 번호로 다시 붙은 새 세션이 옛 세션의 번호와 겹쳐 옛 투영을 받지 않게.
+        static NEXT_BASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = NEXT_BASE.fetch_add(1 << 40, std::sync::atomic::Ordering::Relaxed);
+        let content_rev = Arc::new(std::sync::atomic::AtomicU64::new(base));
         let cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
         let byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
         let screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -167,6 +171,7 @@ impl Wiring {
             Arc::clone(&self.term),
             Arc::clone(&blocks),
             Arc::clone(&block_rev),
+            Arc::clone(&content_rev),
             Arc::clone(&cwd_handle),
             Arc::clone(&byte_taps),
             Arc::clone(&screen_taps),
@@ -205,6 +210,7 @@ impl Wiring {
             tty_short: l.tty_short,
             blocks,
             block_rev,
+            content_rev,
             cwd_handle,
             inline_imgs,
             scheme_reports,

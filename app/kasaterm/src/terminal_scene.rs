@@ -901,13 +901,10 @@ impl App {
         let projection = term.filter(|t| desktop_view && !t.laid_out && kasa_remote::remote::is_view_pane(&tab_pid))
             .map(|source| {
                 let scroll = self.mirror_view_scroll.get(&tab_pid).copied();
-                if let Some(session) = self.pty.get(&tab_pid) {
-                    if let Some(view) = crate::mirror_view::project_session_history_target(
-                        session, &source.cells, (source.cursor_row as usize, source.cursor_col as usize),
-                        cols_now.max(2), rows_now.max(1), scroll, self.turn.mirror_target(&tab_pid),
-                    ) {
-                        return Arc::new(view);
-                    }
+                if let Some(view) = self.pty.get(&tab_pid).and_then(|session| crate::mirror_view::cached_session_history(
+                    &tab_pid, session, cols_now.max(2), rows_now.max(1), scroll, self.turn.mirror_target(&tab_pid),
+                )) {
+                    return view;
                 }
                 let input_top = crate::screenread::pinned_input_top(&source.cells)
                     .filter(|top| *top <= source.cursor_row as usize);

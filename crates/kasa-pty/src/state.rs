@@ -58,7 +58,7 @@ pub use process::{fresh_process_table, process_table, process_table_shared};
 pub use registry::{
     keep_session, kept_sessions, live_sessions, lookup_session, register_session, release_session,
 };
-pub use screen::{PromptAnchor, ViewerSnapshot};
+pub use screen::{PromptAnchor, ViewerRevision, ViewerSnapshot};
 pub use vt::set_host_colors;
 pub(crate) use inline::{b64_decode, png_size};
 pub(crate) use process::{process_cmdline, process_env_vars};
@@ -177,6 +177,9 @@ pub struct PtySession {
     /// 블록 저장소의 바뀜 번호. 0 이면 OSC 133 표지를 한 번도 못 봤다(셸 통합 없음).
     /// 표지·출력이 올 때마다 오른다 — 거울의 긴 폴링이 이것만 보고 깬다.
     block_rev: Arc<std::sync::atomic::AtomicU64>,
+    /// 리더가 바이트를 파서에 먹일 때마다 오른다. 스크롤·크기는 Term 에 그대로 남아 따로 센다
+    /// (`viewer_revision`) — 거울은 프레임마다 다시 접는 대신 이것이 같으면 지난 투영을 쓴다.
+    content_rev: Arc<std::sync::atomic::AtomicU64>,
     /// Shell cwd reported via OSC 9;9 (`ESC]9;9;<path>ST`) — the path-only
     /// working-directory hint Windows Terminal / ConEmu use. The reader stashes
     /// it here so the header breadcrumb tracks PowerShell `cd`, which (unlike

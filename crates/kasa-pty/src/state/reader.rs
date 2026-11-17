@@ -184,6 +184,7 @@ pub(super) fn spawn_reader_thread(
     term: Arc<Mutex<Term<PtyEventForwarder>>>,
     blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
     block_rev: Arc<std::sync::atomic::AtomicU64>,
+    content_rev: Arc<std::sync::atomic::AtomicU64>,
     cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
     byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
     screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
@@ -472,6 +473,7 @@ pub(super) fn spawn_reader_thread(
                     }
                     from = at;
                 }
+                content_rev.fetch_add(1, std::sync::atomic::Ordering::Release);
                 if !scanned {
                     drop_cleared_images(&inline_imgs, processed_bytes);
                 }

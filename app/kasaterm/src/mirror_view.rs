@@ -479,6 +479,41 @@ pub(crate) fn project_session_history_target(
     Some(view)
 }
 
+/// 거울은 프레임마다 그려지는데 원본은 초에 몇 번만 바뀐다. 칸마다 프레임마다 원본 격자·기록을 통째로 떠
+/// 다시 접으면 거울 14칸에서 그 일만으로 프레임 예산을 넘었다(2026-11-18 집 PC). 원본·보기 크기·스크롤·찾는 줄이
+/// 그대로면 지난 투영을 준다. 그리기(메인 스레드)에서만 부른다.
+pub(crate) fn cached_session_history(
+    pid: &str, session: &kasa_pty::PtySession,
+    cols: usize, rows: usize, scroll: Option<usize>, target_abs: Option<i64>,
+) -> Option<std::sync::Arc<Projection>> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    type Key = (kasa_pty::ViewerRevision, usize, usize, Option<usize>, Option<i64>);
+    type Entry = (Key, Instant, Option<Arc<Projection>>);
+    // 닫힌 칸의 투영이 쌓이지 않게, 이만큼 안 그린 칸은 새로 넣을 때 걷는다.
+    const UNUSED: Duration = Duration::from_secs(30);
+    thread_local! {
+        static LAST: RefCell<HashMap<String, Entry>> = RefCell::new(HashMap::new());
+    }
+    let key = (session.viewer_revision(), cols, rows, scroll, target_abs);
+    let now = Instant::now();
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Some((seen, used, view)) = last.get_mut(pid) {
+            if *seen == key {
+                *used = now;
+                return view.clone();
+            }
+        }
+        let view = project_session_history_target(session, &[], (0, 0), cols, rows, scroll, target_abs).map(Arc::new);
+        last.retain(|_, (_, used, _)| now.duration_since(*used) < UNUSED);
+        last.insert(pid.to_string(), (key, now, view.clone()));
+        view
+    })
+}
+
 /// A source that shrank pushed its top lines into scrollback. Its live screen
 /// alone leaves a taller or wider viewer with blank rows below and half a line
 /// on top, so pull just enough history above it — what a terminal does when it
@@ -664,6 +699,40 @@ mod tests {
             source.push(row);
         }
         source
+    }
+
+    #[test]
+    fn cached_projection_is_reused_until_bytes_scroll_or_viewer_size_change() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let (events, incoming) = crossbeam_channel::unbounded();
+        let pid = format!("mirror-cache-{}", uuid::Uuid::new_v4());
+        let session = kasa_pty::PtySession::start_external(kasa_pty::PtyOptions {
+            cols: 60, rows: 20, pane_id: pid.clone(), ..Default::default()
+        }, kasa_pty::ExternalIo {
+            events: incoming, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}),
+        }).unwrap();
+        let feed = |text: String| {
+            events.send(kasa_pty::ExtEvent::Bytes(text.into_bytes())).unwrap();
+            session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        };
+        feed((0..40).map(|i| format!("line {i:02} with some words\r\n")).collect());
+        let first = cached_session_history(&pid, &session, 120, 30, None, None).unwrap();
+        let again = cached_session_history(&pid, &session, 120, 30, None, None).unwrap();
+        assert!(Arc::ptr_eq(&first, &again), "an unchanged source must not be reprojected");
+
+        feed("line 40 arrives\r\n".into());
+        let fresh = cached_session_history(&pid, &session, 120, 30, None, None).unwrap();
+        assert!(!Arc::ptr_eq(&first, &fresh));
+        assert!(text(&fresh.rows).iter().any(|row| row.starts_with("line 40 arrives")), "new bytes reach the viewer");
+
+        let wider = cached_session_history(&pid, &session, 150, 30, None, None).unwrap();
+        assert!(!Arc::ptr_eq(&fresh, &wider), "a resized viewer reflows anew");
+
+        session.scroll(5);
+        let scrolled = cached_session_history(&pid, &session, 150, 30, None, None).unwrap();
+        assert!(!Arc::ptr_eq(&wider, &scrolled), "a parser scroll without output still reprojects");
+        assert_eq!(scrolled.rows, project_session_history(&session, &[], (0, 0), 150, 30, None).unwrap().rows);
     }
 
     #[test]

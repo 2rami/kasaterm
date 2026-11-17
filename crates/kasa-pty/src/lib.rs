@@ -33,5 +33,5 @@ pub use state::{
     process_table, process_table_shared, fresh_process_table,
     register_session, set_host_colors, AgentKind, AgentSpec, CommandBlock, PromptAnchor, PtyOptions,
     AGENT_TABLE,
-    PtySession, ViewerSnapshot,
+    PtySession, ViewerRevision, ViewerSnapshot,
 };
