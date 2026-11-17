@@ -25,6 +25,8 @@ kasa-identity = { workspace = true }
 kasa-net = { workspace = true }
 kasa-socket = { workspace = true, default-features = true }
 libc = { workspace = true }
+# 웹 설치 화면의 QR — 앱 하단바 QR 과 같은 부호기.
+qrcodegen = { workspace = true }
 reqwest = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }

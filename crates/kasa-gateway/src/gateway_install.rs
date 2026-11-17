@@ -114,9 +114,7 @@ fn percent(value: &str) -> String {
         .collect()
 }
 
-fn esc(value: &str) -> String {
-    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
-}
+use kasa_device::web_look::escape as esc;
 
 fn gone() -> axum::response::Response {
     html(
@@ -126,22 +124,54 @@ fn gone() -> axum::response::Response {
 }
 
 fn html(status: StatusCode, body: &str) -> axum::response::Response {
+    shell(status, body, "")
+}
+
+/// 앱과 같은 겉모습의 한 장 — 머리 막대 · 본문 카드 · 카드 밖 덧붙임(컴퓨터로 열었을 때의 QR).
+fn shell(status: StatusCode, card: &str, extra: &str) -> axum::response::Response {
     let page = format!(
-        "<!doctype html><html lang=ko><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">\
-<title>KASATERM 설치</title><style>body{{margin:0;background:#12161c;color:#c8d0d9;font:16px/1.55 -apple-system,system-ui,sans-serif}}\
-main{{max-width:420px;margin:0 auto;padding:48px 24px}}h1{{font-size:22px;margin:0 0 6px;color:#e6ebf0}}.dim{{color:#7d8894;font-size:14px}}\
-a{{color:#e6ebf0}}a.btn{{display:block;margin:28px 0 18px;padding:14px;border-radius:6px;background:#e6ebf0;color:#12161c;text-align:center;font-weight:600;text-decoration:none}}</style>\
-<body><main>{body}</main></body></html>"
+        "<!doctype html><html lang=ko><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1,viewport-fit=cover\">\
+<title>KASATERM 설치</title><style>{}</style><body>{}<main class=os><section class=card>{card}</section>{extra}</main></body></html>",
+        kasa_device::web_look::CSS,
+        kasa_device::web_look::bar("설치"),
     );
     (status, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response()
+}
+
+/// 처음 기기의 세 걸음 — 지금 걸음(1부터)을 강조한다. 등록이 없는 관문은 걸음이 하나라 안 그린다.
+pub(super) fn steps(now: u8) -> String {
+    let mut out = String::from("<ol class=steps aria-label=\"설치 순서\">");
+    for (i, name) in ["기기 등록", "프로파일 설치", "앱 설치"].into_iter().enumerate() {
+        let i = i as u8 + 1;
+        let class = match i.cmp(&now) {
+            std::cmp::Ordering::Less => " class=done",
+            std::cmp::Ordering::Equal => " class=now aria-current=step",
+            std::cmp::Ordering::Greater => "",
+        };
+        out.push_str(&format!("<li{class}><b>{i:02}</b>{name}</li>"));
+    }
+    out.push_str("</ol>");
+    out
+}
+
+/// 컴퓨터 화면으로 연 사람이 폰으로 옮겨 가게 — 이 페이지 주소의 QR. 폰 화면에서는 CSS 가 숨긴다.
+fn qr_card(page: &str) -> String {
+    kasa_device::web_look::qr_svg(page)
+        .map(|svg| {
+            format!(
+                "<section class=\"card qr\">{svg}<div><h2>폰으로 찍어서 열어요</h2>\
+<p class=dim>설치는 폰·아이패드의 Safari 에서만 돼요. 카메라로 이 코드를 찍으면 같은 페이지가 열려요.</p></div></section>"
+            )
+        })
+        .unwrap_or_default()
 }
 
 async fn page(State(gate): State<Gate>, AxPath(token): AxPath<String>, headers: axum::http::HeaderMap) -> axum::response::Response {
     let (Some((_, meta)), Some(origin)) = (gate.release(&token), gate.public_origin(&headers)) else {
         return gone();
     };
-    let (_, install) = links(&origin, &token);
-    let head = format!("<h1>{}</h1><p class=dim>{} · 빌드 {}</p>", esc(&meta.title), esc(&meta.version), esc(&meta.build));
+    let (page, install) = links(&origin, &token);
+    let head = format!("<h1>{}</h1><p class=meta>{} · 빌드 {}</p>", esc(&meta.title), esc(&meta.version), esc(&meta.build));
     let enroll = format!("/relay/install/{token}/enroll.mobileconfig");
     let known = headers
         .get_all(header::COOKIE)
@@ -157,22 +187,24 @@ async fn page(State(gate): State<Gate>, AxPath(token): AxPath<String>, headers: 
         )
     } else if known {
         format!(
-            "{head}<a class=btn href=\"{}\">설치</a>\
+            "{head}{}<a class=btn href=\"{}\">설치</a>\
 <p class=dim>누르면 묻는 창에서 「설치」를 고르세요. 처음 쓰는 다른 기기라면 그 기기에서 <a href=\"{}\">기기 등록</a>부터.</p>",
+            steps(3),
             esc(&install),
             esc(&enroll)
         )
     } else {
         format!(
-            "{head}<a class=btn href=\"{}\">처음이면 — 기기 등록</a>\
+            "{head}{}<a class=btn href=\"{}\">처음이면 — 기기 등록</a>\
 <p class=dim>「허용」을 누른 뒤 설정 앱 위쪽의 「프로파일이 다운로드됨」에서 「설치」를 한 번 누르면, 이 기기가 등록되고 \
 설치 화면으로 돌아와요. 기기에는 아무것도 남지 않아요.</p>\
-<p class=dim>이미 등록한 기기라면 <a href=\"{}\">바로 설치</a>.</p>",
+<a class=\"btn ghost\" href=\"{}\">이미 등록한 기기라면 — 바로 설치</a>",
+            steps(1),
             esc(&enroll),
             esc(&install)
         )
     };
-    html(StatusCode::OK, &body)
+    shell(StatusCode::OK, &body, &qr_card(&page))
 }
 
 async fn manifest(State(gate): State<Gate>, AxPath(token): AxPath<String>, headers: axum::http::HeaderMap) -> axum::response::Response {

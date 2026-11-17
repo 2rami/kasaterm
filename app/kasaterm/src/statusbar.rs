@@ -809,29 +809,40 @@ fn paint_chrome_popover(
     });
 }
 
-/// Four full quiet-zone modules surround the square code. Only a small central
-/// area is covered by the umbrella; finder patterns remain untouched.
+/// 웹 설치 페이지 QR(`kasa_device::web_look::qr_svg`)과 같은 모양 — 둥근 점 · 각진 남색 찾기 무늬 · 가운데
+/// 강조색 판의 흰 우산. 찾기 무늬를 둥글리거나 강조색으로 칠하면 판독기가 못 찾는다(그 함수 주석).
+/// 사방 4칸 여백은 흰 바탕이다 — 다크 테마에서도 카메라가 읽게.
 fn paint_mobile_qr(g: &mut gpu::GpuRenderer, address: &str, rect: (f32, f32, f32, f32)) {
+    const INK: [u8; 4] = [21, 41, 74, 255];
     let (x, y, side, _) = rect;
-    g.rect(x, y, side, side, [255, 255, 255, 255]);
+    g.round_rect_fill(x, y, side, side, 10.0, [255, 255, 255, 255]);
     let Some((n, modules)) = qr_modules(address) else { return };
     let cell = side / (n + 8) as f32;
     let quiet = 4.0 * cell;
+    let cover = kasa_device::web_look::qr_cover(n);
+    let lo = (n - cover) / 2;
+    let in_cover = |c: usize, r: usize| (lo..lo + cover).contains(&c) && (lo..lo + cover).contains(&r);
+    let finder = |c: usize, r: usize| (c < 7 && r < 7) || (c + 7 >= n && r < 7) || (c < 7 && r + 7 >= n);
+    let inset = cell * 0.08;
     for row in 0..n {
         for col in 0..n {
-            if modules[row * n + col] {
-                g.rect(x + quiet + col as f32 * cell, y + quiet + row as f32 * cell,
-                    cell, cell, [18, 22, 30, 255]);
+            if modules[row * n + col] && !finder(col, row) && !in_cover(col, row) {
+                g.round_rect_fill(x + quiet + col as f32 * cell + inset, y + quiet + row as f32 * cell + inset,
+                    cell - inset * 2.0, cell - inset * 2.0, cell * 0.3, INK);
             }
         }
     }
-    let cover_modules = ((n as f32 * 0.15).floor() as usize | 1).clamp(3, 9);
-    let cover = cover_modules as f32 * cell;
-    let center_x = x + side * 0.5;
-    let center_y = y + side * 0.5;
-    g.rect(center_x - cover * 0.5, center_y - cover * 0.5, cover, cover, [255, 255, 255, 255]);
-    let logo = (cover - 4.0).max(8.0);
-    g.queue_icon("umbrella", center_x - logo * 0.5, center_y - logo * 0.5, logo, [18, 22, 30, 255]);
+    for (fc, fr) in [(0, 0), (n - 7, 0), (0, n - 7)] {
+        let (fx, fy) = (x + quiet + fc as f32 * cell, y + quiet + fr as f32 * cell);
+        g.rect(fx, fy, cell * 7.0, cell * 7.0, INK);
+        g.rect(fx + cell, fy + cell, cell * 5.0, cell * 5.0, [255, 255, 255, 255]);
+        g.rect(fx + cell * 2.0, fy + cell * 2.0, cell * 3.0, cell * 3.0, INK);
+    }
+    let k = cover as f32 * cell;
+    let (tx, ty) = (x + quiet + lo as f32 * cell, y + quiet + lo as f32 * cell);
+    g.round_rect_fill(tx, ty, k, k, k * 0.28, theme::accent());
+    let logo = k * 0.72;
+    g.queue_icon("umbrella", tx + (k - logo) * 0.5, ty + (k - logo) * 0.5, logo, [255, 255, 255, 255]);
 }
 
 /// 새 판 팝오버 — 굽기 · 다른 기계로 보내기 · 기계 설정. 판 번호를 누르면 뜬다.

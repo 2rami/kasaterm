@@ -382,20 +382,24 @@ pub(super) async fn status(
     match gate.enroll.job(&job) {
         Some(Job::Running) => html(
             StatusCode::OK,
-            "<meta http-equiv=refresh content=3><h1>기기를 등록하는 중이에요</h1>\
+            &format!(
+                "<meta http-equiv=refresh content=3><h1>기기를 등록하는 중이에요</h1>{}\
 <p class=dim>이 기기를 설치 목록에 올리고 앱을 다시 서명하고 있어요. 보통 1분 안에 끝나요 — 이 화면은 저절로 바뀌어요.</p>",
+                steps(2)
+            ),
         ),
         Some(Job::Done { new }) => {
             let cookie = format!("{COOKIE}=1; Path=/relay/install; Max-Age=31536000; Secure; HttpOnly; SameSite=Lax");
             let mut res = html(
                 StatusCode::OK,
                 &format!(
-                    "<h1>{}</h1><p class=dim>{} {} · 빌드 {}</p><a class=btn href=\"{}\">설치</a>\
+                    "<h1>{}</h1><p class=meta>{} {} · 빌드 {}</p>{}<a class=btn href=\"{}\">설치</a>\
 <p class=dim>누르면 묻는 창에서 「설치」를 고르고 홈 화면에서 아이콘이 받아지는 것을 보세요.</p>",
                     if new { "기기를 등록했어요" } else { "이미 등록된 기기예요" },
                     esc(&meta.title),
                     esc(&meta.version),
                     esc(&meta.build),
+                    steps(3),
                     esc(&install),
                 ),
             );
@@ -406,7 +410,7 @@ pub(super) async fn status(
         }
         Some(Job::Failed(why)) => html(
             StatusCode::OK,
-            &format!("<h1>등록하지 못했어요</h1><p class=dim>{}</p><a class=btn href=\"{}\">처음으로</a>", esc(&why), esc(&page)),
+            &format!("<h1>등록하지 못했어요</h1><p class=bad>{}</p><a class=btn href=\"{}\">처음으로</a>", esc(&why), esc(&page)),
         ),
         None => html(
             StatusCode::OK,

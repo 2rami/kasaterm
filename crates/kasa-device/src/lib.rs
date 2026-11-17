@@ -20,6 +20,7 @@ pub mod login_vault;
 #[cfg(windows)]
 pub(crate) mod wincred;
 pub mod access;
+pub mod web_look;
 pub use access::{remote_token, session_token, VerifiedClaudeIdentity, verified_claude_identity_for_token};
 pub use workspace_assistant::DesktopSession as WorkspaceDesktopSession;
 pub use nacho_relay::{app_target as nacho_app_target, NachoDesktopSession};

@@ -36,13 +36,12 @@ pub async fn kasanet_phone_handler(req: axum::extract::Request) -> axum::respons
 async fn app_page() -> impl IntoResponse {
     let install = kasa_characters::character::app_install_url().unwrap_or_default();
     let html = include_str!("../../assets/term/app.html")
-        .replace("__INSTALL_URL__", &html_escape(&install));
+        .replace("__OS_CSS__", crate::web_look::CSS)
+        .replace("__OS_BAR__", &crate::web_look::bar("폰에서 이어보기"))
+        .replace("__INSTALL_URL__", &crate::web_look::escape(&install));
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
 
 /// 폰 허브 — 이 기계와 명부의 다른 기계, 그 pane 목록. 누르면 터미널로.
 async fn hub_page() -> impl IntoResponse {
