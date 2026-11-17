@@ -471,19 +471,6 @@ pub(crate) fn agents_error_sids_cached() -> HashSet<String> {
 }
 
 impl PtyBackend {
-    /// 소환 관계를 적는다 — 메모리와 함께 surface 키 짝으로 파일에도. 앱을 다시 켜면 번호가 바뀌고
-    /// 메모리가 비어, 재시작 뒤 학생의 done 이 갈 곳을 잃었다(새 판 설치마다 재시작한다).
-    pub(crate) fn remember_spawner(&self, child: &str, parent: &str) {
-        let pair = (kasa_collab::surface_keys::ensure(child), kasa_collab::surface_keys::ensure(parent));
-        if let Ok(mut m) = self.spawned_by.lock() {
-            m.insert(pair.0.clone(), pair.1.clone());
-        }
-        let path = spawner_file();
-        let mut pairs = read_spawner_pairs(&path);
-        remember_spawner_pair(&mut pairs, pair);
-        write_spawner_pairs(&path, &pairs);
-    }
-
     /// 그 칸을 부른 칸의 지금 번호. 메모리에 없으면(재시작 뒤) 파일의 키 짝으로 찾는다.
     pub(crate) fn spawner_of(&self, child: &str) -> Option<String> {
         let memory = self.spawned_by.lock().ok()?.clone();
@@ -1066,6 +1053,19 @@ impl PtyBackend {
 }
 
 impl Backend for PtyBackend {
+    /// 소환 관계를 적는다 — 메모리와 함께 surface 키 짝으로 파일에도. 앱을 다시 켜면 번호가 바뀌고
+    /// 메모리가 비어, 재시작 뒤 학생의 done 이 갈 곳을 잃었다(새 판 설치마다 재시작한다).
+    fn remember_spawner(&self, child: &str, parent: &str) {
+        let pair = (kasa_collab::surface_keys::ensure(child), kasa_collab::surface_keys::ensure(parent));
+        if let Ok(mut m) = self.spawned_by.lock() {
+            m.insert(pair.0.clone(), pair.1.clone());
+        }
+        let path = spawner_file();
+        let mut pairs = read_spawner_pairs(&path);
+        remember_spawner_pair(&mut pairs, pair);
+        write_spawner_pairs(&path, &pairs);
+    }
+
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         Ok(vec![WorkspaceInfo {
             id: FIXED_WORKSPACE_ID.into(),

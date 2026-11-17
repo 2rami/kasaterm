@@ -1135,6 +1135,9 @@ pub trait Backend: Send + Sync {
     fn pane_done(&self, _surface_id: &str, _outcome: &str, _summary: &str) -> Result<()> {
         anyhow::bail!("pane_done unsupported by this backend")
     }
+    /// `child` 칸의 `done` 보고를 `parent` 칸으로 보내게 적는다. 칸을 쪼개거나 탭을 열 때와, 이미 있는 칸에
+    /// 학생을 다시 띄울 때(`surface.launch`) 부른다. 보고를 전하지 않는 백엔드는 아무것도 안 한다.
+    fn remember_spawner(&self, _child: &str, _parent: &str) {}
     /// 이 pane 이 **지금 무엇을 돌리기 시작했고 무엇이 끝났는지** — `PreToolUse`/
     /// `PostToolUse` 훅이 `kasaterm-cli agent-status` 로 부른다.
     ///

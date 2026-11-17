@@ -2312,6 +2312,29 @@ fn body_flag(args: &[String]) -> Result<Option<String>> {
     }
 }
 
+/// `launch %N [--cwd 폴더] '<명령>'` 의 인자. `caller` 는 부른 칸 — 받는 쪽이 그 칸을 학생의 새 부모로 적어,
+/// 다시 띄운 학생의 `done` 이 처음 쪼갠 옛 부모가 아니라 다시 띄운 칸으로 간다.
+fn launch_params(args: &[String], caller: Option<String>) -> Result<Value> {
+    let surface = args.iter().find(|a| a.starts_with('%')).cloned()
+        .ok_or_else(|| anyhow!("launch %N [--cwd 폴더] '<명령>'"))?;
+    let cwd = flag_value(args, "--cwd");
+    let mut skip = false;
+    let command = args.iter().filter(|a| {
+        let keep = !skip && !a.starts_with('%') && *a != "--cwd";
+        skip = *a == "--cwd";
+        keep
+    }).cloned().collect::<Vec<_>>().join(" ");
+    if command.trim().is_empty() {
+        return Err(anyhow!("launch %N [--cwd 폴더] '<명령>'"));
+    }
+    let mut params = json!({ "surface_id": surface, "command": command });
+    if let Some(dir) = cwd { params["cwd"] = json!(dir); }
+    if let Some(me) = caller.filter(|me| !me.is_empty() && *me != surface) {
+        params["from"] = json!(me);
+    }
+    Ok(params)
+}
+
 fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
     // Caller-supplied id so async clients can correlate; we just stamp
     // a process-id-based string for the CLI path where nobody cares.
@@ -2542,21 +2565,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         // `launch %N [--cwd 폴더] '<명령>'` — 빈 셸 칸에서 명령(POSIX 셸 꼴)을 그 칸 셸 문법으로 띄운다(surface.launch).
         // 부르는 쪽은 그 칸이 cmd 인지 zsh 인지 몰라도 된다.
         "launch" => {
-            let surface = args.iter().find(|a| a.starts_with('%')).cloned()
-                .ok_or_else(|| anyhow!("launch %N [--cwd 폴더] '<명령>'"))?;
-            let cwd = flag_value(args, "--cwd");
-            let mut skip = false;
-            let command = args.iter().filter(|a| {
-                let keep = !skip && !a.starts_with('%') && *a != "--cwd";
-                skip = *a == "--cwd";
-                keep
-            }).cloned().collect::<Vec<_>>().join(" ");
-            if command.trim().is_empty() {
-                return Err(anyhow!("launch %N [--cwd 폴더] '<명령>'"));
-            }
-            let mut params = json!({ "surface_id": surface, "command": command });
-            if let Some(dir) = cwd { params["cwd"] = json!(dir); }
-            ("surface.launch", params)
+            // 다른 기기로 곧장 보내는 `--api` 에서는 이 칸 번호가 그 기기의 칸을 가리키지 않는다.
+            let caller = std::env::var("KASATERM_PANE_ID").ok().filter(|_| API_TARGET.get().is_none());
+            ("surface.launch", launch_params(args, caller)?)
         }
         // 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 학생을 맥미니에서
         // 돌리고 이 창은 미러다. 앱을 꺼도(detach) 원격 셸은 살아남고, 재시작하면
@@ -4548,6 +4559,17 @@ fn run_statusline() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launch_carries_the_calling_pane_as_the_new_parent() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let params = super::launch_params(&args(&["%9", "--cwd", "/w", "claude"]), Some("%2".into())).unwrap();
+        assert_eq!(params, serde_json::json!({"surface_id": "%9", "command": "claude", "cwd": "/w", "from": "%2"}));
+        for caller in [None, Some(String::new()), Some("%9".into())] {
+            let params = super::launch_params(&args(&["%9", "claude"]), caller).unwrap();
+            assert!(params.get("from").is_none(), "{params}");
+        }
+    }
+
     #[test]
     fn keychain_refs_take_a_bare_service_and_refuse_1password() {
         assert_eq!(keychain_ref("github.com").unwrap(), "keychain://github.com");

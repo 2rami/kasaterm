@@ -1428,7 +1428,14 @@ fn surface_launch(backend: &dyn Backend, id: Value, params: &Value) -> Response 
         Err(e) => return param_err(id, &e.to_string()),
     };
     match backend.send_text(Some(target), &line) {
-        Ok(()) => Response::success(id, json!({"ok": true, "shell": shell.name()})),
+        Ok(()) => {
+            // 이미 있는 칸에 학생을 다시 띄운 칸이 새 부모다 — 안 적으면 그 학생의 `done` 이 처음 쪼갠 옛 부모에게
+            // 간다. 복원 뒤 다른 칸이 같은 칸을 다시 열었을 때 보고가 엉뚱한 칸으로 갔다(2026-11-17).
+            if let Some(from) = params.get("from").and_then(|v| v.as_str()).filter(|f| !f.is_empty() && *f != target) {
+                backend.remember_spawner(target, from);
+            }
+            Response::success(id, json!({"ok": true, "shell": shell.name()}))
+        }
         Err(e) => {
             if let Some(path) = prompt_file {
                 let _ = std::fs::remove_file(path);
@@ -1660,6 +1667,8 @@ mod tests {
         board: Vec<crate::backend::PaneActivity>,
         // 완료 보고 기록 — surface.done 이 outcome 검증을 통과했을 때만 쌓인다.
         done: Mutex<Vec<(String, String, String)>>,
+        // 소환 관계 기록 — (아이 칸, 부른 칸).
+        spawners: Mutex<Vec<(String, String)>>,
         // 나쵸 인박스 보고 — 디스크 대신 여기 쌓는다(검증은 실물 build 를 그대로 탄다).
     }
 
@@ -1750,6 +1759,20 @@ mod tests {
             ));
             Ok(())
         }
+        fn remember_spawner(&self, child: &str, parent: &str) {
+            self.spawners.lock().unwrap().push((child.to_string(), parent.to_string()));
+        }
+    }
+
+    #[test]
+    fn launching_into_a_pane_makes_the_caller_its_new_parent() {
+        let backend = FakeBackend::default();
+        let launch = |params: Value| dispatch(&backend, req("surface.launch", params));
+        assert!(launch(json!({"surface_id": "%9", "command": "claude", "from": "%2"})).ok);
+        assert_eq!(*backend.spawners.lock().unwrap(), vec![("%9".to_string(), "%2".to_string())]);
+        assert!(launch(json!({"surface_id": "%9", "command": "claude"})).ok, "부른 칸을 모르면 기록은 그대로");
+        assert!(launch(json!({"surface_id": "%9", "command": "claude", "from": "%9"})).ok, "제 칸에 띄운 것은 부모가 아니다");
+        assert_eq!(backend.spawners.lock().unwrap().len(), 1);
     }
 
     fn req(method: &str, params: Value) -> Request {
