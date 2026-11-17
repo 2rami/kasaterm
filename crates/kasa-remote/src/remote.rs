@@ -257,11 +257,18 @@ pub fn cached_fresh_pane(local_id: &str) -> Option<serde_json::Value> {
 
 /// 캐시가 없거나 구 호스트가 실행 상태를 안 주는 것은 종료 증거가 아니다.
 pub fn cached_agent_running(local_id: &str) -> Option<bool> {
-    if let Some(row) = cached_pane(local_id) {
-        return row.get("harness").map(|value| value.as_str().is_some_and(|s| !s.is_empty()));
+    let info = remote_info(local_id)?;
+    let label = if info.label.is_empty() {
+        kasa_device::machines::display_identity().label_for_base(&info.base).map(str::to_string)
+    } else {
+        Some(info.label.clone())
+    };
+    if let Some(running) = label.and_then(|label| kasa_device::machines::with_cached_pane_identity(&label, &info.remote_id,
+        |row| row.get("harness").map(|value| value.as_str().is_some_and(|s| !s.is_empty()))))
+    {
+        return running;
     }
     // 이 기기의 창 밖 셸을 제 창구로 본 탭 — 명부 캐시에 제 자신은 없으니 세션을 직접 본다.
-    let info = remote_info(local_id)?;
     if info.label != kasa_device::machines::self_label() {
         return None;
     }

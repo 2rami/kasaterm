@@ -1806,19 +1806,29 @@ pub fn cached_fresh_pane(label: &str, pane: &str) -> Option<Value> {
     cached_pane_from(&c, label, pane, true)
 }
 
-fn cached_pane_from(c: &Cache, label: &str, pane: &str, require_fresh: bool) -> Option<Value> {
+/// 원본 행의 신원 칸(이름·하네스처럼 낡아도 지우지 않는 값)을 행을 복사하지 않고 읽는다. 거울 칸마다 그릴 때마다
+/// 묻는 자리라 행 전체(대화 마지막 말까지)를 복사하면 프레임마다 쌓였다. 상태 칸은 낡으면 지워 주는 `cached_pane` 으로.
+pub fn with_cached_pane_identity<R>(label: &str, pane: &str, read: impl FnOnce(&Value) -> R) -> Option<R> {
+    let c = cache().lock().ok()?;
+    cached_row(&c, label, pane).map(|(row, _)| read(row))
+}
+
+/// 같은 기기가 여러 이름(직통·ssh 별칭)으로 실렸으면 가장 최근에 물은 쪽의 행.
+fn cached_row<'c>(c: &'c Cache, label: &str, pane: &str) -> Option<(&'c Value, bool)> {
     let own = c.get(label)?;
     let seen = own.machine_id.as_ref().and_then(|id| c.values()
         .filter(|s| s.machine_id.as_ref() == Some(id)).max_by_key(|s| s.requested_at)).unwrap_or(own);
     let fresh = seen.at.elapsed() < STALE_AFTER;
+    let row = seen.panes.iter().find(|row| row.get("id").and_then(Value::as_str) == Some(pane))?;
+    Some((row, fresh))
+}
+
+fn cached_pane_from(c: &Cache, label: &str, pane: &str, require_fresh: bool) -> Option<Value> {
+    let (row, fresh) = cached_row(c, label, pane)?;
     if require_fresh && !fresh {
         return None;
     }
-    let mut row = seen
-        .panes
-        .iter()
-        .find(|row| row.get("id").and_then(Value::as_str) == Some(pane))
-        .cloned()?;
+    let mut row = row.clone();
     // Retain the last identity for reconnecting, but never replay an old approval as current.
     row["state_fresh"] = Value::Bool(fresh);
     if !fresh {
@@ -2271,6 +2281,10 @@ mod tests {
         assert_eq!(stale["state_fresh"], false);
         assert!(stale["kind"].is_null() && stale["waiting_for"].is_null());
         assert!(stale["response_end"].is_null(), "끊긴 기기의 옛 종료를 새 완료 재료로 쓰지 않는다");
+        // 복사하지 않는 신원 읽기도 낡은 행에서 같은 이름을 본다.
+        assert_eq!(cached_row(&c, "mini", "%8").map(|(row, fresh)| (row["name"].clone(), fresh)),
+            Some((stale["name"].clone(), false)));
+        assert!(cached_row(&c, "mini", "%9").is_none());
         c.insert("new-route".into(), seen(Duration::ZERO));
         let recovered = cached_pane_from(&c, "mini", "%8", true).unwrap();
         assert_eq!(recovered["state_fresh"], true);

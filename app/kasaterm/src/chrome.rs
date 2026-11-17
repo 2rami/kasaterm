@@ -441,11 +441,13 @@ impl App {
             } else {
                 Some(info.label)
             };
-            if let Some(row) = label.and_then(|label| kasa_device::machines::cached_pane(&label, &info.remote_id)) {
+            if let Some(name) = label.and_then(|label| kasa_device::machines::with_cached_pane_identity(&label, &info.remote_id, |row| {
                 if row.get("harness").is_some_and(serde_json::Value::is_null) {
                     return None;
                 }
-                return row.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+                row.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string)
+            })) {
+                return name;
             }
             // Before the host's first metadata arrives, a restored local
             // assignment/session binding is not evidence of remote identity.
