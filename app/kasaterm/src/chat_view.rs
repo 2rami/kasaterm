@@ -439,6 +439,13 @@ pub(crate) fn bottom_region(rows: &[Vec<GridCell>]) -> Option<usize> {
     Some(top)
 }
 
+/// 바닥으로 옮길 줄의 끝 — 마지막 글자 줄이나 커서 줄 바로 다음. 대화가 짧은 칸은 상태줄 아래가 빈 줄이라, 그것까지
+/// 바닥으로 세면 바닥이 화면 대부분이 되어(`REGION_MAX`) 그려서 보기가 터미널로 돌아갔다(이 기기 칸에서 늘 그랬다).
+fn band_end(rows: &[Vec<GridCell>], top: usize, cursor_row: usize) -> usize {
+    let last = rows.iter().rposition(|r| r.iter().any(|c| !matches!(c.ch, ' ' | '\0'))).unwrap_or(top);
+    (last.max(top).max(cursor_row.min(rows.len().saturating_sub(1))) + 1).min(rows.len())
+}
+
 /// 진짜 화면에 보이는 하네스 배너 — claude 로고 세 줄, 코덱스 `>_ OpenAI Codex` 와 폴더 두 줄.
 fn screen_banner(rows: &[Vec<GridCell>]) -> Option<Vec<Vec<GridCell>>> {
     let at = rows.iter().position(|r| {
@@ -627,7 +634,8 @@ impl App {
         let top = bottom_region(&src.cells)?;
         // 거울은 원본 칸 폭이 이 칸과 다르다 — 바닥도 이 폭으로 다시 짓는다.
         let src_cursor = (src.cursor_row as usize).checked_sub(top).map(|r| (r, src.cursor_col as usize));
-        let bottom = bottom::fit(&src.cells[top..], src.cols as usize, src_cursor, cols);
+        let band = &src.cells[top..band_end(&src.cells, top, src.cursor_row as usize)];
+        let bottom = bottom::fit(band, src.cols as usize, src_cursor, cols);
         let region = bottom.rows.len();
         if region == 0 || region as f32 > rows as f32 * REGION_MAX {
             return None;
@@ -1053,6 +1061,17 @@ mod tests {
 
     /// 커서가 칸막이 아래 「Chat about this」에 가 있어도 창 머리는 질문 위 가로줄이다. 고른 보기 바로 위 가로줄을
     /// 머리로 잡던 때는 칸막이 아래 두 줄만 옮겨 와 질문과 보기가 사라졌다(2026-11-18 PC 거울).
+    #[test]
+    fn the_blank_rows_under_a_short_session_are_not_part_of_the_bottom() {
+        let rule = "─".repeat(40);
+        let mut lines = vec![" ▐▛███▛█   Claude Code", "", &rule, "❯ ", &rule, "  상태줄"];
+        lines.extend(std::iter::repeat_n("", 30));
+        let s = screen(&lines, 40);
+        let top = bottom_region(&s).unwrap();
+        assert_eq!((top, band_end(&s, top, 3)), (2, 6));
+        assert_eq!(band_end(&s, top, 9), 10, "빈 줄에 선 커서 줄까지는 남긴다");
+    }
+
     #[test]
     fn a_question_window_keeps_its_head_whichever_option_is_current() {
         let rule = "─".repeat(40);
