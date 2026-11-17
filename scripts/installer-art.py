@@ -122,7 +122,7 @@ def banner():
 
 
 def dmg_background(scale):
-    """DMG 창(660×400) 바탕 — 아이콘 자리는 앱 (170, 205)·Applications (490, 205), 크기 112."""
+    """DMG 창(660×400) 바탕 — 아이콘 자리는 앱 (170, 228)·Applications (490, 228), 크기 112."""
     w, h = 660 * scale, 400 * scale
     img = vertical((w, h), PAPER, WASH).convert("RGBA")
     d = ImageDraw.Draw(img)
@@ -135,12 +135,12 @@ def dmg_background(scale):
     title = font(22 * s)
     msg = "Applications 폴더로 끌어다 놓으면 설치돼요"
     tw = d.textlength(msg, font=title)
-    d.text(((w - tw) / 2, 92 * s), msg, font=title, fill=INK)
+    d.text(((w - tw) / 2, 78 * s), msg, font=title, fill=INK)
     hint = font(13 * s, "Medium")
     sub = "설치한 뒤에는 이 창을 닫고 디스크를 꺼내도 돼요"
     hw = d.textlength(sub, font=hint)
-    d.text(((w - hw) / 2, 128 * s), sub, font=hint, fill=MUTE)
-    y = 205 * s
+    d.text(((w - hw) / 2, 112 * s), sub, font=hint, fill=MUTE)
+    y = 228 * s
     x0, x1 = 252 * s, 404 * s
     dash, gap = 10 * s, 8 * s
     x = x0

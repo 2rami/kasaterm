@@ -1455,5 +1455,5 @@ PC 미러의 `[[ki:…]]` 이미지 표식은 원본 기기의 인증된 이미�
 - MSI 는 `-cultures:ko-kr` 에 `app/kasaterm/wix/ko-kr.wxl` 로 WixUI 기본 한국어(「~하십시오」)를 앱 말투로 덮는다. 코드 페이지
   949 라 `—` 같은 글자는 MSI 문자열에 못 쓴다(light LGHT0311) — 주석은 괜찮다.
 - DMG 는 `scripts/dmg-layout.sh`(발행기는 `macsign.stage_dmg_layout`)가 배경과 `assets/dmg/DS_Store`(창 660×400, 아이콘 112,
-  앱 (170,205)·Applications (490,205))를 스테이징 맨 위에 놓는다. DS_Store 의 배경 별칭은 볼륨 이름 `kasaterm` 을 가리키니
+  앱 (170,228)·Applications (490,228))를 스테이징 맨 위에 놓는다. DS_Store 의 배경 별칭은 볼륨 이름 `kasaterm` 을 가리키니
   `hdiutil -volname` 을 바꾸면 dmgbuild 로 DS_Store 를 다시 만든다.
