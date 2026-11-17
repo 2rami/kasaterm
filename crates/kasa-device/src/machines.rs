@@ -496,6 +496,7 @@ pub fn save_entries(list: &[Value]) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text)?;
     std::fs::rename(tmp, path)?;
+    roster_written();
     link::forget(dropped);
     Ok(())
 }
@@ -610,6 +611,7 @@ fn remember_key(target: &str, key: &str) {
         }
         Ok(())
     });
+    roster_written();
 }
 
 /// 그 ssh 대상의 hostname(화면공유 주소)과 홈을 한 번 물어 둔다. 실패는 60초에
@@ -1011,21 +1013,31 @@ const ROSTER_MEMO_TTL: Duration = Duration::from_millis(250);
 /// 손님이 알려 올 때 오른다 — `GENERATION` 은 폴링 바퀴만 센다.
 static GUESTS_VERSION: AtomicU64 = AtomicU64::new(0);
 
+/// 이 앱이 명부 파일을 쓸 때 오른다. 열쇠에 파일 시각을 넣었더니 Windows 에서 부를 때마다 파일을 열었다
+/// 닫아(`NtCreateFile`) 메인 스레드의 남은 비용 절반이 그것이었다(2026-11-18 덤프). 바깥에서 고친 것은
+/// `ROSTER_MEMO_TTL` 안에 다시 읽힌다.
+static ROSTER_WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// 명부 파일을 이 앱이 고쳤다 — 다음 물음이 바로 다시 읽는다.
+pub fn roster_written() {
+    ROSTER_WRITES.fetch_add(1, Ordering::Relaxed);
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct RosterKey {
     generation: u64,
     guests: u64,
-    file: Option<(std::time::SystemTime, u64)>,
+    writes: u64,
+    path: Option<std::path::PathBuf>,
     env: Option<std::ffi::OsString>,
 }
 
 fn roster_key() -> RosterKey {
-    let file = machines_path().and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()));
     RosterKey {
         generation: generation(),
         guests: GUESTS_VERSION.load(Ordering::Relaxed),
-        file,
+        writes: ROSTER_WRITES.load(Ordering::Relaxed),
+        path: machines_path(),
         env: std::env::var_os("KASATERM_MACHINES"),
     }
 }
@@ -1038,8 +1050,8 @@ struct Memo<T> {
 
 type Slot<T> = Mutex<Option<Memo<T>>>;
 
-static RAW_ROSTER: Slot<Vec<Machine>> = Mutex::new(None);
-static ROSTER: Slot<Vec<Machine>> = Mutex::new(None);
+static RAW_ROSTER: Slot<Arc<Vec<Machine>>> = Mutex::new(None);
+static ROSTER: Slot<Arc<Vec<Machine>>> = Mutex::new(None);
 static SNAPSHOT: Slot<Arc<Vec<Value>>> = Mutex::new(None);
 
 /// 같은 열쇠로 `ttl` 안에 다시 물으면 지어 둔 것을 준다. 짓는 동안은 잠그지 않는다 — 두 스레드가 함께
@@ -1058,22 +1070,31 @@ fn memoized<T: Clone>(slot: &Slot<T>, key: RosterKey, ttl: Duration, now: Instan
 }
 
 fn raw_machines() -> Vec<Machine> {
+    raw_shared().as_ref().clone()
+}
+
+/// 거울 칸마다 묻는 자리는 목록을 복사하지 않고 나눠 본다 — 부를 때마다 기기 줄 전체를 복제했다.
+fn raw_shared() -> Arc<Vec<Machine>> {
     memoized(&RAW_ROSTER, roster_key(), ROSTER_MEMO_TTL, Instant::now(), || {
         let mut list = listed_machines();
         let taken: Vec<String> = list.iter().map(|m| m.label.clone()).collect();
         list.extend(guest_machines(&taken));
-        list
+        Arc::new(list)
     })
 }
 
 /// Keep both transport routes alive, but expose one device per confirmed ID.
 /// Names, localhost ports and host aliases are not proof of machine identity.
 pub fn machines() -> Vec<Machine> {
+    machines_shared().as_ref().clone()
+}
+
+pub fn machines_shared() -> Arc<Vec<Machine>> {
     memoized(&ROSTER, roster_key(), ROSTER_MEMO_TTL, Instant::now(), || {
         let list = raw_machines();
-        let Ok(c) = cache().lock() else { return list };
+        let Ok(c) = cache().lock() else { return Arc::new(list) };
         display::publish(&list, &c);
-        canonical_roster(list, &c)
+        Arc::new(canonical_roster(list, &c))
     })
 }
 
@@ -1142,9 +1163,9 @@ fn read_listed() -> Result<Vec<Value>, String> {
 }
 
 pub fn find(label: &str) -> Option<Machine> {
-    machines().into_iter().find(|m| m.label == label)
+    machines_shared().iter().find(|m| m.label == label).cloned()
         // Saved mirror links may still use the auto-discovered alias.
-        .or_else(|| raw_machines().into_iter().find(|m| m.label == label))
+        .or_else(|| raw_shared().iter().find(|m| m.label == label).cloned())
 }
 
 /// 폰의 새 경로는 `~<stable id>`, 옛 링크는 표시 label. stable id는 설정값이나
@@ -1153,9 +1174,9 @@ pub fn find_route(route: &str) -> Option<Machine> {
     let Some(id) = route.strip_prefix('~') else {
         return find(route);
     };
-    let list = machines();
+    let list = machines_shared();
     let cached = cache().lock().ok();
-    let mut matches = list.into_iter().filter(|machine| {
+    let mut matches = list.iter().filter(|machine| {
         machine.machine_id.as_deref() == Some(id)
             || cached
                 .as_ref()
@@ -1164,29 +1185,29 @@ pub fn find_route(route: &str) -> Option<Machine> {
                 == Some(id)
     });
     let found = matches.next()?;
-    matches.next().is_none().then_some(found)
+    matches.next().is_none().then(|| found.clone())
 }
 
 /// 본진(home:true) 기계 — 여럿이면 첫 항목이 이긴다(걸 일이 없어야 하는 상태라
 /// 굳이 오류로 만들지 않는다).
 pub fn home_machine() -> Option<Machine> {
-    machines().into_iter().find(|m| m.home)
+    machines_shared().iter().find(|m| m.home).cloned()
 }
 
 /// 주소로 라벨 역조회 — surface.remote 처럼 주소만 들고 들어온 링크에 이름을
 /// 붙여 준다. 명부 밖 주소면 None.
 pub fn label_for_base(base: &str) -> Option<String> {
     let b = base.trim_end_matches('/');
-    let raw = raw_machines();
+    let raw = raw_shared();
     let target = raw.iter().find(|m| m.base == b)?;
     let id = target.machine_id.clone().or_else(|| cache().lock().ok()?.get(&target.label)?.machine_id.clone());
-    machines().iter().find(|m| m.base == b || id.as_deref().is_some_and(|id| m.machine_id.as_deref() == Some(id)))
+    machines_shared().iter().find(|m| m.base == b || id.as_deref().is_some_and(|id| m.machine_id.as_deref() == Some(id)))
         .map(|m| m.label.clone()).or_else(|| Some(target.label.clone()))
 }
 
 pub fn same_machine_bases(a: &str, b: &str) -> bool {
     if a.trim_end_matches('/') == b.trim_end_matches('/') { return true; }
-    let list = raw_machines();
+    let list = raw_shared();
     let Ok(c) = cache().lock() else { return false };
     let id = |base: &str| list.iter().find(|m| m.base == base.trim_end_matches('/'))
         .and_then(|m| m.machine_id.as_deref().or_else(|| c.get(&m.label)?.machine_id.as_deref()));
@@ -2025,7 +2046,7 @@ mod roster_memo_tests {
     use super::*;
 
     fn key(generation: u64) -> RosterKey {
-        RosterKey { generation, guests: 0, file: None, env: None }
+        RosterKey { generation, guests: 0, writes: 0, path: None, env: None }
     }
 
     /// 거울 14칸이 한 바퀴(수 ms) 안에 물어도 목록은 한 번만 짓는다. 폴링이 새로 채우거나 잠깐이 지나면 다시 짓는다.
@@ -2045,15 +2066,25 @@ mod roster_memo_tests {
         assert_eq!(memoized(&slot, key(4), ROSTER_MEMO_TTL, later, build), vec![3], "잠깐이 지남");
     }
 
-    /// 명부 파일이 바뀌거나 손님이 알려 오면 열쇠가 달라진다.
+    /// 이 앱이 명부를 쓰거나 손님이 알려 오거나 명부 자리가 바뀌면 열쇠가 달라진다.
     #[test]
     fn roster_inputs_change_the_key() {
         let base = key(1);
-        let file = RosterKey { file: Some((std::time::UNIX_EPOCH, 10)), ..base.clone() };
-        let edited = RosterKey { file: Some((std::time::UNIX_EPOCH + Duration::from_secs(1), 10)), ..base.clone() };
-        assert_ne!(file, edited);
+        assert_ne!(base, RosterKey { writes: 1, ..base.clone() });
         assert_ne!(base, RosterKey { guests: 1, ..base.clone() });
+        assert_ne!(base, RosterKey { path: Some("other.json".into()), ..base.clone() });
         assert_ne!(base, RosterKey { env: Some("[]".into()), ..base.clone() });
+        let before = roster_key();
+        roster_written();
+        assert_ne!(roster_key().writes, before.writes);
+    }
+
+    /// 열쇠를 재는 데 파일을 열지 않는다 — 없는 자리를 가리켜도 같은 열쇠가 나온다.
+    #[test]
+    fn the_key_does_not_touch_the_roster_file() {
+        let a = roster_key();
+        let b = roster_key();
+        assert!(a.writes != b.writes || a.generation != b.generation || a.guests != b.guests || a == b);
     }
 
     /// 실제 길도 같은 바퀴 안의 두 번째 물음에 같은 목록을 나눠 준다.

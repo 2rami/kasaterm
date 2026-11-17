@@ -347,7 +347,10 @@ pub fn apply_files(request: &PendingApply) -> Result<(), String> {
     }
     choice::prune_sent(&mut settings, request.remote.settings.get(choice::KEY));
     if settings != original_settings { local::write_private(&request.paths.settings, &settings)?; }
-    if machines != original_machines { local::write_private(&request.paths.machines, &machines)?; }
+    if machines != original_machines {
+        local::write_private(&request.paths.machines, &machines)?;
+        crate::machines::roster_written();
+    }
     let actual = local::snapshot_values(&settings, &machines)?;
     let mut observed = request.expected.clone();
     for (id, value) in &request.original.machines {
