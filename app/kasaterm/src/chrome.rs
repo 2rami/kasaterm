@@ -32,6 +32,15 @@ fn remote_seat(route: &str, label: &str, row: &serde_json::Value) -> Option<crat
     })
 }
 
+type RemoteMirrorIndex = std::collections::HashMap<String, std::collections::HashMap<String, Vec<(String, Option<String>)>>>;
+
+fn mirrors_of(index: &RemoteMirrorIndex, seat: &crate::state::RemoteSeat) -> Vec<String> {
+    index.get(&seat.label).and_then(|panes| panes.get(&seat.remote_id)).into_iter().flatten()
+        .filter(|(_, mine)| mine.as_deref().is_none_or(|mine| seat.surface_key.as_deref().is_none_or(|theirs| theirs == mine)))
+        .map(|(local, _)| local.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod notification_surface_tests {
     use super::*;
@@ -51,6 +60,27 @@ mod notification_surface_tests {
         assert_eq!(visible_notification_surface(&ws).as_deref(), Some("%0"));
         ws.active_pane = None;
         assert_eq!(visible_notification_surface(&ws), None);
+    }
+
+    #[test]
+    fn a_reused_remote_number_keeps_only_mirrors_of_the_same_surface() {
+        let mut index = RemoteMirrorIndex::new();
+        index.entry("nachoneko".into()).or_default().entry("%3".into()).or_default().extend([
+            ("%10".to_string(), Some("new".to_string())),
+            ("%11".to_string(), Some("old".to_string())),
+            ("%12".to_string(), None),
+        ]);
+        let seat = crate::state::RemoteSeat {
+            key: String::new(), label: "nachoneko".into(), remote_id: "%3".into(), surface_key: Some("new".into()),
+            name: String::new(), detail: String::new(), session: String::new(),
+        };
+        let mut found = mirrors_of(&index, &seat);
+        found.sort();
+        assert_eq!(found, ["%10", "%12"]);
+        let unkeyed = crate::state::RemoteSeat { surface_key: None, ..seat.clone() };
+        assert_eq!(mirrors_of(&index, &unkeyed).len(), 3, "a source without a key matches every mirror of that number");
+        let elsewhere = crate::state::RemoteSeat { label: "macbook".into(), ..seat };
+        assert!(mirrors_of(&index, &elsewhere).is_empty());
     }
 }
 
@@ -875,16 +905,26 @@ impl App {
         );
     }
 
-    /// 그 원격 칸을 지금 비추는 이 기기 칸들 — 방에 앉은 것만. 번호가 재사용됐으면 surface_key 로 거른다.
-    fn remote_mirrors(&self, seat: &crate::state::RemoteSeat) -> Vec<String> {
-        self.pty.keys().filter(|local| {
-            let Some(info) = kasa_remote::remote::remote_info(local) else { return false };
+    /// 방에 앉은 거울 칸을 (기기 이름 → 원격 칸 번호 → (이 기기 칸, 거울이 아는 원본 열쇠)) 로 한 번에 모은다.
+    /// 원격 칸마다 이 기기 칸을 다 훑으면 250ms 마다 「원격 칸 × 이 기기 칸」 번 링크를 잠그고 기기 목록을 풀었다.
+    fn remote_mirror_index(&self) -> RemoteMirrorIndex {
+        let mut index = RemoteMirrorIndex::new();
+        for local in self.pty.keys() {
+            let Some(info) = kasa_remote::remote::remote_info(local) else { continue };
+            if self.window_of_pane(local).is_none() {
+                continue;
+            }
             let label = kasa_device::machines::label_for_base(&info.base)
                 .unwrap_or_else(|| if info.label.is_empty() { info.base.clone() } else { info.label.clone() });
-            label == seat.label && info.remote_id == seat.remote_id && self.window_of_pane(local).is_some()
-                && kasa_remote::remote::remote_surface_key(local).filter(|k| !k.starts_with("legacy:"))
-                    .is_none_or(|mine| seat.surface_key.as_deref().is_none_or(|theirs| theirs == mine))
-        }).cloned().collect()
+            let key = kasa_remote::remote::remote_surface_key(local).filter(|k| !k.starts_with("legacy:"));
+            index.entry(label).or_default().entry(info.remote_id).or_default().push((local.clone(), key));
+        }
+        index
+    }
+
+    /// 그 원격 칸을 지금 비추는 이 기기 칸들 — 방에 앉은 것만. 번호가 재사용됐으면 surface_key 로 거른다.
+    fn remote_mirrors(&self, seat: &crate::state::RemoteSeat) -> Vec<String> {
+        mirrors_of(&self.remote_mirror_index(), seat)
     }
 
     /// 원격 방을 보러 왔다 — 그 칸들의 깜빡임을 멈춘다. 끝난 표시는 거울 칸이 보일 때 원본처럼 걷힌다.
@@ -903,8 +943,9 @@ impl App {
         self.info.machines_col.marks_at = Some(std::time::Instant::now());
         let seats = std::mem::take(&mut self.info.machines_col.remote_seats);
         let mut marks = std::collections::HashMap::new();
+        let index = self.remote_mirror_index();
         for seat in &seats {
-            let mirrors = self.remote_mirrors(seat);
+            let mirrors = mirrors_of(&index, seat);
             let looking = self.window_focused && mirrors.iter().any(|id| self.notification_surface_is_visible(id));
             let col = &mut self.info.machines_col;
             if looking {
