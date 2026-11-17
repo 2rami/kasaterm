@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -178,6 +178,7 @@ pub fn announce_guest(label: &str, port: u16, host: &str, home: &str, build: &st
             eprintln!("[machines] {label} 이(가) 알려 옴: 127.0.0.1:{port} (빌드 {build})");
         }
     }
+    GUESTS_VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 알려 온 기계들을 명부 항목으로. 파일 명부와 이름이 겹치면 파일 쪽이 이긴다 —
@@ -1001,20 +1002,79 @@ pub fn stop_tunnels() {
     crate::kasanet::shutdown();
 }
 
+/// GUI 는 거울 칸마다·바퀴마다 목록을 묻는다. 부를 때마다 명부 파일을 읽어 풀고 기기·칸 줄을 다시 지으면
+/// 메인 스레드가 한 코어를 다 썼다(2026-11-17 집 PC, 거울 14칸에 91%). 목록에 드는 것(폴링 갱신 번호·손님
+/// 번호·명부 파일·명부 env)이 같고 이 시간 안이면 지난 답을 준다. 손님 만료·온라인 판정처럼 시간이 흐르며
+/// 바뀌는 것은 이만큼 늦는다.
+const ROSTER_MEMO_TTL: Duration = Duration::from_millis(250);
+
+/// 손님이 알려 올 때 오른다 — `GENERATION` 은 폴링 바퀴만 센다.
+static GUESTS_VERSION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, PartialEq)]
+struct RosterKey {
+    generation: u64,
+    guests: u64,
+    file: Option<(std::time::SystemTime, u64)>,
+    env: Option<std::ffi::OsString>,
+}
+
+fn roster_key() -> RosterKey {
+    let file = machines_path().and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()));
+    RosterKey {
+        generation: generation(),
+        guests: GUESTS_VERSION.load(Ordering::Relaxed),
+        file,
+        env: std::env::var_os("KASATERM_MACHINES"),
+    }
+}
+
+struct Memo<T> {
+    key: RosterKey,
+    at: Instant,
+    value: T,
+}
+
+type Slot<T> = Mutex<Option<Memo<T>>>;
+
+static RAW_ROSTER: Slot<Vec<Machine>> = Mutex::new(None);
+static ROSTER: Slot<Vec<Machine>> = Mutex::new(None);
+static SNAPSHOT: Slot<Arc<Vec<Value>>> = Mutex::new(None);
+
+/// 같은 열쇠로 `ttl` 안에 다시 물으면 지어 둔 것을 준다. 짓는 동안은 잠그지 않는다 — 두 스레드가 함께
+/// 지어도 둘 다 맞는 답이고, 짓다가 상태가 바뀌면 열쇠가 달라져 다음 물음이 다시 짓는다.
+fn memoized<T: Clone>(slot: &Slot<T>, key: RosterKey, ttl: Duration, now: Instant, build: impl FnOnce() -> T) -> T {
+    if let Ok(memo) = slot.lock() {
+        if let Some(memo) = memo.as_ref().filter(|m| m.key == key && now.saturating_duration_since(m.at) < ttl) {
+            return memo.value.clone();
+        }
+    }
+    let value = build();
+    if let Ok(mut memo) = slot.lock() {
+        *memo = Some(Memo { key, at: now, value: value.clone() });
+    }
+    value
+}
+
 fn raw_machines() -> Vec<Machine> {
-    let mut list = listed_machines();
-    let taken: Vec<String> = list.iter().map(|m| m.label.clone()).collect();
-    list.extend(guest_machines(&taken));
-    list
+    memoized(&RAW_ROSTER, roster_key(), ROSTER_MEMO_TTL, Instant::now(), || {
+        let mut list = listed_machines();
+        let taken: Vec<String> = list.iter().map(|m| m.label.clone()).collect();
+        list.extend(guest_machines(&taken));
+        list
+    })
 }
 
 /// Keep both transport routes alive, but expose one device per confirmed ID.
 /// Names, localhost ports and host aliases are not proof of machine identity.
 pub fn machines() -> Vec<Machine> {
-    let list = raw_machines();
-    let Ok(c) = cache().lock() else { return list };
-    display::publish(&list, &c);
-    canonical_roster(list, &c)
+    memoized(&ROSTER, roster_key(), ROSTER_MEMO_TTL, Instant::now(), || {
+        let list = raw_machines();
+        let Ok(c) = cache().lock() else { return list };
+        display::publish(&list, &c);
+        canonical_roster(list, &c)
+    })
 }
 
 fn canonical_roster(list: Vec<Machine>, c: &Cache) -> Vec<Machine> {
@@ -1119,10 +1179,8 @@ pub fn label_for_base(base: &str) -> Option<String> {
     let b = base.trim_end_matches('/');
     let raw = raw_machines();
     let target = raw.iter().find(|m| m.base == b)?;
-    let c = cache().lock().ok()?;
-    let id = target.machine_id.as_deref().or_else(|| c.get(&target.label)?.machine_id.as_deref());
-    let canonical = canonical_roster(raw.clone(), &c);
-    canonical.iter().find(|m| m.base == b || id.is_some_and(|id| m.machine_id.as_deref() == Some(id)))
+    let id = target.machine_id.clone().or_else(|| cache().lock().ok()?.get(&target.label)?.machine_id.clone());
+    machines().iter().find(|m| m.base == b || id.as_deref().is_some_and(|id| m.machine_id.as_deref() == Some(id)))
         .map(|m| m.label.clone()).or_else(|| Some(target.label.clone()))
 }
 
@@ -1817,11 +1875,18 @@ async fn first_session_character(bases: &[String], sid: &str, timeout: Duration)
 /// 명부에서 빠진 기기도 이유를 단 끊긴 행으로 끝에 붙는다 — 이 기기 화면(사이드바·Info·하단바·CLI)만.
 /// 관문 너머(`/machines`)엔 안 싣는다: 폰·다른 기기는 제 명부로 판단한다.
 pub fn snapshot() -> Vec<Value> {
-    let mut rows = snapshot_with_uplinks(&[]);
-    // 다시 들어온 기기는 다음 바퀴가 흔적을 걷기 전까지 두 줄로 설 수 있다 — 살아 있는 줄이 이긴다.
-    let live: HashSet<String> = rows.iter().filter_map(|r| r["label"].as_str().map(str::to_string)).collect();
-    rows.extend(link::ghosts().into_iter().filter(|g| g["label"].as_str().is_none_or(|l| !live.contains(l))));
-    rows
+    snapshot_shared().as_ref().clone()
+}
+
+/// 거울 칸마다 부르는 자리용 `snapshot` — 기기·칸 줄 전체를 복사하지 않고 나눠 본다.
+pub fn snapshot_shared() -> Arc<Vec<Value>> {
+    memoized(&SNAPSHOT, roster_key(), ROSTER_MEMO_TTL, Instant::now(), || {
+        let mut rows = snapshot_with_uplinks(&[]);
+        // 다시 들어온 기기는 다음 바퀴가 흔적을 걷기 전까지 두 줄로 설 수 있다 — 살아 있는 줄이 이긴다.
+        let live: HashSet<String> = rows.iter().filter_map(|r| r["label"].as_str().map(str::to_string)).collect();
+        rows.extend(link::ghosts().into_iter().filter(|g| g["label"].as_str().is_none_or(|l| !live.contains(l))));
+        Arc::new(rows)
+    })
 }
 
 fn availability(age: Option<Duration>, uplink: bool) -> (bool, Option<&'static str>) {
@@ -1953,6 +2018,53 @@ pub fn snapshot_with_uplinks(uplinks: &[crate::uplink::GatewayMachine]) -> Vec<V
         }
     }
     rows
+}
+
+#[cfg(test)]
+mod roster_memo_tests {
+    use super::*;
+
+    fn key(generation: u64) -> RosterKey {
+        RosterKey { generation, guests: 0, file: None, env: None }
+    }
+
+    /// 거울 14칸이 한 바퀴(수 ms) 안에 물어도 목록은 한 번만 짓는다. 폴링이 새로 채우거나 잠깐이 지나면 다시 짓는다.
+    #[test]
+    fn fourteen_mirrors_in_one_turn_build_the_roster_once() {
+        let slot: Slot<Vec<u32>> = Mutex::new(None);
+        let builds = std::cell::Cell::new(0);
+        let build = || { builds.set(builds.get() + 1); vec![builds.get()] };
+        let turn = Instant::now();
+        for mirror in 0..14 {
+            memoized(&slot, key(3), ROSTER_MEMO_TTL, turn + Duration::from_millis(mirror), build);
+        }
+        assert_eq!(builds.get(), 1);
+        assert_eq!(memoized(&slot, key(4), ROSTER_MEMO_TTL, turn + Duration::from_millis(20), build), vec![2], "폴링 갱신");
+        assert_eq!(memoized(&slot, key(4), ROSTER_MEMO_TTL, turn + Duration::from_millis(30), build), vec![2]);
+        let later = turn + Duration::from_millis(20) + ROSTER_MEMO_TTL;
+        assert_eq!(memoized(&slot, key(4), ROSTER_MEMO_TTL, later, build), vec![3], "잠깐이 지남");
+    }
+
+    /// 명부 파일이 바뀌거나 손님이 알려 오면 열쇠가 달라진다.
+    #[test]
+    fn roster_inputs_change_the_key() {
+        let base = key(1);
+        let file = RosterKey { file: Some((std::time::UNIX_EPOCH, 10)), ..base.clone() };
+        let edited = RosterKey { file: Some((std::time::UNIX_EPOCH + Duration::from_secs(1), 10)), ..base.clone() };
+        assert_ne!(file, edited);
+        assert_ne!(base, RosterKey { guests: 1, ..base.clone() });
+        assert_ne!(base, RosterKey { env: Some("[]".into()), ..base.clone() });
+    }
+
+    /// 실제 길도 같은 바퀴 안의 두 번째 물음에 같은 목록을 나눠 준다.
+    #[test]
+    fn snapshot_shared_is_shared_within_a_turn() {
+        let (before, started) = (roster_key(), Instant::now());
+        let (a, b) = (snapshot_shared(), snapshot_shared());
+        if roster_key() == before && started.elapsed() < ROSTER_MEMO_TTL / 2 {
+            assert!(Arc::ptr_eq(&a, &b));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -483,7 +483,7 @@ pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)>
     let label = kasa_device::machines::label_for_base(&info.base).unwrap_or_else(|| {
         if info.label.is_empty() { info.base.clone() } else { info.label.clone() }
     });
-    let snap = kasa_device::machines::snapshot();
+    let snap = kasa_device::machines::snapshot_shared();
     let m = snap
         .iter()
         .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(label.as_str()))?;
