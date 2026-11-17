@@ -32,6 +32,13 @@ const MIGRATE_AFTER: Duration = Duration::from_millis(100);
 const LONG_LIVED: Duration = Duration::from_secs(3);
 #[cfg(test)]
 const LONG_LIVED: Duration = Duration::from_millis(200);
+/// 직통이 공용 중계로 이만큼 머물러야 카사넷 연결을 끊는다. 길을 갈아타는 순간 선택된 길이 한 표본쯤 비거나
+/// 중계로 잡히는데, 그때마다 끊으면 그 기기의 거울이 전부 ssh 로 다시 붙었다가 몇 초 뒤 또 카사넷으로 붙어 칸마다
+/// 화면 스냅샷을 두 번 다시 받는다(2026-11-18 집 PC↔맥북, 거울 22개).
+#[cfg(not(test))]
+const DEMOTE_AFTER: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const DEMOTE_AFTER: Duration = Duration::from_millis(300);
 /// 직통인 동안 원래 길에 남은 오래된 연결을 이 간격으로 쓸어 옮긴다. 직통이 설 때 한 번만 옮기면 그 순간
 /// 막 열렸던 연결(HTTP 재사용 풀)이 끝까지 ssh 에 남는다(2026-09-29 리그에서 5개 중 3개가 남았다).
 const SWEEP: Duration = Duration::from_secs(1);
@@ -252,23 +259,28 @@ async fn carry(
 
 async fn follow(inner: Arc<Inner>, mut rx: watch::Receiver<LinkState>) {
     let mut usable_since: Option<Instant> = None;
+    let mut demoted_at: Option<Instant> = None;
     loop {
-        let now_usable = rx.borrow_and_update().carries_data();
-        match (now_usable, usable_since) {
-            (true, None) => usable_since = Some(Instant::now()),
-            (false, Some(_)) => {
+        let state = *rx.borrow_and_update();
+        if state.carries_data() {
+            demoted_at = None;
+            usable_since.get_or_insert_with(Instant::now);
+        } else if usable_since.is_some() {
+            let since = *demoted_at.get_or_insert_with(Instant::now);
+            if state == LinkState::Down || since.elapsed() >= DEMOTE_AFTER {
                 usable_since = None;
+                demoted_at = None;
                 // 믿지 않는 중계로 떨어진 연결에 데이터를 더 싣지 않는다 — 끊어서 원래 길로 다시 붙게 한다.
                 inner.cut(|c| c.via == Via::Kasanet);
             }
-            _ => {}
         }
-        if usable_since.is_some_and(|t| t.elapsed() >= MIGRATE_AFTER) {
+        if demoted_at.is_none() && usable_since.is_some_and(|t| t.elapsed() >= MIGRATE_AFTER) {
             inner.cut(|c| c.via == Via::Fallback && !c.pinned && c.since.elapsed() >= LONG_LIVED);
         }
+        let wake = demoted_at.map_or(SWEEP, |t| (t + DEMOTE_AFTER).saturating_duration_since(Instant::now()));
         tokio::select! {
             changed = rx.changed() => if changed.is_err() { return },
-            _ = tokio::time::sleep(SWEEP), if usable_since.is_some() => {}
+            _ = tokio::time::sleep(wake), if usable_since.is_some() => {}
         }
     }
 }
@@ -395,6 +407,52 @@ mod tests {
         );
         let mut back = TcpStream::connect(at).await.unwrap();
         assert_eq!(ask(&mut back, "e").await.unwrap(), "F:e");
+    }
+
+    /// 끊지 않은 카사넷 연결 하나를 든 입구 — `follow` 만 따로 돌려 길 상태를 손으로 바꾼다.
+    fn carrying_one() -> (Arc<Inner>, JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let inner = Arc::new(Inner {
+            local_addr: listener.local_addr().unwrap(),
+            fallback: None,
+            link: Mutex::new(None),
+            watcher: Mutex::new(None),
+            carried: Mutex::new(HashMap::new()),
+            next: AtomicU64::new(0),
+        });
+        let held = tokio::spawn(std::future::pending::<()>());
+        inner.carried.lock().unwrap().insert(0, Carried {
+            via: Via::Kasanet, since: Instant::now(), pinned: false, abort: held.abort_handle(),
+        });
+        (inner, held)
+    }
+
+    #[tokio::test]
+    async fn a_relay_blip_shorter_than_the_grace_keeps_kasanet_connections() {
+        let (inner, _held) = carrying_one();
+        let (tx, rx) = watch::channel(LinkState::Direct { rtt: Duration::from_millis(5) });
+        tokio::spawn(follow(inner.clone(), rx));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(LinkState::Relay).unwrap();
+        tokio::time::sleep(DEMOTE_AFTER / 3).await;
+        tx.send(LinkState::Direct { rtt: Duration::from_millis(6) }).unwrap();
+        tokio::time::sleep(DEMOTE_AFTER * 2).await;
+        assert_eq!(inner.carried.lock().unwrap().len(), 1, "a momentary relay sample must not cut the mirrors");
+
+        tx.send(LinkState::Relay).unwrap();
+        wait_until("staying on the public relay cuts", || inner.carried.lock().unwrap().is_empty()).await;
+    }
+
+    #[tokio::test]
+    async fn a_closed_link_cuts_at_once() {
+        let (inner, _held) = carrying_one();
+        let (tx, rx) = watch::channel(LinkState::Direct { rtt: Duration::from_millis(5) });
+        tokio::spawn(follow(inner.clone(), rx));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let lost = Instant::now();
+        tx.send(LinkState::Down).unwrap();
+        wait_until("down cuts", || inner.carried.lock().unwrap().is_empty()).await;
+        assert!(lost.elapsed() < DEMOTE_AFTER, "a dead link has nothing to wait for");
     }
 
     #[tokio::test(flavor = "multi_thread")]
