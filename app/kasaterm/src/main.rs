@@ -30,6 +30,7 @@ mod homeaccounts;
 mod device_accounts;
 mod disk_warning;
 mod input;
+mod input_trace;
 mod shell_edit;
 mod process_usage;
 mod image_preview;

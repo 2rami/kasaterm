@@ -11,6 +11,7 @@
 //! in-process multiplexer (`Workspace` of `PtySession`s).
 
 pub mod block_lines;
+pub mod input_trace;
 pub mod layout;
 mod host;
 mod kitty;

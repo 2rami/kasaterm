@@ -99,6 +99,7 @@ impl PtySession {
         if held.is_empty() {
             return Ok(());
         }
+        crate::input_trace::note("released", "", format!("{}B", held.len()));
         self.send_bytes_guarded(&held, None).map(|_| ())
     }
 
@@ -122,6 +123,7 @@ impl PtySession {
             let mut hold = self.input_hold.lock().unwrap();
             match hold.take() {
                 Some((until, mut held)) if Instant::now() < until => {
+                    crate::input_trace::note("held", "", format!("{}B — tell 붙여넣기~Enter 사이라 Enter 뒤로 미룸", bytes.len()));
                     held.extend_from_slice(bytes);
                     *hold = Some((until, held));
                     return Ok(self.input_revision());
@@ -138,7 +140,10 @@ impl PtySession {
         };
         let revision = {
             let mut w = self.writer.lock().unwrap();
-            anyhow::ensure!(!self.input_closed(), "pane is closed — reopen it before sending input");
+            if self.input_closed() {
+                crate::input_trace::note("closed", "", format!("{}B — 닫힌 칸이라 버림", bytes.len()));
+                anyhow::bail!("pane is closed — reopen it before sending input");
+            }
             anyhow::ensure!(expected.is_none_or(|revision|revision == self.input_revision()), "input changed during tell delivery");
             // 클릭은 입력칸에 글을 못 넣는다 — 세면 학생 창을 눌러 보기만 해도 사람이 Enter 를 칠 때까지
             // tell 이 줄만 섰다(2026-10-01 실측: 하루 61건 중 21건 만료).

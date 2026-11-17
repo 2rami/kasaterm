@@ -563,7 +563,10 @@ impl App {
         // 붙여넣기와 Enter 사이에 사람이 친 글이 본문 뒤에 붙어 함께 제출되던 자리다(2026-09-29 「빈 입력창에 뭐 치면
         // 같이 전송」). 그 사이 입력은 붙들었다가 Enter 뒤(또는 보류 뒤) 친 순서대로 흘려보낸다.
         delivery.pty.hold_input(HOLD_FOR);
-        let revision = match delivery.pty.send_bytes_guarded(payload.as_bytes(),Some(delivery.revision)) {
+        let pasted = delivery.pty.send_bytes_guarded(payload.as_bytes(),Some(delivery.revision));
+        kasa_pty::input_trace::note("tell-paste", &delivery.record.address.surface_id,
+            format!("{}B {} — Enter 까지 사람 키를 붙든다", payload.len(), if pasted.is_ok() { "ok" } else { "실패" }));
+        let revision = match pasted {
             Ok(revision) => revision,
             Err(_) => {
                 let _ = delivery.pty.release_input();
@@ -608,6 +611,7 @@ impl App {
                     _ => "receiver disappeared after paste".into(),
                 };
                 eprintln!("[tell] {} → {} Enter 보류: {why}", commit.record.message_id, commit.record.address.surface_id);
+                kasa_pty::input_trace::note("tell-withheld", &commit.record.address.surface_id, why.clone());
                 let _ = commit.pty.release_input();
                 finish(&commit.record,State::Uncertain,&format!("Enter withheld: {why}"));
                 return;
@@ -620,6 +624,7 @@ impl App {
             session_titles().lock().unwrap().insert(surface.clone(),(commit.record.title.clone(),Instant::now()));
         }
         let result = commit.pty.send_bytes_guarded(b"\r",Some(commit.revision));
+        kasa_pty::input_trace::note("tell-enter", &surface, if result.is_ok() { "ok".into() } else { "실패".into() });
         if result.is_err() { session_titles().lock().unwrap().remove(&surface); }
         else { taking().lock().unwrap().insert(surface.clone(),Taking { submitted: Instant::now(), seen_busy: false }); }
         let _ = commit.pty.release_input();

@@ -3205,6 +3205,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let _input_trace = self.window.as_ref().is_some_and(|window| window.id() == id)
+            .then(|| crate::input_trace::begin(&event, || self.input_trace_state())).flatten();
         if let WindowEvent::KeyboardInput { event, .. } = &event {
             if self.consume_settings_activation_key(event) { return; }
         }

@@ -1140,6 +1140,10 @@ pub trait Backend: Send + Sync {
     fn login_vault(&self, _action: &str) -> Result<serde_json::Value> {
         anyhow::bail!("login vault unsupported by this backend")
     }
+    /// 최근 `seconds` 초의 키 발자국 — 받은 키·쓴 칸·버린 이유. 글자는 종류로만 가려져 있다.
+    fn input_trace(&self, _seconds: u64) -> Result<serde_json::Value> {
+        anyhow::bail!("input trace unsupported by this backend")
+    }
     /// `child` 칸의 `done` 보고를 `parent` 칸으로 보내게 적는다. 칸을 쪼개거나 탭을 열 때와, 이미 있는 칸에
     /// 학생을 다시 띄울 때(`surface.launch`) 부른다. 보고를 전하지 않는 백엔드는 아무것도 안 한다.
     fn remember_spawner(&self, _child: &str, _parent: &str) {}

@@ -4297,6 +4297,12 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn input_trace(&self, seconds: u64) -> Result<serde_json::Value> {
+        let lines = kasa_pty::input_trace::dump(std::time::Duration::from_secs(seconds));
+        let summary = if lines.is_empty() { format!("최근 {seconds}초에 받은 키가 없어요") } else { lines.join("\n") };
+        Ok(serde_json::json!({ "summary": summary, "lines": lines }))
+    }
+
     fn login_vault(&self, action: &str) -> Result<serde_json::Value> {
         use kasa_device::login_vault as vault;
         match action {

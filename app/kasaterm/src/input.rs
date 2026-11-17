@@ -812,11 +812,17 @@ impl App {
     /// pane, and routing that commit through `send_bytes` would put the final
     /// syllable in the newly-focused terminal.
     pub(crate) fn send_bytes_to_surface(&self, surface: Option<&str>, bytes: &[u8]) {
-        if bytes.is_empty() || self.restoration_blocks_input() {
+        use kasa_pty::input_trace::note;
+        if bytes.is_empty() {
+            return;
+        }
+        if self.restoration_blocks_input() {
+            note("dropped", surface.unwrap_or(""), format!("{}B — 창 복원 중", bytes.len()));
             return;
         }
         let fallback_surface = surface.is_none().then(|| self.target_surface()).flatten();
-        if surface.or(fallback_surface.as_deref()).is_some_and(|id| self.restoration_blocks_surface(id)) {
+        if let Some(id) = surface.or(fallback_surface.as_deref()).filter(|id| self.restoration_blocks_surface(id)) {
+            note("dropped", id, format!("{}B — 이 칸 복원 중", bytes.len()));
             return;
         }
         if let Some(id) = surface.or(fallback_surface.as_deref()) {
@@ -831,7 +837,12 @@ impl App {
         // tab instead (the "typing in another tab lands in the first tab" bug).
         if let Some(pid) = surface {
             if let Some(pty) = self.pty.get(pid) {
-                let _ = pty.send_bytes(bytes);
+                let result = pty.send_bytes(bytes);
+                let step = if kasa_remote::remote::is_remote_pane(pid) { "mirror" } else { "pty" };
+                note(step, pid, match &result {
+                    Ok(()) => format!("{}B ok", bytes.len()),
+                    Err(e) => format!("{}B 실패: {e}", bytes.len()),
+                });
                 return;
             }
         }
@@ -846,11 +857,19 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" ");
             let fallback = self.target_pane();
-            let _ = tmux.send_keys_hex(surface.or(fallback.as_deref()), &hex);
+            let target = surface.or(fallback.as_deref());
+            let result = tmux.send_keys_hex(target, &hex);
+            note("tmux", target.unwrap_or(""), format!("{}B {}", bytes.len(), if result.is_ok() { "ok" } else { "실패" }));
         } else if surface.is_none() {
-            if let Some(pty) = self.active_pty() {
-                let _ = pty.send_bytes(bytes);
+            match self.active_pty() {
+                Some(pty) => {
+                    let result = pty.send_bytes(bytes);
+                    note("pty", "(active)", format!("{}B {}", bytes.len(), if result.is_ok() { "ok" } else { "실패" }));
+                }
+                None => note("dropped", "", format!("{}B — 키를 받을 칸이 없음", bytes.len())),
             }
+        } else {
+            note("dropped", surface.unwrap_or(""), format!("{}B — 이 칸에 PTY 가 없음", bytes.len()));
         }
     }
     /// True when the pane has mouse reporting + SGR encoding enabled

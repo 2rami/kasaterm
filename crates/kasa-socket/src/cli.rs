@@ -2090,6 +2090,9 @@ const HELP_GROUPS: &[(&str, &[&str])] = &[
         "secret status                             믿는 폰 열쇠(값 없음)",
         "login-vault status|create|join            로그인 금고 상태·금고 만들기·이 기기 등록(폰 Face ID·지문 확인은 사람)",
     ]),
+    ("진단", &[
+        "input-trace [초=120]                      키가 씹혔을 때 — 받은 키·간 칸·버린 이유(글자는 종류만)",
+    ]),
     ("앱", &[
         "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·승인 필요)",
         "agent-plan [--machine ID]                전체 로그인 계정의 사용량으로 새 세션 계획 조회",
@@ -2357,6 +2360,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
     let (method, params): (&str, Value) = match cmd {
         // 설정 화면 버튼과 같은 일 — 재시작 뒤 사람 손을 폰 Face ID·지문 확인만 남기려고 둔다. 지문이 같다는 확인은
         // 사람이 두 기기 화면을 맞춰 보는 보안 단계라 열지 않는다.
+        "input-trace" => {
+            let seconds = args.first().map(|s| s.parse::<u64>()).transpose()
+                .map_err(|_| anyhow!("input-trace [초] — 초는 숫자"))?.unwrap_or(120);
+            ("input.trace", json!({ "seconds": seconds }))
+        }
         "login-vault" => match args.first().map(String::as_str).unwrap_or("status") {
             "status" => ("login_vault.status", json!({})),
             "create" => ("login_vault.create", json!({})),

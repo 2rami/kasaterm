@@ -709,6 +709,9 @@ async fn manager(
     let mut had_attach = false;
     let mut attempts_before_first = 0u32;
     let mut backoff_ms = 500u64;
+    // 큐에서 꺼냈는데 연결이 끊겨 못 보낸 입력. 끊긴 쓰기는 상대가 온전한 프레임으로 받을 수 없으니(앞부분만
+    // 나갔거나 하나도 못 나갔다) 다음 연결의 맨 앞에 다시 보낸다 — 버리면 그 순간 친 키가 사라졌다.
+    let mut unsent: Option<Vec<u8>> = None;
     // Never forward authentication across a source-controlled HTTP redirect.
     let identity_client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none()).build()
@@ -957,7 +960,10 @@ async fn manager(
                                 *viewport.connection_error.lock().unwrap() = None;
                                 viewport.received_frame.store(true, Ordering::Release);
                             }
-                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                                kasa_pty::input_trace::note("ws-closed", &local, "거울 연결이 끊겨 다시 잇는다".into());
+                                break;
+                            }
                             // Ping/Pong — tungstenite 가 pong 을 알아서 큐잉한다.
                             // 실제 송신은 아래 주기 flush 가 밀어낸다.
                             Some(Ok(_)) => {}
@@ -965,9 +971,19 @@ async fn manager(
                         // Keep queued input in its existing channel until the
                         // source identity is verified; never type into a reused
                         // pane number while its size handshake is still pending.
-                        o = orx.recv(), if hint.is_none() || sized_this_conn => match o {
+                        _ = std::future::ready(()), if unsent.is_some() && (hint.is_none() || sized_this_conn) => {
+                            let b = unsent.take().unwrap_or_default();
+                            kasa_pty::input_trace::note("ws-resend", &local, format!("{}B", b.len()));
+                            if tx.send(Message::Binary(b.clone().into())).await.is_err() {
+                                unsent = Some(b);
+                                break;
+                            }
+                        }
+                        o = orx.recv(), if unsent.is_none() && (hint.is_none() || sized_this_conn) => match o {
                             Some(Out::Input(b)) => {
-                                if tx.send(Message::Binary(b.into())).await.is_err() {
+                                if tx.send(Message::Binary(b.clone().into())).await.is_err() {
+                                    kasa_pty::input_trace::note("ws-failed", &local, format!("{}B — 재접속 뒤 다시 보냄", b.len()));
+                                    unsent = Some(b);
                                     break;
                                 }
                             }

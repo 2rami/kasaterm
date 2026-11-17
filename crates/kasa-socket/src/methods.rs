@@ -268,6 +268,13 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "collab.activity" => collab_activity(backend, id, &req.params),
         "surface.attention" => surface_attention(backend, id, &req.params),
         "surface.done" => surface_done(backend, id, &req.params),
+        "input.trace" => {
+            let seconds = req.params.get("seconds").and_then(Value::as_u64).unwrap_or(120);
+            match backend.input_trace(seconds) {
+                Ok(result) => Response::success(id, result),
+                Err(e) => backend_err(id, e),
+            }
+        }
         "login_vault.status" | "login_vault.create" | "login_vault.join" => {
             let action = req.method.trim_start_matches("login_vault.");
             match backend.login_vault(action) {

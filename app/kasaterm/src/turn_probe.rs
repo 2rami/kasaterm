@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 const STALL: Duration = Duration::from_secs(1);
 const SLOW: Duration = Duration::from_millis(50);
+/// 키 발자국 고리에 남기는 바퀴. 입력이 늦다고 느끼는 경계(100ms)부터 — 50ms 로 잡으면 칸이 많을 때 고리가 이것으로 찬다.
+const TRACE_STALL: Duration = Duration::from_millis(100);
 
 thread_local! {
     static TURN: Cell<Option<Instant>> = const { Cell::new(None) };
@@ -40,6 +42,9 @@ impl Drop for TurnEnd {
         crate::stall_dump::turn_closed();
         let clicked = CLICKED.with(|c| c.replace(false));
         let took = start.elapsed();
+        if took >= TRACE_STALL {
+            kasa_pty::input_trace::event("stall", format!("메인 스레드 {}ms 묶임 — 그동안 받은 키는 늦게 처리된다", took.as_millis()));
+        }
         if took >= STALL {
             eprintln!("[stall] main thread {}ms{}", took.as_millis(), if clicked { " (click)" } else { "" });
         } else if PROFILE.with(|p| *p) && (clicked || took >= SLOW) {
