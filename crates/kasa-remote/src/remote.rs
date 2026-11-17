@@ -1691,6 +1691,12 @@ pub fn remote_get_json(base: &str, path_and_query: &str) -> Result<serde_json::V
     remote_get_json_bounded(base, path_and_query, 16 * 1024 * 1024)
 }
 
+/// 크기 상한이 있는 원격 읽기의 멈춤 판정. 전체 시간으로 끊으면 긴 거울 기록(수십 MB)이 느린 길·바쁜 기기에서
+/// 계속 오고 있는데도 10초에 「원격 응답 읽기」로 끊겼다 — 연결·읽기가 이만큼 멈췄을 때만 끊는다.
+const BOUNDED_STALL: Duration = Duration::from_secs(10);
+/// 조금씩 흘리는 상대가 붙잡지 못하게 하는 바깥 상한.
+const BOUNDED_TOTAL: Duration = Duration::from_secs(120);
+
 pub fn remote_get_json_bounded(base: &str, path_and_query: &str, max_bytes: usize) -> Result<serde_json::Value> {
     let token = connection_auth_token(base);
     let u = format!("{}{}", http_base(base), path_and_query);
@@ -1700,7 +1706,9 @@ pub fn remote_get_json_bounded(base: &str, path_and_query: &str, max_bytes: usiz
         .context("get runtime")?;
     rt.block_on(async {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .connect_timeout(BOUNDED_STALL)
+            .read_timeout(BOUNDED_STALL)
+            .timeout(BOUNDED_TOTAL)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("http client")?;

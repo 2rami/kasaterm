@@ -465,6 +465,7 @@ mod tests {
         let raw = format!("{}\n", "a".repeat(18 << 20));
         let body = serde_json::json!({"ok": true, "raw": raw, "offset": 90_000_000u64, "reset": true, "source": "s.jsonl"}).to_string();
         assert!(body.len() > 16 << 20);
+        let body_mib = body.len() >> 20;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -478,7 +479,11 @@ mod tests {
             write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).unwrap();
             stream.write_all(body.as_bytes()).unwrap();
         });
+        let started = std::time::Instant::now();
         let page = remote_page(&format!("http://127.0.0.1:{port}"), "%2", &HistoryAsk::default()).unwrap().unwrap();
+        // 걸린 시간으로 판정하지 않는다 — 시험 수천 개가 함께 도는 debug 빌드에선 벽시계가 흔들린다. 읽기가
+        // 멈추면 remote_get_json_bounded 가 끊어 실패하고, 느려진 회귀는 이 숫자(--nocapture)로 본다.
+        eprintln!("[remote-history] {body_mib} MiB page in {} ms", started.elapsed().as_millis());
         server.join().unwrap();
         assert_eq!(page.chunk.raw.len(), raw.len());
         assert!(page.chunk.reset);
