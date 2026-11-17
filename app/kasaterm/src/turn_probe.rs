@@ -48,6 +48,71 @@ impl Drop for TurnEnd {
     }
 }
 
+/// `KASATERM_PROFILE` 이면 한 장을 구간(칸 합성·합성 뒤 준비·크롬과 셀·GPU 제출)으로 나눠 재고 1초마다
+/// `[frame]` 으로 p50·p95 를 찍는다. 장 전체 길이(`[render-gpu]`)만으로는 어느 구간을 줄여야 하는지 모른다.
+const FRAME_PHASES: [&str; 4] = ["panes", "prep", "chrome", "gpu"];
+
+#[derive(Default)]
+struct FrameClock {
+    last: Option<Instant>,
+    current: [u32; 4],
+    window: Vec<[u32; 4]>,
+    since: Option<Instant>,
+}
+
+thread_local! {
+    static FRAME: std::cell::RefCell<FrameClock> = std::cell::RefCell::new(FrameClock::default());
+}
+
+pub(crate) fn frame_begin() {
+    if !PROFILE.with(|p| *p) {
+        return;
+    }
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        f.last = Some(Instant::now());
+        f.current = [0; 4];
+    });
+}
+
+pub(crate) fn frame_mark(phase: usize) {
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        let Some(last) = f.last else { return };
+        let now = Instant::now();
+        f.current[phase] = now.duration_since(last).as_micros() as u32;
+        f.last = Some(now);
+    });
+}
+
+pub(crate) fn frame_end() {
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        if f.last.take().is_none() {
+            return;
+        }
+        let sample = f.current;
+        f.window.push(sample);
+        let since = *f.since.get_or_insert_with(Instant::now);
+        if since.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        let window = std::mem::take(&mut f.window);
+        f.since = Some(Instant::now());
+        let pick = |mut v: Vec<u32>, q: f32| {
+            v.sort_unstable();
+            v[((v.len() - 1) as f32 * q) as usize]
+        };
+        let totals: Vec<u32> = window.iter().map(|s| s.iter().sum()).collect();
+        let mut line = format!("[frame] n={} total p50={}us p95={}us", window.len(), pick(totals.clone(), 0.5), pick(totals, 0.95));
+        for (i, name) in FRAME_PHASES.iter().enumerate() {
+            let v: Vec<u32> = window.iter().map(|s| s[i]).collect();
+            line.push_str(&format!(" | {name} p50={}us p95={}us", pick(v.clone(), 0.5), pick(v, 0.95)));
+        }
+        eprintln!("{line}");
+    });
+}
+
 /// `KASATERM_LAG_PROBE` — 25ms 마다 꼬리표 붙은 `Redraw` 를 보내, 메인 스레드가 받기까지
 /// 걸린 시간을 1초마다 `[lag]` 로 찍는다. 바퀴 길이는 처리 시간만 말하고, 사람이 누른 클릭이
 /// 처리되기 **전에** 줄 서서 기다린 시간은 이것만 보인다. 한 번에 꼬리표 하나만 띄운다.

@@ -728,6 +728,7 @@ impl App {
 
     fn render_frame_gpu(&mut self, scale: f32, time_secs: f32) {
         if self.paint_design_study(scale, time_secs) { return; }
+        crate::turn_probe::frame_begin();
         // 하단바 높이는 설정값이라 프레임 내내 여러 번 읽힌다. 여기서 한 번
         // 뽑아 두는 건 값이 도중에 바뀔 일이 없어서이기도 하지만, 아래쪽 대부분이
         // `self.gpu` 를 빌린 안쪽이라 거기서 `&self` 메서드를 다시 못 부르기 때문이다.
@@ -1644,6 +1645,7 @@ impl App {
         // Top-right toast. Pre-read here so the render block below never
         // re-borrows self while g is held.
 
+        crate::turn_probe::frame_mark(0);
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
             .map(|s| gpu::PaneSlot {
@@ -2490,6 +2492,7 @@ impl App {
         );
         let mut weather_spots = Vec::new();
         let live_zoom_now = self.live_zoom().map(str::to_string);
+        crate::turn_probe::frame_mark(1);
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -5635,9 +5638,12 @@ impl App {
             g.weather_frame = weather_frame;
             self.image_preview.paint(preview_window_id, g, (win_px.0 / scale, win_px.1 / scale), self.cursor_px);
             self.media_preview.paint(preview_window_id, g, (win_px.0 / scale, win_px.1 / scale), self.cursor_px);
+            crate::turn_probe::frame_mark(2);
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }
+            crate::turn_probe::frame_mark(3);
+            crate::turn_probe::frame_end();
         }
         self.weather_take_spots(weather_spots);
         if let Some(output) = settings_paint {
