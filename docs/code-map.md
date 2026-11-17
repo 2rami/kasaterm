@@ -177,7 +177,7 @@
 
 - `inline_media.rs`·`inline_media/cache.rs` — 음성·영상 표시 블록, 원본 기기별 메타데이터·썸네일 캐시와 스트리밍 재생 참조. `media_preview.rs`는 카드 안 재생(한 번에 하나)·크게 보기로 이어 틀기·저장과 큰 미리보기의 재생 조작, `media_preview/volume.rs`는 카드·미리보기의 공통 음량과 음소거 저장을, `media_preview/probe.rs`는 조작 관찰·볼륨 이벤트 검증을 맡는다. `media_player.rs`는 플랫폼 디코더·음성 시계·영상 프레임을 맡는다(macOS `media_player/macos.rs`, Windows `media_player/windows.rs`와 루프백 창구를 읽는 바이트 스트림 `windows_stream.rs`). 로컬 등록과 HTTP 읽기는 `kasa_socket::inline_media`·`kasa_http::http`에 있고, 재생용 루프백 Range 창구는 `kasa_remote::media_stream`이다. 계약은 [inline-media.md](inline-media.md).
 - `mobile/lib/inline_media.dart`·`inline_media_bridge_io.dart`·`screens/media_player.dart` — 폰의 결과 카드·루프백 Range 전송·네이티브 재생. 원본 인증 경로로 필요한 512KiB 조각만 읽고 닫힌 소비자의 요청을 취소한다.
-- `kasa-socket/src/guidance.rs` — 앱 연결 없는 `kasaterm-cli guide`와 짧은 시작 안내. `skills/kasapane`의 주제별 원문을 내장하고 요청한 주제 하나만 출력한다. Claude·Codex 실행과 새 작업 브리프는 `references/start.md`만 싣고(실행 때 이미 받은 대화에는 받는 기기가 브리프의 그 문단을 빼고 붙여넣는다), 미디어 전달 때 `guide media`로 상세 규칙을 읽는다.
+- `kasa-socket/src/guidance.rs` — 앱 연결 없는 `kasaterm-cli guide`와 짧은 시작 안내. `skills/kasapane`의 주제별 원문을 내장하고 요청한 주제 하나만 출력한다. Claude·Codex 실행과 새 작업 브리프는 `references/start.md`만 싣고(실행 때 이미 받은 대화에는 받는 기기가 브리프의 그 문단과, 보낸 학생 표식이 있으면 완료 보고 줄까지 빼고 붙여넣는다), 미디어 전달 때 `guide media`로 상세 규칙을 읽는다.
 - `kasa-socket/src/cli/summon_place.rs` — 학생 소환의 작업방 선택. 원격은 기존 칸 주소(`--beside`) 또는 이름 붙인 새 방(`--new-room`)을 지정하고, 사람의 활성 방으로 임의 배치하지 않는다.
 
 - `gpu/curves.rs` — Git 그래프의 배율별 안티앨리어싱 곡선 마스크와 재사용. 기존 아이콘의 클립·그리기 순서를 따른다.

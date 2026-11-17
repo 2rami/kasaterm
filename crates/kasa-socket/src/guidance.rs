@@ -23,10 +23,19 @@ pub fn topic(name: &str) -> Option<&'static Topic> {
     TOPICS.iter().find(|t| t.name == name)
 }
 
-/// 브리프 끝의 시작 안내 문단을 걷는다. 보내는 쪽은 받는 대화가 실행 지침으로 이미 받았는지 몰라 늘 붙이므로,
-/// 받는 기기가 그 실행을 보고 이미 받은 대화에는 빼고 넣는다 — 새 일마다 같은 문단이 대화에 쌓이던 자리다.
-pub fn without_start(body: &str) -> String {
-    body.replacen(&format!("\n\n{}", START.trim()), "", 1)
+/// 새 일 브리프 끝의 완료 보고 안내가 여는 말. 옛 판의 문구가 달라도 이것으로 알아본다(화면 `assigned_brief`·폰과 같은 규칙).
+const DONE_HINT_HEAD: &str = "끝나면 `kasaterm-cli done ";
+
+/// 시작 안내를 실행 지침으로 받은 대화에 가는 브리프에서 겹치는 안내를 걷는다. 보내는 쪽은 받는 대화가 받았는지 몰라
+/// 늘 붙이므로 받는 기기가 고른다 — 새 일마다 같은 문단이 대화에 쌓이던 자리다. 시작 안내가 완료 보고(`done`)도
+/// 말해 완료 보고 줄도 겹치지만, 보낸 학생 표식(`⟦이름⟧`)이 없는 브리프(칸 밖 프로그램)는 그 줄이 「맡긴 일」의
+/// 유일한 표지라 남긴다.
+pub fn without_known(body: &str) -> String {
+    let body = body.replacen(&format!("\n\n{}", START.trim()), "", 1);
+    match body.rsplit_once("\n\n") {
+        Some((head, hint)) if body.trim_start().starts_with('⟦') && hint.starts_with(DONE_HINT_HEAD) => head.to_string(),
+        _ => body,
+    }
 }
 
 /// `guide` 무인자·`--help` 가 내는 목록.
@@ -42,12 +51,14 @@ pub fn index() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn only_the_start_paragraph_leaves_the_brief() {
+    fn a_guided_conversation_gets_only_the_work() {
         let start = super::START.trim();
         let hint = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`으로 한 번 보고해 주세요.";
-        let brief = format!("⟦호시노⟧ 폰 알림 고쳐\n\n둘째 문단\n\n{start}\n\n{hint}");
-        assert_eq!(super::without_start(&brief), format!("⟦호시노⟧ 폰 알림 고쳐\n\n둘째 문단\n\n{hint}"));
-        let plain = format!("답장 한 줄\n\n{hint}");
-        assert_eq!(super::without_start(&plain), plain);
+        let marked = format!("⟦호시노@맥미니⟧ 폰 알림 고쳐\n\n둘째 문단\n\n{start}\n\n{hint}");
+        assert_eq!(super::without_known(&marked), "⟦호시노@맥미니⟧ 폰 알림 고쳐\n\n둘째 문단");
+        let unmarked = format!("폰 알림 고쳐\n\n{start}\n\n{hint}");
+        assert_eq!(super::without_known(&unmarked), format!("폰 알림 고쳐\n\n{hint}"), "표식 없는 브리프는 완료 보고 줄이 맡긴 일 표지다");
+        let reply = "⟦호시노⟧ 답장 한 줄\n\n둘째 문단";
+        assert_eq!(super::without_known(reply), reply);
     }
 }

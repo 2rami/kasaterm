@@ -46,7 +46,7 @@ struct Proof {
 #[derive(Clone)]
 pub(crate) struct Commit {
     record: Record,
-    /// 실제로 붙여넣는 글 — 받는 대화가 이미 받은 시작 안내를 뺀 본문(`sent_body`).
+    /// 실제로 붙여넣는 글 — 받는 대화가 이미 받은 안내를 뺀 본문(`sent_body`).
     body: String,
     pty: Arc<kasa_pty::PtySession>,
     revision: u64,
@@ -218,7 +218,7 @@ fn schedule_commit(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_
     });
 }
 
-/// 받는 학생이 이번 실행에 시작 안내를 지침으로 받았으면 브리프의 같은 문단을 뺀다. claude 는 셰임이
+/// 받는 학생이 이번 실행에 시작 안내를 지침으로 받았으면 브리프의 겹치는 안내를 뺀다(`guidance::without_known`). claude 는 셰임이
 /// `--append-system-prompt` 로, codex 는 칸 홈(`CODEX_HOME`)의 `AGENTS.md` 로 싣는다. 셰임 밖에서 뜬 대화는 받은
 /// 적이 없어 그대로 둔다.
 fn sent_body(record: &Record, harness: Option<kasa_pty::AgentKind>) -> String {
@@ -233,7 +233,7 @@ fn sent_body(record: &Record, harness: Option<kasa_pty::AgentKind>) -> String {
 }
 
 fn body_for_launch(body: &str, launch: Option<&str>) -> String {
-    if launch.is_some_and(|text|text.contains(kasa_socket::guidance::START.trim())) { kasa_socket::guidance::without_start(body) }
+    if launch.is_some_and(|text|text.contains(kasa_socket::guidance::START.trim())) { kasa_socket::guidance::without_known(body) }
     else { body.to_owned() }
 }
 
@@ -869,11 +869,11 @@ mod tests {
     fn start_guide_reaches_a_conversation_once() {
         let start = kasa_socket::guidance::START.trim();
         let hint = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`으로 한 번 보고해 주세요.";
-        let brief = format!("폰 알림 고쳐\n\n{start}\n\n{hint}");
+        let brief = format!("⟦호시노⟧ 폰 알림 고쳐\n\n{start}\n\n{hint}");
         let claude = format!("claude --append-system-prompt 말투\n{start} --resume abc");
-        assert_eq!(body_for_launch(&brief,Some(&claude)), format!("폰 알림 고쳐\n\n{hint}"));
+        assert_eq!(body_for_launch(&brief,Some(&claude)), "⟦호시노⟧ 폰 알림 고쳐");
         let codex_home = format!("GLOBAL_GUIDE\n\n{start}\n");
-        assert_eq!(body_for_launch(&brief,Some(&codex_home)), format!("폰 알림 고쳐\n\n{hint}"));
+        assert_eq!(body_for_launch(&brief,Some(&codex_home)), "⟦호시노⟧ 폰 알림 고쳐");
         assert_eq!(body_for_launch(&brief,Some("claude --resume abc")), brief, "셰임 밖에서 뜬 대화");
         assert_eq!(body_for_launch(&brief,None), brief, "실행을 못 읽으면 그대로");
     }
