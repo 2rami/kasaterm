@@ -412,11 +412,13 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             }
         }
     }
-    // 말투를 꺼도 지침을 찾을 길은 필요하다. 본문은 싣지 않고 필요한 주제를 읽는 안내만 남긴다.
-    let persona_line = format!(
-        "if [ -n \"$PERSONA_OK\" ]; then\nKASA_GUIDE_START={}\nset -- --append-system-prompt \"${{KASATERM_PERSONA}}\n${{KASA_GUIDE_START}}\" \"$@\"\nfi\n",
-        shell_quote_path(kasa_socket::guidance::START),
-    );
+    // 카사텀 지침은 kasapane 스킬로 싣고(`install_kasapane_skill`) 실행 지침엔 말투만 둔다. 말투가 없으면 빈
+    // `--append-system-prompt` 를 붙이지 않는다 — 바인딩 훅은 그 인자가 없을 때만 앱에 말투를 물어 싣는다.
+    install_kasapane_skill(shim_dir);
+    let persona_line = "if [ -n \"$PERSONA_OK\" ]; then\n\
+set -- --plugin-dir \"$SELF_DIR/kasapane\" \"$@\"\n\
+[ -n \"$KASATERM_PERSONA\" ] && set -- --append-system-prompt \"$KASATERM_PERSONA\" \"$@\"\n\
+fi\n";
     // 학생별 실행 통로(`KASATERM_BACKEND`) — kimi·glm 처럼 claude 를 감싸 게이트웨이로
     // 보내는 런처다. 이 줄이 persona 블록의 **맨 앞**인 것이 설계의 핵심이다: 런처는
     // 환경을 씌운 뒤 다시 PATH 의 claude(= 이 shim)를 부르므로, 플래그를 붙인 다음에

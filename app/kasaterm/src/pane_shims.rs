@@ -49,6 +49,23 @@ pub(crate) fn write_shim(path: &std::path::Path, body: impl AsRef<[u8]>) -> std:
     write_shim_inner(path, body.as_ref(), true)
 }
 
+/// 칸의 claude·codex 가 싣는 kasapane 스킬을 셰임 자리에 깐다(`$SELF_DIR/kasapane`). 실행 지침에 붙이던 시작 안내를
+/// 대신한다 — 늘 지킬 규칙은 스킬 설명으로 늘 실리고 본문은 필요할 때만 읽힌다. 사용자가 따로 깐 같은 이름의 플러그인보다
+/// `--plugin-dir` 이 이긴다. 같은 내용이면 건드리지 않는다 — claude 는 플러그인 폴더가 바뀌면 다시 싣는다.
+pub(crate) fn install_kasapane_skill(shim_dir: &std::path::Path) {
+    let root = shim_dir.join("kasapane");
+    for (file, text) in kasa_socket::guidance::skill_files() {
+        let path = root.join(file);
+        if std::fs::read(&path).is_ok_and(|cur| cur == text.as_bytes()) {
+            continue;
+        }
+        let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| write_shim_data(&path, text));
+        if let Err(e) = written {
+            eprintln!("[shim] kasapane skill {file} write failed: {e}");
+        }
+    }
+}
+
 /// 셰임이 읽기만 하는 파일(rc·hooks json·계정 경로) — 원자 교체, 실행 권한 없음.
 /// 소스되는 rc 도 셸이 읽어가며 실행하므로 스크립트와 같은 경합에 걸린다.
 pub(crate) fn write_shim_data(path: &std::path::Path, body: impl AsRef<[u8]>) -> std::io::Result<()> {
@@ -804,11 +821,11 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// 실행에는 짧은 시작 안내만 한 번 — 전역 지시와 말투는 그대로 두고, 주제별 원문은 `guide` 로 남긴다.
+    /// 카사텀 지침은 실행 지침이 아니라 kasapane 스킬로 간다 — 실행 지침엔 전역 지시와 말투만 남는다.
     #[test]
-    fn claude_and_codex_get_the_short_start_guide_once_beside_global_and_persona() {
+    fn claude_and_codex_get_kasapane_as_a_skill_and_only_persona_as_instructions() {
         let sh = test_posix_shell().expect("셰임을 돌릴 POSIX sh");
-        let dir = std::env::temp_dir().join(format!("kt-guide-start-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kt-guide-skill-{}", uuid::Uuid::new_v4()));
         let src = dir.join("global");
         let ch = dir.join("pane");
         std::fs::create_dir_all(&src).unwrap();
@@ -816,31 +833,26 @@ mod tests {
         std::fs::write(src.join("AGENTS.md"), "GLOBAL_GUIDE").unwrap();
         install_claude_hook_shim(&dir);
         install_codex_shim(&dir);
-        let guide = kasa_socket::guidance::START.trim();
-        let not_injected = |text: &str| {
-            for topic in kasa_socket::guidance::TOPICS {
-                assert!(!text.contains(topic.text.trim()), "{} 원문이 실행 지침에 실렸다", topic.name);
-            }
-        };
+        for (file, text) in kasa_socket::guidance::skill_files() {
+            assert_eq!(std::fs::read_to_string(dir.join("kasapane").join(file)).unwrap(), text, "{file}");
+        }
+        let skill_dir = dir.join("kasapane").to_string_lossy().replace('\\', "/");
 
         let claude = std::fs::read_to_string(dir.join("claude")).unwrap();
-        let start = claude.find("if [ -n \"$PERSONA_OK\" ]; then\nKASA_GUIDE_START=").unwrap();
+        let start = claude.find("if [ -n \"$PERSONA_OK\" ]; then\nset -- --plugin-dir").unwrap();
         let fragment = &claude[start..];
         let fragment = &fragment[..fragment.find("\nfi\n").unwrap() + 4];
-        for persona in ["", "PERSONA_LINE"] {
+        for (persona, want) in [("", vec!["--plugin-dir", &skill_dir, "resume"]),
+            ("PERSONA_LINE", vec!["--append-system-prompt", "PERSONA_LINE", "--plugin-dir", &skill_dir, "resume"])] {
             let out = std::process::Command::new(&sh)
-                .args(["-c", &format!("set -- resume\n{fragment}\nprintf '%s\\0' \"$@\"")])
+                .args(["-c", &format!("SELF_DIR='{skill_root}'\nset -- resume\n{fragment}\nprintf '%s\\0' \"$@\"",
+                    skill_root = dir.to_string_lossy().replace('\\', "/"))])
                 .env("PERSONA_OK", "1").env("KASATERM_PERSONA", persona)
                 .output().unwrap();
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
             let args = String::from_utf8(out.stdout).unwrap();
-            let args: Vec<_> = args.split('\0').collect();
-            assert_eq!(args[0], "--append-system-prompt");
-            assert!(args[1].starts_with(persona), "말투가 앞에 그대로: {}", args[1]);
-            assert_eq!(args[1].matches(guide).count(), 1);
-            not_injected(args[1]);
-            assert_eq!(args[2], "resume");
-            assert_eq!(args.iter().filter(|a| **a == "--append-system-prompt").count(), 1);
+            let args: Vec<_> = args.trim_end_matches('\0').split('\0').collect();
+            assert_eq!(args, want, "말투가 없으면 빈 --append-system-prompt 를 붙이지 않는다");
         }
 
         let codex = std::fs::read_to_string(dir.join("codex")).unwrap();
@@ -853,12 +865,41 @@ mod tests {
                 .env("KASATERM_PERSONA", persona).output().unwrap();
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
             let delivered = std::fs::read_to_string(ch.join("AGENTS.md")).unwrap();
-            assert!(delivered.starts_with("GLOBAL_GUIDE"));
-            assert_eq!(delivered.matches("PERSONA_LINE").count(), usize::from(!persona.is_empty()), "다시 띄워도 말투는 한 벌");
-            assert_eq!(delivered.matches(guide).count(), 1, "다시 띄워도 시작 안내는 한 벌");
-            not_injected(&delivered);
+            let want = if persona.is_empty() { "GLOBAL_GUIDE".to_string() } else { format!("GLOBAL_GUIDE\n{persona}\n") };
+            assert_eq!(delivered, want, "다시 띄워도 말투는 한 벌이고 카사텀 지침은 안 실린다");
         }
         assert_eq!(std::fs::read_to_string(src.join("AGENTS.md")).unwrap(), "GLOBAL_GUIDE");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// codex 칸 홈의 skills 는 원본 스킬을 하나씩 이은 폴더다 — 옛 판처럼 폴더째 이으면 kasapane 이 사용자의
+    /// 전역 스킬 폴더에 들어간다. 옛 판이 건 폴더 링크는 링크만 걷고 원본은 그대로 둔다.
+    #[cfg(unix)]
+    #[test]
+    fn codex_pane_skills_add_kasapane_without_touching_the_global_skills() {
+        let sh = test_posix_shell().expect("셰임을 돌릴 POSIX sh");
+        let dir = std::env::temp_dir().join(format!("kt-codex-skills-{}", uuid::Uuid::new_v4()));
+        let src = dir.join("global");
+        let ch = dir.join("pane");
+        std::fs::create_dir_all(src.join("skills/alpha")).unwrap();
+        std::fs::write(src.join("skills/alpha/SKILL.md"), "ALPHA").unwrap();
+        std::fs::create_dir_all(&ch).unwrap();
+        std::os::unix::fs::symlink(src.join("skills"), ch.join("skills")).unwrap();
+        install_codex_shim(&dir);
+        let codex = std::fs::read_to_string(dir.join("codex")).unwrap();
+        let helpers = &codex[codex.find("KT_WIN=;").unwrap()..codex.find("# ~/.codex 를 링크로 미러").unwrap()];
+        let skills = &codex[codex.find("# 스킬 — 원본 스킬은").unwrap()..codex.find("cp \"$SRC/config.toml\"").unwrap()];
+        for _ in 0..2 {
+            let out = std::process::Command::new(&sh)
+                .args(["-c", &format!("{helpers}{skills}")])
+                .env("SRC", &src).env("CH", &ch).env("SELF_DIR", &dir).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let pane_skills = ch.join("skills");
+            assert!(!pane_skills.symlink_metadata().unwrap().file_type().is_symlink(), "칸 홈의 skills 는 제 폴더다");
+            assert_eq!(std::fs::read_to_string(pane_skills.join("alpha/SKILL.md")).unwrap(), "ALPHA");
+            assert_eq!(std::fs::read_to_string(pane_skills.join("kasapane/SKILL.md")).unwrap(), kasa_socket::guidance::skill_files()[0].1);
+            assert!(!src.join("skills/kasapane").exists(), "원본 스킬 폴더엔 안 들어간다");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
     use std::time::{Duration, Instant};

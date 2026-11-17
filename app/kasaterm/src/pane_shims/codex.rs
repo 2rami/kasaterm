@@ -12,6 +12,7 @@ use super::*;
 /// Permission defaults stay pane-local so they never rewrite the user's config.
 pub(crate) fn install_codex_shim(shim_dir: &std::path::Path) {
     install_agent_identity_helper(shim_dir);
+    install_kasapane_skill(shim_dir);
     // Named replacements keep shell quoting separate from Rust formatting.
     let wrapper = r#"#!/bin/sh
 # kasaterm pane-only codex wrapper — pane 전용 CODEX_HOME 을 세워 훅·페르소나를 얹는다.
@@ -102,7 +103,7 @@ kt_stop() {
   echo "kasaterm: $1" >&2
   exit 1
 }
-# ~/.codex 를 링크로 미러 — 세션·플러그인·스킬·캐시·인증을 원본과 공유해 pane 안
+# ~/.codex 를 링크로 미러 — 세션·플러그인·캐시·인증을 원본과 공유해(스킬은 아래에서 하나씩) pane 안
 # codex 가 pane 밖 codex 와 같은 것을 본다. auth.json 도 링크라 토큰 갱신이 원본에
 # 그대로 써져 로그인이 안 갈린다(실측: doctor 가 stored ChatGPT tokens=true). 매 실행
 # 다시 걸어 pane 안에서 생긴 드리프트는 다음 실행에 원상복구된다.
@@ -116,7 +117,7 @@ for e in "$SRC"/* "$SRC"/.[!.]*; do
   [ -e "$e" ] || continue
   n=${e##*/}
   case "$n" in
-    config.toml|hooks.json|AGENTS.md) continue ;;
+    config.toml|hooks.json|AGENTS.md|skills) continue ;;
     auth.json) [ -n "$ACCT" ] && continue ;;
   esac
   kt_link "$e" "$CH/$n" || kt_stop "codex pane 홈에 $n 을 원본과 이어 걸지 못해 멈췄어요 — 사본으로 띄우면 토큰 갱신·새 세션이 원본에 안 남아요. 임시 폴더($CH)가 NTFS 인지 확인해 주세요."
@@ -136,6 +137,23 @@ if [ -n "$ACCT" ]; then
     kt_stop "codex pane 홈에 고른 계정의 auth.json 을 이어 걸지 못해 멈췄어요 — 사본으로 띄우면 토큰 갱신이 계정에 안 남아요."
   fi
 fi
+# 스킬 — 원본 스킬은 하나씩 이어 걸고 카사텀 스킬(kasapane)을 곁에 둔다. 폴더째 이으면 kasapane 을 넣을 자리가
+# 사용자의 전역 스킬 폴더가 된다. 옛 판이 폴더째 건 링크는 링크만 걷고, 걷지 못했으면 그 안을 건드리지 않고 멈춘다.
+KS="$CH/skills"
+[ -L "$KS" ] && rm -f "$KS" 2>/dev/null
+if [ -e "$SRC/skills" ] && [ "$KS" -ef "$SRC/skills" ]; then
+  kt_stop "codex pane 홈의 skills 가 아직 원본 스킬 폴더와 이어져 있어 멈췄어요 — $KS 링크를 걷고 다시 띄워 주세요."
+fi
+mkdir -p "$KS" 2>/dev/null || kt_stop "codex pane 홈에 skills 폴더를 만들지 못했어요($KS)."
+for e in "$KS"/* "$KS"/.[!.]*; do
+  [ -L "$e" ] && rm -f "$e" 2>/dev/null
+done
+for e in "$SRC/skills"/* "$SRC/skills"/.[!.]*; do
+  [ -e "$e" ] || continue
+  [ "${e##*/}" = kasapane ] && continue
+  kt_link "$e" "$KS/${e##*/}" || kt_stop "codex pane 홈에 스킬 ${e##*/} 을 원본과 이어 걸지 못해 멈췄어요."
+done
+kt_link "$SELF_DIR/kasapane" "$KS/kasapane" || kt_stop "codex pane 홈에 카사텀 스킬을 걸지 못해 멈췄어요."
 cp "$SRC/config.toml" "$CH/config.toml" 2>/dev/null
 if [ -n "$KT_HOME_ONLY" ]; then
   if [ -n "$KT_WIN" ]; then cygpath -w "$CH" || exit 1; else printf '%s\n' "$CH"; fi
@@ -172,7 +190,6 @@ fi
 INSTRUCTIONS=$(mktemp "$CH/AGENTS.md.XXXXXX") || exit 1
 cp "$SRC/AGENTS.md" "$INSTRUCTIONS" 2>/dev/null || : > "$INSTRUCTIONS"
 [ -n "$KASATERM_PERSONA" ] && printf '\n%s\n' "$KASATERM_PERSONA" >> "$INSTRUCTIONS"
-# KASATERM_GUIDE_START
 mv "$INSTRUCTIONS" "$CH/AGENTS.md" || exit 1
 export CODEX_HOME="$CH"
 # KASATERM_PERMISSION_DEFAULT
@@ -222,7 +239,6 @@ esac
 exec "$REAL" "$@"
 "#;
     let wrapper = wrapper.replace("# KASATERM_LAUNCH_IDENTITY", &identity_bootstrap_sh("codex", ""))
-        .replace("# KASATERM_GUIDE_START", &format!("printf '\\n%s\\n' {} >> \"$INSTRUCTIONS\"", shell_quote_path(kasa_socket::guidance::START)))
         .replace("# KASATERM_PERMISSION_DEFAULT", &(agent_preferences::permission_shell("codex", agent_preferences::permission("codex")) + &agent_preferences::codex_statusline_shell()));
     let wrapper = accept_prompt_file(wrapper);
     let wrapper_path = shim_dir.join("codex");

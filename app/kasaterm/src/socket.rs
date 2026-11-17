@@ -7709,8 +7709,8 @@ fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
 
 /// pane 의 claude 가 `agents`/`attach` 뷰인지 — argv 토큰 검사. 값 플래그(persona 텍스트
 /// 등)가 argv 에 섞이는 일반 세션을 오탐하지 않게, 세션형 플래그(--session-id/--resume/
-/// --append-system-prompt)가 하나라도 있으면 뷰가 아니라고 본다(shim 이 일반 부팅엔
-/// 항상 그중 하나를 얹고, agents/attach 엔 PERSONA_OK 게이트로 하나도 안 얹는다).
+/// --append-system-prompt/--plugin-dir)가 하나라도 있으면 뷰가 아니라고 본다(shim 이 일반 부팅엔
+/// 항상 kasapane 스킬의 `--plugin-dir` 를 얹고, agents/attach 엔 PERSONA_OK 게이트로 하나도 안 얹는다).
 fn claude_view_subcommand(shell_pid: u32) -> Option<&'static str> {
     let pid = claude_child_pid(shell_pid)?;
     let argv = kasa_pty::process_cmdline(pid)?;
@@ -7718,7 +7718,7 @@ fn claude_view_subcommand(shell_pid: u32) -> Option<&'static str> {
     if tokens.iter().any(|t| {
         matches!(
             *t,
-            "--session-id" | "--resume" | "-r" | "--append-system-prompt"
+            "--session-id" | "--resume" | "-r" | "--append-system-prompt" | "--plugin-dir"
         )
     }) {
         return None;

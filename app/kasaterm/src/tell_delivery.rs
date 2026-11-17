@@ -46,8 +46,6 @@ struct Proof {
 #[derive(Clone)]
 pub(crate) struct Commit {
     record: Record,
-    /// 실제로 붙여넣는 글 — 받는 대화가 이미 받은 안내를 뺀 본문(`sent_body`).
-    body: String,
     pty: Arc<kasa_pty::PtySession>,
     revision: u64,
     proof: std::result::Result<Proof,String>,
@@ -218,25 +216,6 @@ fn schedule_commit(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_
     });
 }
 
-/// 받는 학생이 이번 실행에 시작 안내를 지침으로 받았으면 브리프의 겹치는 안내를 뺀다(`guidance::without_known`). claude 는 셰임이
-/// `--append-system-prompt` 로, codex 는 칸 홈(`CODEX_HOME`)의 `AGENTS.md` 로 싣는다. 셰임 밖에서 뜬 대화는 받은
-/// 적이 없어 그대로 둔다.
-fn sent_body(record: &Record, harness: Option<kasa_pty::AgentKind>) -> String {
-    let pid = record.receiver_agent_pid;
-    let launch = match harness {
-        Some(kasa_pty::AgentKind::Claude) => kasa_pty::process_cmdline(pid),
-        Some(kasa_pty::AgentKind::Codex) => kasa_pty::process_env_var(pid,"CODEX_HOME")
-            .and_then(|home|std::fs::read_to_string(std::path::Path::new(&home).join("AGENTS.md")).ok()),
-        _ => None,
-    };
-    body_for_launch(&record.body,launch.as_deref())
-}
-
-fn body_for_launch(body: &str, launch: Option<&str>) -> String {
-    if launch.is_some_and(|text|text.contains(kasa_socket::guidance::START.trim())) { kasa_socket::guidance::without_known(body) }
-    else { body.to_owned() }
-}
-
 fn begin_proof(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>, record: Record) {
     std::thread::spawn(move || {
         let Some(pty) = kasa_pty::lookup_session(&record.address.surface_id) else {
@@ -252,8 +231,7 @@ fn begin_proof(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop
         if kasa_collab::tell_service::transition(&record.message_id,State::Dispatching,"identity proven; awaiting guarded first write").is_err() {
             release(&record.address.surface_id); return;
         }
-        let body = sent_body(&record,proof.as_ref().map(|found|found.harness).ok());
-        let delivery = Commit {record,body,pty,revision,proof,pasted_at:None};
+        let delivery = Commit {record,pty,revision,proof,pasted_at:None};
         if proxy.send_event(UserEvent::SafeTellReady(delivery.clone())).is_err() {
             finish(&delivery.record,State::Failed,"GUI stopped before the first write");
         }
@@ -581,7 +559,7 @@ impl App {
             finish(&delivery.record,state,hold.reason());
             return;
         }
-        let payload = format!("\x1b[200~{}\x1b[201~",delivery.body);
+        let payload = format!("\x1b[200~{}\x1b[201~",delivery.record.body);
         // 붙여넣기와 Enter 사이에 사람이 친 글이 본문 뒤에 붙어 함께 제출되던 자리다(2026-09-29 「빈 입력창에 뭐 치면
         // 같이 전송」). 그 사이 입력은 붙들었다가 Enter 뒤(또는 보류 뒤) 친 순서대로 흘려보낸다.
         delivery.pty.hold_input(HOLD_FOR);
@@ -615,7 +593,7 @@ impl App {
         // **위쪽**에 있어 큰 창에서 그 범위 밖이었다 — 글은 들어갔는데 에코를 못 찾아 Enter 를
         // 영영 보류했다(2026-09-28 실측: 44행 창, 입력창 9행). 입력창을 못 찾는 하네스만 옛 방식.
         let shown = input_box_text(&live_cells(&commit.pty).0).unwrap_or_else(||commit.pty.visible_text(30));
-        let echoed = paste_echoed(&commit.body,&shown);
+        let echoed = paste_echoed(&commit.record.body,&shown);
         let step = commit_step(blocked,echoed,proof,commit.pasted_at.map(|at|at.elapsed()));
         match step {
             CommitStep::Enter => {}
@@ -862,20 +840,6 @@ mod tests {
         assert!(pty.input_draft_present());
         assert!(pty.send_bytes_guarded(b"message",Some(revision)).is_err());
         assert_eq!(capture.0.lock().unwrap().as_slice(),[b"\r".to_vec(),b"first\nsecond".to_vec(),b"\r".to_vec()]);
-    }
-
-    /// 칸에서 뜬 학생은 시작 안내를 실행 지침으로 받았다 — 새 일마다 다시 넣지 않고, 셰임 밖에서 뜬 대화에만 넣는다.
-    #[test]
-    fn start_guide_reaches_a_conversation_once() {
-        let start = kasa_socket::guidance::START.trim();
-        let hint = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`으로 한 번 보고해 주세요.";
-        let brief = format!("⟦호시노⟧ 폰 알림 고쳐\n\n{start}\n\n{hint}");
-        let claude = format!("claude --append-system-prompt 말투\n{start} --resume abc");
-        assert_eq!(body_for_launch(&brief,Some(&claude)), "⟦호시노⟧ 폰 알림 고쳐");
-        let codex_home = format!("GLOBAL_GUIDE\n\n{start}\n");
-        assert_eq!(body_for_launch(&brief,Some(&codex_home)), "⟦호시노⟧ 폰 알림 고쳐");
-        assert_eq!(body_for_launch(&brief,Some("claude --resume abc")), brief, "셰임 밖에서 뜬 대화");
-        assert_eq!(body_for_launch(&brief,None), brief, "실행을 못 읽으면 그대로");
     }
 
     /// 새 학생: 부팅 줄은 `send` 로 LF 로 끝나 초안 표시가 선 채 claude 가 뜬다. SessionStart 가

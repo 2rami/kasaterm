@@ -923,25 +923,18 @@ fn guide_text(args: &[String]) -> Result<String> {
 }
 
 /// 새 일을 건네는 브리프(summon·`tell --title`) 끝에 붙이는 한 줄 — 완료 보고가 없으면 `wait` 가
-/// 끝나지 않고 부른 창도 모른다. 시작 안내를 실행 지침으로 받은 대화에는 받는 기기가 뺀다(시작 안내도 done 을
-/// 말한다). 보낸 학생 표식이 없는 브리프에서는 화면·폰이 「맡긴 일」을 알아보는 표지라 남는다.
+/// 끝나지 않고 부른 창도 모른다. 칸의 학생은 이 규칙을 kasapane 스킬 설명으로 늘 받으므로, 보낸 학생 표식
+/// (`⟦이름⟧`)이 있는 브리프에는 붙이지 않는다. 표식이 없는 브리프(칸 밖 프로그램·셸에서 사람이 보낸 것)는
+/// 화면·폰이 「맡긴 일」을 알아보는 표지가 이 줄뿐이라 남긴다.
 const BRIEF_DONE_HINT: &str = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`(못 끝냈으면 failed, 막히거나 승인이 필요하면 blocked·needs_approval)으로 한 번 보고해 주세요.";
 
-/// 받는 대화가 실행 지침으로 시작 안내를 받았는지 여기서는 몰라 늘 싣는다 — 이미 받은 대화에는 받는 기기가
-/// 붙여넣기 전에 뺀다(`guidance::without_known`). 긴 규약은 받은 쪽이 `guide` 로 그때 읽는다.
+/// 보낸 학생 표식을 단 뒤의 브리프에 부른다.
 fn with_done_hint(brief: &str) -> String {
     let body = brief.trim();
-    let start = crate::guidance::START.trim();
-    let mut out = body.to_string();
-    if !body.contains(start) {
-        out.push_str("\n\n");
-        out.push_str(start);
+    if body.starts_with('⟦') || body.contains("kasaterm-cli done") {
+        return body.to_string();
     }
-    if !body.contains("kasaterm-cli done") {
-        out.push_str("\n\n");
-        out.push_str(BRIEF_DONE_HINT);
-    }
-    out
+    format!("{body}\n\n{BRIEF_DONE_HINT}")
 }
 /// 부팅한 claude 가 보드에 설 때까지 기다리는 상한.
 const SUMMON_BOOT_SECS: u64 = 90;
@@ -1064,10 +1057,9 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
             params: json!({ "surface_id": surface, "title": title }) });
     }
 
-    let body = with_done_hint(&brief);
+    let body = with_done_hint(&mark_tell_sender(brief.clone(), std::env::var("KASATERM_CHARACTER").ok().as_deref()));
     let title = name.clone().or_else(|| brief_title(&brief)).map(|t| crate::tell::normalize_title(&t)).transpose()?
         .filter(|t| !t.is_empty());
-    let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
     let body = crate::tell::normalize(&body)?;
 
     // codex 는 첫 입력 전엔 대화 기록이 없어 tell 이 겨눌 주소(대화 번호)가 영영 안 선다 — 브리프를 첫
@@ -1162,10 +1154,9 @@ fn run_summon_placed(socket_path: &str, spot: SummonSpot, name: Option<String>, 
 
     let chosen_boot = auto_summon_boot(socket_path, boot, placed.get("machine_id").and_then(Value::as_str))?;
     let boot = chosen_boot.as_str();
-    let body = with_done_hint(brief);
+    let body = with_done_hint(&mark_tell_sender(brief.to_string(), std::env::var("KASATERM_CHARACTER").ok().as_deref()));
     let title = name.clone().or_else(|| brief_title(brief)).map(|t| crate::tell::normalize_title(&t)).transpose()?
         .filter(|t| !t.is_empty());
-    let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
     let body = crate::tell::normalize(&body)?;
     let first_prompt = boots_fresh_codex(boot);
     send_boot(socket_path, &BootTo::Placed(&placed, &surface), spot.cwd.as_deref(), boot, first_prompt.then_some(body.as_str()))?;
@@ -2862,8 +2853,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // 무테마로 떴다(2026-09-17 지적 「tell 로 보내면 학생 프사 나오면서 그거 왜 안 되지」).
             // 사람이 직접 친 cli 는 env 가 없어 마커 없이(사용자 발신=무색) 나간다.
             // 제목이 붙은 tell 은 새 일이다 — 답장·알림과 갈리는 표지가 그것뿐이라 거기에만 붙인다.
-            let body = if params.get("title").is_some() { with_done_hint(&body) } else { body };
             let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
+            let body = if params.get("title").is_some() { with_done_hint(&body) } else { body };
             params["body"] = json!(crate::tell::normalize(&body)?);
             crate::tell::valid_id(params["message_id"].as_str().unwrap())?;
             eprintln!("tell receipt ID: {}",params["message_id"].as_str().unwrap());
@@ -4896,19 +4887,19 @@ mod tests {
         let ok = super::build_request("tell", &v(&["%1", "--title", "보드 걷기", "본문", "한 줄"])).unwrap();
         assert_eq!(ok.params["title"], "보드 걷기");
         let body = ok.params["body"].as_str().unwrap();
-        assert!(body.contains("본문 한 줄\n\n") && body.ends_with(super::BRIEF_DONE_HINT), "새 일에는 done 안내가 붙는다: {body}");
-        let start = crate::guidance::START.trim();
-        assert_eq!(body.matches(start).count(), 1, "새 일을 받은 기존 대화에도 시작 안내가 한 번 들어간다");
+        assert!(body.contains("본문 한 줄"), "{body}");
         for topic in crate::guidance::TOPICS {
             assert!(!body.contains(topic.text.trim()), "{} 원문은 브리프에 안 싣는다", topic.name);
         }
-        assert_eq!(super::with_done_hint(body), body, "재전달해도 지침은 한 벌이다");
         let reply = super::build_request("tell", &v(&["%1", "답장", "한 줄"])).unwrap();
         let reply = reply.params["body"].as_str().unwrap();
-        assert!(reply.ends_with("답장 한 줄") && !reply.contains(start) && !reply.contains("kasaterm-cli done"), "제목 없는 답장엔 안 붙는다: {reply}");
-        let told = super::build_request("tell", &v(&["%1", "--title", "일", "끝나면 kasaterm-cli done 으로"])).unwrap();
-        // 시작 안내도 done 을 말하므로(start.md) 브리프 쪽 done 안내만 센다.
-        assert!(!told.params["body"].as_str().unwrap().contains(super::BRIEF_DONE_HINT), "이미 말한 브리프엔 겹쳐 붙이지 않는다");
+        assert!(reply.ends_with("답장 한 줄") && !reply.contains("kasaterm-cli done"), "제목 없는 답장엔 안 붙는다: {reply}");
+        // 칸 학생은 완료 보고 규칙을 스킬 설명으로 받는다 — 표식 없는 브리프에만 「맡긴 일」 표지로 남긴다.
+        let unmarked = super::with_done_hint("본문 한 줄");
+        assert_eq!(unmarked, format!("본문 한 줄\n\n{}", super::BRIEF_DONE_HINT));
+        assert_eq!(super::with_done_hint(&unmarked), unmarked, "재전달해도 한 벌이다");
+        assert_eq!(super::with_done_hint("⟦아로나⟧ 본문"), "⟦아로나⟧ 본문");
+        assert_eq!(super::with_done_hint("끝나면 kasaterm-cli done 으로"), "끝나면 kasaterm-cli done 으로", "이미 말한 브리프엔 겹쳐 붙이지 않는다");
         let dashed = super::build_request("tell", &v(&["%1", "--", "--로 시작하는 본문"])).unwrap();
         assert!(dashed.params["body"].as_str().unwrap().ends_with("--로 시작하는 본문"));
         assert!(super::build_request("tell", &v(&["%1", "옵션 --title 이야기"])).is_ok(), "한 덩어리 본문 속 낱말은 옵션이 아니다");
@@ -4925,7 +4916,7 @@ mod tests {
             assert!(index.contains(topic.name), "목록에 {} 가 있다", topic.name);
             let text = super::guide_text(&v(&[topic.name])).unwrap();
             assert_eq!(text, topic.text);
-            assert!(!text.trim().is_empty() && text.trim() != crate::guidance::START.trim(), "{} 는 시작 안내와 다른 글", topic.name);
+            assert!(!text.trim().is_empty(), "{}", topic.name);
             for other in crate::guidance::TOPICS.iter().filter(|o| o.name != topic.name) {
                 assert_ne!(text.trim(), other.text.trim(), "{} 와 {} 는 따로 읽힌다", topic.name, other.name);
             }
