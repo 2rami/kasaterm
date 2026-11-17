@@ -927,7 +927,8 @@ fn guide_text(args: &[String]) -> Result<String> {
 /// 학생이 done 을 아는 길이 이것뿐이라, 일을 건넬 때마다 싣는다.
 const BRIEF_DONE_HINT: &str = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`(못 끝냈으면 failed, 막히거나 승인이 필요하면 blocked·needs_approval)으로 한 번 보고해 주세요.";
 
-/// 기존 대화는 실행 지침 없이 떴을 수 있어 새 일에 시작 안내를 함께 싣는다. 긴 규약은 받은 쪽이 `guide` 로 그때 읽는다.
+/// 받는 대화가 실행 지침으로 시작 안내를 받았는지 여기서는 몰라 늘 싣는다 — 이미 받은 대화에는 받는 기기가
+/// 붙여넣기 전에 뺀다(`guidance::without_start`). 긴 규약은 받은 쪽이 `guide` 로 그때 읽는다.
 fn with_done_hint(brief: &str) -> String {
     let body = brief.trim();
     let start = crate::guidance::START.trim();
