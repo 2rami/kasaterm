@@ -53,7 +53,7 @@ pub(crate) fn migration_cwd(session: &kasa_pty::PtySession, pane: &str) -> Optio
     let shell = session.shell_pid()?;
     #[cfg(windows)]
     {
-        let agent = kasa_pty::agent_pid_for_pane(&kasa_pty::process_table_shared(), shell, pane);
+        let agent = kasa_pty::agent_pid_for_pane_shared(shell, pane);
         if let Some(cwd) = agent.and_then(|(_, pid)| socket::pid_cwd(pid)).or_else(|| session.reported_cwd()) {
             return Some(cwd);
         }
@@ -286,7 +286,7 @@ impl App {
         // 에이전트가 **없는** 셸 pane 이면 이사가 아니라 **그 기계 태생 스폰**이다
         // — 옮길 대화가 없으니 레포만 맞추고 저쪽에 진짜 학생을 앉힌 뒤 이 pane 을
         // 거울로 바꾼다(2026-08-30 지시 「claude mini 이렇게 키면 맥미니에서 켜게」).
-        let agent = kasa_pty::agent_pid_for_pane(&kasa_pty::process_table_shared(), shell, pid);
+        let agent = kasa_pty::agent_pid_for_pane_shared(shell, pid);
         if let Some((kind, _)) = &agent {
             if !matches!(
                 kind,
@@ -1025,7 +1025,7 @@ impl App {
                     .get(&q.pane)
                     .and_then(|s| s.shell_pid())
                     .and_then(|sh| {
-                        kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), sh)
+                        kasa_pty::agent_pid_for_shell_shared(sh)
                     })
                     .is_some();
                 if !alive {

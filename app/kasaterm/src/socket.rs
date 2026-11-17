@@ -1438,7 +1438,7 @@ impl Backend for PtyBackend {
             .into_iter()
             .find(|(id, _)| *id == active)
             .map(|(_, p)| p)?;
-        kasa_pty::agent_for_shell(&kasa_pty::process_table_shared(), pid)
+        kasa_pty::agent_pid_for_shell_shared(pid).map(|(kind, _)| kind)
             .map(|k| k.as_str().to_string())
     }
 
@@ -2175,7 +2175,7 @@ impl Backend for PtyBackend {
     fn agent_prompt_idle(&self, surface_id: &str) -> Option<bool> {
         let session = kasa_pty::lookup_session(surface_id)?;
         // 끊긴 부모 사슬 아래의 하네스도 판정한다 — 끄는 쪽이 그 하네스를 찾은 길과 같아야 한다.
-        let (agent, _) = kasa_pty::agent_pid_for_pane(&kasa_pty::process_table_shared(), session.shell_pid()?, surface_id)?;
+        let (agent, _) = kasa_pty::agent_pid_for_pane_shared(session.shell_pid()?, surface_id)?;
         self.hub.refresh();
         let turn_free = !self.hub.is_working(surface_id) && !self.hub.state(surface_id).needs_you();
         Some(turn_free && crate::tell_delivery::resumed_input_ready(&session, agent))
@@ -7900,7 +7900,7 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
     // 발견이 늘 비어, 훅이 한 번 묶기를 건너뛰면(재시작 뒤 이어 켠 칸) 아무도 다시 묶지 못했다.
     #[cfg(windows)]
     if let Some((kasa_pty::AgentKind::Claude, pid)) =
-        kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell_pid)
+        kasa_pty::agent_pid_for_shell_shared(shell_pid)
     {
         return Some(pid);
     }

@@ -52,7 +52,7 @@ mod agents;
 #[cfg(test)]
 mod test_support;
 
-pub use agents::{AGENT_TABLE, AgentKind, AgentSpec, agent_for_shell, agent_nested_in_pane, agent_pid_for_pane, agent_pid_for_shell};
+pub use agents::{AGENT_TABLE, AgentKind, AgentSpec, agent_for_shell, agent_nested_in_pane, agent_pid_for_pane, agent_pid_for_pane_shared, agent_pid_for_shell, agent_pid_for_shell_shared};
 pub use blocks::CommandBlock;
 pub use lifecycle::{ExternalIo, ExtEvent};
 pub use process::{fresh_process_table, process_table, process_table_shared};

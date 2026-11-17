@@ -2,7 +2,7 @@
 //! `claude agents` 뷰 판정 캐시.
 
 use super::*;
-use super::process::effective_shell_pid;
+use super::process::{effective_shell_pid, ProcessTable};
 
 impl PtySession {
     /// 이 pane 이 지금 돌리는 **에이전트 종류**. 셸이거나 다른 프로그램이면 None.
@@ -21,7 +21,7 @@ impl PtySession {
     /// 테이블은 300ms 공유 캐시라 `ps` 추가 호출이 없다.
     pub fn active_agent(&self) -> Option<AgentKind> {
         let pid = self.shell_pid?;
-        agent_for_shell(&process_table_shared(), pid)
+        agent_pid_for_shell_shared(pid).map(|(kind, _)| kind)
     }
 
     /// `claude agents`(에이전트 목록 뷰)로 도는 pane 인지 — argv 서브커맨드로 판정.
@@ -247,6 +247,59 @@ pub fn agent_pid_for_pane(
     #[cfg(not(windows))]
     let _ = pane_id;
     None
+}
+
+/// 공유 프로세스 표 한 장에 대한 판정 답. 표는 백그라운드 스캔이 갈아 끼울 때(~300ms)만
+/// 바뀌는데, 렌더 스레드는 그리는 칸마다 테두리·이름표·사이드바·상태 줄이 저마다 묻는다.
+/// 같은 표로는 셸마다 한 번만 판정하고 나머지는 이 답을 준다. 표를 쥐고 있어 그 주소가
+/// 다른 표에 다시 쓰이지 않는다.
+struct TableAnswers {
+    table: ProcessTable,
+    by_shell: std::collections::HashMap<u32, Option<(AgentKind, u32)>>,
+    /// 셸 하나는 칸 하나의 것이라 셸로 찾고 칸 이름은 맞춰 본다.
+    by_pane: std::collections::HashMap<u32, (String, Option<(AgentKind, u32)>)>,
+}
+
+static TABLE_ANSWERS: Mutex<Option<TableAnswers>> = Mutex::new(None);
+
+/// 지금 표의 답 자리를 연다. 표가 바뀌었으면 지난 답을 버린다.
+fn with_answers<R>(table: &ProcessTable, f: impl FnOnce(&mut TableAnswers) -> R) -> R {
+    let mut slot = TABLE_ANSWERS.lock().unwrap_or_else(|e| e.into_inner());
+    if !slot.as_ref().is_some_and(|a| Arc::ptr_eq(&a.table, table)) {
+        *slot = Some(TableAnswers {
+            table: table.clone(),
+            by_shell: Default::default(),
+            by_pane: Default::default(),
+        });
+    }
+    f(slot.as_mut().expect("just filled"))
+}
+
+/// `agent_pid_for_shell` 을 공유 표로, 표가 바뀐 때만 다시 판정한다. 판정은 잠금 밖에서
+/// 한다 — 명령줄 읽기가 낄 수 있다.
+pub fn agent_pid_for_shell_shared(shell_pid: u32) -> Option<(AgentKind, u32)> {
+    let table = process_table_shared();
+    if let Some(hit) = with_answers(&table, |a| a.by_shell.get(&shell_pid).copied()) {
+        return hit;
+    }
+    let hit = agent_pid_for_shell(&table, shell_pid);
+    with_answers(&table, |a| a.by_shell.insert(shell_pid, hit));
+    hit
+}
+
+/// `agent_pid_for_pane` 을 공유 표로. 하네스가 안 잡히는 셸 칸(Windows)은 매번 하네스
+/// 프로세스마다 환경을 읽어 가장 비싼 길이라 같은 표로는 한 번만 간다.
+pub fn agent_pid_for_pane_shared(shell_pid: u32, pane_id: &str) -> Option<(AgentKind, u32)> {
+    let table = process_table_shared();
+    let known = with_answers(&table, |a| {
+        a.by_pane.get(&shell_pid).filter(|(pane, _)| pane == pane_id).map(|(_, hit)| *hit)
+    });
+    if let Some(hit) = known {
+        return hit;
+    }
+    let hit = agent_pid_for_pane(&table, shell_pid, pane_id);
+    with_answers(&table, |a| a.by_pane.insert(shell_pid, (pane_id.to_string(), hit)));
+    hit
 }
 
 /// `pid` 에서 칸 셸까지 올라가는 길에 하네스가 둘 이상 있는가 — 칸의 claude 가 Bash 로
@@ -589,6 +642,24 @@ impl AgentsViewCache {
 #[cfg(test)]
 fn agent_in_table(table: &[(u32, u32, String)], shell_pid: u32) -> Option<AgentKind> {
     agent_pid_in_table(table, shell_pid).map(|(kind, _)| kind)
+}
+
+#[cfg(test)]
+mod table_answers_tests {
+    use super::*;
+
+    #[test]
+    fn answers_last_while_the_table_is_the_same_and_go_with_it() {
+        let a: ProcessTable = Arc::new(vec![(10, 1, "cmd".to_string()), (11, 10, "claude".to_string())]);
+        let b: ProcessTable = Arc::new((*a).clone());
+        with_answers(&a, |s| s.by_shell.insert(10, Some((AgentKind::Claude, 11))));
+        // 같은 표를 다시 빌려 온 것(Arc 복제)이면 답이 남는다.
+        assert_eq!(with_answers(&a.clone(), |s| s.by_shell.get(&10).copied()), Some(Some((AgentKind::Claude, 11))));
+        // 내용이 같아도 새로 읽은 표면 다시 판정한다.
+        assert_eq!(with_answers(&b, |s| s.by_shell.get(&10).copied()), None);
+        with_answers(&b, |s| s.by_pane.insert(10, ("%1".to_string(), None)));
+        assert_eq!(with_answers(&b, |s| s.by_pane.get(&10).cloned()), Some(("%1".to_string(), None)));
+    }
 }
 
 #[cfg(test)]

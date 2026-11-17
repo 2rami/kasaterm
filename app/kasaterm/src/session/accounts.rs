@@ -12,7 +12,7 @@ impl App {
     /// 이미 떠 있는 process가 실제로 물고 있는 인증 경로를 기준으로 해야 한다.
     pub(super) fn pane_agent_ps_env(&self, pane: &str, expected: kasa_pty::AgentKind) -> Option<String> {
         let shell = self.pty.get(pane)?.shell_pid()?;
-        let (kind, pid) = kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell)?;
+        let (kind, pid) = kasa_pty::agent_pid_for_shell_shared(shell)?;
         if kind != expected {
             return None;
         }

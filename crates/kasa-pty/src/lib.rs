@@ -28,7 +28,7 @@ pub use procinfo::{
 #[cfg(windows)]
 pub use procinfo::open_files;
 pub use state::{
-    agent_for_shell, agent_nested_in_pane, agent_pid_for_pane, agent_pid_for_shell, input_shell_pid, keep_session, kept_sessions, live_sessions, lookup_session,
+    agent_for_shell, agent_nested_in_pane, agent_pid_for_pane, agent_pid_for_pane_shared, agent_pid_for_shell, agent_pid_for_shell_shared, input_shell_pid, keep_session, kept_sessions, live_sessions, lookup_session,
     release_session, ExtEvent, ExternalIo,
     process_table, process_table_shared, fresh_process_table,
     register_session, set_host_colors, AgentKind, AgentSpec, CommandBlock, PromptAnchor, PtyOptions,
