@@ -33,10 +33,11 @@ static WAKER: OnceLock<()> = OnceLock::new();
 /// 창이 다른 모니터로 옮겨 가면 주사율이 바뀐다 — 이 정도 박자로 다시 읽으면 충분하다.
 const REMEASURE: Duration = Duration::from_secs(2);
 
-/// Windows 는 vsync 없이 내서(`AutoNoVsync`) present 가 메인 스레드를 안 막아, 출력이 이어지면 주사율(143Hz)만큼
-/// 전체 화면을 다시 그렸다. 한 장마다 사이드바가 프로세스 표를 여러 번 훑어 메인 스레드가 한 코어의 70%를 쓰고
-/// 타자가 그 뒤에 줄 섰다(2026-11-13 집 PC 실측). 첫 변화는 그 자리에서 그리므로 메아리는 그대로다.
-const MAX_HZ: f64 = if cfg!(windows) { 60.0 } else { 240.0 };
+/// 화면 주사율까지 그린다. Windows 는 한때 60 으로 묶었다 — vsync 없이 내서(`AutoNoVsync`) 출력이 이어지면 143Hz
+/// 만큼 전체를 다시 그렸고, 한 장마다 사이드바가 프로세스 표를 훑어 메인 스레드가 한 코어의 70%를 썼다
+/// (2026-11-13 집 PC). 그 뒤 기기 목록·거울 투영·쉬는 칸 합성을 다시 쓰게 되어 3840x1600 한 장이 3~5ms 라,
+/// 144Hz 화면에서 거울이 60장에 묶여 끊겨 보이던 것을 푼다.
+const MAX_HZ: f64 = 240.0;
 
 fn refresh_interval(window: &Window) -> Duration {
     let hz = window
