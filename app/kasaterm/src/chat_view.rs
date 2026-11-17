@@ -415,14 +415,11 @@ pub(crate) fn bottom_region(rows: &[Vec<GridCell>]) -> Option<usize> {
         Some(crate::screenread::PromptBox::Filled { rows }) => rows.start,
         None => {
             let lines: Vec<String> = rows.iter().map(|r| row_text(r)).collect();
-            parse::parse_prompt_menu(&lines)?;
-            // 지금 고른 선택지 위로 가장 가까운 칸막이 가로줄이 창 머리다. 창이 화면보다 커서 머리가 밀려
+            let first = parse::parse_prompt_menu(&lines)?.first_row;
+            // 첫 선택지 위로 가장 가까운 칸막이 가로줄이 창 머리다. 고른 선택지 위에서 찾으면 질문 창의
+            // 「Chat about this」 위 칸막이가 잡혀 질문과 보기가 바닥에서 빠졌다. 창이 화면보다 커서 머리가 밀려
             // 올라갔으면(좁은 원본의 승인 창) 화면 맨 위부터가 창이다.
-            let current = lines.iter().rposition(|l| {
-                let t = l.trim_start().trim_start_matches(['│', '|']).trim_start();
-                t.starts_with(['❯', '›']) && t[t.chars().next().map_or(0, char::len_utf8)..].trim_start().starts_with(|c: char| c.is_ascii_digit())
-            })?;
-            (current.saturating_sub(40)..current).rev().find(|&r| full_rule(&rows[r])).unwrap_or(0)
+            (first.saturating_sub(40)..first).rev().find(|&r| full_rule(&rows[r])).unwrap_or(0)
         }
     };
     // 일하는 동안의 스피너 줄과 풀스크린의 「◉ effort」 줄은 입력칸 바로 위에 선다.
@@ -1052,6 +1049,27 @@ mod tests {
         let rule = "─".repeat(40);
         let s = screen(&["⏺ 답", "", &rule, " ☐ 색", "좋아하는 색?", "❯ 1. 빨강", "  2. 파랑", "Enter to select · Esc to cancel"], 40);
         assert_eq!(bottom_region(&s), Some(2));
+    }
+
+    /// 커서가 칸막이 아래 「Chat about this」에 가 있어도 창 머리는 질문 위 가로줄이다. 고른 보기 바로 위 가로줄을
+    /// 머리로 잡던 때는 칸막이 아래 두 줄만 옮겨 와 질문과 보기가 사라졌다(2026-11-18 PC 거울).
+    #[test]
+    fn a_question_window_keeps_its_head_whichever_option_is_current() {
+        let rule = "─".repeat(40);
+        let options = ["1. [ ] 잘림", "     아래 줄이 잘림", "2. [ ] 다름", "     옛 내용", "3. [ ] Type something", "     Submit"];
+        for current in [0usize, 4, 6] {
+            let mut lines: Vec<String> = vec!["⏺ 답".into(), "".into(), rule.clone(), " ☐ 이상한 점".into(), "".into(), "어떤 점이 이상한가요?".into(), "".into()];
+            for (k, o) in options.iter().enumerate() {
+                let mark = if k == current { "❯ " } else { "  " };
+                lines.push(if o.starts_with(' ') { o.to_string() } else { format!("{mark}{o}") });
+            }
+            lines.push(rule.clone());
+            lines.push(format!("{}4. Chat about this", if current == 6 { "❯ " } else { "  " }));
+            lines.push("".into());
+            lines.push("Enter to select · ↑/↓ to navigate · Esc to cancel".into());
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert_eq!(bottom_region(&screen(&refs, 40)), Some(2), "current option row {current}");
+        }
     }
 
     #[test]

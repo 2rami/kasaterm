@@ -890,6 +890,8 @@ pub(crate) struct PromptMenu {
     /// 제목 위 창 안의 줄들, 화면 차례 그대로 — 도구 이름·설명·명령 원문(Claude `Bash command`,
     /// 코덱스 `Would you like to run…`·`$ 명령`, 질문 머리). 거울 카드가 TUI 와 같은 정보를 보이는 재료다.
     pub(crate) context: Vec<String>,
+    /// 첫 선택지가 선 화면 줄 — 창 머리는 그 위에서 찾는다. 고른 선택지 위는 칸막이 아래일 수 있다.
+    pub(crate) first_row: usize,
 }
 
 /// `❯ 1. 예` 꼴 한 줄 — (고른 표식이 있나, 번호, 이름).
@@ -1007,7 +1009,7 @@ pub(crate) fn parse_prompt_menu(screen: &[String]) -> Option<PromptMenu> {
         context.push(t.to_string());
     }
     context.reverse();
-    Some(PromptMenu { title, options: opts.into_iter().map(|(o, _)| o).collect(), context })
+    Some(PromptMenu { title, options: opts.into_iter().map(|(o, _)| o).collect(), context, first_row: first })
 }
 
 /// 선택지 이름 뒤 두 칸 넘는 틈에 이어 선 상자(미리보기 그림)를 떼어 낸다. 글자 칸으로 자르지 않는다 — 한글은
