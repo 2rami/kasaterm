@@ -592,6 +592,53 @@ pub(crate) struct ComposeMemo {
     value: TerminalComposition,
 }
 
+/// 스피너 줄 반짝임. 학생 색과 실제로 반짝임 색으로 남은 칸만 알면 시각이 바뀌어도 그 칸만 다시 칠할 수 있어,
+/// 일하는 칸도 격자가 그대로인 동안 지난 합성을 쓴다. 칸은 합성이 끝난 뒤에 거른다 — 뒤의 단계(대화 상자 복원 등)가
+/// 덮은 칸까지 다시 칠하면 처음 합성과 달라진다.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SpinnerGlow {
+    row: usize,
+    first: usize,
+    span: f32,
+    accent: [u8; 4],
+    cells: Vec<usize>,
+}
+
+impl SpinnerGlow {
+    /// 한 번 스윕(초)·밴드 폭(셀)·밴드 중심 밝기(흰색 비율).
+    const PERIOD: f32 = 2.0;
+    const SIGMA: f32 = 2.0;
+    const GLOW: f32 = 0.9;
+
+    fn color(&self, idx: usize, t: f32) -> kasa_bridge::screen::Color {
+        // 밴드가 문구 왼쪽 밖에서 오른쪽 밖으로 완전히 지나가게.
+        let sweep = (t / Self::PERIOD).fract();
+        let center = self.first as f32 - Self::SIGMA * 2.0 + sweep * (self.span + Self::SIGMA * 4.0);
+        let d = idx as f32 - center;
+        let g = (-(d * d) / (2.0 * Self::SIGMA * Self::SIGMA)).exp() * Self::GLOW;
+        let mix = |b: u8| (b as f32 + (255.0 - b as f32) * g).round() as u8;
+        kasa_bridge::screen::Color::Rgb(mix(self.accent[0]), mix(self.accent[1]), mix(self.accent[2]))
+    }
+
+    fn paint(&self, rows: &mut [Vec<GridCell>], t: f32) {
+        let Some(row) = rows.get_mut(self.row) else { return };
+        for &idx in &self.cells {
+            if let Some(cell) = row.get_mut(idx) {
+                cell.fg = self.color(idx, t);
+            }
+        }
+    }
+
+    /// 합성이 끝난 격자에서 아직 반짝임 색인 칸만 남긴다.
+    fn settle(&mut self, rows: &[Vec<GridCell>], t: f32) {
+        let row = rows.get(self.row);
+        let keep: Vec<usize> = self.cells.iter().copied()
+            .filter(|&idx| row.and_then(|r| r.get(idx)).is_some_and(|cell| cell.fg == self.color(idx, t)))
+            .collect();
+        self.cells = keep;
+    }
+}
+
 impl ComposeMemo {
     fn reusable(&self, key: u64, viewer: Option<kasa_pty::ViewerRevision>, now: std::time::Instant) -> bool {
         self.key == key && self.viewer == viewer && now.saturating_duration_since(self.at) < COMPOSE_REUSE
@@ -626,9 +673,58 @@ mod compose_memo_tests {
         let mut fresh = TerminalComposition::default();
         fresh.rows = Arc::new(vec![vec![GridCell::blank(); 3]]);
         fresh.tab_pid = "%3".into();
-        let reused = fresh.reuse();
+        let reused = fresh.reuse(Some(1.0));
         assert!(reused.preedit_cursor.is_none());
-        assert_eq!((reused.rows, reused.tab_pid), (fresh.rows, fresh.tab_pid));
+        assert!(Arc::ptr_eq(&reused.rows, &fresh.rows), "without an animation the grid is shared, not copied");
+        assert_eq!(reused.tab_pid, fresh.tab_pid);
+    }
+
+    fn spinner_row() -> Vec<Vec<GridCell>> {
+        vec![
+            "first line".chars().map(|ch| GridCell { ch, ..GridCell::blank() }).collect(),
+            "* Thinking about it… (esc to interrupt)".chars().map(|ch| GridCell { ch, ..GridCell::blank() }).collect(),
+        ]
+    }
+
+    fn glow_for(rows: &[Vec<GridCell>]) -> SpinnerGlow {
+        let end = 20;
+        SpinnerGlow {
+            row: 1,
+            first: 0,
+            span: 19.0,
+            accent: [51, 221, 153, 255],
+            cells: rows[1].iter().take(end).enumerate().filter(|(_, c)| c.ch != ' ').map(|(i, _)| i).collect(),
+        }
+    }
+
+    #[test]
+    fn a_working_pane_reused_later_glows_exactly_as_a_fresh_composition_at_that_time() {
+        let (t0, t1) = (0.3, 1.45);
+        let mut first = spinner_row();
+        let mut glow = glow_for(&first);
+        glow.paint(&mut first, t0);
+        glow.settle(&first, t0);
+        let memo = TerminalComposition { rows: Arc::new(first), spinner_glow: Some(glow.clone()), ..Default::default() };
+
+        let mut fresh = spinner_row();
+        glow.paint(&mut fresh, t1);
+        let reused = memo.reuse(Some(t1));
+        assert_eq!(*reused.rows, fresh);
+        assert_ne!(*reused.rows, *memo.rows, "the band moved between the two times");
+    }
+
+    #[test]
+    fn cells_a_later_pass_overwrote_keep_that_pass_colour_when_repainted() {
+        let t0 = 0.3;
+        let mut rows = spinner_row();
+        let mut glow = glow_for(&rows);
+        glow.paint(&mut rows, t0);
+        // A dialog restore (foreground) puts the original cell back over the glow.
+        rows[1][4] = GridCell { ch: 'T', ..GridCell::blank() };
+        glow.settle(&rows, t0);
+        assert!(!glow.cells.contains(&4));
+        let memo = TerminalComposition { rows: Arc::new(rows.clone()), spinner_glow: Some(glow), ..Default::default() };
+        assert_eq!(memo.reuse(Some(1.7)).rows[1][4], rows[1][4]);
     }
 }
 
@@ -636,6 +732,10 @@ mod compose_memo_tests {
 pub(crate) struct TerminalComposition {
     pub(crate) preedit_cursor: Option<preedit::Placement>,
     pub(crate) animated_cells: bool,
+    /// 시각으로 다시 칠할 수 있는 움직임 — 재사용할 때 이것만 다시 칠한다.
+    pub(crate) spinner_glow: Option<SpinnerGlow>,
+    /// 다시 칠할 길이 없는 움직임(ultracode 숨쉬기) — 이런 합성은 다시 쓰지 않는다.
+    pub(crate) unrepeatable_animation: bool,
     /// 쉬는 칸은 지난 합성을 다시 쓰므로 프레임마다 격자를 복사하지 않게 나눠 든다.
     pub(crate) rows: Arc<Vec<Vec<GridCell>>>,
     pub(crate) banner_slots: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))>,
@@ -658,12 +758,23 @@ pub(crate) struct TerminalComposition {
 }
 
 impl TerminalComposition {
-    /// 다시 쓸 사본. IME 자리는 활성 칸에만 있어 재사용하는 합성에는 없다.
-    fn reuse(&self) -> Self {
+    /// 다시 쓸 사본. IME 자리는 활성 칸에만 있어 재사용하는 합성에는 없다. `at` 이 있으면 반짝임을 그 시각으로
+    /// 다시 칠한다 — 그때만 격자를 복사한다.
+    fn reuse(&self, at: Option<f32>) -> Self {
+        let rows = match (&self.spinner_glow, at) {
+            (Some(glow), Some(t)) => {
+                let mut rows = (*self.rows).clone();
+                glow.paint(&mut rows, t);
+                Arc::new(rows)
+            }
+            _ => self.rows.clone(),
+        };
         Self {
             preedit_cursor: None,
             animated_cells: self.animated_cells,
-            rows: self.rows.clone(),
+            spinner_glow: self.spinner_glow.clone(),
+            unrepeatable_animation: self.unrepeatable_animation,
+            rows,
             banner_slots: self.banner_slots.clone(),
             spinner_slots: self.spinner_slots.clone(),
             waiting_slots: self.waiting_slots.clone(),
@@ -981,17 +1092,17 @@ impl App {
         });
         if let Some((key, viewer)) = memo {
             if let Some(hit) = self.compose_memo.borrow().get(id).filter(|m| m.reusable(key, viewer, std::time::Instant::now())) {
-                return hit.value.reuse();
+                return hit.value.reuse(Some(self.version_anim_start.elapsed().as_secs_f32()));
             }
         }
         let composition = self.compose_terminal_pane_now(
             ws, pane, term, id, tab_pid, cols_now, rows_now, body_left, body_top, font_scale, desktop_view,
         );
         let mut memos = self.compose_memo.borrow_mut();
-        match memo.filter(|_| !composition.animated_cells && composition.preedit_cursor.is_none()) {
+        match memo.filter(|_| !composition.unrepeatable_animation && composition.preedit_cursor.is_none()) {
             Some((key, viewer)) => {
                 memos.retain(|_, m| m.at.elapsed() < COMPOSE_REUSE * 40);
-                memos.insert(id.clone(), ComposeMemo { key, viewer, at: std::time::Instant::now(), value: composition.reuse() });
+                memos.insert(id.clone(), ComposeMemo { key, viewer, at: std::time::Instant::now(), value: composition.reuse(None) });
             }
             None => {
                 memos.remove(id);
@@ -1018,7 +1129,7 @@ impl App {
             return None;
         }
         let state = self.agent_state(tab_pid);
-        if state.is_busy() || state.needs_you() || self.notify_flash_factor(tab_pid).is_some() {
+        if state.needs_you() || self.notify_flash_factor(tab_pid).is_some() {
             return None;
         }
         let (w, h) = (cols as f32 * self.cell.w * scale, rows as f32 * self.cell.h * scale);
@@ -1143,6 +1254,8 @@ impl App {
         let mut agents_view_panes: std::collections::HashSet<String> = Default::default();
         let mut mirror_claude_panes: std::collections::HashSet<String> = Default::default();
         let mut animated_cells = false;
+        let mut spinner_glow: Option<(SpinnerGlow, f32)> = None;
+        let mut unrepeatable_animation = false;
         let mut composed: Vec<Vec<GridCell>> = match term {
             Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
             None => Vec::new(),
@@ -1584,7 +1697,6 @@ impl App {
                     // 이미 돌려 애니 비용이 추가로 들지 않는다.
                 if let Some(a) = accent {
                     animated_cells = true;
-                    use kasa_bridge::screen::Color;
                     let t = self.version_anim_start.elapsed().as_secs_f32();
                     let row = &composed[sr];
                     // glow/색은 동사 문구("Cerebrating…")까지만 — 뒤의
@@ -1604,22 +1716,16 @@ impl App {
                         .take(end)
                         .rposition(|c| !matches!(c.ch, ' ' | '\0'))
                         .unwrap_or(first);
-                    let span = lastc.saturating_sub(first).max(1) as f32;
-                    const PERIOD: f32 = 2.0; // 한 번 스윕(초)
-                    const SIGMA: f32 = 2.0; // 밴드 폭(셀)
-                    const GLOW: f32 = 0.9; // 밴드 중심 밝기(흰색 비율)
-                                           // 밴드가 문구 왼쪽 밖에서 오른쪽 밖으로 완전히 지나가게.
-                    let sweep = (t / PERIOD).fract();
-                    let center = first as f32 - SIGMA * 2.0 + sweep * (span + SIGMA * 4.0);
-                    for (idx, cell) in composed[sr].iter_mut().enumerate().take(end) {
-                        if matches!(cell.ch, ' ' | '\0') {
-                            continue;
-                        }
-                        let d = idx as f32 - center;
-                        let g = (-(d * d) / (2.0 * SIGMA * SIGMA)).exp() * GLOW;
-                        let mix = |b: u8| (b as f32 + (255.0 - b as f32) * g).round() as u8;
-                        cell.fg = Color::Rgb(mix(a[0]), mix(a[1]), mix(a[2]));
-                    }
+                    let glow = SpinnerGlow {
+                        row: sr,
+                        first,
+                        span: lastc.saturating_sub(first).max(1) as f32,
+                        accent: a,
+                        cells: row.iter().take(end).enumerate()
+                            .filter(|(_, c)| !matches!(c.ch, ' ' | '\0')).map(|(idx, _)| idx).collect(),
+                    };
+                    glow.paint(&mut composed, t);
+                    spinner_glow = Some((glow, t));
                     // 꼬리("(49s · thinking some more…)")도 학생 색 언어로 —
                     // glow 는 여전히 문구까지만(사용자: 문구만 glow)이고, 꼬리는
                     // accent 를 테마 배경에 눕힌 차분한 톤. claude 가 제 주황을
@@ -1787,6 +1893,7 @@ impl App {
             // ultracode pane 은 이 테두리도 입력박스 보더와 같은 위상으로
             // 숨쉰다(2026-08-17 「리네임되는 부분 테두리도 같이 숨쉬기되게」).
             let col = if self.pane_ultracode.contains(&tab_pid) {
+                unrepeatable_animation = true;
                 ultracode_breath(Some(col), self.version_anim_start.elapsed().as_secs_f32())
             } else {
                 col
@@ -2216,6 +2323,7 @@ impl App {
             && agent_kind.is_some();
         if ultra {
             animated_cells = true;
+            unrepeatable_animation = true;
             let t = self.version_anim_start.elapsed().as_secs_f32();
             // 학생색 ↔ 보라 **순환** 숨쉬기(2026-08-17 「학생색 유지되면서
             // 순환하는 형식으로」 — 통보라 숨쉬기는 누구 pane 인지 잃어서
@@ -2298,9 +2406,15 @@ impl App {
         title_outline_slots.retain(|&(x, y, w, h, _)| !foreground.overlaps((x, y, w, h), (body_left, body_top), cell));
         foreground.restore(&mut composed);
         crate::links::restyle_web_suffixes(&mut composed);
+        let spinner_glow = spinner_glow.map(|(mut glow, t)| {
+            glow.settle(&composed, t);
+            glow
+        });
         TerminalComposition {
             preedit_cursor,
             animated_cells,
+            spinner_glow,
+            unrepeatable_animation,
             rows: Arc::new(composed),
             banner_slots,
             spinner_slots,
