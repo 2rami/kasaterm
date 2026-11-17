@@ -1837,6 +1837,9 @@ struct FileTreeDrag {
 struct TerminalPane {
     live_output: bool,
     output_generation: u64,
+    /// 이 격자를 고칠 때마다 오르는 번호 — 고치는 길은 모두 `term_mut` 를 지난다. 합성 재사용
+    /// (`compose_terminal_pane`)이 「안 바뀐 칸」을 이것으로 안다. `output_generation` 은 연결 세대라 못 쓴다.
+    revision: u64,
     /// 첫 화면 갱신이 닿은 때. 첫 프롬프트 전 「준비 중」 제목을 언제 거둘지 잰다(`shell_loading`).
     started: Option<Instant>,
     rows: u16,
@@ -2179,6 +2182,8 @@ impl PaneTab {
     }
     fn term_mut(&mut self) -> Option<&mut TerminalPane> {
         if let PaneContent::Terminal(t) = &mut self.content {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            t.revision = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(t)
         } else {
             None
@@ -6108,6 +6113,8 @@ struct App {
     /// 화면 행을 복사 시점에 되짚을 다른 길이 없다.
     pane_view_shift: std::collections::HashMap<String, PaneViewShift>,
     mirror_view_scroll: HashMap<String, usize>,
+    /// 칸별 지난 합성 — `terminal_scene::ComposeMemo`.
+    compose_memo: std::cell::RefCell<HashMap<String, render::terminal_scene::ComposeMemo>>,
     /// Wakes the event loop from background threads (PTY snapshots,
     /// socket commands) so a parked WaitUntil repaints immediately.
     proxy: EventLoopProxy<UserEvent>,
@@ -6621,6 +6628,7 @@ impl App {
             pane_font_scales: std::collections::HashMap::new(),
             pane_view_shift: std::collections::HashMap::new(),
             mirror_view_scroll: HashMap::new(),
+            compose_memo: Default::default(),
             proxy,
             inline_web: None,
             account_switch_confirm: None,
