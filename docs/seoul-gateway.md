@@ -232,6 +232,15 @@ bd51029b 관문으로 교체(18:09:35, sha256 902a0ee6…, `/relay/login-vault` 
 401(전후 같음), 데스크톱 넷 재접속, 교체 뒤 관문 기록 error·panic 0. 같은 때 폰 Ad Hoc 1.0.0(2611161806)을 올려 서울 `latest` 도 그 판이다.
 ⚠️ `kasa-relay --help` 는 도움말이 아니라 기본값으로 켜지려 한다 — 서버에서 바이너리가 뜨는지만 보려다 「Address already in use」로 끝났다.
 
+## 설치 페이지 겉모습 교체 기록 (2026-11-18)
+
+폰 설치 페이지(`/relay/install/<token>/`·등록 상태)를 앱 겉모습으로 바꾼 관문은 **미니 설치 전용 관문만** 갈아 끼웠다 — 서울 Caddy 가
+`/relay/install/*`(latest 제외)를 미니로 넘기니 서울 관문(bd51029b)은 그대로다. 운영 기준과 같게 bd51029b 에 9f2c91ef 만 얹어 이 맥에서
+`MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release -p kasa-gateway --bin kasa-relay` 로 지었다(sha256 989be5d1…, 옆에 `kasa-relay.info`).
+교체 전 미니 판은 10-02 빌드였고 `~/.local/bin/kasa-relay.bak-20261118` 로 남겼다. 되돌리기는 그 파일을 제자리로 놓고
+`launchctl kickstart -k gui/$(id -u)/com.geono.kasa-relay`. 확인: 공개 주소의 설치 페이지 200(진행표·QR 카드), manifest 전후 바이트 같음,
+ipa 200, 서울 `latest` 무토큰 401(전후 같음), 관문 기록 error·panic 0.
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서
