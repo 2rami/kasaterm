@@ -186,6 +186,7 @@ class RealBackend:
             self.git("fetch", "-q", self.remote, f"refs/tags/{plan['tag']}", timeout=120)
             parent = self.git("rev-parse", f"{tagged}^")
             out["tag_parent"] = parent.out.strip() if parent.ok else None
+            out["tag"] = tagged
         return out
 
     def observe(self, plan):

@@ -297,17 +297,25 @@ def recover(state_dir, plan_id, replan=False, engine=None):
         backend = engine.backend(plan, "dry", config)
         facts = engine.facts(plan, config)
         tagged = bool(facts.get("tag_parent"))
-        if state.get("stages", {}).get("tag", {}).get("status") == "done" and not tagged:
+        stages = state.get("stages", {})
+        if stages.get("tag", {}).get("status") == "done" and not tagged:
             raise Refused("previously published tag is missing; do not create another release")
+        # Someone else released this version first (same source commit, their own version commit). This plan never
+        # pushed a tag and its built artifact names a different commit, so it can never attach to that tag; moving
+        # the queue to the next version abandons nothing this controller published.
+        built = (stages.get("build", {}).get("detail") or {}).get("commit")
+        foreign = bool(tagged and built and facts.get("tag") and facts["tag"] != built
+                       and stages.get("tag", {}).get("status") != "done")
         if replan:
-            if tagged:
+            if tagged and not foreign:
                 raise Refused("an existing tag must resume its original plan; cannot replan")
             if policy.load(root)["policy_hash"] != config["policy_hash"]:
                 raise Refused("policy changed during recovery")
             history = entry.get("cancelled_plans", []) + [plan_id]
             ledger["requests"][request] = {"state": "queued", "cancelled_plans": history}
             ledger["active"] = None
-            result = {"state": "queued_for_replanning", "request": request, "discarded_plan": plan_id}
+            result = {"state": "queued_for_replanning", "request": request, "discarded_plan": plan_id,
+                      **({"foreign_tag": facts["tag"]} if foreign else {})}
         else:
             if entry.get("policy_scope") != policy.scope_hash(config):
                 raise Refused("reauthorization requires exactly the same policy scope")

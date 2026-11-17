@@ -44,7 +44,10 @@ class FakeBackend:
         return self.engine.feed
 
     def resume_facts(self, plan):
-        return {"main": self.engine.head, "tag_parent": self.engine.tags.get(plan["tag"])}
+        facts = {"main": self.engine.head, "tag_parent": self.engine.tags.get(plan["tag"])}
+        if plan["tag"] in self.engine.tag_commits:
+            facts["tag"] = self.engine.tag_commits[plan["tag"]]
+        return facts
 
     def contains(self, older, newer):
         return self.engine.contains(older, newer)
@@ -85,6 +88,7 @@ class FakeEngine:
         self.feed = "sha256:feed"
         self.remote_url = policy.REMOTE_URL
         self.tags, self.calls = {}, []
+        self.tag_commits = {}
         self.waiting = False
         self.disable_after_tag = False
         self.tag_error = None
@@ -468,6 +472,21 @@ class PolicyFixture(unittest.TestCase):
         self.assertNotIn("build", state["stages"])
         self.assertEqual(auto.tick(self.root, self.engine)["state"], "blocked")
         self.assertEqual(self.engine.calls, [])
+
+    def test_replan_moves_past_a_version_someone_else_tagged_first(self):
+        self.engine.local_ready = False
+        first = auto.tick(self.root, self.engine)
+        plan, state = self.engine.load_plan(first["plan_id"])
+        state["stages"]["build"] = {"status": "done", "detail": {"commit": B}}
+        fastpatch.save_state(plan["plan_id"], state, self.engine.plans)
+        self.engine.tags[plan["tag"]] = plan["commit"]
+        self.engine.tag_commits[plan["tag"]] = B
+        with self.assertRaisesRegex(Refused, "existing tag"):
+            auto.recover(self.root, first["plan_id"], replan=True, engine=self.engine)
+        self.engine.tag_commits[plan["tag"]] = C
+        got = auto.recover(self.root, first["plan_id"], replan=True, engine=self.engine)
+        self.assertEqual(got["state"], "queued_for_replanning")
+        self.assertEqual(got["foreign_tag"], C)
 
     def test_untagged_replan_recovers_changed_feed_after_reenable(self):
         self.engine.local_ready = False
