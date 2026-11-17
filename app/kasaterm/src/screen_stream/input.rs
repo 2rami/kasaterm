@@ -52,7 +52,8 @@ impl App {
                 let Some(view) = self.screen_views.get_mut(&id) else { return false };
                 if held.is_none() && view.on_toggle(p) {
                     if pressed && bit == 1 {
-                        view.control = !view.control;
+                        let control = !view.control;
+                        view.set_control(control);
                         self.focus_screen_view(id, on);
                         self.chrome_dirty = true;
                     }

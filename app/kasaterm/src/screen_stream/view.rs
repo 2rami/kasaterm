@@ -72,7 +72,8 @@ impl ScreenView {
     /// 그 기기(base) 화면을 본다. 새 장이 풀릴 때마다 `wake` 를 부른다 — GUI 를 깨워 다시 그리게.
     /// 그 기기가 화면 스트림을 모르는 판이거나 카사넷 직통이 아니면 연결 없이 까닭만 들고 연다 — 칸은 그대로 두고
     /// 길이 서면 다시 붙는다.
-    pub(crate) fn open(label: &str, base: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
+    /// `fit` 은 이 기기가 그릴 수 있는 가장 큰 픽셀 크기 — 그 기기는 이 안에 들도록 줄여 보낸다.
+    pub(crate) fn open(label: &str, base: &str, fit: (u32, u32), wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
         let shared = Arc::new(Shared {
             latest: Mutex::new(None),
             serial: AtomicU64::new(0),
@@ -80,7 +81,7 @@ impl ScreenView {
             stats: Mutex::new(Stats::default()),
             input_note: Mutex::new(None),
         });
-        let config = Config { codec: VideoDecoder::CODEC.into(), ..Config::default() };
+        let config = Config { codec: VideoDecoder::CODEC.into(), max_w: fit.0, max_h: fit.1, ..Config::default() };
         let (tx, rx) = mpsc::channel::<Incoming>();
         let keyframes: Arc<Mutex<Option<Keyframes>>> = Arc::new(Mutex::new(None));
         let on = {
@@ -151,6 +152,14 @@ impl ScreenView {
             surface: Surface::Main,
             closed_since: None,
         })
+    }
+
+    /// 조작을 켜면 그 기기 커서를 장에서 뺀다 — 이 기기 포인터가 곧 커서가 되어 영상 지연 없이 따라온다(Parsec 처럼).
+    pub(crate) fn set_control(&mut self, on: bool) {
+        self.control = on;
+        if let Some(w) = &self.watch {
+            w.set_cursor_hidden(on);
+        }
     }
 
     /// 연결이 없거나 닫혔다.

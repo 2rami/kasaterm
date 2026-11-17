@@ -32,6 +32,9 @@ pub mod ctl {
     pub const INPUT_STATE: u8 = b'N';
     pub const DENIED: u8 = b'X';
     pub const QUIT: u8 = b'Q';
+    /// 보는 쪽이 조작 중인지 — 본문 1바이트(1 = 조작 중). 조작 중이면 보내는 쪽은 커서를 장에서 뺀다: 보는 쪽 자기
+    /// 포인터가 곧 커서라 영상 지연만큼 늦게 따라오는 그 기기 커서가 겹쳐 굼떠 보였다(Parsec 처럼).
+    pub const CURSOR: u8 = b'M';
 }
 
 /// 압축 장 하나의 상한. 원래 해상도 키프레임도 1MB 를 넘지 않았다(S0) — 넉넉히 잡되 끝은 둔다.
@@ -50,18 +53,26 @@ pub struct Config {
     pub scale: f32,
     /// 화면이 멈춘 뒤 같은 장을 몇 번 더 압축해 보낼지 — 움직일 때 무른 마지막 장을 또렷하게 다듬는다.
     pub refine: u32,
+    /// 보는 쪽이 그릴 수 있는 가장 큰 픽셀 크기(0 = 모름) — 보는 기기의 가장 큰 모니터. macOS 보내는 쪽은 이 안에
+    /// 들도록 줄여 뜬다: 그릴 수 없는 픽셀은 압축만 늦춘다(3024×1964 H.264 압축 p90 35ms, 1814×1178 에서 11ms).
+    /// Windows 복제는 원래 크기 그대로 보낸다.
+    pub max_w: u32,
+    pub max_h: u32,
 }
 
 impl Default for Config {
     /// S0 실측으로 정한 기본값 — HEVC 30Mbps 60fps 원래 해상도, 멈추면 30장(0.5초) 다듬기.
     fn default() -> Self {
-        Self { codec: "hevc".into(), bitrate: 30_000_000, fps: 60, scale: 1.0, refine: 30 }
+        Self { codec: "hevc".into(), bitrate: 30_000_000, fps: 60, scale: 1.0, refine: 30, max_w: 0, max_h: 0 }
     }
 }
 
 impl Config {
     pub fn to_json(&self) -> Value {
-        json!({ "codec": self.codec, "bitrate": self.bitrate, "fps": self.fps, "scale": self.scale, "refine": self.refine })
+        json!({
+            "codec": self.codec, "bitrate": self.bitrate, "fps": self.fps, "scale": self.scale, "refine": self.refine,
+            "max_w": self.max_w, "max_h": self.max_h,
+        })
     }
 
     /// 범위 밖 값은 끝으로 붙인다 — 보는 쪽이 보낸 값이라 그대로 믿지 않는다.
@@ -76,6 +87,8 @@ impl Config {
             fps: v.get("fps").and_then(Value::as_u64).map_or(d.fps, |f| f.clamp(1, 120) as u32),
             scale: v.get("scale").and_then(Value::as_f64).map_or(d.scale, |s| s.clamp(0.25, 1.0) as f32),
             refine: v.get("refine").and_then(Value::as_u64).map_or(d.refine, |r| r.min(240) as u32),
+            max_w: v.get("max_w").and_then(Value::as_u64).map_or(0, |w| if w == 0 { 0 } else { w.clamp(160, 16384) as u32 }),
+            max_h: v.get("max_h").and_then(Value::as_u64).map_or(0, |h| if h == 0 { 0 } else { h.clamp(120, 16384) as u32 }),
         }
     }
 }
@@ -183,6 +196,8 @@ pub trait Session: Send {
     fn display(&self) -> u32;
     /// 보는 쪽에 알리는 압축 정보(크기·코덱·하드웨어 여부 등).
     fn info(&self) -> Value;
+    /// 커서를 장에서 뺀다(보는 쪽이 조작 중). 커서를 따로 안 뜨는 판(Windows 복제)은 할 일이 없다.
+    fn set_cursor_hidden(&self, _hidden: bool) {}
 }
 
 static CAPTURE: OnceLock<Arc<dyn Capture>> = OnceLock::new();
@@ -301,6 +316,11 @@ async fn serve_with(
                 write_msg(send, ctl::PONG, &pair(t0, capture.now())).await?;
             }
             ctl::KEYFRAME => session.lock().unwrap_or_else(|e| e.into_inner()).keyframe(),
+            ctl::CURSOR => {
+                if let Some(&hidden) = body.first() {
+                    session.lock().unwrap_or_else(|e| e.into_inner()).set_cursor_hidden(hidden != 0);
+                }
+            }
             ctl::INPUT => {
                 let Some(event) = std::str::from_utf8(&body).ok().and_then(crate::screen_mirror::input_of) else { continue };
                 if let Some(told) = input.put(&capture, display, event).await {
@@ -540,6 +560,11 @@ impl Watch {
     /// 조작 하나 — 화면 거울과 같은 JSON(`{"t":"pointer",…}`).
     pub fn send_input(&self, event: &Value) {
         let _ = self.ctl.send((ctl::INPUT, event.to_string().into_bytes()));
+    }
+
+    /// 조작 중이면 그 기기 커서를 장에서 빼 달라고 한다. 붙기 전에 불러도 붙은 뒤 차례대로 간다.
+    pub fn set_cursor_hidden(&self, hidden: bool) {
+        let _ = self.ctl.send((ctl::CURSOR, vec![u8::from(hidden)]));
     }
 }
 

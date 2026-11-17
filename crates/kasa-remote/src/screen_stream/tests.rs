@@ -17,6 +17,7 @@ struct Counts {
     prompts: AtomicUsize,
     input_prompts: AtomicUsize,
     inputs: Mutex<Vec<(u32, Input)>>,
+    cursor_hidden: Mutex<Vec<bool>>,
 }
 
 /// 5ms 마다 장을 낸다. 첫 장·청한 다음 장이 키프레임이다.
@@ -97,6 +98,10 @@ impl Session for FakeSession {
 
     fn display(&self) -> u32 {
         7
+    }
+
+    fn set_cursor_hidden(&self, hidden: bool) {
+        self.counts.cursor_hidden.lock().unwrap().push(hidden);
     }
 }
 
@@ -221,8 +226,11 @@ async fn input_lands_on_the_captured_display_in_order_and_held_buttons_are_relea
     ctl.send(input(json!({ "t": "pointer", "x": 0.3, "y": 0.5, "b": 1 }))).unwrap();
     ctl.send(input(json!({ "t": "text", "s": "안녕" }))).unwrap();
     ctl.send(input(json!({ "t": "nonsense" }))).unwrap();
+    ctl.send((ctl::CURSOR, vec![1])).unwrap();
+    ctl.send((ctl::CURSOR, vec![0])).unwrap();
+    ctl.send((ctl::CURSOR, Vec::new())).unwrap();
     let waited = Instant::now();
-    while counts.inputs.lock().unwrap().len() < 3 && waited.elapsed() < T {
+    while (counts.inputs.lock().unwrap().len() < 3 || counts.cursor_hidden.lock().unwrap().len() < 2) && waited.elapsed() < T {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     ctl.send((ctl::QUIT, Vec::new())).unwrap();
@@ -238,6 +246,7 @@ async fn input_lands_on_the_captured_display_in_order_and_held_buttons_are_relea
     assert_eq!(kinds[2], Input::Text("안녕".into()));
     assert_eq!(kinds[3], Input::Pointer { x: 0.3, y: 0.5, buttons: 0, prev: 1, mods: 0 }, "끊길 때 눌린 단추를 그 자리에서 뗀다");
     assert_eq!(kinds.len(), 4, "모르는 메시지는 버린다");
+    assert_eq!(*counts.cursor_hidden.lock().unwrap(), vec![true, false], "조작을 켜고 끄면 커서를 빼고 되돌린다. 빈 본문은 버린다");
     let mut told = Vec::new();
     while let Ok(e) = rx.try_recv() {
         if let Event::Input { ok, reason } = e {
@@ -298,8 +307,10 @@ fn frame_round_trips_and_refuses_truncation() {
 
 #[test]
 fn viewer_config_is_clamped_on_the_sending_side() {
-    let c = Config::from_json(&json!({ "codec": "vp9", "bitrate": 1u64 << 40, "fps": 0, "scale": 4.0, "refine": 100000 }));
-    assert_eq!(c, Config { codec: "hevc".into(), bitrate: 200_000_000, fps: 1, scale: 1.0, refine: 240 });
+    let c = Config::from_json(&json!({ "codec": "vp9", "bitrate": 1u64 << 40, "fps": 0, "scale": 4.0, "refine": 100000, "max_w": 3, "max_h": 1u64 << 40 }));
+    assert_eq!(c, Config { codec: "hevc".into(), bitrate: 200_000_000, fps: 1, scale: 1.0, refine: 240, max_w: 160, max_h: 16384 });
+    let fit = Config { max_w: 2560, max_h: 1440, ..Config::default() };
+    assert_eq!(Config::from_json(&fit.to_json()), fit, "보는 쪽 모니터 크기는 그대로 건너간다");
     assert_eq!(Config::from_json(&Value::Null), Config::default());
     assert_eq!(Config::from_json(&Config { codec: "h264".into(), ..Config::default() }.to_json()).codec, "h264");
 }

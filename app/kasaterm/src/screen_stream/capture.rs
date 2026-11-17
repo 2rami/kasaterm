@@ -84,6 +84,7 @@ unsafe fn is_complete(sample: &CMSampleBuffer) -> bool {
 
 pub struct Capture {
     stream: Retained<SCStream>,
+    config: Retained<SCStreamConfiguration>,
     _output: Retained<Output>,
     pub width: usize,
     pub height: usize,
@@ -95,7 +96,8 @@ pub struct Capture {
 unsafe impl Send for Capture {}
 
 impl Capture {
-    pub fn start(fps: u32, pixel_format: u32, scale_by: f64, sink: impl Fn(Frame) + Send + Sync + 'static) -> Result<Self> {
+    /// `fit` 은 장이 들어야 할 픽셀 상자(0 이면 제한 없음) — `scale_by` 와 둘 중 더 작게 줄인다.
+    pub fn start(fps: u32, pixel_format: u32, scale_by: f64, fit: (u32, u32), sink: impl Fn(Frame) + Send + Sync + 'static) -> Result<Self> {
         let content = shareable_content()?;
         extern "C" {
             fn CGMainDisplayID() -> u32;
@@ -115,8 +117,14 @@ impl Capture {
         let scale = unsafe { SCShareableContent::infoForFilter(&filter).pointPixelScale() } as f64;
         // 인코더는 짝수 크기를 바란다.
         let even = |v: f64| ((v / 2.0).round() as usize) * 2;
-        let width = even(unsafe { display.width() } as f64 * scale * scale_by);
-        let height = even(unsafe { display.height() } as f64 * scale * scale_by);
+        let (native_w, native_h) = (unsafe { display.width() } as f64 * scale, unsafe { display.height() } as f64 * scale);
+        let scale_by = if fit.0 > 0 && fit.1 > 0 {
+            scale_by.min(f64::from(fit.0) / native_w).min(f64::from(fit.1) / native_h)
+        } else {
+            scale_by
+        };
+        let width = even(native_w * scale_by);
+        let height = even(native_h * scale_by);
 
         let config = unsafe { SCStreamConfiguration::new() };
         unsafe {
@@ -158,7 +166,15 @@ impl Capture {
             Ok(Err(e)) => bail!("화면 캡처 시작 실패(화면 기록 권한?): {e}"),
             Err(_) => bail!("화면 캡처 시작이 10초 안에 끝나지 않았다"),
         }
-        Ok(Self { stream, _output: output, width, height, display: display_id })
+        Ok(Self { stream, config, _output: output, width, height, display: display_id })
+    }
+
+    /// 커서를 장에 넣을지 — 끝나기를 기다리지 않는다(조작 받는 길을 막지 않게).
+    pub fn show_cursor(&self, on: bool) {
+        unsafe {
+            self.config.setShowsCursor(on);
+            self.stream.updateConfiguration_completionHandler(&self.config, None);
+        }
     }
 }
 

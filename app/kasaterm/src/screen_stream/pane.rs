@@ -124,7 +124,7 @@ impl App {
         };
         let proxy = self.proxy.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || drop(proxy.send_event(UserEvent::Redraw)));
-        let Some(view) = ScreenView::open(label, base, wake) else {
+        let Some(view) = ScreenView::open(label, base, self.screen_fit(), wake) else {
             return false;
         };
         let view_id = self.screen_view_seq;
@@ -217,13 +217,21 @@ impl App {
             let Some(machine) = kasa_device::machines::find(&label) else { continue };
             let proxy = self.proxy.clone();
             let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || drop(proxy.send_event(UserEvent::Redraw)));
-            if let Some(view) = ScreenView::open(&label, &machine.base, wake) {
+            if let Some(view) = ScreenView::open(&label, &machine.base, self.screen_fit(), wake) {
                 if let Some((_, previous)) = retry.iter().find(|(v, _)| *v == view_id) {
                     view.carry_status(previous);
                 }
                 self.screen_views.insert(view_id, view);
             }
         }
+    }
+
+    /// 화면 칸이 커질 수 있는 끝 — 가장 큰 모니터. 칸 크기로 정하면 키우거나 꺼낼 때마다 다시 붙어야 한다.
+    fn screen_fit(&self) -> (u32, u32) {
+        self.window
+            .as_ref()
+            .map(|w| w.available_monitors().map(|m| m.size()).fold((0, 0), |a, s| if s.width * s.height > a.0 * a.1 { (s.width, s.height) } else { a }))
+            .unwrap_or((0, 0))
     }
 
     /// 본창에 그려지는 보기에 새 장이 있나 — 꺼낸 창의 보기는 그 창만 다시 그린다(`redraw_screen_windows`).

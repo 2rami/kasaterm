@@ -79,6 +79,12 @@ impl Session for HostSession {
     fn display(&self) -> u32 {
         self.display
     }
+
+    fn set_cursor_hidden(&self, hidden: bool) {
+        if let Some(c) = &self.capture {
+            c.show_cursor(!hidden);
+        }
+    }
 }
 
 impl Drop for HostSession {
@@ -132,6 +138,7 @@ impl Capture for Host {
             config.fps,
             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             f64::from(config.scale),
+            (config.max_w, config.max_h),
             move |f| {
                 if sink.scroll_mode {
                     *sink.base.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pixels(f.pixels));
