@@ -91,8 +91,11 @@ scripts\windows\build-run.ps1
   `-SkipUi` 없이 다시 실행해 dist를 만든다.
 - **link.exe / rc.exe 못 찾음** — VS Build Tools 설치가 덜 됨. "x64 Native Tools /
   ARM64 Native Tools Command Prompt"에서 실행하거나 새 로그인으로 PATH 반영.
-- **호스트 모듈 최적화에서 STATUS_ACCESS_VIOLATION** — 루트 Cargo.toml의 `opt-level=0` pin이
-  이걸 막는다. 그 pin을 지우지 말 것.
+- **호스트 크레이트 최적화에서 STATUS_ACCESS_VIOLATION** — 예전 MCP 크레이트의 rmcp·schemars 를
+  최적화하던 Windows LLVM 이 죽어 호스트 크레이트 12개를 `opt-level=0` 으로 묶었었다. 쪼갠 뒤에는
+  그 의존이 없고, 묶음이 기기 목록·거울 연결·HTTP JSON 을 Windows 판에서만 최적화 없이 돌려 메인
+  스레드를 잡아먹었다. 2026-11-18 rustc 1.95(x64)로 12개 모두 기본 최적화에서 구워져 묶음을 걷었다.
+  다시 죽으면 죽는 크레이트 하나만 `[profile.release.package.<이름>]` 으로 묶는다.
 - **자동 업데이트(WinSparkle)** — 실행 테스트엔 불필요해 생략했다(DLL 없으면
   `win_sparkle.rs`가 no-op으로 통과). 자동업뎃까지 보려면 CI가 받는 x64 prebuilt
   `WinSparkle.dll`을 exe 옆에 둬야 하는데, ARM 네이티브 빌드에선 맞지 않는다.

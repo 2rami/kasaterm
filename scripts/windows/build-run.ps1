@@ -29,8 +29,7 @@ if (-not (Test-Path "web\arona-ui\dist\index.html")) {
     Write-Warning "arona-ui dist 없음 — god 모드 웹뷰가 빈 화면일 수 있다(-SkipUi 를 뺐는지 확인)."
 }
 
-# 2) 네이티브 빌드. 루트 Cargo.toml이 호스트 크레이트들을 opt-level=0으로 유지해서
-#    Windows LLVM 의 STATUS_ACCESS_VIOLATION 을 피한다 — 그대로 둘 것.
+# 2) 네이티브 빌드.
 Write-Host "-- cargo build --release -p kasaterm -p kasa-socket"
 cargo build --release -p kasaterm -p kasa-socket
 

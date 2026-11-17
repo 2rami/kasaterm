@@ -106,12 +106,7 @@ fi
 # 릴리스 도구(tools/release)는 격리 target(CARGO_TARGET_DIR)으로 굽는다 — 바이너리는 cargo 가 실제로 쓴 자리에서 가져온다.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ "$PROFILE" == "release" ]]; then
-  # Windows용 최적화 우회가 맥의 대화 기록 JSON 직렬화까지 느리게 만들지 않게 한다.
-  host_optimization=()
-  for package in kasa-identity kasa-characters kasa-wire kasa-device kasa-backend kasa-students kasa-remote kasa-browser kasa-git kasa-gateway kasa-http kasa-serve; do
-    host_optimization+=(--config "profile.release.package.${package}.opt-level=3")
-  done
-  cargo build --locked --release "${host_optimization[@]}" -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp --bins
+  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp --bins
   BINDIR="$TARGET_DIR/release"
 else
   cargo build --locked -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp --bins

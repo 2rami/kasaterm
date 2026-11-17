@@ -1,10 +1,10 @@
 # HTTP 대화 기록 CPU 확인
 
-`kasa-http`는 HTTP 라우터와 JSON 직렬화를 포함한다. `Cargo.toml`의 패키지별
-`opt-level=0`은 Windows의 과거 LLVM 오류 우회다. 이 설정을 macOS에도 그대로 적용하면
-배포판에서도 큰 대화 문자열을 검사하고 이스케이프하는 코드가 최적화되지 않는다.
-macOS 번들 경로인 `scripts/build-app.sh`는 release에서 이 패키지만 `opt-level=3`으로
-덮어쓴다. Windows 빌드 설정은 바꾸지 않는다. 개발용 debug 빌드의 수치로 성능을 판단하지 않는다.
+`kasa-http`는 HTTP 라우터와 JSON 직렬화를 포함한다. 예전에는 Windows LLVM 오류 우회로
+호스트 크레이트를 `opt-level=0`으로 묶어, 배포판에서도 큰 대화 문자열을 검사하고 이스케이프하는
+코드가 최적화되지 않았다. 지금은 모든 플랫폼이 release 기본 최적화로 굽는다
+([scripts/windows/README.md](../scripts/windows/README.md)). 아래 비교는 그 묶음이 있던 때와
+없는 때를 같은 응답으로 잰다. 개발용 debug 빌드의 수치로 성능을 판단하지 않는다.
 
 ## 같은 응답으로 비교
 
