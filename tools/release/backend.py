@@ -30,6 +30,7 @@ TEST_PACKAGES = (
     "kasa-backend", "kasa-students", "kasa-remote", "kasa-browser", "kasa-git", "kasa-gateway",
     "kasa-serve", "kasa-socket",
 )
+VERIFY_TIMEOUT = 7200
 TESTS = (["cargo", "test", *[arg for package in TEST_PACKAGES for arg in ("-p", package)], "--release"],)
 PUBLISH_STAGES = ("tag", "release", "feed")
 MAIN_RACE_ATTEMPTS = 5
@@ -346,7 +347,9 @@ class RealBackend:
         cargo = self.tool("cargo")
         for argv in TESTS:
             argv = [cargo, *argv[1:]]
-            r = self.runner.run(argv, cwd=wt, timeout=3600, env=self.env(), kind="local")
+            # 계획마다 새 워크트리라 워크스페이스 크레이트를 release 로 처음부터 다시 굽는다. 43~53분 걸리던 것이 미니가
+            # 다른 일로 바쁠 때 굽기만으로 60분을 넘겨 0.2.246 이 시험도 못 돌고 끊겼다(2026-11-18) — 멈춤이 아니라 느림이다.
+            r = self.runner.run(argv, cwd=wt, timeout=VERIFY_TIMEOUT, env=self.env(), kind="local")
             ran.append(" ".join(argv))
             if r.timed_out:
                 raise Refused(f"검사 시간 초과: {' '.join(argv)}")
