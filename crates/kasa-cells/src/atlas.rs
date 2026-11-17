@@ -27,8 +27,43 @@
 //! consumed while a frame is being built.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::shaper::Shaper;
+
+/// 글자 열쇠 전용 해시(FxHash 와 같은 곱셈 섞기). 그릴 때마다 칸 글자 수만큼(3840x1600 한 장에 2만 번 남짓)
+/// 찾는데, 기본 SipHash 는 하나하나가 열쇠보다 무거웠다. 열쇠는 이 프로세스가 지은 작은 정수 묶음이라
+/// 바깥 입력으로 충돌을 노리는 공격(HashDoS)을 막을 까닭이 없다.
+#[derive(Default)]
+struct GlyphHasher(u64);
+
+impl GlyphHasher {
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl Hasher for GlyphHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.add(u64::from(*byte));
+        }
+    }
+    fn write_u8(&mut self, n: u8) {
+        self.add(u64::from(n));
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.add(u64::from(n));
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.add(n);
+    }
+}
+
+type GlyphMap = HashMap<GlyphKey, Option<AtlasEntry>, BuildHasherDefault<GlyphHasher>>;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct GlyphKey {
@@ -71,7 +106,7 @@ pub struct Atlas {
     cursor_x: u32,
     cursor_y: u32,
     shelf_h: u32,
-    cache: HashMap<GlyphKey, Option<AtlasEntry>>,
+    cache: GlyphMap,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     sampler: wgpu::Sampler,
@@ -154,7 +189,7 @@ impl Atlas {
             cursor_x: 0,
             cursor_y: 0,
             shelf_h: 0,
-            cache: HashMap::new(),
+            cache: GlyphMap::default(),
             texture,
             view,
             sampler,
@@ -417,3 +452,30 @@ impl Atlas {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hash::{BuildHasher, Hash};
+
+    #[test]
+    fn glyph_keys_that_differ_in_any_field_hash_apart() {
+        let build = BuildHasherDefault::<GlyphHasher>::default();
+        let mut seen = std::collections::HashSet::new();
+        let mut keys = 0;
+        for ch in ('가'..='힣').step_by(7).chain('!'..='~') {
+            for (bold, italic) in [(false, false), (true, false), (false, true)] {
+                for size_px in [18, 20, 27] {
+                    for font in [0, 1] {
+                        let key = GlyphKey { ch, bold, italic, size_px, font };
+                        let mut hasher = build.build_hasher();
+                        key.hash(&mut hasher);
+                        seen.insert(hasher.finish());
+                        keys += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(seen.len(), keys, "a collision only costs a probe, but this set must not collide at all");
+    }
+}
