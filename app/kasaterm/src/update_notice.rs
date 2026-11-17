@@ -1,21 +1,8 @@
-//! 새 판은 OS 알림으로 알리고, 클릭하면 업데이터의 표준 확인 창을 연다.
-//! 앱 종료 직전의 작업·문서 보호는 macOS 시트와 WinSparkle 콜백이 맡는다.
+//! 새 판 카드의 앱 쪽 — 업데이터가 알린 단계를 카드로 세우고(`update_card.rs`), 카드의 단추를 그 업데이터에 돌려준다.
+//! 다시 켜면 끊길 일(일하는 창·저장 안 한 문서)은 준비된 카드가 늘 보여 준다 — 「다시 켜기」를 누르는 것이 그 확인이다.
 
 use super::*;
-
-/// pane id(`%N`)와 겹치지 않는 결정 알림 센티널.
-pub(crate) const ACTION: &str = "__kasaterm_update__";
-const DISMISSED_KEY: &str = "update_notice_dismissed";
-
-pub(crate) struct Notice { version: String }
-
-/// 닫은 판이거나 그보다 옛 판이면 알리지 않는다.
-fn should_offer(found: &str, dismissed: Option<&str>) -> bool {
-    match dismissed {
-        Some(closed) => closed != found && !crate::win_sparkle::version_newer(closed, found),
-        None => true,
-    }
-}
+use crate::update_card::{Action, Stage};
 
 /// 쉬는 중에도 전경 프로세스가 이 이름이라, 명령 이름으로는 일하는지 못 가린다.
 const HARNESSES: [&str; 3] = ["claude", "codex", "gemini"];
@@ -35,8 +22,11 @@ fn interrupts(busy: &[String], dirty_docs: usize) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
+/// 끊길 일을 다시 재는 주기 — 프로세스를 훑으니 프레임마다 하지 않는다.
+const INTERRUPTS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl App {
-    /// 업데이터가 찾은 판을 받아 알림을 세운다. 주 스레드 루프 턴마다(`about_to_wait`).
+    /// 주 스레드 루프 턴마다(`about_to_wait`) — 업데이터 틱, 카드의 저절로 걷기·끊길 일 재기·리그 누르기.
     pub(crate) fn tick_update_notice(&mut self) {
         if self.lite {
             return;
@@ -44,60 +34,100 @@ impl App {
         #[cfg(target_os = "macos")]
         if let Some(updater) = self.sparkle_updater.as_ref() {
             crate::macos_sparkle::tick(updater);
-            if crate::macos_sparkle::take_relaunch_request() {
-                self.confirm_update_relaunch();
+        }
+        crate::win_update::tick();
+        crate::update_card::fake_tick();
+        let now = std::time::Instant::now();
+        let stage = crate::update_card::current();
+        let was = self.update_card.stage.clone();
+        if self.update_card.observe(stage.as_ref(), now) {
+            crate::update_card::post(None);
+        }
+        if was != self.update_card.stage {
+            self.chrome_dirty = true;
+            // 진행 값만 바뀐 것은 같은 단계다 — 단계가 넘어갈 때만 남긴다.
+            if was.as_ref().map(std::mem::discriminant) != self.update_card.stage.as_ref().map(std::mem::discriminant) {
+                self.rig_update_shot();
             }
-            if crate::macos_sparkle::take_postponed() {
-                self.set_toast("새 판은 다음에 끌 때 설치돼요 · 지금 하려면 업데이트 확인".to_string());
+        }
+        if matches!(stage, Some(Stage::Ready { .. }))
+            && self.update_card.interrupts_at.is_none_or(|at| now.duration_since(at) >= INTERRUPTS_EVERY)
+        {
+            let what = self.update_interrupts_now();
+            if what != self.update_card.interrupts {
+                self.chrome_dirty = true;
             }
+            self.update_card.interrupts = what;
+            self.update_card.interrupts_at = Some(now);
         }
-        if let Some(version) = crate::win_sparkle::take_found() {
-            self.offer_update(version);
+        // 진행 막대는 업데이터 스레드가 값을 바꾸니 보이는 동안 계속 다시 그린다.
+        if matches!(stage, Some(Stage::Checking | Stage::Downloading { .. } | Stage::Preparing { .. } | Stage::Installing { .. })) {
+            self.chrome_dirty = true;
         }
+        self.rig_update_press(now);
     }
 
-    /// Sparkle 이 받은 판을 설치하고 다시 켜려 한다. 다시 켜면 PTY 가 앱과 함께 끝나 도는 턴·명령이
-    /// 끊기고, 저장 안 한 문서는 묻지 않고 닫힌다(Sparkle 의 종료는 ⌘Q 의 확인을 지나지 않는다). 끊길
-    /// 것이 있으면 OS 시트로 한 번 더 묻는다. 기다렸다 저절로 다시 켜지 않는 것은, 사람이 모르는 때에
-    /// 화면이 사라지기 때문이다.
-    #[cfg(target_os = "macos")]
-    fn confirm_update_relaunch(&mut self) {
-        let Some(what) = self.update_interrupts_now() else {
-            crate::macos_sparkle::answer_relaunch(true);
-            return;
-        };
-        let info = format!("{what}\n「나중에」를 누르면 다음에 끌 때 설치돼요.");
-        let shown = self.window.as_ref().is_some_and(|window| {
-            crate::macos_open::confirm_sheet(window, "지금 다시 켜면 끊겨요", &info,
-                ("그래도 다시 켜기", "나중에"), true, crate::macos_sparkle::answer_relaunch)
-        });
-        if !shown {
-            crate::macos_sparkle::answer_relaunch(false);
+    /// 카드의 단추.
+    pub(crate) fn update_card_act(&mut self, action: Action) {
+        self.chrome_dirty = true;
+        match action {
+            Action::Close => {
+                crate::update_card::post(None);
+                return;
+            }
+            Action::Releases => {
+                crate::update_card::post(None);
+                crate::chrome::open_url_in_browser(crate::version::RELEASES);
+                return;
+            }
+            _ => {}
         }
-    }
-
-    fn offer_update(&mut self, version: String) {
-        let settings = crate::socket::read_settings();
-        if !should_offer(&version, settings[DISMISSED_KEY].as_str()) {
-            return;
-        }
-        // 같은 판은 한 번만 — 시간마다 도는 확인이 서 있는 알림을 다시 세우지 않는다.
-        if self.update_notice.as_ref().is_some_and(|n| n.version == version) {
+        #[cfg(target_os = "macos")]
+        if self.sparkle_updater.is_some() {
+            crate::macos_sparkle::respond(action);
             return;
         }
-        crate::chrome::notify_desktop(&format!("새 판 v{version} 있어요"),
-            "알림을 누르면 업데이트 확인 창을 열어요", None, Some(&format!("update:{version}")),
-            Some((ACTION, Some(&version))));
-        self.update_notice = Some(Notice { version });
+        if crate::win_update::available() {
+            crate::win_update::respond(action, &self.proxy);
+            return;
+        }
+        crate::update_card::fake_respond(action);
     }
 
-    pub(crate) fn open_update_notification(&mut self, version: &str) {
-        if self.update_notice.as_ref().is_some_and(|n| n.version == version) {
-            self.check_for_updates_now();
+    /// 업데이트 리그 — 단계가 바뀔 때마다 앱 화면을 남긴다(`KASATERM_UPDATE_RIG_SHOTS`).
+    fn rig_update_shot(&mut self) {
+        if !crate::verification_run() && std::env::var_os("KASATERM_UPDATE_RIG_FEED").is_none() {
+            return;
+        }
+        let Some(dir) = std::env::var_os("KASATERM_UPDATE_RIG_SHOTS").map(std::path::PathBuf::from) else { return };
+        if self.update_card.stage.is_none() {
+            return;
+        }
+        self.update_card.shots += 1;
+        let path = dir.join(format!("{:03}-card.png", self.update_card.shots));
+        self.pending_capture.push((std::time::Instant::now() + std::time::Duration::from_millis(400), path.display().to_string()));
+    }
+
+    /// 업데이트 리그 — 단계가 `KASATERM_UPDATE_RIG_PRESS_MS` 만큼 그대로면 주 단추(또는 `KASATERM_UPDATE_RIG_BUTTON`)를 누른다.
+    fn rig_update_press(&mut self, now: std::time::Instant) {
+        if !crate::verification_run() && std::env::var_os("KASATERM_UPDATE_RIG_FEED").is_none() {
+            return;
+        }
+        let Some(after) = std::env::var("KASATERM_UPDATE_RIG_PRESS_MS").ok().and_then(|v| v.parse().ok()).map(std::time::Duration::from_millis) else { return };
+        let (Some(stage), Some(since)) = (self.update_card.stage.clone(), self.update_card.since) else { return };
+        if self.update_card.pressed || now.duration_since(since) < after {
+            return;
+        }
+        let content = crate::update_card::content(&stage, self.update_card.interrupts.as_deref(), crate::update_card::LATER_INSTALLS);
+        let wanted = std::env::var("KASATERM_UPDATE_RIG_BUTTON").ok();
+        if let Some(action) = crate::update_card::rig_choice(&content, wanted.as_deref()) {
+            self.update_card.pressed = true;
+            eprintln!("[update-rig] 카드 {:?} 누름", action);
+            self.update_card_act(action);
         }
     }
 
-    /// 지금 다시 켜면 잃는 것. 알림·설치 직전 확인이 같은 답을 쓴다.
+    /// 지금 다시 켜면 잃는 것. 준비된 카드가 같은 답을 쓴다.
     pub(crate) fn update_interrupts_now(&self) -> Option<String> {
         interrupts(&self.update_interrupted_panes(), self.dirty_docs(&crate::PendingClose::Window).len())
     }
@@ -124,14 +154,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_closed_version_stays_closed_until_a_newer_one() {
-        assert!(should_offer("0.2.18", None));
-        assert!(!should_offer("0.2.18", Some("0.2.18")));
-        assert!(!should_offer("0.2.17", Some("0.2.18")));
-        assert!(should_offer("0.2.19", Some("0.2.18")));
-    }
 
     #[test]
     fn restart_warning_preserves_running_work_and_unsaved_documents() {

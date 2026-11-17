@@ -86,8 +86,8 @@ touch docs/.nojekyll  # Jekyll 이 .xml 을 건드리지 않게
 rm -rf "$APPCAST_DIR"
 
 # 6. Windows appcast — Windows CI(windows-release.yml)가 태그 push 시 릴리스에 올린
-#    .msi 를 같은 EdDSA 키(Keychain)로 서명해 appcast-win.xml 을 만든다. WinSparkle 이
-#    이 피드를 본다(win_sparkle.rs 의 APPCAST_URL). .msi 가 아직 릴리스에 없으면(Windows
+#    .msi 를 같은 EdDSA 키(Keychain)로 서명해 appcast-win.xml 을 만든다. 앱의 Windows 업데이터가
+#    이 피드를 본다(win_sparkle.rs 의 STABLE_FEED). .msi 가 아직 릴리스에 없으면(Windows
 #    CI 미완료) 건너뛰고 경고만 — CI 완료 후 release.sh 를 재실행하면 갱신된다.
 WIN_APPCAST=""
 MSI_TMP="$(mktemp -d)/win.msi"

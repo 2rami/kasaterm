@@ -11,8 +11,8 @@
 #
 # 격리 키는 docs/verify-app.md 의 부팅 줄과 같다. 거기에 HOME·USERPROFILE·APPDATA·LOCALAPPDATA·TEMP 를
 # 이번 실행 폴더로 옮긴다 — Windows 의 `~/.config/kasaterm` 은 HOME→USERPROFILE 순으로 풀리고,
-# 웹뷰·셸이 쓰는 자리는 APPDATA·LOCALAPPDATA 다. env 로 못 가르는 사용자 레지스트리(WinSparkle 이 설정을
-# 적는 HKCU\Software\momewomo)는 실행 전후를 대조한다. 거둘 때는 이번에 띄운 PID 와 그 자손만 끈다.
+# 웹뷰·셸이 쓰는 자리는 APPDATA·LOCALAPPDATA 다. env 로 못 가르는 사용자 레지스트리(예전 WinSparkle 이 설정을
+# 적던 HKCU\Software\momewomo)는 실행 전후를 대조한다. 거둘 때는 이번에 띄운 PID 와 그 자손만 끈다.
 # 결과는 -ArtifactDirectory(기본 target\windows-smoke) 밑에 실행마다 새 폴더로 쌓는다 — 있던 것은 안 지운다.
 
 [CmdletBinding()]

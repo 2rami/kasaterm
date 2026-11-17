@@ -4835,7 +4835,7 @@ mod notify_path_tests {
 
     #[test]
     fn notification_actions_preserve_the_version() {
-        let (action, key) = (crate::update_notice::ACTION, "0.2.167");
+        let (action, key) = ("__kasaterm_action__", "0.2.167");
         assert_eq!(notify_route(&notify_ident(8, Some((action, Some(key))))),
                    Some((action.into(), Some(key.into()))));
     }

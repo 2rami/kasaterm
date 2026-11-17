@@ -206,7 +206,7 @@ windesktop `0.2.0 · 5e69f61f+` → update. 다음 판 v0.2.1, 커밋 843개, ma
 | 1 받기 | 공식 피드·공식 릴리스의 그 태그 dmg 하나만(https·크기 상한) | msi → `%LOCALAPPDATA%\kasaterm\updates\<tag>\` |
 | 2 확인 | 크기·sha256(릴리스 단계 값) · EdDSA · dmg 읽기 전용 · `codesign --verify --deep --strict` · 설치본과 같은 팀 · 공증 · 판 번호 | 크기·sha256 · EdDSA |
 | 3 준비 | 확인한 번들을 `.kasaterm.app.next` 에(설치본 안 건드림) | 확인한 msi 를 둔다 |
-| 4 적용 | 바쁜 학생·미저장 편집기가 없을 때 앱이 스스로 끄고 도우미가 갈아 끼움(이전 판 `.kasaterm.app.previous`) | WinSparkle 토스트 [설치] |
+| 4 적용 | 바쁜 학생·미저장 편집기가 없을 때 앱이 스스로 끄고 도우미가 갈아 끼움(이전 판 `.kasaterm.app.previous`) | 새 판 카드 [받기]·[다시 켜기] |
 | 5 재기동 | 도우미가 다시 띄움 — 새 판이 부팅 표식 없이 꺼지면 이전 판 되돌림(강제 종료 없음) | MSI 가 닫고 연다(사람이 고름) |
 | 6 검증 | 부팅 표식의 빌드가 태그 커밋 — 아니면 실패 | `/version` |
 
@@ -226,6 +226,8 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
 | 맥 (.app) | 앱 메뉴 「업데이트 확인…」 → Sparkle 표준 창(확인 → 받기 → EdDSA 확인 → 「설치 후 재실행」). 하루 한 번 자동 확인. 계정 메뉴 바닥에 판 번호와 「v… 나왔음 / 최신 / 새 판 준비됨 · 껐다 켜기」 | 판 번호 줄을 누르면 같은 Sparkle 창 |
 | 윈도 (MSI) | 시작 6초 뒤 피드 확인 → 토스트 [설치] → WinSparkle(받기 → EdDSA 확인 → MSI) | 판 번호 줄 → 같은 WinSparkle 설치 흐름. **손으로 확인하는 길이 처음 생김** |
 | 업데이터 없는 판 (개발 실행, MSI 아닌 윈도) | 없음 | 판 번호 줄 → 까닭을 토스트로 알리고 릴리스 페이지(서명된 파일)를 연다 |
+
+2026-11-18 부터 두 OS 다 표준 창·토스트 대신 앱 안 새 판 카드다(윈도는 WinSparkle 을 걷고 자체 받기) — [automatic-preview-updates.md](automatic-preview-updates.md).
 | 폰 (iOS) | 설치 링크(`mobile/tool/adhoc.sh`) — 관리자 로그인 앱은 알림 줄·설정 「앱 판」이 새 판을 알리고, 사람이 링크에서 설치 | 없음 — 아래 |
 
 - 확인·받기와 설치·재실행은 갈려 있다. 설치·재실행은 업데이터 창에서 **사람이 고른다.** 카사텀이 스스로 끄거나
@@ -239,7 +241,7 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
 - 맥 Sparkle: 앱이 `SPUStandardUpdaterController` 를 대리자 없이 만든다 → `allowedChannels` 가 없어 **stable 하나**.
   preview 채널이 필요하면 대리자(`allowedChannelsForUpdater:`)와 appcast 의 `<sparkle:channel>` 을 함께 넣어야 하고,
   그 전까지 `plan --channel preview` 는 막힌다.
-- 윈도 WinSparkle: 채널 개념이 없다(피드 하나).
+- 윈도: 채널은 피드 주소로 가른다(`win_sparkle.rs` `Channel`).
 - iOS: 설치 링크(Ad Hoc, 등록된 기기만) 하나. TestFlight는 2026-10-01부터 쓰지 않는다([까닭](ios-adhoc-install.md)).
   설치된 앱 바이너리를 몰래 바꾸는 길은 없고 만들지 않는다. 폰에 즉시 반영되는 것은 서버·허브 쪽 데이터와 설정뿐이다.
 
@@ -247,7 +249,7 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
 
 | 바뀐 것 | 기기에 닿는 길 |
 |---|---|
-| Rust 앱·크레이트(`app/`·`crates/`) | 새 판 설치 필요(Sparkle·WinSparkle·자기설치) |
+| Rust 앱·크레이트(`app/`·`crates/`) | 새 판 설치 필요(Sparkle·Windows 업데이터·자기설치) |
 | 폰 앱(`mobile/`) | 설치 링크 새 판(`mobile/tool/adhoc.sh`) |
 | 나쵸 쪽 모드·권한 문구, 장부 내용 | 앱 업데이트 없이 다음 읽기에 반영(앱은 창구에서 읽기만) |
 | appcast·문서·스크립트 | 기기에 안 감 |
@@ -360,7 +362,7 @@ bash scripts/mini-lfs.sh login <기기 이름>    # ssh nachoneko 로 토큰을 
 
 - 판 번호 줄 입구·자기설치 백업은 새 판이 한 번 설치돼야 생긴다(그 전 판에는 없는 코드다).
 - 윈도는 MSI 로 한 번 설치돼 있어야 업데이터가 있다(windesktop 은 2026-09-27 에 `5e69f61f+` 로 닿았다 — 로컬 굽기 판이면
-  WinSparkle 이 없을 수 있다).
+  업데이터가 없을 수 있다).
 - 원격 설치 창구([app-update.md](app-update.md))는 창구가 든 판이 기기마다 한 번 사람 손으로 설치돼야 생긴다. 그 뒤에도
   설치 실행은 기기마다 `KASATERM_APP_UPDATE=on` 으로 켜야 하고, 나쵸 `kasaterm_update` 승인 동작이 있어야 작업이 통과한다.
 

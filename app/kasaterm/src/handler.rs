@@ -901,13 +901,6 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::NotifyFocus { pane, sid } => {
-                if pane == crate::update_notice::ACTION {
-                    if let Some(w) = self.window.as_ref() { w.focus_window(); }
-                    if let Some(key) = sid.as_deref() {
-                        self.open_update_notification(key);
-                    }
-                    return;
-                }
                 // 알림을 쏜 시점의 세션과 지금 그 pane 의 세션이 같을 때만 옮긴다.
                 // surface id 는 재사용되므로, 그 사이 pane 이 닫히고 번호가 새 셸에
                 // 넘어갔으면 엉뚱한 자리로 끌려간다 — 그때는 아무 데도 안 가는 게 맞다.
@@ -1077,16 +1070,6 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 eprintln!("[app-update] exiting for job {job}");
-                event_loop.exit();
-                return;
-            }
-            #[cfg(windows)]
-            UserEvent::UpdaterMayQuit(reply) => {
-                let _ = reply.send(self.update_interrupts_now());
-                return;
-            }
-            #[cfg(windows)]
-            UserEvent::UpdaterQuit => {
                 event_loop.exit();
                 return;
             }
@@ -2196,10 +2179,10 @@ impl ApplicationHandler<UserEvent> for App {
         // 없는 동안 눌린 알림은 앱만 깨우고 어디로 갈지 없이 사라진다.
         #[cfg(target_os = "macos")]
         crate::macos_notify::install_notification_click_handler(self.proxy.clone());
-        // Windows 자동 업데이트 시작 — 설치본만(DLL 없음·검증·격리·라이트 실행은 init 이 거른다).
+        // Windows 새 판 확인 시작 — MSI 설치본만(검증·격리·라이트 실행은 init 이 거른다).
         // mac 메뉴 블록은 cfg(macos) 라, 여기(메뉴 밖)서 별도로 건다.
         #[cfg(windows)]
-        crate::win_sparkle::init(self.proxy.clone());
+        crate::win_update::init();
         #[cfg(windows)]
         crate::session_end::watch(self.proxy.clone());
         // macOS menu bar: app submenu (About/Quit) + a "보기" submenu with
@@ -3309,6 +3292,21 @@ impl ApplicationHandler<UserEvent> for App {
         if main_window && self.design_study_event(&event) { return; }
         if main_window && !self.lite && self.account_menu_event(event_loop, &event) {
             return;
+        }
+        // 새 판 카드는 그 위의 누름·굴림을 먹는다 — 뒤의 칸으로 새지 않게. 움직임은 단추 호버로 다시 그린다.
+        if main_window && self.update_card.card.is_some() {
+            if matches!(&event, WindowEvent::CursorMoved { .. }) && self.update_card.covers(self.cursor_px) {
+                self.chrome_dirty = true;
+            }
+            let scale = self.effective_scale();
+            if restore_toast_captures_pointer(&event, self.cursor_px, scale, self.update_card.card) {
+                if matches!(&event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }) {
+                    if let Some(action) = self.update_card.hit(self.cursor_px) {
+                        self.update_card_act(action);
+                    }
+                }
+                return;
+            }
         }
         if main_window && (self.restore_applying.is_some() || self.restore_progress.is_some()) {
             let scale = self.effective_scale();

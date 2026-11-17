@@ -81,7 +81,9 @@ mod sprites;
 mod stream;
 mod testkit;
 mod theme;
+mod update_card;
 mod update_notice;
+mod win_update;
 mod themegen;
 // 대화 기록 읽기는 kasa-agents 로 옮겼다. `crate::transcript::…` 그대로 쓴다.
 use kasa_agents::transcript;
@@ -4063,12 +4065,6 @@ enum UserEvent {
     RestartExit(String),
     /// 확인·준비한 업데이트를 도우미에 넘겼다 — 이제 정상 종료로 끄면 도우미가 갈아 끼운다.
     UpdateExit(String),
-    /// WinSparkle 이 MSI 를 띄우기 직전 — 지금 끄면 끊길 일(`None` 이면 없음)을 답한다.
-    #[cfg(windows)]
-    UpdaterMayQuit(std::sync::mpsc::Sender<Option<String>>),
-    /// WinSparkle 이 MSI 를 띄웠다 — 정상 종료(`exiting`)로 끄면 MSI 가 파일을 갈아 끼운다.
-    #[cfg(windows)]
-    UpdaterQuit,
     /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(사용자: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),
@@ -6158,8 +6154,8 @@ struct App {
     /// Sparkle SPUStandardUpdaterController — 보관해야 판 확인이 유지된다(드롭=정지).
     #[cfg(target_os = "macos")]
     sparkle_updater: Option<macos_sparkle::Updater>,
-    /// 새 판 알림 — 업데이터가 찾고 사람이 아직 답하지 않은 판(`update_notice.rs`).
-    update_notice: Option<update_notice::Notice>,
+    /// 새 판 카드 — 화면에 선 자리·단추·끊길 일(`update_card.rs`).
+    update_card: update_card::Shown,
     /// History store for inline autosuggestion. See autosuggest.rs.
     autosuggest: autosuggest::History,
     /// What the user has typed at the current shell prompt since the last
@@ -6644,7 +6640,7 @@ impl App {
             quit_menu_item: None,
             #[cfg(target_os = "macos")]
             sparkle_updater: None,
-            update_notice: None,
+            update_card: Default::default(),
             autosuggest: autosuggest::History::new(),
             input_buf: String::new(),
             current_suggestion: None,

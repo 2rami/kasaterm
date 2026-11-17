@@ -142,17 +142,6 @@
                                 Remove='uninstall'
                                 Wait='no'/>
                         </Component>
-                        <!-- WinSparkle 자동 업데이트 런타임 DLL — exe 옆(bin\)에 두면
-                             win_sparkle.rs 의 LoadLibrary 가 찾는다. CI 가 빌드 산출물
-                             디렉토리에 WinSparkle.dll 을 미리 복사해 둔다. -->
-                        <Component Id='binary1' Guid='*'>
-                            <File
-                                Id='winsparkledll'
-                                Name='WinSparkle.dll'
-                                DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\WinSparkle.dll'
-                                KeyPath='yes'/>
-                        </Component>
                         <!-- 크로스-pane RPC + statusline. locate_cmux_compat_binary 가
                              exe 옆에서 찾아 pane PATH(shim dir)에 스테이징하고, claude
                              statusLine 커맨드(kasaterm-cli statusline)가 이를 실행한다.
@@ -296,7 +285,6 @@
             <ComponentRef Id='License'/>
             
             <ComponentRef Id='binary0'/>
-            <ComponentRef Id='binary1'/>
             <ComponentRef Id='binary2'/>
             <ComponentRef Id='binary3'/>
             <ComponentRef Id='ConptyDll'/>

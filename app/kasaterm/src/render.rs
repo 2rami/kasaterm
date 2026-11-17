@@ -5486,6 +5486,16 @@ impl App {
             }
             self.restore_retry_rect = restore_retry;
             self.restore_toast_rect = restore_toast;
+            // 새 판 카드 — 복원 카드가 서 있으면 그 위에 쌓는다.
+            self.update_card.card = None;
+            self.update_card.hits.clear();
+            if let Some(stage) = self.update_card.stage.clone() {
+                let content = crate::update_card::content(&stage, self.update_card.interrupts.as_deref(), crate::update_card::LATER_INSTALLS);
+                let above = restore_toast.map_or(0.0, |r| r.3);
+                let card = crate::update_card::rect((win_px.0 / scale, win_px.1 / scale), restore_bottom_reserved, above, &content);
+                self.update_card.hits = crate::update_card::paint(g, card, &content, self.cursor_px, std::time::Instant::now());
+                self.update_card.card = Some(card);
+            }
             // 계정 전환 확인 — 인라인 웹에서 누른 것은 웹이 그리므로 메인 몫만 본다.
             if let Some(p) = self.account_switch_confirm.as_ref() {
                 if p.surface == crate::session::ConfirmSurface::Main {

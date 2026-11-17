@@ -403,7 +403,7 @@ jobs:
           path: ${{ env.DMG }}
 
   # msi + dmg 가 모두 릴리스에 올라온 뒤 appcast 2종을 서명·생성해 docs/ 로 커밋.
-  # 설치된 앱들의 Sparkle(mac)/WinSparkle(win)이 이 Pages 피드를 보고 자동 업데이트한다.
+  # 설치된 앱들의 Sparkle(mac)·자체 업데이터(win)가 이 Pages 피드를 보고 새 판 카드를 세운다.
   # mac 만 마무리(platforms=macos)면 build-msi 가 건너뛰어지므로 always() 로 들어와 결과를 직접 본다 — dmg 검증이 성공했고,
   # Windows 는 성공했거나(both) 일부러 건너뛴 경우(macos)에만 돈다. 실패·취소된 job 위로는 절대 안 돈다.
   # preview Windows 덤(platforms=windows)은 거꾸로 dmg 를 건너뛰고 MSI 와 Windows preview 피드만 다룬다.

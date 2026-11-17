@@ -5,82 +5,78 @@
 //! Sparkle.framework 가 없어 dlopen 이 실패하고 graceful no-op(업데이터 없이 정상
 //! 기동), `.app` 빌드(Contents/Frameworks/Sparkle.framework)에서만 활성화된다.
 //!
-//! 새 판 안내·받기·진행 막대·설치·다시 켜기는 Sparkle 표준 창이 한다. preview 기기는 켠 지 10초 뒤와
-//! 한 시간마다 확인하고, 받기는 사람이 표준 창에서 설치를 눌렀을 때만 한다 — Sparkle 은 한 번 받은 판을
-//! 종료 때 반드시 설치하므로, 자동 받기를 끄는 것이 몰래 바뀌지 않게 하는 유일한 막음이다.
+//! 화면은 앱이 그린다 — 표준 창(SPUStandardUserDriver) 대신 사용자 드라이버(`KasatermUserDriver`)를 넘겨, Sparkle 이
+//! 찾고·받고·풀고·설치하는 단계를 앱 안 새 판 카드(`update_card.rs`)로 보이고 카드의 단추로 답한다. 피드 확인·EdDSA
+//! 서명 확인·설치·다시 켜기는 그대로 Sparkle 몫이다.
 //!
-//! 0.2.18~0.2.27 은 자체 알림의 [업데이트] 로 이 프로세스에 자동 받기를 켜려 했는데, Sparkle 은 자동 받기
-//! 대신 표준 창 경로를 골랐고, 표준 창은 일반 앱이면 「앱이 다시 활성화될 때」까지 미뤄진다. 앱 안에서
-//! 누른 사람에겐 진행 표시 없이 아무 일도 안 일어났다(2026-10-02 리그 재현).
-//!
-//! 표준 창은 그래서 우리가 띄운다: 사람이 이 앱을 보고 있고 타자를 멈춘 틈에. 타자 중에 키 창을 빼앗으면
-//! Return 이 「업데이트 설치」를 누른다. 다시 켜기 직전엔 끊길 일을 한 번 더 묻는다(`update_notice.rs`).
+//! 받기는 사람이 카드에서 「받기」를 눌렀을 때만 한다 — Sparkle 은 한 번 받은 판을 종료 때 반드시 설치하므로, 자동
+//! 받기를 끄는 것이 몰래 바뀌지 않게 하는 유일한 막음이다. 표준 창일 때는 일반 앱이면 「앱이 다시 활성화될 때」까지
+//! 창이 미뤄져 앱 안에 있는 사람에겐 끝내 안 뜨기도 했다(2026-10-02 리그 재현) — 카드는 늘 그 자리에 선다.
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, NSObject, NSObjectProtocol};
-use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
+use objc2::{define_class, msg_send, AllocAnyThread, ClassType, DefinedClass};
 use objc2_foundation::{NSBundle, NSError, NSString, NSUserDefaults};
 
+use crate::update_card::{self, Action, Stage};
+
 const PREVIEW_FEED: &str = "https://2rami.github.io/kasaterm/appcast-preview.xml";
-/// 켠 뒤 첫 확인까지. 창이 서고 세션이 돌아온 뒤에 표준 창이 서게 한다.
+/// 켠 뒤 첫 확인까지. 창이 서고 세션이 돌아온 뒤에 카드가 서게 한다.
 const FIRST_PROBE: Duration = Duration::from_secs(10);
 const PROBE_EVERY: Duration = Duration::from_secs(3600);
-/// 마지막 키 입력 뒤 이만큼 쉬어야 표준 창을 앞으로 낸다.
-const TYPING_PAUSE: f64 = 2.0;
 
-#[derive(Default)]
-struct UpdateState {
-    owner: AtomicBool,
-    /// 찾은 판을 표준 창으로 보일 차례다.
-    show_pending: AtomicBool,
-    /// Sparkle 이 다시 켜려 한다 — 부른 쪽이 끊길 일을 보고 `answer_relaunch` 로 답한다.
-    relaunch_asked: AtomicBool,
-    /// 「나중에」 — 표준 창을 걷고 알린다.
-    later: AtomicBool,
-    postponed: AtomicBool,
-}
+/// `SPUUserUpdateChoice`.
+const CHOICE_SKIP: isize = 0;
+const CHOICE_INSTALL: isize = 1;
+const CHOICE_DISMISS: isize = 2;
+/// `SPUUserUpdateStage` — 이미 받은 판·설치 중인 판은 받기를 건너뛴다.
+const STAGE_DOWNLOADED: isize = 1;
+const STAGE_INSTALLING: isize = 2;
 
-fn update_state() -> &'static UpdateState {
-    static STATE: OnceLock<UpdateState> = OnceLock::new();
-    STATE.get_or_init(UpdateState::default)
-}
+static OWNER: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    // Sparkle 의 위임은 주 스레드에서 오고, 블록은 위임 밖에서 부른다 — 위임 안에서 부르면 앱이 Sparkle 의
-    // 호출 도중에 종료로 들어간다. 「나중에」 뒤에도 쥐고 있다가 「업데이트 확인」에서 다시 묻는다.
-    static RELAUNCH: RefCell<Option<block2::RcBlock<dyn Fn()>>> = const { RefCell::new(None) };
+    // Sparkle 의 드라이버 호출은 주 스레드에서 오고, 답(블록)은 사람이 카드를 누를 때 주 스레드에서 부른다.
+    static CHOICE: RefCell<Option<block2::RcBlock<dyn Fn(isize)>>> = const { RefCell::new(None) };
+    static CANCEL: RefCell<Option<block2::RcBlock<dyn Fn()>>> = const { RefCell::new(None) };
+    /// 받는 판 — 진행 단계마다 같은 번호를 쓴다.
+    static VERSION: RefCell<String> = const { RefCell::new(String::new()) };
+    static GOT: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
     fn CFRelease(cf: *const std::ffi::c_void);
 }
 
-pub(crate) fn owns_installation() -> bool { update_state().owner.load(Ordering::Acquire) }
+unsafe extern "C" {
+    fn objc_getProtocol(name: *const std::ffi::c_char) -> *const std::ffi::c_void;
+    fn class_addProtocol(cls: *const AnyClass, protocol: *const std::ffi::c_void) -> Bool;
+}
 
-/// Sparkle 이 받은 판을 설치하고 다시 켜려 한다 — 한 번만 `true`.
-pub(crate) fn take_relaunch_request() -> bool { update_state().relaunch_asked.swap(false, Ordering::AcqRel) }
-/// 「나중에」를 골라 다음 종료 때 설치된다 — 한 번만 `true`.
-pub(crate) fn take_postponed() -> bool { update_state().postponed.swap(false, Ordering::AcqRel) }
+pub(crate) fn owns_installation() -> bool { OWNER.load(Ordering::Acquire) }
 
-/// 다시 켜도 되는지에 대한 답. `true` 면 Sparkle 이 종료·설치·다시 켜기를 이어 간다(종료는 winit `exiting`
-/// 을 지나 세션이 저장된다). `false` 면 표준 창만 걷는다 — 받은 판은 다음에 끌 때 설치된다.
-pub(crate) fn answer_relaunch(go: bool) {
-    if !go {
-        update_state().later.store(true, Ordering::Release);
-        return;
-    }
-    if let Some(install) = RELAUNCH.with(|slot| slot.borrow_mut().take()) {
-        install.call(());
+/// 카드의 단추 — 쥐고 있던 Sparkle 의 답을 부른다. 답할 것이 없으면(이미 답했거나 알림뿐인 단계) 카드만 걷는다.
+pub(crate) fn respond(action: Action) {
+    let choice = |value: isize| CHOICE.with(|slot| slot.borrow_mut().take()).map(|reply| reply.call((value,))).is_some();
+    let answered = match action {
+        Action::Download | Action::Relaunch => choice(CHOICE_INSTALL),
+        Action::Skip => choice(CHOICE_SKIP),
+        Action::Later => choice(CHOICE_DISMISS),
+        Action::Cancel => CANCEL.with(|slot| slot.borrow_mut().take()).map(|cancel| cancel.call(())).is_some(),
+        Action::Close | Action::Releases => false,
+    };
+    if !answered || matches!(action, Action::Skip | Action::Later | Action::Cancel) {
+        update_card::post(None);
     }
 }
+
+fn version() -> String { VERSION.with(|v| v.borrow().clone()) }
 
 fn installed_app(exe: &Path, home: &Path, verification: bool) -> bool {
     !verification && (exe == home.join("Applications/kasaterm.app/Contents/MacOS/kasaterm")
@@ -217,33 +213,6 @@ define_class!(
         fn feed_url(&self, _updater: &AnyObject) -> Option<Retained<NSString>> {
             self.ivars().feed.clone()
         }
-
-        #[unsafe(method(updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:))]
-        fn postpone_relaunch(&self, _updater: &AnyObject, _item: &AnyObject,
-            install: &block2::DynBlock<dyn Fn()>) -> Bool {
-            RELAUNCH.with(|slot| *slot.borrow_mut() = Some(install.copy()));
-            update_state().relaunch_asked.store(true, Ordering::Release);
-            Bool::YES
-        }
-
-        #[unsafe(method(supportsGentleScheduledUpdateReminders))]
-        fn gentle_reminders(&self) -> Bool { Bool::YES }
-
-        #[unsafe(method(standardUserDriverShouldHandleShowingScheduledUpdate:andInImmediateFocus:))]
-        fn should_show_now(&self, _item: &AnyObject, _immediate_focus: Bool) -> Bool {
-            // Sparkle 은 일반 앱이면 다시 활성화될 때까지 미룬다 — 앱 안에 있는 사람에겐 끝내 안 뜬다.
-            Bool::NO
-        }
-
-        #[unsafe(method(standardUserDriverWillHandleShowingUpdate:forUpdate:state:))]
-        fn will_show(&self, handled: Bool, _item: &AnyObject, _state: &AnyObject) {
-            if !handled.as_bool() { update_state().show_pending.store(true, Ordering::Release); }
-        }
-
-        #[unsafe(method(standardUserDriverWillFinishUpdateSession))]
-        fn session_finished(&self) {
-            update_state().show_pending.store(false, Ordering::Release);
-        }
     }
 );
 
@@ -254,13 +223,162 @@ impl UpdateDelegate {
     }
 }
 
+/// 받은 판의 표시 번호(`SUAppcastItem.displayVersionString`). 모르는 물건이면 빈 값.
+unsafe fn item_version(item: &AnyObject) -> String {
+    let responds: Bool = msg_send![item, respondsToSelector: objc2::sel!(displayVersionString)];
+    if !responds.as_bool() { return String::new(); }
+    let v: *mut NSString = msg_send![item, displayVersionString];
+    if v.is_null() { String::new() } else { (*v).to_string() }
+}
+
+unsafe fn update_stage(state: &AnyObject) -> isize {
+    let responds: Bool = msg_send![state, respondsToSelector: objc2::sel!(stage)];
+    if responds.as_bool() { msg_send![state, stage] } else { 0 }
+}
+
+fn error_text(error: &NSError) -> String {
+    let text = error.localizedDescription().to_string();
+    if text.is_empty() { "업데이터가 까닭을 말하지 않았어요.".into() } else { text }
+}
+
+define_class!(
+    /// `SPUUserDriver` — Sparkle 이 단계마다 부르는 화면. 런타임에 그 프로토콜을 단다(`init`).
+    #[unsafe(super(NSObject))]
+    #[name = "KasatermUserDriver"]
+    struct UserDriver;
+
+    unsafe impl NSObjectProtocol for UserDriver {}
+
+    impl UserDriver {
+        #[unsafe(method(showUpdatePermissionRequest:reply:))]
+        fn permission(&self, _request: &AnyObject, reply: &block2::DynBlock<dyn Fn(*mut AnyObject)>) {
+            // 안정판은 Info.plist 가 자동 확인을 이미 정했고, preview 는 이 프로세스에서만 끈다(`configure_session`).
+            // 묻는 창을 띄우지 않고 확인만 켠 채 답한다 — 받기는 늘 사람이 카드에서 고른다.
+            unsafe {
+                let Some(cls) = AnyClass::get(c"SUUpdatePermissionResponse") else { return };
+                let alloc: *mut AnyObject = msg_send![cls, alloc];
+                let response: *mut AnyObject = msg_send![alloc, initWithAutomaticUpdateChecks: Bool::YES, sendSystemProfile: Bool::NO];
+                reply.call((response,));
+                let _ = Retained::from_raw(response);
+            }
+        }
+
+        #[unsafe(method(showUserInitiatedUpdateCheckWithCancellation:))]
+        fn checking(&self, cancellation: &block2::DynBlock<dyn Fn()>) {
+            CANCEL.with(|slot| *slot.borrow_mut() = Some(cancellation.copy()));
+            update_card::post(Some(Stage::Checking));
+        }
+
+        #[unsafe(method(showUpdateFoundWithAppcastItem:state:reply:))]
+        fn found(&self, item: &AnyObject, state: &AnyObject, reply: &block2::DynBlock<dyn Fn(isize)>) {
+            let (version, stage) = unsafe { (item_version(item), update_stage(state)) };
+            VERSION.with(|v| *v.borrow_mut() = version.clone());
+            CANCEL.with(|slot| slot.borrow_mut().take());
+            CHOICE.with(|slot| *slot.borrow_mut() = Some(reply.copy()));
+            update_card::post(Some(match stage {
+                // 「나중에」로 미뤄 둔 받은 판 — 다시 받지 않고 다시 켤지만 묻는다.
+                STAGE_DOWNLOADED => Stage::Ready { version },
+                STAGE_INSTALLING => Stage::Installing { version },
+                _ => Stage::Found { version, note: None },
+            }));
+        }
+
+        #[unsafe(method(showUpdateReleaseNotesWithDownloadData:))]
+        fn notes(&self, _data: &AnyObject) {}
+
+        #[unsafe(method(showUpdateReleaseNotesFailedToDownloadWithError:))]
+        fn notes_failed(&self, _error: &NSError) {}
+
+        #[unsafe(method(showUpdateNotFoundWithError:acknowledgement:))]
+        fn not_found(&self, _error: &NSError, ack: &block2::DynBlock<dyn Fn()>) {
+            CANCEL.with(|slot| slot.borrow_mut().take());
+            update_card::post(Some(Stage::Latest));
+            ack.call(());
+        }
+
+        #[unsafe(method(showUpdaterError:acknowledgement:))]
+        fn failed(&self, error: &NSError, ack: &block2::DynBlock<dyn Fn()>) {
+            CANCEL.with(|slot| slot.borrow_mut().take());
+            CHOICE.with(|slot| slot.borrow_mut().take());
+            update_card::post(Some(Stage::Failed { message: error_text(error) }));
+            ack.call(());
+        }
+
+        #[unsafe(method(showDownloadInitiatedWithCancellation:))]
+        fn download_started(&self, cancellation: &block2::DynBlock<dyn Fn()>) {
+            CANCEL.with(|slot| *slot.borrow_mut() = Some(cancellation.copy()));
+            GOT.with(|g| g.set((0, 0)));
+            update_card::post(Some(Stage::Downloading { version: version(), got: 0, total: 0 }));
+        }
+
+        #[unsafe(method(showDownloadDidReceiveExpectedContentLength:))]
+        fn download_length(&self, total: u64) {
+            GOT.with(|g| g.set((g.get().0, total)));
+            update_card::post(Some(Stage::Downloading { version: version(), got: 0, total }));
+        }
+
+        #[unsafe(method(showDownloadDidReceiveDataOfLength:))]
+        fn download_data(&self, length: u64) {
+            let (got, total) = GOT.with(|g| { let (got, total) = g.get(); g.set((got + length, total)); (got + length, total) });
+            update_card::post(Some(Stage::Downloading { version: version(), got, total }));
+        }
+
+        #[unsafe(method(showDownloadDidStartExtractingUpdate))]
+        fn extracting(&self) {
+            CANCEL.with(|slot| slot.borrow_mut().take());
+            update_card::post(Some(Stage::Preparing { version: version(), progress: 0.0 }));
+        }
+
+        #[unsafe(method(showExtractionReceivedProgress:))]
+        fn extraction(&self, progress: f64) {
+            update_card::post(Some(Stage::Preparing { version: version(), progress: progress.clamp(0.0, 1.0) }));
+        }
+
+        #[unsafe(method(showReadyToInstallAndRelaunch:))]
+        fn ready(&self, reply: &block2::DynBlock<dyn Fn(isize)>) {
+            CHOICE.with(|slot| *slot.borrow_mut() = Some(reply.copy()));
+            update_card::post(Some(Stage::Ready { version: version() }));
+        }
+
+        #[unsafe(method(showInstallingUpdateWithApplicationTerminated:retryTerminatingApplication:))]
+        fn installing(&self, _terminated: Bool, _retry: &block2::DynBlock<dyn Fn()>) {
+            update_card::post(Some(Stage::Installing { version: version() }));
+        }
+
+        #[unsafe(method(showUpdateInstalledAndRelaunched:acknowledgement:))]
+        fn installed(&self, _relaunched: Bool, ack: &block2::DynBlock<dyn Fn()>) {
+            update_card::post(Some(Stage::Installed { version: crate::version::CURRENT.to_string() }));
+            ack.call(());
+        }
+
+        #[unsafe(method(showUpdateInFocus))]
+        fn in_focus(&self) {}
+
+        #[unsafe(method(dismissUpdateInstallation))]
+        fn dismiss(&self) {
+            CHOICE.with(|slot| slot.borrow_mut().take());
+            CANCEL.with(|slot| slot.borrow_mut().take());
+            // 알리기만 하는 카드(최신·실패·바뀜)는 제 시간에 걷힌다 — 세션이 끝났다고 바로 지우지 않는다.
+            if !matches!(update_card::current(), Some(Stage::Latest | Stage::Failed { .. } | Stage::Installed { .. })) {
+                update_card::post(None);
+            }
+        }
+    }
+);
+
+impl UserDriver {
+    fn new() -> Retained<Self> {
+        let driver = Self::alloc().set_ivars(());
+        unsafe { msg_send![super(driver), init] }
+    }
+}
+
 pub(crate) struct Updater {
-    controller: Retained<AnyObject>,
+    updater: Retained<AnyObject>,
     // Sparkle only holds weak delegate references.
+    _driver: Retained<UserDriver>,
     _delegate: Retained<UpdateDelegate>,
     preview: bool,
-    /// 리그는 배경(Accessory) 앱이라 활성이 되지 않는다 — 활성 조건 없이 표준 창을 낸다.
-    rig: bool,
     next_probe: Cell<Instant>,
 }
 
@@ -282,8 +400,8 @@ unsafe fn configure_session(defaults: &NSUserDefaults) -> Option<()> {
     Some(())
 }
 
-/// Sparkle.framework 를 dlopen 해 `SPUStandardUpdaterController` 를 만든다. 반환된 controller 는
-/// App 에 **보관해야 한다** — 드롭되면 updater 가 정지한다. framework 가 없으면(dev 빌드) `None`.
+/// Sparkle.framework 를 dlopen 해 앱 드라이버를 단 `SPUUpdater` 를 만든다. 반환된 값은 App 에 **보관해야 한다** —
+/// 드롭되면 updater 가 정지한다. framework 가 없으면(dev 빌드) `None`.
 pub(crate) fn init() -> Option<Updater> {
     let exe = std::env::current_exe().ok()?;
     let home = kasa_socket::home_dir()?;
@@ -301,84 +419,59 @@ pub(crate) fn init() -> Option<Updater> {
         if libc::dlopen(c.as_ptr(), libc::RTLD_NOW).is_null() {
             return None; // dev 빌드 — framework 미번들. graceful no-op.
         }
-
-        let cls = AnyClass::get(c"SPUStandardUpdaterController")?;
-        let alloc: *mut AnyObject = msg_send![cls, alloc];
-        if alloc.is_null() {
-            return None;
+        let cls = AnyClass::get(c"SPUUpdater")?;
+        let driver = UserDriver::new();
+        let protocol = objc_getProtocol(c"SPUUserDriver".as_ptr());
+        if !protocol.is_null() {
+            let _ = class_addProtocol(UserDriver::class(), protocol);
         }
         let delegate = UpdateDelegate::new(preview.then(|| rig.as_deref().unwrap_or(PREVIEW_FEED)));
-        let delegate_ptr: *mut AnyObject = (&*delegate as *const UpdateDelegate).cast_mut().cast();
         if preview { configure_session(&NSUserDefaults::standardUserDefaults())?; }
+        let bundle = NSBundle::mainBundle();
+        let alloc: *mut AnyObject = msg_send![cls, alloc];
+        if alloc.is_null() { return None; }
         let obj: *mut AnyObject = msg_send![
             alloc,
-            initWithStartingUpdater: Bool::from(!preview),
-            updaterDelegate: delegate_ptr,
-            userDriverDelegate: delegate_ptr,
+            initWithHostBundle: &*bundle,
+            applicationBundle: &*bundle,
+            userDriver: &*driver,
+            delegate: &*delegate,
         ];
-        let controller = Retained::from_raw(obj)?;
+        let updater = Retained::from_raw(obj)?;
+        let mut error: *mut NSError = std::ptr::null_mut();
+        let started: Bool = msg_send![&*updater, startUpdater: &mut error];
+        if !started.as_bool() { return None; }
         if preview {
-            let updater: *mut AnyObject = msg_send![&*controller, updater];
-            let mut error: *mut NSError = std::ptr::null_mut();
-            let started: Bool = msg_send![updater, startUpdater: &mut error];
-            if !started.as_bool() { return None; }
             // Selecting a single writer before the first update cycle also
             // covers a local dist build that finishes after Sparkle stages.
-            update_state().owner.store(true, Ordering::Release);
+            OWNER.store(true, Ordering::Release);
         }
-        Some(Updater {
-            controller, _delegate: delegate, preview, rig: rig.is_some(),
-            next_probe: Cell::new(Instant::now() + FIRST_PROBE),
-        })
+        Some(Updater { updater, _driver: driver, _delegate: delegate, preview, next_probe: Cell::new(Instant::now() + FIRST_PROBE) })
     }
 }
 
-/// 주 스레드 루프 턴마다 — 미룬 표준 창 띄우기, 「나중에」 정리, preview 의 시간마다 확인.
+/// 주 스레드 루프 턴마다 — preview 의 시간마다 확인.
 pub(crate) fn tick(updater: &Updater) {
     rig_watch_windows();
-    let state = update_state();
+    if !updater.preview { return; }
+    let now = Instant::now();
+    if now < updater.next_probe.get() { return; }
     unsafe {
-        let driver: *mut AnyObject = msg_send![&*updater.controller, userDriver];
-        if state.later.swap(false, Ordering::AcqRel) {
-            let _: () = msg_send![driver, dismissUpdateInstallation];
-            state.postponed.store(true, Ordering::Release);
-        }
-        if state.show_pending.load(Ordering::Acquire) && (updater.rig || app_active())
-            // kCGEventSourceStateHIDSystemState, kCGEventKeyDown
-            && CGEventSourceSecondsSinceLastEventType(1, 10) >= TYPING_PAUSE
-        {
-            state.show_pending.store(false, Ordering::Release);
-            let _: () = msg_send![driver, showUpdateInFocus];
-        }
-        if !updater.preview { return; }
-        let now = Instant::now();
-        if now < updater.next_probe.get() { return; }
-        let instance: *mut AnyObject = msg_send![&*updater.controller, updater];
-        let busy: Bool = msg_send![instance, sessionInProgress];
+        let busy: Bool = msg_send![&*updater.updater, sessionInProgress];
         if busy.as_bool() { return; }
         updater.next_probe.set(now + PROBE_EVERY);
-        // 자동 받기가 꺼져 있어 찾기만 하고, 찾으면 표준 창 경로(위임의 `will_show`)로 간다.
-        let _: () = msg_send![instance, checkForUpdatesInBackground];
+        // 자동 받기가 꺼져 있어 찾기만 하고, 찾으면 드라이버의 `found` 로 카드가 선다.
+        let _: () = msg_send![&*updater.updater, checkForUpdatesInBackground];
     }
 }
 
-unsafe fn app_active() -> bool {
-    let Some(app_class) = AnyClass::get(c"NSApplication") else { return false };
-    let app: *mut AnyObject = msg_send![app_class, sharedApplication];
-    let active: Bool = msg_send![app, isActive];
-    active.as_bool()
-}
-
-/// "업데이트 확인" 메뉴 → 표준 확인 창(없으면 「최신」 안내까지 Sparkle 이 한다). 「나중에」로 미룬 판이
-/// 있으면 확인 대신 다시 켤지를 다시 묻는다.
+/// "업데이트 확인" — 찾는 중 카드부터 선다. 「나중에」로 미룬 받은 판이 있으면 Sparkle 이 다시 켤지를 다시 묻는다.
 pub(crate) fn check_for_updates(updater: &Updater) {
-    if RELAUNCH.with(|slot| slot.borrow().is_some()) {
-        update_state().relaunch_asked.store(true, Ordering::Release);
-        return;
-    }
     unsafe {
-        let nil: *mut AnyObject = std::ptr::null_mut();
-        let _: () = msg_send![&*updater.controller, checkForUpdates: nil];
+        let can: Bool = msg_send![&*updater.updater, canCheckForUpdates];
+        if can.as_bool() {
+            let _: () = msg_send![&*updater.updater, checkForUpdates];
+        }
     }
 }
 
@@ -408,45 +501,52 @@ mod tests {
     }
 
     #[test]
-    fn found_versions_wait_for_us_and_relaunch_waits_for_the_answer() {
-        let delegate = UpdateDelegate::new(Some(PREVIEW_FEED));
+    fn the_feed_is_ours_only_on_preview() {
         let dummy = NSObject::new();
+        let delegate = UpdateDelegate::new(Some(PREVIEW_FEED));
         let feed: Option<Retained<NSString>> = unsafe { msg_send![&*delegate, feedURLStringForUpdater: &*dummy] };
         assert_eq!(feed.map(|f| f.to_string()).as_deref(), Some(PREVIEW_FEED));
         let stable = UpdateDelegate::new(None);
         let feed: Option<Retained<NSString>> = unsafe { msg_send![&*stable, feedURLStringForUpdater: &*dummy] };
         assert!(feed.is_none(), "안정판은 Info.plist 피드를 쓴다");
+    }
 
-        // 표준 창을 띄울 때는 우리가 고른다 — Sparkle 의 「다시 활성화될 때」를 쓰지 않는다.
-        let gentle: Bool = unsafe { msg_send![&*delegate, supportsGentleScheduledUpdateReminders] };
-        assert!(gentle.as_bool());
-        let sparkle_shows: Bool = unsafe { msg_send![&*delegate,
-            standardUserDriverShouldHandleShowingScheduledUpdate: &*dummy, andInImmediateFocus: Bool::NO] };
-        assert!(!sparkle_shows.as_bool());
-        let state = update_state();
-        let _: () = unsafe { msg_send![&*delegate, standardUserDriverWillHandleShowingUpdate: Bool::NO,
-            forUpdate: &*dummy, state: &*dummy] };
-        assert!(state.show_pending.load(Ordering::Acquire));
-        let _: () = unsafe { msg_send![&*delegate, standardUserDriverWillFinishUpdateSession] };
-        assert!(!state.show_pending.load(Ordering::Acquire));
+    /// Sparkle 이 부르는 차례 그대로 — 찾음 → 받기 → 진행 → 준비 → 다시 켜기. 답은 카드의 단추가 부를 때만 간다.
+    #[test]
+    fn the_card_answers_sparkle_only_when_a_person_presses() {
+        let driver = UserDriver::new();
+        let dummy = NSObject::new();
+        let answered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = answered.clone();
+        let reply = block2::RcBlock::new(move |choice: isize| seen.lock().unwrap().push(choice));
+        let _: () = unsafe { msg_send![&*driver, showUpdateFoundWithAppcastItem: &*dummy, state: &*dummy, reply: &*reply] };
+        assert!(matches!(update_card::current(), Some(Stage::Found { .. })));
+        assert!(answered.lock().unwrap().is_empty(), "찾기만 했다 — 받기는 사람이 누를 때");
+        respond(Action::Download);
+        assert_eq!(*answered.lock().unwrap(), vec![CHOICE_INSTALL]);
 
-        let called = std::sync::Arc::new(AtomicBool::new(false));
-        let observed = called.clone();
-        let install = block2::RcBlock::new(move || { observed.store(true, Ordering::Release); });
-        let postponed: Bool = unsafe { msg_send![&*delegate, updater: &*dummy,
-            shouldPostponeRelaunchForUpdate: &*dummy, untilInvokingBlock: &*install] };
-        assert!(postponed.as_bool(), "끊길 일을 묻기 전에는 다시 켜지 않는다");
-        assert!(!called.load(Ordering::Acquire), "위임 안에서 설치를 부르면 Sparkle 호출 도중에 앱이 꺼진다");
-        assert!(take_relaunch_request());
-        assert!(!take_relaunch_request(), "한 번만 묻는다");
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let cancel = block2::RcBlock::new(move || flag.store(true, Ordering::Release));
+        let _: () = unsafe { msg_send![&*driver, showDownloadInitiatedWithCancellation: &*cancel] };
+        let _: () = unsafe { msg_send![&*driver, showDownloadDidReceiveExpectedContentLength: 4_000u64] };
+        let _: () = unsafe { msg_send![&*driver, showDownloadDidReceiveDataOfLength: 1_000u64] };
+        assert!(matches!(update_card::current(), Some(Stage::Downloading { got: 1_000, total: 4_000, .. })));
+        let _: () = unsafe { msg_send![&*driver, showDownloadDidStartExtractingUpdate] };
+        assert!(matches!(update_card::current(), Some(Stage::Preparing { .. })));
+        respond(Action::Cancel);
+        assert!(!cancelled.load(Ordering::Acquire), "푸는 중엔 받기 취소가 이미 지난 일이다");
 
-        answer_relaunch(false);
-        assert!(state.later.swap(false, Ordering::AcqRel));
-        assert!(!called.load(Ordering::Acquire), "「나중에」는 다시 켜지 않는다");
-        assert!(RELAUNCH.with(|slot| slot.borrow().is_some()), "업데이트 확인에서 다시 물을 수 있게 쥐고 있다");
-        answer_relaunch(true);
-        assert!(called.load(Ordering::Acquire));
-        assert!(RELAUNCH.with(|slot| slot.borrow().is_none()));
+        let _: () = unsafe { msg_send![&*driver, showReadyToInstallAndRelaunch: &*reply] };
+        assert!(matches!(update_card::current(), Some(Stage::Ready { .. })));
+        respond(Action::Later);
+        assert_eq!(*answered.lock().unwrap(), vec![CHOICE_INSTALL, CHOICE_DISMISS], "나중에 = 끌 때 설치");
+        assert_eq!(update_card::current(), None);
+        respond(Action::Relaunch);
+        assert_eq!(answered.lock().unwrap().len(), 2, "한 번 답한 블록은 다시 안 부른다");
+
+        let _: () = unsafe { msg_send![&*driver, dismissUpdateInstallation] };
+        update_card::post(None);
     }
 
     #[test]

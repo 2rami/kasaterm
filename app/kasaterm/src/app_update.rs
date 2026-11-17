@@ -15,7 +15,7 @@ pub(crate) fn enabled() -> bool {
 }
 
 /// 받은 파일 자리. 격리 리그는 그 collab 루트 아래로 간다.
-fn cache_dir() -> Result<std::path::PathBuf, String> {
+pub(crate) fn cache_dir() -> Result<std::path::PathBuf, String> {
     if let Some(root) = kasa_socket::isolated_collab_root() {
         return Ok(root.join("app-update-cache"));
     }

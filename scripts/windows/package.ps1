@@ -161,23 +161,6 @@ foreach ($artifact in @($appExe, $cliExe, $acpExe)) {
     }
 }
 
-$winSparkleVersion = "0.9.3"
-$winSparkleZip = Join-Path $downloadsRoot "WinSparkle-$winSparkleVersion.zip"
-Get-VerifiedDownload `
-    -Uri "https://github.com/vslavik/winsparkle/releases/download/v$winSparkleVersion/WinSparkle-$winSparkleVersion.zip" `
-    -Destination $winSparkleZip `
-    -Sha256 "745985F41D2AB26B2D5A1CF87D76E4ED851039DB19038E50610EB25EA0B73772"
-
-$winSparkleRoot = Reset-Directory -Path (Join-Path $workRoot "winsparkle") -AllowedRoot $targetRoot
-Expand-Archive -LiteralPath $winSparkleZip -DestinationPath $winSparkleRoot -Force
-$winSparkleDll = Get-ChildItem -LiteralPath $winSparkleRoot -Recurse -Filter "WinSparkle.dll" -File |
-    Where-Object { $_.FullName -match '[\\/]x64[\\/]Release[\\/]' } |
-    Select-Object -First 1
-if (-not $winSparkleDll) {
-    throw "x64 WinSparkle.dll was not found in $winSparkleZip"
-}
-Copy-Item -LiteralPath $winSparkleDll.FullName -Destination (Join-Path $releaseRoot "WinSparkle.dll") -Force
-
 # 시스템 ConPTY 는 kitty 그림(APC)을 걸러 낸다. 동봉 OpenConsole 은 모르는 VT 를 그대로 넘기고,
 # 앱이 시작 때 exe 옆 conpty\conpty.dll 을 먼저 실어 portable-pty 가 그쪽을 쓰게 한다.
 $conptyVersion = "1.24.261001001"
@@ -276,7 +259,7 @@ Invoke-External -FilePath $lightExe -ArgumentList @(
 )
 
 $portableStage = Reset-Directory -Path (Join-Path $workRoot "portable\kasaterm") -AllowedRoot $targetRoot
-Copy-Item -LiteralPath $appExe, $cliExe, $acpExe, (Join-Path $releaseRoot "WinSparkle.dll") -Destination $portableStage -Force
+Copy-Item -LiteralPath $appExe, $cliExe, $acpExe -Destination $portableStage -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\kasaterm\wix\License.rtf") -Destination $portableStage -Force
 $portableFonts = Join-Path $portableStage "fonts"
 New-Item -ItemType Directory -Path $portableFonts -Force | Out-Null
@@ -302,7 +285,7 @@ Invoke-External -FilePath $darkExe -ArgumentList @(
     "-nologo", "-x", $verifyFiles, "-o", $verifyWxs, $msiPath
 )
 $requiredFiles = @(
-    "kasaterm.exe", "kasaterm-cli.exe", "kasa-acp.exe", "WinSparkle.dll", "conpty.dll", "OpenConsole.exe", "index.html",
+    "kasaterm.exe", "kasaterm-cli.exe", "kasa-acp.exe", "conpty.dll", "OpenConsole.exe", "index.html",
     "characters.json", "kasacollab.py",
     "NotoSansKR-Variable.ttf", "OFL-NotoSansKR.txt", "OFL-D2Coding.txt"
 )

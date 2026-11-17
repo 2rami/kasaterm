@@ -20,7 +20,7 @@ kasaterm-cli app update-check --machine <등록된-machine_id> --expect <inspect
 - `restart`: 세션 저장 성공을 확인하고 앱 밖 도우미를 준비한다. 응답을 보낼 시간을 둔 뒤 GUI 스레드에서 화면·대상·미저장 문서를 다시 검사하고 정상 종료한다. 같은 설치본만 다시 열고, 새 앱이 저장된 재시작 작업에서 복원 의도를 읽어 자동으로 복원한다. 임의 환경변수나 에이전트 인증값을 새 앱으로 넘기지 않는다.
 - 바쁜 작업이 있으면 기본적으로 거부한다. 영향 목록을 확인하고 사용자가 중단을 허락한 경우만 `restart … --interrupt`로 진행한다. 미저장 문서·새 자기설치·다른 진행 중 재시작은 이 옵션으로도 넘지 못한다. 일반 셸 명령은 이어지지 않으며 대화 복원이 작업의 자동 재개를 뜻하지 않는다.
 - 응답의 `job_id`는 기존 `app-restart status JOB --machine ID`로 추적한다. 새 PID가 뜬 것과 복원 완료를 구분하며, 복원이 실패하면 작업도 실패로 남는다. 응답이 끊겼을 때 재시작을 다시 실행하지 않고 작업 상태와 `inspect`를 먼저 조회한다.
-- `update-check`: 설치된 Sparkle/WinSparkle의 업데이트 창을 연다. 업데이트 설치 완료·OS 권한 승인을 뜻하지 않는다.
+- `update-check`: 설치된 업데이터의 확인을 돌려 새 판 카드를 세운다. 업데이트 설치 완료·OS 권한 승인을 뜻하지 않는다.
 
 소스: `kasa-socket::app_control`(계약·관측 조건), `kasa-http::http::app_control`(소유자 문), 앱 `app_control.rs`(GUI 작업), `cli/app_control.rs`(명령·캡처 파일). 캡처는 기존 `kasa_remote::screen_mirror::Source`를 공유한다. 재기동 도우미·작업 기록은 기존 `app_restart`를 재사용한다.
 

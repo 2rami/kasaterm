@@ -1,7 +1,7 @@
 """다기기 빠른 패치 릴리스 — 범위를 계획 하나에 고정하고, 나쵸 승인 한 번으로 단계를 끝까지 추적한다.
 
 정본 흐름은 그대로다: 버전 커밋·태그 push → `.github/workflows/release.yml`(msi·dmg 빌드, 릴리스 첨부, appcast
-서명·커밋). 기기 쪽은 이미 있는 업데이터가 받는다 — macOS Sparkle, Windows WinSparkle, iOS 는 설치 링크(adhoc.sh).
+서명·커밋). 기기 쪽은 이미 있는 업데이터가 받는다 — macOS Sparkle, Windows 자체 업데이터(win_update.rs), iOS 는 설치 링크(adhoc.sh).
 
 - plan    커밋·다음 패치 버전·포함 변경·플랫폼/채널·기기 범위·기준 피드 해시·서명 관문을 한 파일에 고정한다.
           `--json` 의 `approval_scope` 를 나쵸가 그대로 승인 요청으로 만든다.
@@ -181,7 +181,7 @@ def how_to_apply(device):
     if osname == "macos":
         return "Sparkle — 판 번호 줄·앱 메뉴 「업데이트 확인…」, 설치·재실행은 사람이"
     if osname == "windows":
-        return "WinSparkle — 시작 토스트 [설치]·판 번호 줄(MSI 설치본만)"
+        return "새 판 카드 [받기]·[다시 켜기]·판 번호 줄(MSI 설치본만, 자체 받기·EdDSA 확인·MSI 도우미)"
     return f"원격 설치 창구 없음 — 그 기기에서 판 번호 줄을 누르거나 {RELEASES} 에서 받기"
 
 

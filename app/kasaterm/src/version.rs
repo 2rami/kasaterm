@@ -151,26 +151,26 @@ pub(crate) const RELEASES: &str = "https://github.com/2rami/kasaterm/releases/la
 
 /// 판 번호 줄을 눌렀을 때 쓰는 길. 업데이터가 있으면 그 창이 확인·받기·설치를 사람에게 묻는다
 /// (EdDSA 서명 확인도 업데이터 몫이고, 설치·재실행은 거기서 사람이 고른다 — 여기서 끄지 않는다).
-/// 맥 preview 는 확인만 하고 답을 새 판 알림으로 낸다(`update_notice.rs`).
+/// 두 업데이터 다 화면은 앱의 새 판 카드다(`update_card.rs`).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UpdateEntry {
     Sparkle,
-    WinSparkle,
+    Windows,
     /// 업데이터가 없다 — 까닭을 말하고 릴리스 페이지를 연다.
     Download(&'static str),
 }
 
-/// 검증 리그가 설정·세션·창 파일을 옮겨 띄운 격리 실행인가. 업데이터(맥 Sparkle·Windows WinSparkle)는
-/// 사용자 기본값(NSUserDefaults·HKCU)과 설치본을 건드리니, 격리판이 얹으면 리그 밖으로 샌다.
+/// 검증 리그가 설정·세션·창 파일을 옮겨 띄운 격리 실행인가. 업데이터(맥 Sparkle·Windows 자체 받기)는
+/// 사용자 기본값(NSUserDefaults)과 설치본을 건드리니, 격리판이 얹으면 리그 밖으로 샌다.
 pub(crate) fn isolated_environment(has: impl Fn(&str) -> bool) -> bool {
     ["KASATERM_SETTINGS_FILE", "KASATERM_SESSION_FILE", "KASATERM_WINDOW_FILE",
         "KASATERM_AUTOQUIT_MS", "KASATERM_LITE_ROOT"].iter().any(|key| has(key))
 }
 
-pub(crate) fn update_entry(sparkle: bool, winsparkle: bool, windows: bool) -> UpdateEntry {
-    match (sparkle, winsparkle, windows) {
+pub(crate) fn update_entry(sparkle: bool, win_updater: bool, windows: bool) -> UpdateEntry {
+    match (sparkle, win_updater, windows) {
         (true, _, false) => UpdateEntry::Sparkle,
-        (_, true, true) => UpdateEntry::WinSparkle,
+        (_, true, true) => UpdateEntry::Windows,
         (_, _, true) => UpdateEntry::Download("MSI 로 설치한 판이 아니라 업데이터가 없어요 — 릴리스 페이지에서 받아 주세요"),
         _ => UpdateEntry::Download("이 판은 .app 번들이 아니라 업데이터가 없어요 — 릴리스 페이지에서 받아 주세요"),
     }
@@ -182,14 +182,14 @@ impl crate::App {
         let sparkle = self.sparkle_updater.is_some();
         #[cfg(not(target_os = "macos"))]
         let sparkle = false;
-        match update_entry(sparkle, crate::win_sparkle::available(), cfg!(windows)) {
+        match update_entry(sparkle, crate::win_update::available(), cfg!(windows)) {
             UpdateEntry::Sparkle => {
                 #[cfg(target_os = "macos")]
                 if let Some(c) = self.sparkle_updater.as_ref() {
                     crate::macos_sparkle::check_for_updates(c);
                 }
             }
-            UpdateEntry::WinSparkle => crate::win_sparkle::check(),
+            UpdateEntry::Windows => crate::win_update::check_now(),
             UpdateEntry::Download(why) => {
                 self.set_toast(why.to_string());
                 crate::chrome::open_url_in_browser(RELEASES);
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn the_version_row_uses_the_updater_the_install_has() {
         assert_eq!(update_entry(true, false, false), UpdateEntry::Sparkle);
-        assert_eq!(update_entry(false, true, true), UpdateEntry::WinSparkle);
+        assert_eq!(update_entry(false, true, true), UpdateEntry::Windows);
         // 업데이터가 없으면 조용히 아무것도 안 하지 않는다 — 까닭과 서명된 릴리스 파일로 가는 길.
         for (s, w, win) in [(false, false, false), (false, false, true), (false, true, false)] {
             let UpdateEntry::Download(why) = update_entry(s, w, win) else {

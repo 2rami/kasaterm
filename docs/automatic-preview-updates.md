@@ -1,6 +1,6 @@
 # 개인 기기의 빠른 업데이트
 
-일반 사용자는 기존 안정판을 받는다. 빠른 업데이트에 참여한 기기(Mac·Windows)만 별도 preview 피드를 확인한다. Mac 은 새 판이 있으면 Sparkle 표준 창(새 판 안내 → 업데이트 설치 → 진행 막대 → 다시 켜기)을 띄우고, Windows 는 OS 알림을 클릭하면 WinSparkle 표준 확인 창을 연다. 사람이 설치를 눌렀을 때만 받는다. 누르기 전에 몰래 받아 두거나 종료할 때 설치하지 않는다.
+일반 사용자는 기존 안정판을 받는다. 빠른 업데이트에 참여한 기기(Mac·Windows)만 별도 preview 피드를 확인한다. 새 판이 있으면 두 OS 모두 앱 안 오른쪽 아래에 새 판 카드(`update_card.rs`: 찾음 → 받기 → 진행 막대 → 다시 켜기)가 선다. 사람이 「받기」를 눌렀을 때만 받는다. 누르기 전에 몰래 받아 두지 않는다.
 
 ## 작업 완료와 발행
 
@@ -13,6 +13,158 @@
 검사는 앱과 기반 크레이트 14개를 한 Cargo 호출에 함께 넣는다. 호출마다 합쳐지는 macOS 의존성 기능이 제품 빌드와
 같도록 유지하며, 각 패키지의 시험을 이름 필터 없이 전부 실행한다. 실패·시간 초과는 그대로 발행을 막는다. 기본 Cargo 일꾼은
 1개로 제한한다. 별도 `CARGO_BUILD_JOBS` 설정이 있으면 그 값을 따르며, 메모리·스왑 여유를 확인한 뒤 늘린다.
+
+### Windows 덤 — mac 을 기다리게 하지 않는다
+
+preview 태그의 채널 기록(`.github/release-channel.json`)이 `platforms: ["macos","windows"]` 이면 CI 는 Windows 를 그 태그
+실행에서 굽지 않는다. mac 피드를 게시한 뒤 `windows-followup` job 이 같은 태그로 `release vX.Y.Z (windows)` 실행을 부르고,
+그 실행이 MSI 를 굽고 mac 실행이 만든 prerelease 에 붙인 뒤(만들지도·채널을 바꾸지도·있는 파일을 덮지도 않는다) 같은 EdDSA
+키로 서명해 `docs/appcast-win-preview.xml` 하나만 게시한다. 게시는 mac 과 같은 `feed_publish` 다 — 태그 커밋·채널·플랫폼,
+판·주소·크기·산출물 해시, 저장소 공개키로 서명 확인, main CAS, Pages 빌드와 공개 피드 대조.
+
+- 따로 도는 실행이라 Windows 굽기(CI 에서 수십 분)의 시간·실패가 mac preview 와 controller 를 늦추거나 막지 않는다. controller 는
+  mac 실행만 기다리고(`backend.tag_run_platforms`), `(windows)` 실행은 controller 의 실행 찾기에 걸리지 않는다.
+- 같은 이유로 Windows preview 피드는 계획의 기준 해시(`feed_base`)에 넣지 않는다. 늦게 나간 Windows 피드가 다음 계획을 낡게 만들어
+  20분 굽기를 버리게 하지 않는다. 판 번호는 원격 태그로 오르니 Windows 피드가 판을 되돌리지 못한다.
+- Windows 덤이 실패하면 그 판의 Windows 만 빠진다. 고친 뒤 `gh workflow run release.yml --repo 2rami/kasaterm --ref main -f tag=vX.Y.Z -f platforms=windows`
+  로 다시 부른다. 늦은 판이 이미 나갔으면 `feed_publish` 가 옛 판으로 덮기를 거절한다.
+- 안정판은 예전대로 한 실행에서 두 피드를 한 커밋으로 낸다. `windows` 실행은 Windows 를 싣는 preview 태그에만 열린다.
+- Windows 굽기는 `kasaterm.pdb`·`kasaterm_cli.pdb`·`kasa_acp.pdb` 를 릴리스 자산이 아니라 그 실행의 산출물
+  `kasaterm-windows-pdb`(보존 90일)로만 남긴다. controller 는 tick 마다 끝난 release.yml 실행에서 그것을 받아
+  `<상태폴더>/symbols/<태그>/` 에 계속 둔다(`tools/release/symbols.py`). 받지 못해도 출시는 그대로 가고, 산출물이 없던 실행은
+  `symbols/.no-artifact.json` 에 적어 다시 묻지 않는다. 집 PC 덤프의 `kasaterm.exe + 오프셋` 을 함수로 바꿀 때 그 판의 PDB 를 쓴다.
+
+CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. appcast job에만 `pages: write`를 주고,
+검증된 피드 커밋 뒤 기존 `main:/docs` 사이트에 빌드를 한 번 요청한다. 게시 커밋을 포함한 Pages 빌드 성공과
+공개 피드의 버전·주소·서명·크기를 최대 60회(확인 사이 10초) 대조한다. 실패·시간 초과는 CI 실패이며,
+이미 올라간 피드 커밋·태그·산출물을 되돌리거나 새 릴리스를 만들지 않는다. 사이트 설정도 자동 변경하지 않는다.
+원인을 해결한 뒤 해당 appcast job만 명시적으로 재실행하면 같은 검증 피드를 확인하고 Pages 게시를 재시도한다.
+
+legacy Pages 빌드는 가끔 까닭 없이 실패하거나 15분씩 「빌드 중」에 머문다(2026-10-02 v0.2.28: 피드 커밋 빌드가 15분 뒤 실패,
+다음 빌드는 20초). 그래서 게시 커밋을 품은 빌드가 실패했거나 같은 빌드가 3분(`PAGES_STALL` 18회) 넘게 대기·빌드 중이면 빌드를
+두 번까지 다시 요청한다(`PAGES_REBUILDS`). 그래도 못 끝내면 `KASATERM_APPCAST_PAGES_UNFINISHED` 표식을 남기고 실패한다.
+controller 는 게시 job 만 실패하고 표식이 `KASATERM_APPCAST_CAS_EXHAUSTED`·`KASATERM_APPCAST_PAGES_UNFINISHED` 중 하나면 그 job 만
+실행 시도 번호 2까지 스스로 다시 돌린다(`APPCAST_AUTO_RERUNS`, `gh run rerun <run> --job <job>`) — 같은 서명 피드를 다시 확인할
+뿐 새 릴리스·태그는 만들지 않는다. 세 번째 시도도 실패하면 막힌 채 로그에 재실행 명령을 남긴다. v0.2.28 은 이 장치 전에 나흘
+막혀 있다가 2026-10-06 그 job 을 손으로 다시 돌려 풀었다.
+근거: [Pages의 GITHUB_TOKEN 제한](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site#troubleshooting-publishing-from-a-branch),
+[Pages 빌드 요청과 권한](https://docs.github.com/en/rest/pages/pages#request-a-github-pages-build).
+
+일반적인 `build-app.sh` 실행이나 자유문구 `done`만으로 공개 발행을 승인하지 않는다. 새 커밋을 검증하고 위 대기열에 등록하는 것까지가 빠른 업데이트 작업의 완료 기준이다.
+
+### 끝난 계획 거두기
+
+계획마다 `plans/<id>/work/` 에 격리 워크트리·dmg·자산(판마다 0.9GB 남짓)이 남는다. 지우는 곳이 없어 맥미니에 38개 29GB 가
+쌓였다(2026-11-13). tick 끝에 `plan_sweep.py` 가 최근 5개와 아직 안 끝난 요청(지금 굽는 것·`cancelled_plans` 포함)이
+가리키는 계획은 두고 나머지의 `work/` 를 지운다 — 워크트리는 checkout 에서 `git worktree remove` 로 떼고 `prune` 한다.
+`plan.json`·`state.json` 은 남긴다. 실패해도 그 tick 의 결과는 그대로다(`symbols` 와 같은 꼴).
+
+### 무엇을 굽나 — 등록된 커밋 그대로
+
+controller는 마지막 발행 뒤 main에 들어온 등록 커밋 가운데 가장 새 것을 **그 커밋 그대로** 굽는다. main 끝이 아니다.
+1번의 「정확한 커밋」·「미완성 변경 제외」가 등록의 뜻이라, 등록 안 된 커밋은 판에 싣지 않는 것이 정책에 맞는다.
+
+- main 끝이 등록 안 된 커밋(폰·문서·관문만 바꾼 것 등)이어도 기다리지 않는다. 그 아래 가장 새 등록 커밋이 나간다.
+- 그 판이 품은 더 오래된 등록은 「이미 나간 판에 포함」으로 끝낸다. 마지막 발행을 품지 않은 곁가지 커밋은 내지 않는다(앞 판에 실린 변경이 빠진 판이 되므로).
+- 검사가 실패해 아직 굽지 못한 계획은 더 새 등록이 오면 양보한다. 다 구운 계획은 더 새 등록이 와도 먼저 낸다.
+
+### 굽는 사이 main 이 움직이면
+
+굽기가 20분 남짓이고 그 사이 여러 학생이 main 에 push 한다. 그래서 태그 직전 판정은 「main 이 계획 커밋 그대로인가」가 아니라
+다음 셋이다(`policy.untagged_stale`).
+
+- origin/main 이 계획 커밋을 품는다(조상이거나 같다).
+- 계획 판 이상의 `v*` 태그가 원격에 없다.
+- preview 피드가 계획 때 그대로다.
+
+셋 중 하나라도 어긋나면 그 계획은 태그 없이 버리고 다음 tick 이 새 계획을 잡는다. 통과하면 태그는 계획 커밋에 판 번호·채널 기록만
+바꾼 버전 커밋에 선다. main 이 계획 커밋 그대로면 그 버전 커밋을 main 에 올리고, 앞서 갔으면 **main 끝 + 버전 커밋 합침 커밋**
+(트리는 main 끝 그대로에 `Cargo.toml` 판 번호 줄과 `.github/release-channel.json` 만 바꾼 것)을 태그와 `--atomic` 으로 함께 올린다.
+판에 실리는 것은 태그 커밋이고, 그 사이 들어온 남의 변경은 main 에만 남는다. push 하는 사이 main 이 또 움직이면 원격이 태그 없이
+그대로이므로 새 끝에 다시 합쳐 5번까지 올린다. 판 번호는 계속 오르고, 나가는 커밋은 모두 main 에 있다.
+
+이 완화는 preview 만이다. stable(나쵸 단발 승인)은 예전대로 main 이 계획 커밋일 때만 태그를 올린다.
+
+### controller 소스 갱신
+
+`tools/release` 를 고쳐 main 에 올렸으면 controller 가 도는 소스 checkout 을 그 커밋으로 옮긴다. LaunchAgent 의 `WorkingDirectory` 가
+그 폴더다(미니는 `~/.local/share/kasaterm-preview-controller`).
+
+```sh
+export PATH="$HOME/.local/bin:$PATH" GIT_LFS_SKIP_SMUDGE=1   # git-lfs 위치(미니). 소스는 파이썬 도구만 쓰니 그림은 안 받는다
+git -C /절대/controller소스 fetch -q origin main
+git -C /절대/controller소스 merge-base --is-ancestor <40자리 SHA> origin/main   # main 에 있는 커밋만
+git -C /절대/controller소스 checkout -q --detach <40자리 SHA>
+python3 -m tools.release.auto --state-dir /절대/상태폴더 status                  # 새 코드로 정책·대기열을 읽는지
+```
+
+도는 tick 은 시작할 때 모듈을 다 읽어 둔 채 끝까지 옛 코드로 가고, 다음 tick(1분 간격)부터 새 코드다. 그래서 굽는 중에 옮겨도 된다.
+LaunchAgent 는 다시 등록하지 않는다. 그 checkout 은 사람이 손대지 않는 깨끗한 detached 상태로 둔다.
+
+ssh 로 들어간 셸은 PATH 에 git-lfs 가 없어 첫 줄을 빼면 checkout 이 LFS 필터에서 반쯤 멈춘다 — HEAD 는 옛 커밋인데 파일만
+바뀐 채가 되고 다음 tick 이 그 섞인 파일로 돈다(2026-10-01). 직전이 깨끗했다면 그 변경은 실패한 checkout 산물뿐이니 같은 SHA 로
+`checkout -q -f --detach` 해 마무리한다.
+
+## 처음 한 번: controller
+
+controller는 Mac 한 대다. 소스와 상태, LFS 캐시는 Desktop·Documents·Downloads 밖에 둔다. 상시 정책 파일은 저장소 밖의 소유자 전용 0600 파일이고 저장소·기계 id·preview 피드·Mac·현재 minor의 패치 증가·서명 팀·공증 프로필·LFS 경로에 결속된다.
+
+LFS 경로는 미니 LFS 서버의 저장소(`~/.local/share/kasaterm-lfs`)를 그대로 쓴다([fast-patch-release.md](fast-patch-release.md) 「미니 LFS 서버」). 사람이 올린 그림이 곧 controller 의 로컬 캐시라 격리 워크트리가 네트워크 없이 선다. 2026-09-29 GitHub LFS 예산 초과로 controller 가 멈춘 뒤 합쳤다(정책 revision 4).
+
+직렬 controller는 상태 폴더의 0700 `target/`에 컴파일 캐시를 재사용한다. 계획별 소스·검사 결과·서명 산출물은 계속 분리하며, 새 커밋의 검증을 캐시가 대신하지 않는다.
+
+```sh
+python3 -m tools.release.auto --state-dir /절대/상태폴더 enable \
+  --controller 기계_ID --minor 0.2 \
+  --lfs-storage ~/.local/share/kasaterm-lfs --unlock-signing
+python3 -m tools.release.auto --state-dir /절대/상태폴더 install \
+  --source /절대/controller소스 --python /절대/python3 --apply
+```
+
+`install`은 `--apply`가 없으면 LaunchAgent 내용을 보여줄 뿐이다. 서명 키·비밀번호·공증 자격 내용은 정책이나 로그에 넣지 않는다. 기존 키체인과 이름 있는 공증 프로필을 쓴다.
+
+알림 배너의 큰 아이콘을 학생 얼굴로 그리는 대화 알림 권한은 Developer ID 프로파일이 있어야 실린다. App ID `com.kasa.kasaterm`에 Communication Notifications를 켜고 `MAC_APP_DIRECT` 프로파일을 controller의 `~/.config/kasaterm/signing/kasaterm-developer-id.provisionprofile`(또는 `KASATERM_MAC_PROFILE`)에 둔다. 프로파일이 없거나 팀·번들 id·서명 인증서가 안 맞으면 `scripts/mac-provision.py`가 까닭을 남기고, 판은 권한 없이 서명돼 앱 아이콘 배너로 돌아간다. 인증서를 새로 받으면 프로파일도 새로 받는다.
+
+`enable` 은 정책의 `platforms` 를 `["macos","windows"]` 로 봉인한다. 그 전에 봉인한 `["macos"]` 정책은 그대로 유효하고 mac 만
+낸다 — 코드가 주인이 허가한 범위를 넓히지 않는다. Windows 를 싣으려면 controller 에서 `enable` 을 다시 친다(같은 인자, 정책 revision 이
+오른다). 진행 중인 계획은 옛 정책 해시에 묶여 있으니 `status` 의 `queue.active` 가 비었을 때 친다. 계획은 정책이 허가하고 그 커밋의
+Windows 앱이 preview 피드를 알 때만(`win_sparkle.rs` 에 `appcast-win-preview.xml`) Windows 를 싣는다.
+
+```sh
+python3 -m tools.release.auto --state-dir /절대/상태폴더 status
+python3 -m tools.release.auto --state-dir /절대/상태폴더 disable
+python3 -m tools.release.auto --state-dir /절대/상태폴더 observe
+```
+
+`disable`은 미착수 controller 작업을 막는다. 이미 외부 태그·DMG 업로드가 시작된 트랜잭션은 CI가 검증 후 피드 게시를 마무리할 수 있다. 이미 시작한 외부 작업을 취소했다고 보고하지 않는다. 이 경계는 `publication.commit_point`와 `ci_may_finish_after_disable`에 기록한다.
+
+정책을 껐다 다시 켠 뒤에는 같은 범위의 정확한 계획만 `reauthorize <plan_id>`로 재허가한다. 태그가 없는 계획만 `replan <plan_id>`로 새 검사·계획을 요청할 수 있다. 이미 태그가 있는 계획을 버리고 다른 릴리스를 만들어 우회하지 않는다.
+
+## 처음 한 번: 받는 기기
+
+기기별 `settings.json`(Mac `~/.config/kasaterm/settings.json`, Windows `%USERPROFILE%\.config\kasaterm\settings.json`)에서
+다음 두 항목을 명시한다. 계정 공통 설정 동기화에는 포함하지 않는다. 앱은 켤 때 한 번 읽는다 — 바꾼 뒤 한 번 껐다 켠다.
+
+```json
+{"update_channel":"preview","automatic_update_on_quit":true}
+```
+
+`automatic_update_on_quit`는 이름이 옛 동작에서 왔지만 지금은 preview 참여 표식이다. 이미 켜 둔 기기를 그대로 잇기 위해 이름을 바꾸지 않는다.
+
+이 동작을 지원하는 앱을 처음 한 번 전달해야 한다. 이후 정식 설치본은 켠 지 10초 뒤와 한 시간마다 `https://2rami.github.io/kasaterm/appcast-preview.xml`을 확인한다(`checkForUpdatesInBackground`). 이 프로세스에서만 Sparkle 자동 확인·자동 받기를 꺼 두므로(`NSArgumentDomain`) 확인은 판을 찾기만 하고 받지 않는다.
+
+- 화면은 앱이 그린다 — `SPUStandardUpdaterController` 대신 `SPUUpdater` 에 앱의 사용자 드라이버(`KasatermUserDriver`, `macos_sparkle.rs`)를 넘긴다.
+  Sparkle 이 부르는 단계(찾음·받는 중·푸는 중·준비됨·설치 중·최신·오류)가 새 판 카드로 서고, 카드의 단추가 쥐고 있던 Sparkle 의 답을
+  부른다. 피드·EdDSA 확인·설치·다시 켜기는 그대로 Sparkle 몫이다. 표준 창일 때는 일반 앱이면 「앱이 다시 활성화될 때」까지 창이 미뤄졌다 — 카드는
+  늘 그 자리에 서고, 키보드로는 못 누른다(타자 중 Return 이 「다시 켜기」를 누르지 않게).
+- 찾음 카드는 [건너뛰기][나중에][받기]다. [받기]는 받고(진행 막대) 서명을 확인하고 풀어 「준비됐어요」로 간다. 계정 메뉴 판 번호 줄의 「업데이트 확인」은
+  「찾는 중」 카드를 세우고, 없으면 「최신 판이에요」로 답한다(4초 뒤 걷힌다).
+- 준비된 카드는 지금 다시 켜면 끊길 일(일하거나 사람을 기다리는 학생, 학생이 아닌 창에서 도는 명령, 저장 안 한 문서)을 2초마다 다시 재 주의 색으로
+  보이고, 그때 주 단추는 「그래도 다시 켜기」가 된다 — 누르는 것이 확인이라 따로 OS 시트를 띄우지 않는다. 종료는 winit `exiting`을 지나 세션이 저장된다.
+- [나중에]는 카드를 걷는다. 받은 판은 Sparkle 설치기가 쥐고 있다가 다음 정상 종료 때 설치한다(다시 켜지는 않는다). 「업데이트 확인」을 누르면 받은 판을
+  다시 받지 않고 「준비됐어요」로 다시 묻는다.
+- 기다렸다 저절로 다시 켜지 않는 것은, 사람이 모르는 때에 화면이 사라지기 때문이다.
+- 안정판도 같은 드라이버를 단다. 피드·확인 주기는 Info.plist 그대로다.
 
 ### Windows 덤 — mac 을 기다리게 하지 않는다
 
@@ -166,13 +318,14 @@ python3 -m tools.release.auto --state-dir /절대/상태폴더 observe
 preview 피드를 아는 MSI 설치본(`C:\Program Files\kasaterm`)이 처음 한 번 있어야 한다. 그 전 판은 안정판 피드(`appcast-win.xml`)만
 보고, 그 피드는 preview 가 바꾸지 않는다 — 첫 preview MSI 는 그 판의 prerelease 에서 받아 사람이 설치한다.
 
-- 확인은 켠 지 10초 뒤, 그 뒤 참여 기기는 한 시간·안정판은 하루마다다(맥과 같은 간격). 확인은 앱이 피드를 직접 읽어 판만 견주고
-  WinSparkle 자동 확인은 끈다 — WinSparkle 은 자체 확인이 새 판을 찾으면 옛 「업데이트 있음」 창을 끌 수 없게 띄운다.
-- 새 판은 OS 알림으로 알린다. 알림 또는 판 번호 줄의 업데이트 확인을 누르면 `win_sparkle_check_update_with_ui`로 표준 확인 창을 연다. 사람의 설치 선택 뒤에만 다운로드·EdDSA 확인·MSI 설치가 진행된다.
-- MSI를 띄우기 직전에는 일하는 창·사람을 기다리는 학생·실행 중인 명령·미저장 문서를 다시 확인하고, 끊길 일이 있으면 Windows 확인창으로 묻는다. 기본 선택은 [아니요]이며 앱이 5초 안에 답하지 못하면 끄지 않는다.
-- MSI 를 띄운 직후(shutdown-request) 앱이 스스로 정상 종료한다 — `exiting` 을 지나 세션·창 크기가 저장된다. 예전엔 앱이 떠 있어
-  MSI 가 「Files in Use」를 묻고 사람이 앱을 꺼야 했다. 설치는 MSI 창과 관리자 확인(UAC, 설치 범위가 기기 전체)을 사람이 누른다.
-  설치가 끝난 뒤 다시 켜는 것은 사람이 한다(MSI 에 다시 켜기 단계가 아직 없다).
+- 확인은 켠 지 10초 뒤, 그 뒤 참여 기기는 한 시간·안정판은 하루마다다(맥과 같은 간격). 앱이 피드를 직접 읽어 판을 견주고, 새 판이면
+  맥과 같은 새 판 카드를 세운다(`win_update.rs`). WinSparkle 은 걷었다 — 그 창은 OS 모양으로 고정이라 카드와 맞출 수 없었다.
+- [받기]는 `curl.exe` 로 `%LOCALAPPDATA%\kasaterm\updates\self\` 에 `.part` 로 받고, 크기와 EdDSA 서명(맥 Sparkle 과 같은 공개키)을 확인한 것만
+  `.msi` 로 옮긴다. [건너뛰기]는 그 판을 설정 `update_notice_dismissed` 에 적어 더 새 판까지 다시 묻지 않는다(사람이 누른 확인은 다시 보인다).
+- [다시 켜기]는 원격 업데이트 창구와 같은 MSI 도우미(`kasa_socket::app_update::swap_powershell`)를 띄우고 앱이 정상 종료(`UpdateExit`)한다.
+  도우미는 앱이 꺼지길 기다렸다 MSI 해시를 다시 재고 `msiexec /passive` 로 설치한 뒤(관리자 확인 UAC 는 사람이 누른다) 앱을 다시 띄운다.
+  다시 뜬 앱은 도우미 기록에 `booted` 를 적고 「새 판으로 바뀌었어요」 카드를 세운다. MSI 가 실패하면 Windows Installer 가 이전 판을 두고 도우미가 그 판을 다시 띄운다.
+- MSI 설치기 화면은 한국어(`ko-kr.wxl`)·앱 그림이다([design.md](design.md) 「설치 화면」).
 
 ### 0.2.18~0.2.27 에서 넘어오기
 
@@ -184,7 +337,7 @@ preview 피드를 아는 MSI 설치본(`C:\Program Files\kasaterm`)이 처음 �
 
 기기 id·bundle id·실행파일명·버전·서명 팀·해시를 다시 확인하고 macOS 원자 교환으로 두 번들을 바꾼다. 이전 번들은 전용 backup으로 보존하며 앱을 강제 종료하거나 재실행하지 않는다. `status --plan <id>`로 설치 여부를 확인한다. 등록 응답이 불확실하면 새 helper를 중복 등록하지 않고, `rollback_required`는 원본과 신규 번들을 보존한 채 운영자가 확인한다. Kasaterm의 정상 종료 후에만 위 두 설정을 기존 설정에 병합한다. Viewer만 갱신할 때는 공통 설정을 바꾸지 않는다.
 
-preview 업데이터를 시작한 프로세스에서는 Sparkle이 설치를 전담한다. 표준 창·진행 막대·다시 켜기 확인을 바꿨으면 `docs/verify-app.md` 「업데이트 리그」로 실제 Sparkle 흐름을 돌려 본다. 로컬 dist 자기설치와 기존 원격 app-update 도우미를 함께 실행하지 않는다. 개발 실행·격리 검증·Lite는 이 자동 설치를 켜지 않는다. 기본 stable 사용자는 기존 업데이트 선택을 유지한다.
+preview 업데이터를 시작한 프로세스에서는 Sparkle이 설치를 전담한다. 새 판 카드·진행 막대·다시 켜기 확인을 바꿨으면 `docs/verify-app.md` 「업데이트 리그」로 실제 Sparkle 흐름을 돌려 본다. 로컬 dist 자기설치와 기존 원격 app-update 도우미를 함께 실행하지 않는다. 개발 실행·격리 검증·Lite는 이 자동 설치를 켜지 않는다. 기본 stable 사용자는 기존 업데이트 선택을 유지한다.
 
 ## 안정판 보호
 

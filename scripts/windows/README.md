@@ -96,9 +96,8 @@ scripts\windows\build-run.ps1
   그 의존이 없고, 묶음이 기기 목록·거울 연결·HTTP JSON 을 Windows 판에서만 최적화 없이 돌려 메인
   스레드를 잡아먹었다. 2026-11-18 rustc 1.95(x64)로 12개 모두 기본 최적화에서 구워져 묶음을 걷었다.
   다시 죽으면 죽는 크레이트 하나만 `[profile.release.package.<이름>]` 으로 묶는다.
-- **자동 업데이트(WinSparkle)** — 실행 테스트엔 불필요해 생략했다(DLL 없으면
-  `win_sparkle.rs`가 no-op으로 통과). 자동업뎃까지 보려면 CI가 받는 x64 prebuilt
-  `WinSparkle.dll`을 exe 옆에 둬야 하는데, ARM 네이티브 빌드에선 맞지 않는다.
+- **자동 업데이트** — `C:\Program Files\kasaterm` 의 MSI 설치본에서만 켜진다(`win_update.rs`). 개발 빌드는
+  새 판 카드가 안 서고, 모양은 `KASATERM_FAKE_UPDATE=<판>` 으로 본다.
 - **칸 안 그림(kitty)이 안 보임** — 개발 빌드엔 동봉 ConPTY가 없어 시스템 ConPTY로 돈다.
   시스템 ConPTY는 kitty 그림을 걸러 낸다. 보려면 `package.ps1`이 받는 `conpty.dll`과
   `OpenConsole.exe`를 exe 옆 `conpty\`에 둔다. 동봉본을 끄려면 `KASATERM_CONPTY=system`.
@@ -121,7 +120,7 @@ cargo build --release -p kasaterm --target x86_64-pc-windows-msvc
 ## 6. x64 배포 패키지 만들기
 
 x64 Windows의 PowerShell에서 실행한다. Rust MSVC 툴체인과 Node만 미리 있으면 되고,
-WinSparkle, WiX 3.14.1, ConPTY(NuGet `Microsoft.Windows.Console.ConPTY`)는 고정된 SHA-256을
+WiX 3.14.1, ConPTY(NuGet `Microsoft.Windows.Console.ConPTY`)는 고정된 SHA-256을
 확인한 뒤 `target\package-tools`에 받는다.
 
 ```powershell
@@ -135,7 +134,7 @@ scripts\windows\package.ps1
 - `kasaterm-vX.Y.Z-windows-x86_64-portable.zip`
 - `kasaterm-vX.Y.Z-windows-x86_64-portable.zip.sha256`
 
-스크립트는 MSI를 다시 추출해 앱, CLI, WinSparkle, ConPTY, 아로나 UI, 학생 로스터와 협업 훅이
+스크립트는 MSI를 다시 추출해 앱, CLI, ConPTY, 아로나 UI, 학생 로스터와 협업 훅이
 모두 들어갔는지 확인한다. 이미 최신 release 빌드와 UI dist가 있으면 조립만 다시 할 수 있다.
 
 ```powershell
