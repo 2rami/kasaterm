@@ -171,6 +171,7 @@ mod tests {
             rows: 2,
             clip: Some(CellClip { row: 0, col: 2, cols: 4, rows: 1 }),
             z: 0,
+            digest: 0,
         };
         let s = inline_slot(&face, "k".into(), (10.0, 20.0), (8.0, 16.0), 24, 0);
         assert!(!s.below);

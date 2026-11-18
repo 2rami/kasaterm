@@ -581,6 +581,16 @@ impl App {
     }
 }
 
+/// 그림 텍스처 열쇠. 내용 해시를 아는 kitty 그림은 칸·id 와 상관없이 하나를 나눠 쓴다 — 학생 얼굴이 답마다 새 id 로
+/// 와 같은 PNG 를 장마다 따로 읽어 디코드하고 올렸다(2026-11-18, 칸마다 8~24장).
+pub(crate) fn inline_texture_key(prefix: &str, tab_pid: &str, v: &kasa_bridge::screen::InlineImageView) -> String {
+    if v.digest != 0 {
+        format!("{prefix}:same:{:x}", v.digest)
+    } else {
+        format!("{prefix}:{tab_pid}:{}:{}", v.id, v.path)
+    }
+}
+
 /// 안 바뀐 칸의 합성을 다시 쓰는 상한. 합성은 격자 말고도 인라인 그림·결과, 학생 결속, 에이전트 목록
 /// 같은 바깥 상태를 읽어 내용 번호만으로는 다 못 잡는다 — 그 변화도 이 시간 안에는 화면에 닿는다.
 const COMPOSE_REUSE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -656,6 +666,25 @@ mod compose_memo_tests {
         assert!(memo.reusable(7, None, at + COMPOSE_REUSE / 2));
         assert!(!memo.reusable(8, None, at), "another grid, size or student is another composition");
         assert!(!memo.reusable(7, None, at + COMPOSE_REUSE), "outside state the key cannot see reaches the screen in time");
+    }
+
+    #[test]
+    fn the_same_picture_shares_one_texture_across_ids_and_panes() {
+        let face = |id: u64, path: &str, digest: u64| kasa_bridge::screen::InlineImageView {
+            id,
+            path: path.into(),
+            row: 0,
+            col: 0,
+            cols: 4,
+            rows: 2,
+            clip: None,
+            z: 0,
+            digest,
+        };
+        let key = |pane: &str, v| inline_texture_key("inline", pane, &v);
+        assert_eq!(key("%1", face(3, "a.png", 9)), key("%2", face(8, "b.png", 9)), "답마다 새 id 로 온 같은 얼굴");
+        assert_ne!(key("%1", face(3, "a.png", 9)), key("%1", face(3, "a.png", 10)), "같은 id 로 다시 보낸 다른 그림");
+        assert_ne!(key("%1", face(3, "a.png", 0)), key("%1", face(4, "a.png", 0)), "내용을 모르면 id 로 가른다");
     }
 
     #[test]
@@ -1408,7 +1437,7 @@ impl App {
                 };
                 inline_slots.push(inline_slot(
                     v,
-                    format!("inline:{}:{}:{}", tab_pid, v.id, v.path),
+                    inline_texture_key("inline", &tab_pid, v),
                     (body_left, body_top),
                     cell,
                     rows_now,

@@ -685,7 +685,7 @@ impl App {
         let inline: Vec<_> = images
             .iter()
             .map(|v| {
-                let key = format!("{KEY_PREFIX}{}:{}", v.id, v.path);
+                let key = terminal_scene::inline_texture_key(KEY_PREFIX.trim_end_matches(':'), "", v);
                 terminal_scene::inline_slot(v, key, (0.0, 0.0), cell, rows as usize, 0)
             })
             .collect();

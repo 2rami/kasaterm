@@ -88,10 +88,18 @@ pub struct InlineImageView {
     /// kitty 놓기의 z. 0 아래면 글자 아래(칸 기본 배경 위)에, 그 밖은 글자 위에 그린다. OSC 1337 은 0.
     #[serde(default, skip_serializing_if = "is_zero_z")]
     pub z: i32,
+    /// kitty 그림 내용의 해시. 같은 그림이 id 만 바꿔 다시 오면(학생 얼굴이 답마다 새 id) GUI 가 텍스처 하나를 나눠
+    /// 쓴다. 0 은 모름(OSC 1337·옛 판) — 그때는 id 로 가른다.
+    #[serde(default, skip_serializing_if = "is_zero_digest")]
+    pub digest: u64,
 }
 
 fn is_zero_z(z: &i32) -> bool {
     *z == 0
+}
+
+fn is_zero_digest(digest: &u64) -> bool {
+    *digest == 0
 }
 
 /// 뷰포트 칸 사각형.
