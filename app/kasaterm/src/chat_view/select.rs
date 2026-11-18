@@ -314,7 +314,7 @@ impl App {
             return None;
         }
         let cache = pane.cache.borrow();
-        let doc = Doc { lines: &cache.lines, bottom: d.rows.get(d.view.hist..).unwrap_or_default() };
+        let doc = Doc { lines: &cache.lines, bottom: d.rows().get(d.view.hist..).unwrap_or_default() };
         Some(doc.text(sel)).filter(|t| !t.is_empty())
     }
 
@@ -382,7 +382,7 @@ impl App {
                 if clicks > 1 {
                     let cache = pane.cache.borrow();
                     let drawn = self.chat_view.drawn.borrow();
-                    let bottom = drawn.get(&id).and_then(|d| d.rows.get(view.hist..)).unwrap_or_default();
+                    let bottom = drawn.get(&id).and_then(|d| d.rows().get(view.hist..)).unwrap_or_default();
                     let (s, e) = Doc { lines: &cache.lines, bottom }.span(pos, clicks);
                     sel.anchor = s;
                     sel.end = e;
@@ -457,7 +457,7 @@ impl App {
         let (hist, caret, input) = {
             let drawn = self.chat_view.drawn.borrow();
             let Some(d) = drawn.get(id) else { return };
-            let bottom = d.rows.get(d.view.hist..).unwrap_or_default().to_vec();
+            let bottom = d.rows().get(d.view.hist..).unwrap_or_default().to_vec();
             let input = crate::screenread::prompt_box(&bottom).map(|pb| pb.rows());
             (d.view.hist, d.caret, input)
         };
@@ -491,7 +491,7 @@ impl App {
             let drawn = self.chat_view.drawn.borrow();
             let Some(d) = drawn.get(id) else { return };
             let Some((crow, ccol)) = d.caret.filter(|(r, _)| *r == goal.row) else { return };
-            d.rows.get(crow).map(|row| caret_steps(row, ccol, goal.col))
+            d.rows().get(crow).map(|row| caret_steps(row, ccol, goal.col))
         };
         if let Some(p) = self.chat_view.panes.get_mut(id) {
             p.caret_goal = None;
@@ -566,7 +566,7 @@ impl App {
             return false;
         };
         let cache = pane.cache.borrow();
-        let doc = Doc { lines: &cache.lines, bottom: d.rows.get(d.view.hist..).unwrap_or_default() };
+        let doc = Doc { lines: &cache.lines, bottom: d.rows().get(d.view.hist..).unwrap_or_default() };
         sel.end = doc.step(sel.anchor, sel.end, step);
         // 끝이 화면 밖으로 나가면 따라 굴린다.
         if let Zone::Conv(l) = sel.end.zone {

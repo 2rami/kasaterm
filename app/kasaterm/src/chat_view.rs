@@ -22,6 +22,7 @@ pub(crate) use scrollbar::{paint_scrollbars, BAR_COLS};
 use kasa_socket::backend::{HistoryAsk, HistoryPage};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Mutex;
 
 type Rect = (f32, f32, f32, f32);
@@ -79,14 +80,20 @@ pub(crate) struct Drawn {
     hist_rows: usize,
     /// 보이는 대화 줄마다 누르면 펼치는 묶음 열쇠.
     toggles: Vec<Option<usize>>,
-    /// 그린 격자 — 바닥 줄 글을 고를 때·링크를 찾을 때 읽는다.
-    rows: Vec<Vec<GridCell>>,
+    /// 그린 판 — 바닥 줄 글을 고를 때·링크를 찾을 때 그 격자를 읽는다.
+    frame: Rc<ChatFrame>,
     /// 원본 커서가 이 격자에서 선 칸 — 커서 블록·한글 조합 글자가 여기 선다.
     cursor: Option<(usize, usize)>,
     /// 원본 커서 자리(보이든 말든) — 입력칸을 누르면 여기서부터 화살표를 센다.
     caret: Option<(usize, usize)>,
     /// 이 화면이 보인 대화 줄 범위 — 문서 선택을 화면 칸으로 옮긴다.
     view: select::View,
+}
+
+impl Drawn {
+    fn rows(&self) -> &[Vec<GridCell>] {
+        &self.frame.term.cells
+    }
 }
 
 /// 렌더가 터미널 합성기에 넘길 이번 프레임의 화면.
@@ -130,6 +137,8 @@ pub(crate) struct ChatPane {
     prompt_bg: RefCell<Option<kasa_bridge::screen::Color>>,
     /// 진짜 화면에서 본 배너 줄 — 첫 말 전 새 세션엔 기록이 없고, 말이 쌓이면 화면 밖으로 밀린다.
     banner: RefCell<Option<Vec<Vec<GridCell>>>>,
+    /// 지난 판과 그 열쇠, 그 판이 앞 쪽을 청했는지. 원본 화면·기록·보던 자리가 같으면 판을 다시 쓴다.
+    frame: RefCell<Option<(u64, Rc<ChatFrame>, bool)>>,
     /// 트랙패드 휠의 한 줄이 안 된 나머지 px.
     wheel_px: f32,
     /// 고른 글 — 문서 좌표라 굴려도 남는다(`select.rs`).
@@ -161,6 +170,7 @@ impl ChatPane {
             esc_at: None,
             prompt_bg: RefCell::new(None),
             banner: RefCell::new(None),
+            frame: RefCell::new(None),
             wheel_px: 0.0,
             sel: None,
             caret_goal: None,
@@ -406,6 +416,25 @@ fn full_rule(row: &[GridCell]) -> bool {
 
 /// 진짜 화면에서 바닥에 붙여 옮길 줄의 시작 — 스피너·입력칸·상태줄, 입력칸 대신 선 선택지 창(승인·
 /// 질문). 둘 다 못 찾으면 None: 대화 보기가 못 그리는 판이니 진짜 터미널을 보인다.
+/// 대화 판을 짓는 데 드는 것의 열쇠. 짓는 동안 소비되는 옮기기(`jump`)·앞 쪽 붙음(`anchor`)이 걸렸거나 기록이
+/// 잠겨 있으면 None — 그 판은 새로 짓는다. 배너·입력칸 바탕처럼 판이 기억해 두는 것은 원본 화면에서 오므로
+/// 원본 내용 번호가 덮는다.
+fn chat_frame_key(chat: &ChatPane, src: &TerminalPane, name: Option<&str>, cols: usize, rows: usize) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    if chat.jump.get().is_some() || chat.anchor.get() {
+        return None;
+    }
+    let feed = chat.feed.try_lock().ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (src.revision, cols, rows, feed.version, feed.front_changes, feed.start).hash(&mut hasher);
+    (chat.front_seen.get(), chat.back.get(), name).hash(&mut hasher);
+    let mut open: Vec<usize> = chat.open.iter().copied().collect();
+    open.sort_unstable();
+    open.hash(&mut hasher);
+    (theme::accent(), theme::pane_bg(), theme::fg()).hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 pub(crate) fn bottom_region(rows: &[Vec<GridCell>]) -> Option<usize> {
     if rows.is_empty() {
         return None;
@@ -625,12 +654,26 @@ impl App {
 
     /// 대화로 보는 칸의 이번 프레임 화면 — 위는 기록에서 편 대화, 아래는 진짜 화면의 바닥. 판이 떠
     /// 바닥을 못 찾으면 None(진짜 터미널을 그린다).
-    pub(crate) fn chat_frame(&self, ws: &Workspace, pane: &PaneState, id: &str, cols: usize, rows: usize) -> Option<ChatFrame> {
+    ///
+    /// 입력이 같으면 지난 판을 그대로 준다 — 장마다 대화 칸마다 바닥 찾기·다시 접기·줄 복사를 새로 해, 일하는
+    /// 칸이 하나라도 있으면 쉬는 대화 칸까지 매 장 다시 지었다(거울 26칸 리그에서 메인 스레드 일의 13%).
+    pub(crate) fn chat_frame(&self, ws: &Workspace, pane: &PaneState, id: &str, cols: usize, rows: usize) -> Option<Rc<ChatFrame>> {
         let chat = self.chat_view.panes.get(id)?;
         if chat.failed.get() || !self.pane_can_chat(ws, id) || cols < 8 || rows < 4 {
             return None;
         }
         let src = pane.term()?;
+        let tab = ws.active_tab_pid(id);
+        let name = ws.pane_character.get(&tab).cloned();
+        let key = chat_frame_key(chat, src, name.as_deref(), cols, rows);
+        if let Some((seen, frame, older)) = chat.frame.borrow().as_ref() {
+            if key == Some(*seen) {
+                if *older {
+                    chat.want_older.set(true);
+                }
+                return Some(Rc::clone(frame));
+            }
+        }
         let top = bottom_region(&src.cells)?;
         // 거울은 원본 칸 폭이 이 칸과 다르다 — 바닥도 이 폭으로 다시 짓는다.
         let src_cursor = (src.cursor_row as usize).checked_sub(top).map(|r| (r, src.cursor_col as usize));
@@ -641,8 +684,6 @@ impl App {
             return None;
         }
         let hist_rows = rows.saturating_sub(region).max(1);
-        let tab = ws.active_tab_pid(id);
-        let name = ws.pane_character.get(&tab).cloned();
         let face_slug = name.as_deref().and_then(crate::screenread::student_face_slug);
         if let Some(rows) = screen_banner(&src.cells[..top]) {
             *chat.banner.borrow_mut() = Some(rows);
@@ -695,7 +736,8 @@ impl App {
             toggles.push(None);
         }
         // 받은 쪽 첫머리에 두 화면 안으로 다가가면 앞 쪽을 받는다 — 닿기 전에 대개 와 있다.
-        if older_left && first < hist_rows * 2 {
+        let wants_older = older_left && first < hist_rows * 2;
+        if wants_older {
             chat.want_older.set(true);
         }
         if older_left && first == 0 {
@@ -728,14 +770,18 @@ impl App {
             app_cursor: src.app_cursor,
             bracketed_paste: src.bracketed_paste,
             laid_out: true,
+            // 합성 재사용이 같은 판인지를 이 번호로 안다.
+            revision: crate::next_term_revision(),
             ..Default::default()
         };
         let caret = cursor.map(|(r, c)| (r as usize, c as usize));
-        Some(ChatFrame { term, faces, face_slug, hist_rows, toggles, caret, view })
+        let frame = Rc::new(ChatFrame { term, faces, face_slug, hist_rows, toggles, caret, view });
+        *chat.frame.borrow_mut() = key.map(|key| (key, Rc::clone(&frame), wants_older));
+        Some(frame)
     }
 
     /// 렌더가 그린 대화 칸을 적는다 — 다음 입력이 이 자리를 본다.
-    pub(crate) fn note_chat_frame(&self, id: &str, frame: &ChatFrame, rect: Rect, cell: (f32, f32)) {
+    pub(crate) fn note_chat_frame(&self, id: &str, frame: &Rc<ChatFrame>, rect: Rect, cell: (f32, f32)) {
         self.chat_view.drawn.borrow_mut().insert(
             id.to_string(),
             Drawn {
@@ -743,7 +789,7 @@ impl App {
                 cell,
                 hist_rows: frame.hist_rows,
                 toggles: frame.toggles.clone(),
-                rows: frame.term.cells.clone(),
+                frame: Rc::clone(frame),
                 cursor: frame.term.cursor_visible.then_some((frame.term.cursor_row as usize, frame.term.cursor_col as usize)),
                 caret: frame.caret,
                 view: frame.view,
@@ -758,12 +804,12 @@ impl App {
 
     /// 대화 칸이 그린 격자 — 끌어 선택한 글을 복사할 때 터미널 격자 대신 읽는다.
     pub(crate) fn chat_view_rows(&self, id: &str) -> Option<Vec<Vec<GridCell>>> {
-        self.chat_view.drawn.borrow().get(id).map(|d| d.rows.clone())
+        self.chat_view.drawn.borrow().get(id).map(|d| d.rows().to_vec())
     }
 
     /// 대화 칸에 그린 (커서 칸, 격자 폭) — 원본 격자와 크기·자리가 달라 커서를 따로 옮겨 그린다.
     pub(crate) fn chat_view_cursor(&self, id: &str) -> Option<(Option<(usize, usize)>, usize)> {
-        self.chat_view.drawn.borrow().get(id).map(|d| (d.cursor, d.rows.first().map_or(0, Vec::len)))
+        self.chat_view.drawn.borrow().get(id).map(|d| (d.cursor, d.rows().first().map_or(0, Vec::len)))
     }
 
     /// 대화 칸에 그린 격자에서 그 픽셀의 (칸, 열, 행)과 보이는 격자 — 링크는 원본 글자판이 아니라 이것에서 찾는다.
@@ -774,7 +820,7 @@ impl App {
             if x < rx || x >= rx + rw || y < ry || y >= ry + rh || d.cell.0 <= 0.0 || d.cell.1 <= 0.0 {
                 return None;
             }
-            Some((id.clone(), ((x - rx) / d.cell.0) as u16, ((y - ry) / d.cell.1) as u16, d.rows.clone()))
+            Some((id.clone(), ((x - rx) / d.cell.0) as u16, ((y - ry) / d.cell.1) as u16, d.rows().to_vec()))
         })
     }
 
@@ -798,7 +844,7 @@ impl App {
             if x < rx || x >= rx + rw || y < ry || y >= ry + rh || d.cell.0 <= 0.0 || d.cell.1 <= 0.0 {
                 return None;
             }
-            let row = (((y - ry) / d.cell.1) as usize).min(d.rows.len().saturating_sub(1));
+            let row = (((y - ry) / d.cell.1) as usize).min(d.rows().len().saturating_sub(1));
             let col = (((x - rx) / d.cell.0) as usize).min(d.view.cols.saturating_sub(1));
             Some((id.clone(), row, col))
         })
@@ -809,7 +855,7 @@ impl App {
         let want: Vec<char> = text.chars().collect();
         let drawn = self.chat_view.drawn.borrow();
         drawn.values().find_map(|d| {
-            d.rows.iter().enumerate().find_map(|(r, row)| {
+            d.rows().iter().enumerate().find_map(|(r, row)| {
                 let line: Vec<(usize, char)> = row.iter().enumerate().filter(|(_, c)| c.ch != '\0').map(|(i, c)| (i, c.ch)).collect();
                 let at = line.windows(want.len()).position(|w| w.iter().map(|(_, ch)| *ch).eq(want.iter().copied()))?;
                 let col = line[at].0;
@@ -1016,6 +1062,24 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 원본 화면·보던 자리가 같은 동안만 지난 판을 다시 쓰고, 짓는 동안 소비되는 옮기기가 걸리면 새로 짓는다.
+    #[test]
+    fn a_chat_frame_is_reused_only_while_its_inputs_stay() {
+        let chat = ChatPane::new();
+        let src = TerminalPane { revision: 7, ..Default::default() };
+        let key = chat_frame_key(&chat, &src, Some("학생"), 80, 24);
+        assert!(key.is_some());
+        assert_eq!(key, chat_frame_key(&chat, &src, Some("학생"), 80, 24));
+        let moved = TerminalPane { revision: 8, ..Default::default() };
+        assert_ne!(key, chat_frame_key(&chat, &moved, Some("학생"), 80, 24), "원본 화면");
+        assert_ne!(key, chat_frame_key(&chat, &src, Some("학생"), 80, 30), "칸 크기");
+        chat.back.set(3);
+        assert_ne!(key, chat_frame_key(&chat, &src, Some("학생"), 80, 24), "보던 자리");
+        chat.back.set(0);
+        chat.jump.set(Some(1));
+        assert_eq!(chat_frame_key(&chat, &src, Some("학생"), 80, 24), None, "옮기기");
+    }
 
     fn row(text: &str) -> Vec<GridCell> {
         let mut out = Vec::new();

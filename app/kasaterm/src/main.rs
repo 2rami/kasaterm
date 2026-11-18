@@ -1835,6 +1835,12 @@ struct FileTreeDrag {
     active: bool,
 }
 
+/// 격자 내용 번호 — 칸 격자를 고칠 때와 대화 보기가 판을 새로 지을 때 하나씩 받는다. 0 은 「모름」이다.
+pub(crate) fn next_term_revision() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A terminal pane's screen state: the PTY-backed cell grid, cursor,
 /// scrollback, and the modes the emulator reports. Lives inside
 /// `PaneContent::Terminal`.
@@ -2187,8 +2193,7 @@ impl PaneTab {
     }
     fn term_mut(&mut self) -> Option<&mut TerminalPane> {
         if let PaneContent::Terminal(t) = &mut self.content {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-            t.revision = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            t.revision = next_term_revision();
             Some(t)
         } else {
             None

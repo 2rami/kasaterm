@@ -1125,7 +1125,8 @@ impl App {
         desktop_view: bool,
     ) -> Option<(u64, Option<kasa_pty::ViewerRevision>)> {
         use std::hash::{Hash, Hasher};
-        if !desktop_view || term.laid_out || ws.active_pane.as_ref() == Some(id) {
+        // 대화 보기 판(`laid_out`)은 새로 지을 때마다 번호를 받는다 — 번호 없는 늘어놓은 격자만 매번 짓는다.
+        if !desktop_view || (term.laid_out && term.revision == 0) || ws.active_pane.as_ref() == Some(id) {
             return None;
         }
         let state = self.agent_state(tab_pid);
