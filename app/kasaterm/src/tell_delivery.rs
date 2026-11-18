@@ -908,6 +908,32 @@ mod tests {
         assert!(!composer_draft_at(&[row("plain shell $ ls")], 0, 16, Claude), "입력창이 없다");
     }
 
+    /// 2026-11-18 모모이 칸 실화면: 747자 쪽지가 입력칸을 넘쳐 앞 5줄이 접히고(`↑ 5 more`) `❯` 행이 사라졌다.
+    /// 위에 칠해진 지난 질문을 입력창으로 읽어 Enter 를 보류했다(같은 칸 12번).
+    #[test]
+    fn echo_reads_the_scrolled_box_not_the_shaded_past_prompt() {
+        let shaded = |text: &str| row(text).into_iter()
+            .map(|cell|GridCell {bg:kasa_bridge::screen::Color::Rgb(55,55,55),..cell}).collect::<Vec<_>>();
+        let cells = vec![
+            shaded("❯ ⟦미도리⟧ [미도리] 알림: 지금 서울 관문(kasa-relay)을 main 48a53430 판으로"),
+            shaded("  갈아 끼워요 — 업링크가 몇 초 끊겼다 다시 붙어요."),
+            row(""),
+            row("- 옛 판은 백업해 뒀고, 문제가 생기면 바로 되돌려요."),
+            row(""),
+            row(&format!("─── ↑ 5 more {} 작업 영역: 배포 확인·미도리 소견 ─","─".repeat(30))),
+            row("  보류 문턱·끊긴 올리기·탭 끄기(「꺼질 때 마지막 한 번·기기 빼면 묘비」는 안"),
+            row("  만든 것이라 고침) midori/browser-sync-doc-rules 7579992, windows-port 위"),
+            row("  FF 가능."),
+            row(&"─".repeat(78)),
+            row("  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
+        ];
+        let body = "⟦미도리⟧ [미도리] ① 관문: … ② 브라우저 레포 문서 보류 문턱·끊긴 올리기·탭 끄기(「꺼질 때 마지막 한 번·\
+                    기기 빼면 묘비」는 안 만든 것이라 고침) midori/browser-sync-doc-rules 7579992, windows-port 위 FF 가능.";
+        let shown = input_box_text(&cells).expect("접힌 입력칸");
+        assert!(!shown.contains("알림"), "지난 질문은 입력창이 아니다: {shown:?}");
+        assert!(paste_echoed(body,&shown));
+    }
+
     /// 새 세션 화면: 입력창이 맨 위에 있고 아래 40줄이 비었다 — 바닥 30줄만 보던 에코 확인이
     /// 놓친 배치다. 넓은 글자의 빈칸(`\0`)도 글을 끊지 않는다.
     #[test]

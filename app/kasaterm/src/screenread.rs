@@ -385,6 +385,18 @@ pub(crate) fn overflowed_title_rule(r: &[GridCell]) -> bool {
         && glyphs.len() >= 8
 }
 
+/// 입력이 입력칸보다 길면 claude 가 앞줄을 접고 윗줄에 `─── ↑ 5 more ───…─` 를 새긴다. 접힌 칸에는 `❯` 행이
+/// 없어서 마커로만 찾으면 입력칸을 놓치고, 그 위에 칠해진 지난 질문 행을 입력창으로 짚었다(2026-11-18 모모이
+/// 칸: 긴 쪽지를 붙인 뒤 다른 글을 읽어 Enter 를 보류했다).
+pub(crate) fn scrolled_prompt_rule(r: &[GridCell]) -> bool {
+    let glyphs: String = r.iter().map(|c| c.ch).filter(|c| !matches!(c, ' ' | '\0')).collect();
+    let start = r.iter().position(|c| !matches!(c.ch, ' ' | '\0'));
+    let Some(rest) = glyphs.strip_prefix('─') else { return false };
+    let Some(rest) = rest.trim_start_matches('─').strip_prefix(['↑', '↓']) else { return false };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    start.is_some_and(|s| s <= 1) && digits > 0 && rest[digits..].starts_with("more") && glyphs.ends_with('─')
+}
+
 /// codex 입력칸 머리 표시. 추론 강도 ultra 에서는 입력칸만 `»` 로 바뀐다(codex-rs
 /// `bottom_pane/effort_ignition.rs` 의 `prompt_glyph`) — 지나간 질문은 그대로 `›` 다.
 pub(crate) fn is_codex_composer_marker(ch: char) -> bool {
@@ -393,7 +405,7 @@ pub(crate) fn is_codex_composer_marker(ch: char) -> bool {
 
 pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     fn is_border(r: &[GridCell]) -> bool {
-        if overflowed_title_rule(r) {
+        if overflowed_title_rule(r) || scrolled_prompt_rule(r) {
             return true;
         }
         // 오른쪽 알림 판의 가로선은 왼쪽의 과거 ❯ 행을 둘러싼 입력칸이 아니다.
@@ -433,7 +445,8 @@ pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     if let Some(b2) = rows.iter().rposition(|r| is_border(r)) {
         if let Some(b1) = rows[..b2].iter().rposition(|r| is_border(r)) {
             let range = (b1 + 1)..b2;
-            if !range.is_empty() && rows[range.clone()].iter().any(|r| marker_row(r)) {
+            let scrolled = scrolled_prompt_rule(&rows[b1]) || scrolled_prompt_rule(&rows[b2]);
+            if !range.is_empty() && (scrolled || rows[range.clone()].iter().any(|r| marker_row(r))) {
                 return Some(PromptBox::Bordered { rows: range, top: b1, bottom: b2 });
             }
         }
@@ -6344,6 +6357,17 @@ mod prompt_box_tests {
         let not = row_from(&format!("View teammates and a long label here {}", "─".repeat(12)));
         let rows2 = vec![not, row_from("❯ x"), row_from(&"─".repeat(40))];
         assert!(prompt_box(&rows2).is_none());
+    }
+
+    // 좁은 칸에서는 접힘 표시와 세션명이 대시보다 많아도 입력칸 윗줄이다.
+    #[test]
+    fn scrolled_prompt_rule_is_a_border_even_when_the_label_outweighs_the_dashes() {
+        let top = row_from("── ↑ 12 more ──── 아주 긴 세션 이름이 들어간 작업 영역: 배포 확인·미도리 소견 ─");
+        assert!(scrolled_prompt_rule(&top));
+        let rows = vec![top, row_from("  접힌 입력의 끝줄"), row_from(&"─".repeat(60))];
+        assert!(matches!(prompt_box(&rows), Some(PromptBox::Bordered { top: 0, bottom: 2, .. })));
+        assert!(!scrolled_prompt_rule(&row_from("↑ 5 more lines above ─")), "대시로 시작해야 한다");
+        assert!(!scrolled_prompt_rule(&row_from("──── 작업 영역: 5 more ─")), "화살표와 숫자가 있어야 한다");
     }
 
     // 진짜 claude 입력박스: 대시줄 사이 ❯ 마커행 → 감지된다(실제 composed 는
