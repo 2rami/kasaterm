@@ -78,6 +78,9 @@ base64.workspace = true
 # (uploaded straight into a wgpu texture). default-features off so we
 # only pull the codecs we actually open from a shell.
 image.workspace = true
+# 학생 얼굴 PNG 를 256색 팔레트로 — 답마다 칸 출력에 실려 거울마다 그대로 간다.
+color_quant = "1.1"
+png = "0.18"
 # Parse markdown into an event stream for the in-pane document renderer
 # (headings/paragraphs/code/lists laid out directly with the cell renderer).
 pulldown-cmark = { version = "0.13", default-features = false }

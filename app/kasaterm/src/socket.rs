@@ -6198,15 +6198,78 @@ fn validate_sprite_frames(slug: &str, motion: &str, frames: &[Vec<u8>]) -> anyho
     Ok(())
 }
 
+/// 얼굴은 답마다 칸 출력에 kitty 그림으로 실려 그 칸을 보는 거울마다 그대로 간다. 96×96 RGBA PNG 가 25KB
+/// 안팎인데 256색 팔레트(투명도는 tRNS)로 쓰면 5~6KB 다(2026-11-18, 느린 맥북 길에서 거울 첫 화면의 98% 가 얼굴).
+fn palette_png(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    if rgba.len() != (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    // 다 비친 칸의 RGB 는 쓰레기 값이라 그대로 배우면 옅은 색 테두리가 남는다 — 지우고, 마지막 색 자리를 다 비침에 둔다.
+    const CLEAR: usize = 255;
+    let cleaned: Vec<u8> = rgba.chunks_exact(4).flat_map(|px| if px[3] == 0 { [0; 4] } else { [px[0], px[1], px[2], px[3]] }).collect();
+    let quant = color_quant::NeuQuant::new(10, CLEAR, &cleaned);
+    let indices: Vec<u8> = cleaned.chunks_exact(4).map(|px| if px[3] == 0 { CLEAR } else { quant.index_of(px) } as u8).collect();
+    let mut map = quant.color_map_rgba();
+    map.resize(CLEAR * 4, 0);
+    map.extend([0; 4]);
+    let palette: Vec<u8> = map.chunks_exact(4).flat_map(|c| [c[0], c[1], c[2]]).collect();
+    let alpha: Vec<u8> = map.chunks_exact(4).map(|c| c[3]).collect();
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, w, h);
+    encoder.set_color(png::ColorType::Indexed);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_palette(palette);
+    encoder.set_trns(alpha);
+    encoder.set_compression(png::Compression::High);
+    let mut writer = encoder.write_header().ok()?;
+    writer.write_image_data(&indices).ok()?;
+    writer.finish().ok()?;
+    Some(out)
+}
+
+#[cfg(test)]
+mod face_png_tests {
+    #[test]
+    fn a_face_in_256_colours_keeps_its_shape_and_clear_edges() {
+        let (rgba, w, h) = crate::sprites::student_profile_rgba("izuna").expect("얼굴");
+        let small = super::palette_png(&rgba, w, h).unwrap();
+        assert_eq!(super::palette_png(&rgba, w, h).unwrap(), small, "같은 얼굴이면 같은 바이트 — 텍스처·거울 별칭 묶기가 기댄다");
+        if let Ok(path) = std::env::var("KASATERM_FACE_PNG_DUMP") {
+            std::fs::write(path, &small).unwrap();
+        }
+        let mut plain = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_raw(w, h, rgba.clone()).unwrap().write_to(&mut plain, image::ImageFormat::Png).unwrap();
+        assert!(small.len() * 2 < plain.get_ref().len(), "{} vs {}", small.len(), plain.get_ref().len());
+        let back = image::load_from_memory(&small).unwrap().to_rgba8();
+        assert_eq!((back.width(), back.height()), (w, h));
+        let (mut diff, mut opaque) = (0u64, 0u64);
+        for (a, b) in rgba.chunks_exact(4).zip(back.as_raw().chunks_exact(4)) {
+            if a[3] == 0 {
+                assert!(b[3] < 32, "투명한 가장자리는 투명하게");
+            } else if a[3] == 255 {
+                assert!(b[3] >= 192, "불투명한 칸이 비쳐 보이면 안 된다 ({})", b[3]);
+                diff += (0..3).map(|i| (a[i] as i32 - b[i] as i32).unsigned_abs() as u64).sum::<u64>();
+                opaque += 1;
+            }
+        }
+        assert!(opaque > 0 && diff / (3 * opaque) < 12, "평균 색 차 {}", diff / (3 * opaque.max(1)));
+    }
+}
+
 /// 학생 얼굴(화면이 쓰는 얼굴 자르기 그대로)을 임시 폴더의 PNG 로 두고 `(경로, 세대)` 를 준다. 같은
 /// 그림이면 파일을 다시 쓰지 않는다 — 터미널은 경로와 세대가 같으면 다시 읽지 않는다.
 fn write_mod_face(slug: &str) -> Option<(std::path::PathBuf, u32)> {
     use std::hash::{Hash, Hasher};
     let (rgba, w, h) = crate::sprites::student_profile_rgba(slug)?;
-    let image = image::RgbaImage::from_raw(w, h, rgba)?;
-    let mut png = std::io::Cursor::new(Vec::new());
-    image.write_to(&mut png, image::ImageFormat::Png).ok()?;
-    let png = png.into_inner();
+    let png = match palette_png(&rgba, w, h) {
+        Some(png) => png,
+        None => {
+            let image = image::RgbaImage::from_raw(w, h, rgba)?;
+            let mut png = std::io::Cursor::new(Vec::new());
+            image.write_to(&mut png, image::ImageFormat::Png).ok()?;
+            png.into_inner()
+        }
+    };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     png.hash(&mut hasher);
     let generation = hasher.finish() as u32;
