@@ -82,15 +82,33 @@ pub(super) fn draw_drag(g: &mut gpu::GpuRenderer, info: &state::InfoState, curso
     g.pop_clip();
 }
 
+thread_local! {
+    /// [`App::sidebar_frame`] 구간 하나 동안의 기기 절 — 기기마다 방을 묶고 줄을 세는 일이라 구간 안에서 한 번만.
+    static FRAME_SECTIONS: std::cell::RefCell<Option<(u64, Vec<Section>)>> = const { std::cell::RefCell::new(None) };
+}
+
 impl App {
+    fn sidebar_sections(&self) -> Vec<Section> {
+        let serial = Self::sidebar_frame_serial();
+        if let Some(serial) = serial {
+            let kept = FRAME_SECTIONS.with(|kept| kept.borrow().as_ref().filter(|(at, _)| *at == serial).map(|(_, s)| s.clone()));
+            if let Some(kept) = kept {
+                return kept;
+            }
+        }
+        let fresh = sections(&self.info, self.tab_strip_w(), self.sidebar_local_content_h());
+        if let Some(serial) = serial {
+            FRAME_SECTIONS.with(|kept| *kept.borrow_mut() = Some((serial, fresh.clone())));
+        }
+        fresh
+    }
+
     pub(crate) fn sidebar_devices_content_h(&self) -> f32 {
-        sections(&self.info, self.tab_strip_w(), self.sidebar_local_content_h())
-            .last().map_or(0.0, |section| section.top + section.height)
+        self.sidebar_sections().last().map_or(0.0, |section| section.top + section.height)
     }
 
     pub(crate) fn sidebar_local_device_top(&self) -> f32 {
-        sections(&self.info, self.tab_strip_w(), self.sidebar_local_content_h())
-            .into_iter().find(|section| section.key.is_empty()).map_or(0.0, |section| section.top)
+        self.sidebar_sections().into_iter().find(|section| section.key.is_empty()).map_or(0.0, |section| section.top)
     }
 
     pub(crate) fn sidebar_local_body_offset(&self) -> f32 {

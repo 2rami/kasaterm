@@ -1,5 +1,35 @@
 //! 사이드바 방 카드 — 카드 높이·스크롤 범위·배치 계산.
 use super::*;
+use std::cell::{Cell, RefCell};
+
+type CardMetrics = (f32, f32, Vec<String>, Vec<String>);
+
+/// 한 장을 그리는 사이 방 카드 치수·기기 절을 한 번만 잰다. 그 사이 본기기 카드 높이·스크롤 한계·절 위치·
+/// 배치가 저마다 모든 방의 카드(배치도 leaf·숨긴 칸·원격 보기 여부)와 모든 기기의 방 묶음을 처음부터 다시 재서,
+/// 한 장에 카드 치수를 여섯 번·기기 절을 네 번 쟀다(2026-11-18 사용자 앱 표본에서 사이드바가 일하는 장의 1할).
+/// 범위 밖(입력 처리 등)은 그사이 상태가 바뀌었을 수 있어 늘 새로 잰다.
+#[derive(Default)]
+struct FrameMemo {
+    metrics: std::collections::HashMap<usize, CardMetrics>,
+    views: std::collections::HashMap<usize, bool>,
+    heights: Option<Vec<f32>>,
+}
+
+thread_local! {
+    static FRAME: Cell<u64> = const { Cell::new(0) };
+    static SERIAL: Cell<u64> = const { Cell::new(0) };
+    static MEMO: RefCell<FrameMemo> = RefCell::new(FrameMemo::default());
+}
+
+/// 살아 있는 동안만 [`App::sidebar_frame`] 의 잰 값을 다시 쓴다.
+pub(crate) struct SidebarFrame(());
+
+impl Drop for SidebarFrame {
+    fn drop(&mut self) {
+        FRAME.with(|frame| frame.set(0));
+        MEMO.with(|memo| *memo.borrow_mut() = FrameMemo::default());
+    }
+}
 
 fn summarize_cells(cells: Vec<Vec<String>>, mut flags: impl FnMut(&str) -> (bool, bool)) -> String {
     let (mut busy, mut attention) = (0, 0);
@@ -36,6 +66,35 @@ mod summary_tests {
 }
 
 impl App {
+    /// 사이드바 배치를 재는 구간을 연다 — 돌려받은 값을 버리면 닫힌다.
+    pub(crate) fn sidebar_frame(&self) -> SidebarFrame {
+        let serial = SERIAL.with(|serial| {
+            serial.set(serial.get() + 1);
+            serial.get()
+        });
+        FRAME.with(|frame| frame.set(serial));
+        MEMO.with(|memo| *memo.borrow_mut() = FrameMemo::default());
+        SidebarFrame(())
+    }
+
+    /// 지금 [`App::sidebar_frame`] 구간 안이면 그 구간의 번호.
+    pub(crate) fn sidebar_frame_serial() -> Option<u64> {
+        Some(FRAME.with(Cell::get)).filter(|serial| *serial != 0)
+    }
+
+    /// 다른 기기 방의 보기 창이라 이 기기 방 목록에 안 서는가.
+    fn sidebar_room_is_view(&self, i: usize) -> bool {
+        if Self::sidebar_frame_serial().is_none() {
+            return self.remote_view_of_window(i).is_some();
+        }
+        if let Some(view) = MEMO.with(|memo| memo.borrow().views.get(&i).copied()) {
+            return view;
+        }
+        let view = self.remote_view_of_window(i).is_some();
+        MEMO.with(|memo| memo.borrow_mut().views.insert(i, view));
+        view
+    }
+
     pub(crate) fn has_expanded_rooms(&self) -> bool {
         (0..self.windows.len()).any(|i| !self.collapsed_windows.contains(&i)
             && self.internal_room_kind_at(i).is_none())
@@ -74,7 +133,19 @@ impl App {
     ///
     /// 배치 루프와 스크롤 한계가 **같은 값**을 봐야 한다. 갈라지면 스크롤은 되는데
     /// 목록 끝이 영영 안 나오는 종류로 어긋난다 — 실제로 그랬다(아래 참조).
-    pub(crate) fn sidebar_card_metrics(&self, i: usize) -> (f32, f32, Vec<String>, Vec<String>) {
+    pub(crate) fn sidebar_card_metrics(&self, i: usize) -> CardMetrics {
+        if Self::sidebar_frame_serial().is_none() {
+            return self.measure_sidebar_card(i);
+        }
+        if let Some(metrics) = MEMO.with(|memo| memo.borrow().metrics.get(&i).cloned()) {
+            return metrics;
+        }
+        let metrics = self.measure_sidebar_card(i);
+        MEMO.with(|memo| memo.borrow_mut().metrics.insert(i, metrics.clone()));
+        metrics
+    }
+
+    fn measure_sidebar_card(&self, i: usize) -> CardMetrics {
         // 설정·보드 카드는 펴지 않는다. 배치도는 「어느 학생이 어디 있나」를 그리는
         // 자리인데 내부 방의 leaf 는 화면 표식 하나뿐이라, 펴면 아이콘 한 칸짜리
         // 빈 지도가 남는다(2026-09-07 지적 「설정창 방미니맵 그건 필요없으니까」).
@@ -118,16 +189,26 @@ impl App {
     /// 방 카드 전체 높이 목록(갭 제외). 스크롤 한계·막대 위치·굴림 한 칸이
     /// **같은 값**을 봐야 하므로 한 곳에서만 만든다.
     pub(crate) fn sidebar_card_heights(&self) -> Vec<f32> {
-        (0..self.windows.len())
+        let framed = Self::sidebar_frame_serial().is_some();
+        if framed {
+            if let Some(heights) = MEMO.with(|memo| memo.borrow().heights.clone()) {
+                return heights;
+            }
+        }
+        let heights: Vec<f32> = (0..self.windows.len())
             .map(|i| {
                 // 다른 기기 방의 보기 창은 이 목록에 안 선다 — 높이 0.
-                if self.sidebar_room_hidden(i) || self.remote_view_of_window(i).is_some()
+                if self.sidebar_room_hidden(i) || self.sidebar_room_is_view(i)
                     || self.internal_room_kind_at(i) == Some(crate::internal_room::InternalRoomKind::SharedRooms) {
                     return 0.0;
                 }
                 SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1
             })
-            .collect()
+            .collect();
+        if framed {
+            MEMO.with(|memo| memo.borrow_mut().heights = Some(heights.clone()));
+        }
+        heights
     }
 
     /// 방 목록이 세로로 쓸 수 있는 높이(logical px). 트레이·독·상태줄이 바닥을
@@ -282,7 +363,7 @@ impl App {
         let mut y = top + self.sidebar_local_body_offset() - scroll;
         for i in 0..n {
             // 다른 기기 방의 보기 창은 그 기계 절의 방 카드가 탭이다 — 여기엔 안 세운다.
-            if self.sidebar_local_device_collapsed() || self.sidebar_room_hidden(i) || self.remote_view_of_window(i).is_some()
+            if self.sidebar_local_device_collapsed() || self.sidebar_room_hidden(i) || self.sidebar_room_is_view(i)
                 || self.internal_room_kind_at(i) == Some(crate::internal_room::InternalRoomKind::SharedRooms) {
                 continue;
             }

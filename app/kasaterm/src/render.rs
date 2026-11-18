@@ -1873,6 +1873,7 @@ impl App {
         self.info.navigation.room_numbers = self.remote_room_navigation().into_iter().enumerate()
             .map(|(n, (label, window, room))| (label, window, room, local_count + n)).collect();
         self.info.navigation.list_rooms.default_list = self.sidebar_list_body;
+        let sidebar_frame = self.sidebar_frame();
         self.info.navigation.local_content_h = self.sidebar_local_content_h();
         self.info.navigation.shared_scroll = self.sidebar_scroll_px.clamp(0.0, self.sidebar_max_scroll(sb_win_h));
         // 방마다 탭 글리프 — 내부 방(설정·보드)은 셸이 아니라 자기 아이콘을 단다.
@@ -1903,6 +1904,7 @@ impl App {
         self.refresh_local_room_grips(&sb_tabs, (0.0, sb_view.0, tab_strip_w, sb_view.1));
         // 기기 절까지 합친 높이 — 절 배치는 그 안에서 스스로 나눈다.
         let sb_full_h = self.sidebar_full_avail_h(sb_win_h);
+        drop(sidebar_frame);
         // 지금 보는 창이 다른 기기 방의 보기 창이면 그 기계 절의 카드가 「보는 중」으로 선다.
         self.info.navigation.viewing = self.remote_view_of_window(self.active_window);
         // 그 방 안에서 지금 포커스한 거울의 원본 pane — 본기기 배치도의 「지금 보는 칸」 테두리.

@@ -197,11 +197,8 @@ fn room_key(machine: &str, window: Option<u64>, room: &str) -> String {
 fn rows(machine: &state::MachinesColMachine) -> Vec<&state::MachinesColRow> {
     if !machine.online { return Vec::new(); }
     let mut rows: Vec<_> = machine.remote.iter().chain(machine.mirrored.iter()).collect();
-    rows.sort_by(|a, b| a.room.cmp(&b.room).then_with(|| {
-        let number = |r: &state::MachinesColRow| r.remote_id.trim_start_matches('%')
-            .parse::<u64>().unwrap_or(u64::MAX);
-        number(a).cmp(&number(b))
-    }));
+    // 장마다 기기마다 몇 번씩 정렬한다 — 비교마다 칸 번호를 다시 풀지 않게 열쇠를 한 번만 만든다.
+    rows.sort_by_cached_key(|&r| (r.room.as_str(), r.remote_id.trim_start_matches('%').parse::<u64>().unwrap_or(u64::MAX)));
     rows
 }
 
@@ -227,9 +224,9 @@ pub(crate) fn rooms(machine: &state::MachinesColMachine) -> Vec<(String, Vec<&st
 
 /// 배치도 칸 하나에 앉는 줄들 — 바깥 pane 과 그 탭들. 첫 줄이 칸의 대표(좌표·얼굴).
 fn decks<'a>(list: &[&'a state::MachinesColRow]) -> Vec<Vec<&'a state::MachinesColRow>> {
-    let mut out: Vec<(String, Vec<&'a state::MachinesColRow>)> = Vec::new();
-    for row in list {
-        let key = row.tab_of.clone().unwrap_or_else(|| row.remote_id.clone());
+    let mut out: Vec<(&'a str, Vec<&'a state::MachinesColRow>)> = Vec::new();
+    for &row in list {
+        let key = row.tab_of.as_deref().unwrap_or(&row.remote_id);
         match out.iter_mut().find(|(k, _)| *k == key) {
             Some((_, deck)) => {
                 if row.tab_of.is_none() { deck.insert(0, row); } else { deck.push(row); }
