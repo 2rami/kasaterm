@@ -621,6 +621,13 @@ fn parse_codex_status_line(rows: &[Vec<GridCell>]) -> Option<ParsedCodexStatus> 
         .enumerate()
         .rev()
         .find_map(|(row_idx, row)| {
+            // 모델 이름(gpt-·codex-·claude-·o숫자)으로 시작할 수 없는 줄은 글자를 모으기 전에 버린다. Claude·셸 칸은
+            // 이 판정이 늘 실패하는데, 그때까지 모든 줄을 문자열로 만들어 쪼개던 것이 집 PC 메인 스레드 합성 일에서
+            // 가장 컸다(2026-11-18 0.2.246 표본). `row_text_only` 가 빼는 것은 ' ' 과 공백뿐이라 첫 글자가 같다.
+            let first = row.iter().map(|cell| cell.ch).find(|&ch| ch != ' ' && !ch.is_whitespace())?;
+            if !matches!(first.to_ascii_lowercase(), 'g' | 'c' | 'o') {
+                return None;
+            }
             let text = row_text_only(row);
             let parts: Vec<&str> = text
                 .trim()
@@ -1483,6 +1490,15 @@ pub(crate) fn done_report_line(row: &[GridCell]) -> Option<String> {
     // composed, 실측) — 구분할 방법이 없으니 **공백까지 전부 지운** 문자열로
     // 본다. 안 지우면 "[완료]" 가 "완 료" 로 갈라져 prefix 매칭이 깨진다.
     // 이름(캐릭터명)엔 원래 공백이 없어 잃는 것이 없다.
+    //
+    // 보고 줄은 (프롬프트 글자 하나 뒤) '[' 로 시작한다 — 아닌 줄은 글을 만들기 전에 돌아간다. 다시 합성하는 칸마다
+    // 모든 줄을 접어 글로 만들던 것이 합성 일의 몇 %였다(2026-11-18 표본).
+    let mut glyphs = row.iter().map(|c| c.ch).filter(|&c| c != ' ' && c != ' ');
+    let lead = glyphs.next()?;
+    let bracket = if matches!(lead, '❯' | '›' | '>') { glyphs.next()? } else { lead };
+    if bracket != '[' {
+        return None;
+    }
     let flat: String = row
         .iter()
         .map(|c| c.ch)
@@ -2652,6 +2668,10 @@ pub(crate) fn find_image_refs(rows: &[Vec<GridCell>]) -> Vec<ImageRef> {
     const HEAD: &str = "[Image #";
     let mut out = Vec::new();
     for (r, row) in rows.iter().enumerate() {
+        // 참조가 없는 줄은 글자·칸 배열을 만들지 않는다 — 다시 합성하는 칸마다 모든 줄에서 둘을 할당했다.
+        if !(row.iter().any(|cell| cell.ch == '[') && row.iter().any(|cell| cell.ch == '#')) {
+            continue;
+        }
         let (text, cols) = row_text_cells(row);
         let bytes = text.as_bytes();
         let mut from = 0usize;
@@ -3317,11 +3337,32 @@ fn seq_near(hay: &str, parts: &[&str], gap: usize) -> bool {
 /// (세션 안에서 연 목록은 statusline 이 남아 그 조건에 걸려 판정 자체가 꺼졌다)
 /// 판독이 먼저 홀로 서야 한다. 그래서 낱말 존재가 아니라 **인접 순서**로 본다.
 pub(crate) fn screen_is_agents_list(rows: &[Vec<GridCell>]) -> bool {
-    let squashed = squash_screen(rows);
-    // 구분자와 개수를 사이에 두므로 gap 은 " · 9999 " 를 덮을 만큼만.
-    seq_near(&squashed, &["awaiting input", "working", "completed"], 16)
-        // 통계줄이 아직 안 그려진 첫 프레임 폴백 — 목록 자리 빈 상태 안내.
-        || squashed.contains("Nothing running in the background.")
+    ScreenText::of(rows).agents_list()
+}
+
+/// 화면 전체를 낱말 사이 공백 하나로 접은 글. 합성 한 번에 피커 판정 셋이 저마다 화면을 다시 접던 것이 집 PC 메인
+/// 스레드 합성 일의 몇 %였다(2026-11-18 0.2.246 표본) — 한 번 접어 함께 본다.
+pub(crate) struct ScreenText(String);
+
+impl ScreenText {
+    pub(crate) fn of(rows: &[Vec<GridCell>]) -> Self {
+        Self(squash_screen(rows))
+    }
+
+    pub(crate) fn agents_list(&self) -> bool {
+        // 구분자와 개수를 사이에 두므로 gap 은 " · 9999 " 를 덮을 만큼만.
+        seq_near(&self.0, &["awaiting input", "working", "completed"], 16)
+            // 통계줄이 아직 안 그려진 첫 프레임 폴백 — 목록 자리 빈 상태 안내.
+            || self.0.contains("Nothing running in the background.")
+    }
+
+    pub(crate) fn resume_picker(&self) -> bool {
+        self.0.contains("Resume session (")
+    }
+
+    pub(crate) fn ask_picker(&self) -> bool {
+        self.0.contains("Chat about this") && (self.0.contains("Esc to cancel") || self.0.contains("Enter to select"))
+    }
 }
 
 /// claude `--resume` 세션 피커 화면인지 감지. "Resume session (N of M)" 헤더가
@@ -3338,7 +3379,7 @@ pub(crate) fn screen_is_resume_picker(rows: &[Vec<GridCell>]) -> bool {
     // 좁은 창에선 "Resume session" 과 "(N of M)" 이 다른 셀 행으로 wrap 되며
     // 사이에 행끝 패딩(스페이스·U+0000)이 껴 "Resume session (" 직접 매칭이
     // 깨진다(사용자: 특정 창 크기에서만 사각형 잔상 재발) — squash_screen 이 그걸 접는다.
-    squash_screen(rows).contains("Resume session (")
+    ScreenText::of(rows).resume_picker()
 }
 
 /// AskUserQuestion picker 감지 — `❯ 1. …` 옵션 목록 + 하단 힌트 박스가 학생
@@ -3348,9 +3389,7 @@ pub(crate) fn screen_is_resume_picker(rows: &[Vec<GridCell>]) -> bool {
 /// 대화 본문 우연 등장을 힌트 AND 로 한 번 더 거른다. resume 와 같은 squash
 /// 정규화로 wrap·다중 공백에 강건하게 매칭한다.
 pub(crate) fn screen_is_ask_picker(rows: &[Vec<GridCell>]) -> bool {
-    let squashed = squash_screen(rows);
-    squashed.contains("Chat about this")
-        && (squashed.contains("Esc to cancel") || squashed.contains("Enter to select"))
+    ScreenText::of(rows).ask_picker()
 }
 
 /// 한 창이 이번 프레임에 얹을 학생 스프라이트 자리들.

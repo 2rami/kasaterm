@@ -1506,7 +1506,9 @@ impl App {
         // 없으면 대화 화면까지 관리 화면으로 오인해 학생 표시가 영영 안 돌아온다.
         let has_profile_slot = statusline_face.is_some()
             || composed.iter().any(|row| row.iter().any(|c| c.ch == '\u{fffc}'));
-        let agents_view = screen_is_agents_list(&composed)
+        // 피커 판정 셋이 함께 본다. 사이에 바뀌는 글자는 Codex 배너 제목과 지운 칸 하나뿐이라 피커 문구에 안 닿는다.
+        let screen_text = ScreenText::of(&composed);
+        let agents_view = screen_text.agents_list()
             || (!has_profile_slot
                 && self
                     .pty
@@ -1810,13 +1812,13 @@ impl App {
         // resume 피커(claude 시스템 UI)는 `╭─╮ Search ╰─╯` 박스가 pane
         // 입력박스로 오인돼 학생 accent 후처리가 오발동한다(사용자: 빈 초록
         // 사각형). agents 목록 뷰처럼 학생 accent·세션 제목 인레이를 끈다.
-        let resume_picker = screen_is_resume_picker(&composed);
+        let resume_picker = screen_text.resume_picker();
         // AskUserQuestion picker 도 `❯ 1. …` 옵션줄 + 하단 힌트 박스가
         // 입력박스로 오인돼 accent 사각형이 남는다(사용자: "question 이나
         // resume" 둘 다). team member/bg 세션 입력박스는 @칩 대신 세션
         // 제목이 상단보더에 와서 @칩 게이트론 못 가른다 → 화면 시그니처
         // ("Chat about this" 등)로 감지해 resume 와 동일하게 accent 를 끈다.
-        let ask_picker = screen_is_ask_picker(&composed);
+        let ask_picker = screen_text.ask_picker();
         let prompt_accent = active_prompt_accent(
             agent_kind,
             agents_view || resume_picker || ask_picker,
