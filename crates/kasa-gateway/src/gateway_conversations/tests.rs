@@ -139,10 +139,14 @@ async fn the_sync_loop_keeps_its_board_between_quick_rounds() {
     let credential = kasa_device::device_auth::DeviceCred { relay:format!("http://{addr}"), account:"alice".into(), device_id:"fixture".into(), token, display_name:None };
     let source = Desktop { id:format!("archive-test-{}", uuid::Uuid::new_v4()), source:std::sync::Mutex::new("first.jsonl".into()), calls:Default::default(), boards:Default::default() };
     let client = reqwest::Client::new();
-    let mut board = kasa_remote::conversation_archive::sync::BoardCache::default();
-    for _ in 0..3 {
-        kasa_remote::conversation_archive::sync::synchronize_with(&mut board, &source, &client, &credential, "archive-desktop", &|| true).await.unwrap();
-    }
+    use kasa_remote::conversation_archive::sync::{synchronize_with, watching, BoardCache, Pace};
+    let mut board = BoardCache::default();
+    let first = synchronize_with(&mut board, &source, &client, &credential, "archive-desktop", &|| true).await.unwrap();
+    let held = watching(&source.id);
+    let second = synchronize_with(&mut board, &source, &client, &credential, "archive-desktop", &|| true).await.unwrap();
+    drop(held);
+    let third = synchronize_with(&mut board, &source, &client, &credential, "archive-desktop", &|| true).await.unwrap();
+    assert_eq!([first, second, third], [Pace::Follow, Pace::Hurry, Pace::Rest], "자라기만 5초 · 보는 중 1초 · 다 올리면 15초");
     assert_eq!(source.calls.lock().unwrap().as_slice(), [0, 100, 200], "기록은 바퀴마다 이어 읽는다");
     assert_eq!(source.boards.load(std::sync::atomic::Ordering::Relaxed), 1, "빠른 바퀴들은 보드를 한 번만 짓는다");
     kasa_remote::conversation_archive::sync::synchronize(&source, &client, &credential, "archive-desktop", &|| true).await.unwrap();

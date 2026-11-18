@@ -105,6 +105,8 @@ async fn transcript_raw_handler(
 ) -> impl IntoResponse {
     let surface = params.get("surface").map(String::as_str).unwrap_or("");
     let offset = params.get("offset").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    // 이 칸 대화를 지금 보는 쪽이 있다는 표시 — 대화 보관 바퀴가 자라는 기록을 1초로 올린다.
+    let _watching = (!surface.is_empty()).then(|| kasa_remote::conversation_archive::sync::watching(surface));
     // `wait_ms` — 새 줄이 없으면 그 칸의 mod 가 대화 행을 알릴 때까지 쥐었다가 다시 읽는다(긴 폴링).
     // mod 없는 칸은 바로 답한다. 행은 mod 가 알린 직후 파일에 닿으므로 한 박자 늦춰 읽는다.
     let wait = params
