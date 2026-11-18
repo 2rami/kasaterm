@@ -19,6 +19,7 @@ mod procinfo;
 mod state;
 
 pub use crossbeam_channel::Receiver as ScreenReceiver;
+pub use std::sync::mpsc::Receiver as TapReceiver;
 pub use host::{set_host_policy, ClipboardSink, HostPolicy};
 pub use kitty::{cell_pixels, set_cell_pixels};
 pub use layout::{bento, bento_shape, fleet, fleet_capacity, Bento, Divider, PtyLayout, SplitDir};

@@ -311,12 +311,12 @@ impl PtySession {
     /// ⚠️ 스냅샷 채취와 구독 등록이 `term` 락 하나 안에서 끝나야 하는 이유는
     /// `tap_bytes_with_snapshot` 와 같다 — 둘로 나누면 그 사이 프레임이 스냅샷에도
     /// tap 에도 없이 사라진다. 그래서 `full_snapshot` 을 부르지 않고 본문을 편다.
-    pub fn tap_screens_with_snapshot(&self) -> (Receiver<ScreenUpdate>, ScreenUpdate) {
+    pub fn tap_screens_with_snapshot(&self) -> (crate::TapReceiver<ScreenUpdate>, ScreenUpdate) {
         let (cols, rows) = *self.size.lock().unwrap();
         let mut t = self.term.lock().unwrap();
         let mut snap = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
         attach_inline_views(&mut snap, &t, &self.inline_imgs);
-        let (tx, rx) = crossbeam_channel::bounded(64);
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
         self.screen_taps.lock().unwrap().push(tx);
         (rx, snap)
     }
@@ -327,8 +327,8 @@ impl PtySession {
     ///
     /// 버퍼는 64청크 — 64KB read 기준 최악 4MB다. 소비가 이보다 밀리면 reader 가
     /// 이 구독을 끊는다(`spawn_reader_thread` 의 tee 주석 참고).
-    pub fn tap_bytes(&self) -> Receiver<Vec<u8>> {
-        let (tx, rx) = crossbeam_channel::bounded(64);
+    pub fn tap_bytes(&self) -> crate::TapReceiver<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
         self.byte_taps.lock().unwrap().push(tx);
         rx
     }
@@ -344,7 +344,7 @@ impl PtySession {
     /// 그 사이의 출력이 스냅샷에도 tap 에도 없이 사라지거나(유실), 양쪽에 다 담겨
     /// 두 번 그려진다(중복 — `abc` 뒤에 `c` 가 또 찍히는 식). reader 도 같은 락
     /// 안에서 뿌리므로(`spawn_reader_thread`) 이 순서면 어느 쪽도 일어나지 않는다.
-    pub fn tap_bytes_with_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>) {
+    pub fn tap_bytes_with_snapshot(&self) -> (crate::TapReceiver<Vec<u8>>, Vec<u8>) {
         let (rx, bytes, _) = self.tap_bytes_with_sized_snapshot();
         (rx, bytes)
     }
@@ -352,12 +352,12 @@ impl PtySession {
     /// The dimensions belong to these exact snapshot bytes, not a later
     /// `size()` read. A resize between capture and WS handshake otherwise
     /// replays narrow rows at a wide margin, destroying their soft-wrap flags.
-    pub fn tap_bytes_with_sized_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>, (u16, u16)) {
+    pub fn tap_bytes_with_sized_snapshot(&self) -> (crate::TapReceiver<Vec<u8>>, Vec<u8>, (u16, u16)) {
         let t = self.term.lock().unwrap();
         let (bytes, size) = self.sized_snapshot_locked(&t);
         // 탭 등록은 스냅샷과 같은 락 안이어야 한다 — 둘 사이에 들어온 프레임은
         // 스냅샷에도 탭에도 없이 사라진다.
-        let (tx, rx) = crossbeam_channel::bounded(64);
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
         self.byte_taps.lock().unwrap().push(tx);
         (rx, bytes, size)
     }
@@ -413,7 +413,7 @@ pub(super) fn snapshot_bytes_with_images(
 /// 터미널 전체가 느려진다(`spawn_reader_thread` 의 tee 주석 참고).
 pub(super) fn publish_screen_update(
     tx: &Sender<ScreenUpdate>,
-    taps: &Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
+    taps: &Arc<Mutex<Vec<TapSender<ScreenUpdate>>>>,
     update: ScreenUpdate,
 ) -> Result<(), crossbeam_channel::TrySendError<ScreenUpdate>> {
     {
@@ -465,7 +465,7 @@ mod snapshot_tap_tests {
             session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
         }
         while tap.try_recv().is_ok() {}
-        assert!(matches!(tap.try_recv(), Err(crossbeam_channel::TryRecvError::Disconnected)));
+        assert!(matches!(tap.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)));
         assert!(!session.output_closed());
         let recovered = session.tap_bytes();
         events.send(ExtEvent::Bytes(b"RECOVERED".to_vec())).unwrap();
@@ -756,5 +756,92 @@ mod external_screen_tests {
         *source.size.lock().unwrap() = (26, 9);
         let (_tap, _bytes, size) = source.tap_bytes_with_sized_snapshot();
         assert_eq!(size, (8, 4));
+    }
+}
+
+/// 거울 탭 채널을 고른 근거를 다시 재는 자리 — 손으로 돌린다
+/// (`cargo test -p kasa-pty --lib tap_wait_cost -- --ignored --nocapture`).
+#[cfg(test)]
+mod tap_wait_cost {
+    use std::time::{Duration, Instant};
+
+    fn thread_cpu() -> Duration {
+        #[cfg(unix)]
+        unsafe {
+            let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t);
+            Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::Foundation::FILETIME;
+            use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+            let zero = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let (mut created, mut exited, mut kernel, mut user) = (zero(), zero(), zero(), zero());
+            GetThreadTimes(GetCurrentThread(), &mut created, &mut exited, &mut kernel, &mut user);
+            let ticks = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+            Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+        }
+    }
+
+    /// `gap` 마다 보낸 시각 하나 — 받는 스레드의 한 통당 CPU 와 받기까지 걸린 평균.
+    fn measure(
+        mut next: impl FnMut() -> Option<Instant> + Send + 'static,
+        mut send: impl FnMut(Instant),
+        count: u32,
+        gap: Duration,
+    ) -> (Duration, Duration) {
+        let receiver = std::thread::spawn(move || {
+            let start = thread_cpu();
+            let (mut late, mut got) = (Duration::ZERO, 0u32);
+            while let Some(sent) = next() {
+                late += sent.elapsed();
+                got += 1;
+            }
+            ((thread_cpu() - start) / got.max(1), late / got.max(1))
+        });
+        for _ in 0..count {
+            send(Instant::now());
+            std::thread::sleep(gap);
+        }
+        drop(send);
+        receiver.join().unwrap()
+    }
+
+    fn both(label: &str) {
+        const COUNT: u32 = 2000;
+        const GAP: Duration = Duration::from_millis(1);
+        let (tx, rx) = crossbeam_channel::bounded::<Instant>(64);
+        let crossbeam = measure(move || rx.recv().ok(), move |t| { let _ = tx.send(t); }, COUNT, GAP);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Instant>(64);
+        let std = measure(move || rx.recv().ok(), move |t| { let _ = tx.send(t); }, COUNT, GAP);
+        eprintln!(
+            "{label}: per message CPU crossbeam {:?} / std {:?} · wake latency crossbeam {:?} / std {:?}",
+            crossbeam.0, std.0, crossbeam.1, std.1
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn crossbeam_and_std_receivers_while_idle_and_while_busy() {
+        both("idle");
+        // 앱처럼 다른 스레드가 코어를 쓰고 있을 때 — 양보가 실제로 자리를 내주는 경우.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let spinners: Vec<_> = (0..cores)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        both("all cores busy");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for spinner in spinners {
+            spinner.join().unwrap();
+        }
     }
 }

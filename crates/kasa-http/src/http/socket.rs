@@ -275,9 +275,9 @@ pub fn push_viewer_control(pane: &str, text: &str) -> usize {
 /// 구독 시작 시점의 "지금 화면"과 이후 스트림. 둘을 한 락에서 받아야 그 사이
 /// 프레임이 유실되지 않는다(`tap_bytes_with_snapshot` 주석).
 enum Tap {
-    Bytes(kasa_pty::ScreenReceiver<Vec<u8>>, Vec<u8>, (u16, u16)),
+    Bytes(kasa_pty::TapReceiver<Vec<u8>>, Vec<u8>, (u16, u16)),
     Grid(
-        kasa_pty::ScreenReceiver<kasa_screen::screen::ScreenUpdate>,
+        kasa_pty::TapReceiver<kasa_screen::screen::ScreenUpdate>,
         Box<kasa_screen::screen::ScreenUpdate>,
     ),
 }
@@ -517,7 +517,7 @@ async fn term_ws_run(
         .await;
     // 이어서 현재 화면. 크기를 먼저 알린 뒤라야 클라가 격자를 맞춘 상태에서 그린다.
     // 기존 칸에 늦게 붙어도 다음 출력까지 빈 화면으로 기다리지 않게 한다.
-    // crossbeam recv 는 블로킹이라 tokio 워커에서 그대로 돌리면 런타임을 세운다.
+    // 탭 recv 는 블로킹이라 tokio 워커에서 그대로 돌리면 런타임을 세운다.
     // 전용 스레드가 받아 tokio 채널로 건넨다.
     let (btx, mut brx) = tokio::sync::mpsc::channel::<Frame>(64);
     // 거울의 「지난 줄 달라」 응답도 화면과 같은 채널을 탄다 — 순서가 보장된다.
