@@ -18,7 +18,7 @@ pub use palette::{adapt_to_viewer, Palette, SourcePalette};
 pub use renderer::{GridFonts, GridRenderer, PaneSlot};
 
 /// 한 행 안의 셀 구간 `col_start..col_end`(끝 미포함). 칸 위에 밑줄을 긋는 링크 범위에 쓴다.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CellSpan {
     pub row: u16,
     pub col_start: u16,
