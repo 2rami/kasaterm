@@ -59,21 +59,13 @@ void main() {
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   }
 
-  testWidgets('설치 확인 창이 닫혀 돌아오면 잠깐 알린 뒤 「열기」 알림을 걸고 비켜선다', (tester) async {
+  testWidgets('설치 확인 창이 닫혀 돌아오면 곧바로 「열기」 알림을 걸고 비켜선다', (tester) async {
     await start(tester);
-    expect(
-      find.textContaining('앱을 닫아요'),
-      findsNothing,
-      reason: '확인 창이 뜨기 전에는 알리지 않는다',
-    );
+    await tester.pump();
+    expect(steps(), isEmpty, reason: '확인 창이 뜨기 전에는 비켜서지 않는다');
     confirmDialog(tester);
     await tester.pump();
     await tester.pump();
-    expect(find.textContaining('앱을 닫아요'), findsOneWidget);
-    await tester.pumpAndSettle();
-    expect(steps(), isEmpty);
-    await tester.pump(releaseStepAsideDelay);
-    await tester.pumpAndSettle();
     expect(steps().single.arguments, {
       'title': 'KASATERM 새 판 1.0.0 (2610061200)',
       'body': '설치가 끝나면 눌러서 열어요',
@@ -89,20 +81,8 @@ void main() {
         '앱 상태 inactive',
         '앱 상태 resumed',
         '기다림 끝 · back',
-        '띠 닫힘 · timeout',
       ]),
     );
-  });
-
-  testWidgets('알림 띠의 [취소]를 누르면 비켜서지 않는다', (tester) async {
-    await start(tester);
-    confirmDialog(tester);
-    await tester.pumpAndSettle(const Duration(milliseconds: 100));
-    await tester.tap(find.text('취소'));
-    await tester.pumpAndSettle();
-    await tester.pump(releaseStepAsideDelay);
-    expect(steps(), isEmpty);
-    expect(logs(), contains('띠 닫힘 · action'));
   });
 
   testWidgets('확인 창이 앱을 비활성으로 만들지 않으면 [앱 닫기] 띠로 비켜선다', (tester) async {
@@ -123,15 +103,11 @@ void main() {
     confirmDialog(tester);
     await tester.pump();
     await tester.pump();
-    expect(find.textContaining('앱을 닫아요'), findsOneWidget);
-    await tester.pumpAndSettle();
-    await tester.pump(releaseStepAsideDelay);
-    await tester.pumpAndSettle();
     expect(steps(), hasLength(1));
     expect(logs(), contains('설치 창 열기 → false'));
   });
 
-  testWidgets('[앱 닫기] 띠가 떠 있어도 확인 창이 늦게 떴다 돌아오면 3초 띠로 바꾼다', (tester) async {
+  testWidgets('[앱 닫기] 띠가 떠 있어도 확인 창이 늦게 떴다 돌아오면 띠를 걷고 비켜선다', (tester) async {
     await start(tester);
     await tester.pump(releaseLeaveGrace);
     await tester.pumpAndSettle();
@@ -140,9 +116,6 @@ void main() {
     await tester.pump();
     await tester.pumpAndSettle();
     expect(find.text('앱 닫기'), findsNothing);
-    expect(find.textContaining('앱을 닫아요'), findsOneWidget);
-    await tester.pump(releaseStepAsideDelay);
-    await tester.pumpAndSettle();
     expect(steps(), hasLength(1));
   });
 
@@ -155,7 +128,7 @@ void main() {
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pumpAndSettle();
-    expect(find.textContaining('앱을 닫아요'), findsNothing);
+    expect(steps(), isEmpty);
     expect(logs(), contains('기다림 끝 · gone'));
 
     calls.clear();
@@ -164,7 +137,6 @@ void main() {
     await tester.pumpAndSettle();
     confirmDialog(tester);
     await tester.pumpAndSettle();
-    expect(find.textContaining('앱을 닫아요'), findsNothing);
     expect(steps(), isEmpty);
     expect(logs(), contains('기다림 끝 · timeout'));
   });

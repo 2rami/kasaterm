@@ -47,8 +47,9 @@ class ReleaseWatch {
 }
 
 /// 새 판 [설치]. iOS 는 앞에 떠 있는 앱을 갈아 끼우지 않아(홈으로 가야 설치가 시작된다) 설치 확인 창이 닫혀 앱으로
-/// 돌아오면 잠깐 알린 뒤 앱이 스스로 홈으로 비켜선다. 설치를 마친 앱을 스스로 다시 켤 길은 없어 「눌러서 열기」 알림을
-/// 남긴다. 확인 창에서 「취소」를 눌렀는지는 앱이 알 수 없어 알림 띠의 [취소]로 멈춘다.
+/// 돌아오면 곧바로 홈으로 비켜선다. 설치를 마친 앱을 스스로 다시 켤 길은 없어 「눌러서 열기」 알림을 남긴다.
+/// 확인 창의 「취소」와 「설치」는 앱이 못 가르지만, 거기까지 온 사람은 이미 [설치]를 두 번 고른 것이라 취소할 틈을
+/// 두지 않는다 — 3초 띠로 물었더니 앱이 꺼지기까지 느렸다(2026-11-18).
 ///
 /// 확인 창이 앱을 비활성으로 만들지 않거나 열기가 실패로 답하면 돌아온 순간을 못 잡는다 — 그때는 [앱 닫기] 단추 띠를
 /// 남겨 사람이 한 번에 비켜서게 한다(10-07 실기에서 앱이 비켜서지 않았다). 단계마다 [releaseLog] 로 남긴다.
@@ -75,10 +76,10 @@ Future<void> installRelease(
     return;
   }
   ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? manual;
-  final first = await Future.any<_Return?>([
-    watch.done,
-    Future.delayed(releaseLeaveGrace, () => null),
-  ]);
+  final graceUp = Completer<_Return?>();
+  final grace = Timer(releaseLeaveGrace, () => graceUp.complete(null));
+  final first = await Future.any<_Return?>([watch.done, graceUp.future]);
+  grace.cancel();
   if (first == null && !watch.left) {
     releaseLog('${releaseLeaveGrace.inSeconds}초 안에 비활성이 안 됨 — [앱 닫기] 띠');
     manual = messenger.showSnackBar(
@@ -105,17 +106,6 @@ Future<void> installRelease(
       break;
     case _Return.back:
       manual?.close();
-      final band = messenger.showSnackBar(
-        releaseBand(
-          title: '새 판을 설치하려고 앱을 닫아요',
-          body: '설치가 끝나면 알림을 눌러 다시 열어요',
-          plain: '취소',
-          duration: releaseStepAsideDelay,
-        ),
-      );
-      final closed = await band.closed;
-      releaseLog('띠 닫힘 · ${closed.name}');
-      if (closed == SnackBarClosedReason.action) return;
   }
   await _bridge('stepAside', {
     'title': 'KASATERM 새 판 ${release.version} (${release.build})',
@@ -254,9 +244,6 @@ class _ReleaseBand extends StatelessWidget {
     );
   }
 }
-
-/// 비켜서기 전에 [취소]를 누를 틈.
-const releaseStepAsideDelay = Duration(seconds: 3);
 
 /// 설치 창을 연 뒤 이만큼 안에 앱이 비활성이 안 되면 돌아온 순간을 못 잡는 것으로 본다.
 const releaseLeaveGrace = Duration(seconds: 2);
