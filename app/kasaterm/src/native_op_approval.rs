@@ -324,7 +324,6 @@ fn trust_sheet(window: &winit::window::Window, key: &serde_json::Value) -> Optio
 
 /// 사람이 맞춰 보고 누르는 확인 창. 누르면 `answer` 에 `value` 를 두고 다음 poll 이 꺼내 간다.
 /// Return 은 취소다(치던 Enter 가 새도 믿음이 나가지 않게).
-#[cfg(target_os = "macos")]
 pub(crate) fn confirm_sheet(
     window: &winit::window::Window,
     title: &str,
@@ -333,35 +332,139 @@ pub(crate) fn confirm_sheet(
     answer: &'static Mutex<Option<String>>,
     value: String,
 ) -> Option<usize> {
+    let spec = SheetSpec { title, info, body: None, buttons: &[primary, "취소"], primary_enabled: true };
+    decision_sheet(window, &spec, move |choice| {
+        if choice == Some(0) {
+            if let Ok(mut slot) = answer.lock() {
+                *slot = Some(value.clone());
+            }
+        }
+    })
+}
+
+/// 결정 시트 한 장. 단추 0 이 주 동작(오른쪽 끝, 위험 표시), 1 이 Return 을 받는 기본 동작이고 그 뒤 단추는 왼쪽으로 선다.
+pub(crate) struct SheetSpec<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) info: &'a str,
+    /// 고정폭 읽기 전용 원문 칸 — 길면 칸 안에서 스크롤한다(시트가 화면 밖으로 자라지 않게).
+    pub(crate) body: Option<&'a str>,
+    pub(crate) buttons: &'a [&'a str],
+    pub(crate) primary_enabled: bool,
+}
+
+/// 원문 칸 폭·높이 상한(맥·Windows 같다).
+#[cfg(target_os = "macos")]
+const BODY_W: f64 = 560.0;
+#[cfg(target_os = "macos")]
+const BODY_MAX_H: f64 = 260.0;
+
+/// 시트를 띄우고 손잡이를 돌려준다. `answer` 는 누른 단추 차례로 한 번 불리고, 결정 없이 거두면 None 이다.
+#[cfg(target_os = "macos")]
+pub(crate) fn decision_sheet(
+    window: &winit::window::Window,
+    spec: &SheetSpec,
+    answer: impl Fn(Option<usize>) + 'static,
+) -> Option<usize> {
     use objc2::msg_send;
     use objc2::runtime::{AnyObject, Bool};
     use objc2_foundation::NSString;
-    let (alert, ns_window) = alert(window, title, info)?;
-    let id = value;
+    let (alert, ns_window) = alert(window, spec.title, spec.info)?;
+    let count = spec.buttons.len();
     unsafe {
-        let trust: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*NSString::from_str(primary)];
-        let cancel: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*NSString::from_str("취소")];
-        let _: () = msg_send![trust, setKeyEquivalent: &*NSString::from_str("")];
-        let _: () = msg_send![cancel, setKeyEquivalent: &*NSString::from_str("\r")];
-        let _: () = msg_send![trust, setHasDestructiveAction: Bool::YES];
-        let addr = alert as usize;
-        let handler = block2::RcBlock::new(move |resp: isize| {
-            if resp == 1000 {
-                if let Ok(mut slot) = answer.lock() {
-                    *slot = Some(id.clone());
+        if let Some(body) = spec.body {
+            let view = body_view(body);
+            if !view.is_null() {
+                let _: () = msg_send![alert, setAccessoryView: view];
+                let _: () = msg_send![view, release];
+            }
+        }
+        for (index, label) in spec.buttons.iter().enumerate() {
+            let button: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*NSString::from_str(label)];
+            let key = if index == 1 { "\r" } else { "" };
+            let _: () = msg_send![button, setKeyEquivalent: &*NSString::from_str(key)];
+            if index == 0 {
+                let _: () = msg_send![button, setHasDestructiveAction: Bool::YES];
+                if !spec.primary_enabled {
+                    let _: () = msg_send![button, setEnabled: Bool::NO];
                 }
             }
+        }
+        let addr = alert as usize;
+        let handler = block2::RcBlock::new(move |resp: isize| {
+            // NSAlertFirstButtonReturn = 1000, 다음 단추 1001…. `close_sheet` 로 거두면 0 이다.
+            answer(usize::try_from(resp - 1000).ok().filter(|index| *index < count));
             let _: () = msg_send![addr as *mut AnyObject, release];
         });
         let _: () = msg_send![alert, beginSheetModalForWindow: ns_window, completionHandler: &*handler];
+        Some(addr)
     }
-    Some(alert as usize)
+}
+
+/// 원문 칸 — 고정폭 읽기 전용, 고르기·복사 가능. 높이는 글에 맞추되 상한을 넘으면 칸 안에서 스크롤한다.
+#[cfg(target_os = "macos")]
+unsafe fn body_view(body: &str) -> *mut objc2::runtime::AnyObject {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    let (Some(scroll_class), Some(text_class), Some(font_class)) =
+        (AnyClass::get(c"NSScrollView"), AnyClass::get(c"NSTextView"), AnyClass::get(c"NSFont"))
+    else {
+        return std::ptr::null_mut();
+    };
+    unsafe {
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(BODY_W, BODY_MAX_H));
+        let text: *mut AnyObject = msg_send![text_class, alloc];
+        let text: *mut AnyObject = msg_send![text, initWithFrame: frame];
+        let _: () = msg_send![text, setString: &*NSString::from_str(body)];
+        let _: () = msg_send![text, setEditable: Bool::NO];
+        let _: () = msg_send![text, setSelectable: Bool::YES];
+        let _: () = msg_send![text, setVerticallyResizable: Bool::YES];
+        let _: () = msg_send![text, setAutoresizingMask: 2usize];
+        let _: () = msg_send![text, setTextContainerInset: NSSize::new(4.0, 6.0)];
+        let font: *mut AnyObject = msg_send![font_class, monospacedSystemFontOfSize: 12.0f64, weight: 0.0f64];
+        if !font.is_null() {
+            let _: () = msg_send![text, setFont: font];
+        }
+        let layout: *mut AnyObject = msg_send![text, layoutManager];
+        let container: *mut AnyObject = msg_send![text, textContainer];
+        let mut height = BODY_MAX_H;
+        if !layout.is_null() && !container.is_null() {
+            let _: () = msg_send![layout, ensureLayoutForTextContainer: container];
+            let used: NSRect = msg_send![layout, usedRectForTextContainer: container];
+            height = (used.size.height + 12.0 + 4.0).clamp(48.0, BODY_MAX_H);
+        }
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(BODY_W, height));
+        let scroll: *mut AnyObject = msg_send![scroll_class, alloc];
+        let scroll: *mut AnyObject = msg_send![scroll, initWithFrame: frame];
+        let _: () = msg_send![scroll, setHasVerticalScroller: Bool::YES];
+        let _: () = msg_send![scroll, setBorderType: 2isize];
+        let _: () = msg_send![scroll, setDocumentView: text];
+        let _: () = msg_send![text, release];
+        scroll
+    }
+}
+
+/// 다른 곳에서 끝난 요청의 시트를 결정 없이 거둔다.
+#[cfg(target_os = "macos")]
+pub(crate) fn close_sheet(alert: usize) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    unsafe {
+        let sheet: *mut AnyObject = msg_send![alert as *mut AnyObject, window];
+        if sheet.is_null() {
+            return;
+        }
+        let parent: *mut AnyObject = msg_send![sheet, sheetParent];
+        if !parent.is_null() {
+            let _: () = msg_send![parent, endSheet: sheet, returnCode: 0isize];
+        }
+    }
 }
 
 /// 검증 실행 전용 — 시트 창을 창 서버에서 뜬다. 뷰 비트맵(`cacheDisplayInRect`)은 시트의 글자를 빠뜨리고, 제 창 한 장은
 /// 화면 녹화 권한 없이 `CGWindowListCreateImage` 로 뜰 수 있다(macos_sparkle.rs 업데이트 리그와 같은 길).
 #[cfg(target_os = "macos")]
-fn shot_alert(alert: usize, path: &str) {
+pub(crate) fn shot_alert(alert: usize, path: &str) {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
     type CreateImage = unsafe extern "C" fn(objc2_foundation::NSRect, u32, u32, u32) -> *mut AnyObject;
@@ -402,45 +505,47 @@ fn shot_alert(alert: usize, path: &str) {
     }
 }
 
-/// 맥 시트와 같은 글·단추 — 원문 칸 없이 지문만, Enter 는 취소.
+/// 맥 시트와 같은 글·단추 — Enter 는 기본 동작(단추 1).
 #[cfg(windows)]
-pub(crate) fn confirm_sheet(
+pub(crate) fn decision_sheet(
     window: &winit::window::Window,
-    title: &str,
-    info: &str,
-    primary: &str,
-    answer: &'static Mutex<Option<String>>,
-    value: String,
+    spec: &SheetSpec,
+    answer: impl Fn(Option<usize>) + 'static,
 ) -> Option<usize> {
-    let spec = crate::win_sheet::Spec { title, info, body: None, buttons: [primary, "취소"], primary_enabled: true };
-    crate::win_sheet::open(window, &spec, move |choice| {
-        if choice == Some(0) {
-            if let Ok(mut slot) = answer.lock() {
-                *slot = Some(value.clone());
-            }
-        }
-    })
+    let spec = crate::win_sheet::Spec {
+        title: spec.title,
+        info: spec.info,
+        body: spec.body,
+        buttons: spec.buttons,
+        primary_enabled: spec.primary_enabled,
+    };
+    crate::win_sheet::open(window, &spec, answer)
 }
 
 #[cfg(windows)]
-fn shot_alert(alert: usize, path: &str) {
+pub(crate) fn close_sheet(alert: usize) {
+    crate::win_sheet::close(alert);
+}
+
+#[cfg(windows)]
+pub(crate) fn shot_alert(alert: usize, path: &str) {
     crate::win_sheet::shot(alert, path);
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn shot_alert(_alert: usize, _path: &str) {}
+pub(crate) fn shot_alert(_alert: usize, _path: &str) {}
 
 #[cfg(not(any(target_os = "macos", windows)))]
-pub(crate) fn confirm_sheet(
+pub(crate) fn decision_sheet(
     _window: &winit::window::Window,
-    _title: &str,
-    _info: &str,
-    _primary: &str,
-    _answer: &'static Mutex<Option<String>>,
-    _value: String,
+    _spec: &SheetSpec,
+    _answer: impl Fn(Option<usize>) + 'static,
 ) -> Option<usize> {
     None
 }
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(crate) fn close_sheet(_alert: usize) {}
 
 fn act(a: Act) -> Target {
     Target::Setting(SettingsAction::DeviceAccount(Action::Op(a)))
@@ -542,7 +647,7 @@ mod tests {
     }
 }
 
-/// 검증 실행이 시트 단추를 누른다 — 0 믿기, 1 취소.
+/// 검증 실행이 시트 단추를 누른다 — 단추 차례(0 이 주 동작).
 #[cfg(target_os = "macos")]
 pub(crate) fn press_sheet(alert: usize, index: usize) {
     use objc2::msg_send;

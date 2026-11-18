@@ -1,8 +1,9 @@
-//! Windows 의 결정 시트 — macOS `NSAlert` 시트 자리(폰 열쇠 믿기 `native_op_approval.rs`).
+//! Windows 의 결정 시트 — macOS `NSAlert` 시트 자리(PR 요청 확인 `native_work_permissions.rs`, 폰 열쇠 믿기 `native_op_approval.rs`).
 //!
 //! 본창에 붙은 소유 창이다. 열린 동안 본창을 막아 시트처럼 굴고, 메시지는 winit 루프가 그대로 펌프하므로 앱은
 //! 계속 그린다 — TaskDialog 처럼 자체 모달 루프를 돌면 그동안 칸 화면이 멎는다. 답은 단추 차례로 돌려준다:
-//! 0 은 주 동작(허락·믿기, 맥의 첫 단추), 1 은 기본 동작(거절·취소, Enter). 결정 없이 닫히면 None.
+//! 0 은 주 동작(PR 만들기·믿기, 맥의 첫 단추), 1 은 기본 동작(나중에·취소, Enter), 그 뒤는 왼쪽으로 서는 단추(버리기).
+//! 결정 없이 닫히면 None.
 //!
 //! winit 루프는 `IsDialogMessage` 를 부르지 않는다. 그래서 Tab·Enter·Esc 는 칸마다 창 프로시저를 갈아 끼워
 //! 직접 받는다. 실행 파일에 공용 컨트롤 v6 매니페스트가 없어, 칸을 만들 때만 v6 활성화 문맥을 켠다 — 없으면
@@ -59,8 +60,8 @@ pub(crate) struct Spec<'a> {
     pub(crate) info: &'a str,
     /// 고정폭 읽기 전용 원문 칸. None 이면 칸 없이 안내만 선다.
     pub(crate) body: Option<&'a str>,
-    /// [주 동작, 기본 동작]. 주 동작은 오른쪽 끝에 위험색으로, 기본 동작은 그 왼쪽에 테두리 단추로 선다.
-    pub(crate) buttons: [&'a str; 2],
+    /// [주 동작, 기본 동작, 그 밖…]. 주 동작은 오른쪽 끝에 위험색으로, 나머지는 차례로 그 왼쪽에 테두리 단추로 선다.
+    pub(crate) buttons: &'a [&'a str],
     pub(crate) primary_enabled: bool,
 }
 
@@ -124,8 +125,8 @@ struct Sheet {
     /// 원문 칸 테두리 사각형(칸은 그 안 1px).
     body_rect: Option<RECT>,
     edit: HWND,
-    buttons: [HWND; 2],
-    labels: [Vec<u16>; 2],
+    buttons: Vec<HWND>,
+    labels: Vec<Vec<u16>>,
     primary_enabled: bool,
     title_font: HFONT,
     text_font: HFONT,
@@ -284,15 +285,17 @@ pub(crate) fn open(window: &winit::window::Window, spec: &Spec, answer: impl Fn(
     let mono_font = ui_font(dpi, px(13.0), Weight::Regular, Some(mono_face()));
 
     let (title, info) = (wide(spec.title), wide(spec.info));
-    let labels = [wide(spec.buttons[0]), wide(spec.buttons[1])];
+    let labels: Vec<Vec<u16>> = spec.buttons.iter().map(|label| wide(label)).collect();
     let (pad, width) = (px(20.0), px(600.0));
     let inner = width - pad * 2;
-    let (title_h, info_h, label_w) = unsafe {
+    let (title_h, info_h, label_w, body_h) = unsafe {
         let dc = GetDC(None);
         let measured = (
             text_height(dc, title_font, &title, inner),
             text_height(dc, text_font, &info, inner),
-            [text_width(dc, button_font, &labels[0]), text_width(dc, button_font, &labels[1])],
+            labels.iter().map(|label| text_width(dc, button_font, label)).collect::<Vec<_>>(),
+            // 칸 안쪽 여백(좌우 8)·스크롤바 자리를 뺀 폭으로 잰다 — 짧은 원문에 빈 칸이 크게 남지 않게.
+            spec.body.map(|body| text_height(dc, mono_font, &wide(body), inner - px(16.0) - px(18.0)) + px(14.0)),
         );
         ReleaseDC(None, dc);
         measured
@@ -302,18 +305,26 @@ pub(crate) fn open(window: &winit::window::Window, spec: &Spec, answer: impl Fn(
     y += title_h + px(6.0);
     let info_rect = RECT { left: pad, top: y, right: pad + inner, bottom: y + info_h };
     y += info_h + px(14.0);
-    let body_rect = spec.body.map(|_| {
-        let r = RECT { left: pad, top: y, right: pad + inner, bottom: y + px(260.0) };
-        y += px(260.0) + px(18.0);
+    let body_rect = body_h.map(|h| {
+        let h = h.clamp(px(48.0), px(260.0));
+        let r = RECT { left: pad, top: y, right: pad + inner, bottom: y + h };
+        y += h + px(18.0);
         r
     });
     if body_rect.is_none() {
         y += px(4.0);
     }
     let button_h = px(32.0);
-    let button_w = label_w.map(|w| (w + px(36.0)).max(px(88.0)));
-    let primary_x = pad + inner - button_w[0];
-    let default_x = primary_x - px(8.0) - button_w[1];
+    let button_w: Vec<i32> = label_w.iter().map(|w| (w + px(36.0)).max(px(88.0))).collect();
+    let mut right = pad + inner;
+    let button_x: Vec<i32> = button_w
+        .iter()
+        .map(|w| {
+            let x = right - w;
+            right = x - px(8.0);
+            x
+        })
+        .collect();
     let button_y = y;
     y += button_h + pad;
 
@@ -336,7 +347,7 @@ pub(crate) fn open(window: &winit::window::Window, spec: &Spec, answer: impl Fn(
         info_rect,
         body_rect,
         edit: HWND::default(),
-        buttons: [HWND::default(); 2],
+        buttons: Vec::new(),
         labels,
         primary_enabled: spec.primary_enabled,
         title_font,
@@ -416,7 +427,7 @@ pub(crate) fn open(window: &winit::window::Window, spec: &Spec, answer: impl Fn(
             subclass(edit);
             (*state).edit = edit;
         }
-        for (i, (bx, bw)) in [(primary_x, button_w[0]), (default_x, button_w[1])].into_iter().enumerate() {
+        for (i, (bx, bw)) in button_x.iter().copied().zip(button_w.iter().copied()).enumerate() {
             let button = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("BUTTON"),
@@ -433,21 +444,25 @@ pub(crate) fn open(window: &winit::window::Window, spec: &Spec, answer: impl Fn(
             )
             .unwrap_or_default();
             subclass(button);
-            (*state).buttons[i] = button;
+            (*state).buttons.push(button);
         }
         if activated {
             let _ = DeactivateActCtx(0, cookie);
         }
+        let (primary, default) = {
+            let buttons = &(*state).buttons;
+            (buttons[0], buttons[1])
+        };
         if !spec.primary_enabled {
-            let _ = EnableWindow((*state).buttons[0], false);
+            let _ = EnableWindow(primary, false);
         }
-        (*state).focus = (*state).buttons[1];
+        (*state).focus = default;
         OPEN.fetch_add(1, Ordering::Relaxed);
         let _ = EnableWindow(owner, false);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
         let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(Some((*state).buttons[1]));
+        let _ = SetFocus(Some(default));
         Some(hwnd.0 as usize)
     }
 }
@@ -598,7 +613,7 @@ fn tab_order(st: &Sheet) -> Vec<HWND> {
     if st.primary_enabled {
         order.push(st.buttons[0]);
     }
-    order.push(st.buttons[1]);
+    order.extend(st.buttons.iter().skip(1));
     order
 }
 
@@ -613,7 +628,7 @@ unsafe extern "system" fn control_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         match msg {
             WM_KEYDOWN => {
                 let key = wp.0 as u16;
-                // Enter 는 언제나 거절·취소다 — 터미널에서 치던 Enter 가 시트로 새도 허락이 나가지 않게.
+                // Enter 는 언제나 기본 동작(나중에·취소)이다 — 터미널에서 치던 Enter 가 시트로 새도 승인이 나가지 않게.
                 if key == VK_RETURN.0 {
                     finish(sheet, Some(1));
                     return LRESULT(0);
@@ -759,14 +774,14 @@ unsafe extern "system" fn sheet_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             }
             WM_DRAWITEM => {
                 let item = &*(lp.0 as *const DRAWITEMSTRUCT);
-                if (ID_BUTTON..ID_BUTTON + 2).contains(&(item.CtlID as i32)) {
+                if (ID_BUTTON..ID_BUTTON + (*st).buttons.len() as i32).contains(&(item.CtlID as i32)) {
                     draw_button(&*st, item);
                     return LRESULT(TRUE.0 as isize);
                 }
             }
             WM_COMMAND => {
                 let id = (wp.0 & 0xFFFF) as i32;
-                if (ID_BUTTON..ID_BUTTON + 2).contains(&id) {
+                if (ID_BUTTON..ID_BUTTON + (*st).buttons.len() as i32).contains(&id) {
                     finish(hwnd, Some((id - ID_BUTTON) as usize));
                     return LRESULT(0);
                 }

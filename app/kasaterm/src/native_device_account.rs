@@ -33,7 +33,6 @@ pub(crate) enum Action {
     OpenClaim,
     Signup,
     CancelChoice,
-    Work(work::Act),
     Op(op::Act),
     Vault(vault::Act),
     Profile(profile::Act),
@@ -88,7 +87,6 @@ pub(crate) struct View {
     oauth_waiting: bool,
     oauth_code: Option<String>,
     choice: Option<Choice>,
-    work: work::View,
     op: op::View,
     vault: vault::View,
     profile: profile::View,
@@ -169,7 +167,6 @@ impl State {
             oauth_waiting: self.oauth_cancel.is_some(),
             oauth_code: self.oauth_code.clone(),
             choice: self.choice.clone(),
-            work: self.work.view(self.status["logged_in"] == true),
             op: self.op.view(self.status["logged_in"] == true),
             vault: self.vault.view(self.status["logged_in"] == true),
             profile: self.profile.view(),
@@ -214,7 +211,6 @@ impl State {
         if self.choice.take().is_some() {
             kasa_device::device_auth::cancel_oauth();
         }
-        self.work.hide();
         self.profile.hide();
     }
 
@@ -333,7 +329,7 @@ fn safe_error(error: &str) -> String {
 
 impl App {
     pub(crate) fn device_account_poll(&mut self) {
-        self.work_permissions_poll();
+        self.pr_requests_poll();
         self.op_approval_poll();
         self.login_vault_poll();
         let profile = self.account_profile_poll();
@@ -379,10 +375,6 @@ impl App {
     }
 
     pub(crate) fn device_account_action(&mut self, action: Action) {
-        if let Action::Work(act) = action {
-            self.work_permissions_action(act);
-            return;
-        }
         if let Action::Op(act) = action {
             self.op_approval_action(act);
             return;
@@ -452,7 +444,6 @@ impl App {
             Action::Linked
             | Action::Connected { .. }
             | Action::CancelOAuth
-            | Action::Work(_)
             | Action::Op(_)
             | Action::Vault(_)
             | Action::Profile(_) => {}

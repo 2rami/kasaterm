@@ -4402,7 +4402,6 @@ fn paint_accounts(
     w: f32,
 ) {
     device_account::paint(g, s, hits, caret, x, y, w);
-    device_account::work::paint(g, s, hits, x, y, w);
     device_account::op::paint(g, s, hits, x, y, w);
     device_account::vault::paint(g, s, hits, x, y, w);
 }

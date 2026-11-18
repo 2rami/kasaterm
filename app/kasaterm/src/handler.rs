@@ -904,6 +904,18 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::NotifyFocus { pane, sid } => {
+                use crate::native_settings::device_account::work;
+                if pane == work::ACTION {
+                    let id = sid.clone().unwrap_or_default();
+                    self.pr_request_clicked(&id);
+                    return;
+                }
+                if pane == work::OPEN_PR {
+                    if let Some(url) = sid.as_deref().filter(|url| url.starts_with("https://github.com/")) {
+                        crate::chrome::open_url_in_browser(url);
+                    }
+                    return;
+                }
                 // 알림을 쏜 시점의 세션과 지금 그 pane 의 세션이 같을 때만 옮긴다.
                 // surface id 는 재사용되므로, 그 사이 pane 이 닫히고 번호가 새 셸에
                 // 넘어갔으면 엉뚱한 자리로 끌려간다 — 그때는 아무 데도 안 가는 게 맞다.

@@ -4834,10 +4834,13 @@ mod notify_path_tests {
     }
 
     #[test]
-    fn notification_actions_preserve_the_version() {
-        let (action, key) = ("__kasaterm_action__", "0.2.167");
-        assert_eq!(notify_route(&notify_ident(8, Some((action, Some(key))))),
-                   Some((action.into(), Some(key.into()))));
+    fn notification_actions_preserve_their_key() {
+        use crate::native_settings::device_account::work;
+        for (action, key) in [("__kasaterm_action__", "0.2.167"), (work::ACTION, "pw_0a1b2c3d4e5f6a7b"),
+                              (work::OPEN_PR, "https://github.com/2rami/kasaterm/pull/12")] {
+            assert_eq!(notify_route(&notify_ident(8, Some((action, Some(key))))),
+                       Some((action.into(), Some(key.into()))));
+        }
     }
 
     #[test]

@@ -4690,11 +4690,9 @@ impl App {
                 eprintln!("[autosettings] 다른 기기 계정 로그인 {key}");
                 self.settings_apply(SettingsAction::AdoptSharedAccount(provider, key));
             }
-            "device-work" | "device-work-open" if crate::verification_run() => {
-                let open = std::env::var("KASATERM_AUTOSETTINGS_ACTION").as_deref() == Ok("device-work-open");
-                self.device_account.work.fixture(open);
-                // 위 「Google·GitHub 연결」 단추와 안내도 관문이 일 권한을 받는 상태로 보인다.
-                self.device_account.fixture(false, false);
+            // PR 요청 두 개 — 첫 시트가 바로 뜬다(찍기·누르기는 `KASATERM_PR_SHEET_*`).
+            "device-work" if crate::verification_run() => {
+                self.device_account.work.fixture();
                 self.chrome_dirty = true;
             }
             action if action.starts_with("device-vault-") && crate::verification_run() => {
@@ -4718,7 +4716,6 @@ impl App {
                     _ => None,
                 };
                 self.device_account.fixture_signed_in(form);
-                self.device_account.work.fixture(false);
                 self.chrome_dirty = true;
             }
             "device-oauth" | "device-choice" | "device-claim" if crate::verification_run() => {
