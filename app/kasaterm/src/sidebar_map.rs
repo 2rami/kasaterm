@@ -50,17 +50,83 @@ pub(crate) fn has_title(width: f32, height: f32) -> bool {
     layout((0.0, 0.0, width, height)).title.is_some()
 }
 
+/// 자른 글 줄과 그 폭. 사이드바 글은 장마다 다시 그리는데, 자를 자리를 찾느라 글자 하나씩 폭을 재서 사용자 앱
+/// 사이드바 표본의 약 1/5 이 글자 재기였다(2026-11-18, 칸 이름표·기기 이름·방 이름). 같은 글·폭·크기면 한 번 잰 것을 쓴다.
+struct Fitted {
+    title: String,
+    width: u32,
+    size: u32,
+    bold: bool,
+    lines: usize,
+    probe: u32,
+    fit: Vec<(String, f32)>,
+}
+
+thread_local! {
+    static FITTED: std::cell::RefCell<std::collections::HashMap<u64, Fitted>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// 배율·글꼴이 바뀌면 같은 글도 폭이 달라진다 — 두 글자의 폭을 열쇠에 넣어 옛 자르기를 안 쓴다.
+const PROBE: &str = "가A";
+/// 끌어 넓히는 동안 폭마다 하나씩 쌓이므로 이만큼에서 비운다.
+const FITTED_MAX: usize = 512;
+
+/// `width` 에 맞춰 자른 줄들(과 그 폭)로 `draw` 를 부른다. `lines == 0` 이면 [`crate::info::fit_text`] 한 줄,
+/// 아니면 [`crate::info::fit_text_lines`] 로 그 줄 수까지.
+pub(crate) fn with_fitted<R>(
+    g: &mut gpu::GpuRenderer,
+    title: &str,
+    width: f32,
+    size: f32,
+    bold: bool,
+    lines: usize,
+    draw: impl FnOnce(&mut gpu::GpuRenderer, &[(String, f32)]) -> R,
+) -> R {
+    let probe = g.measure_chrome_text(PROBE, size, bold).to_bits();
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (title, width.to_bits(), size.to_bits(), bold, lines, probe).hash(&mut hasher);
+        hasher.finish()
+    };
+    let same = |f: &Fitted| f.title == title && f.width == width.to_bits() && f.size == size.to_bits()
+        && f.bold == bold && f.lines == lines && f.probe == probe;
+    if !FITTED.with(|kept| kept.borrow().get(&key).is_some_and(same)) {
+        let cut = if lines == 0 {
+            vec![crate::info::fit_text(g, title, width, size, bold)]
+        } else {
+            crate::info::fit_text_lines(g, title, width, size, bold, lines, false)
+        };
+        let fit = cut.into_iter().map(|line| {
+            let w = g.measure_chrome_text(&line, size, bold);
+            (line, w)
+        }).collect();
+        FITTED.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            if kept.len() >= FITTED_MAX {
+                kept.clear();
+            }
+            kept.insert(key, Fitted { title: title.to_string(), width: width.to_bits(), size: size.to_bits(), bold, lines, probe, fit });
+        });
+    }
+    FITTED.with(|kept| {
+        let kept = kept.borrow();
+        draw(g, kept.get(&key).map_or(&[][..], |fitted| &fitted.fit))
+    })
+}
+
 pub(crate) fn paint_title(g: &mut gpu::GpuRenderer, rect: Rect, title: &str) {
     let layout = layout(rect);
     let Some((x, y, w, h)) = layout.title else { return };
-    let lines = crate::info::fit_text_lines(g, title, w, FONT, false, layout.lines, false);
-    let top = y + (h - lines.len() as f32 * LINE) * 0.5;
     g.push_clip(x, y, w, h);
-    for (i, line) in lines.iter().enumerate() {
-        let left = if layout.horizontal { x } else { x + (w - g.measure_chrome_text(line, FONT, false)).max(0.0) * 0.5 };
-        g.draw_text(left, top + i as f32 * LINE, line,
-            gpu::DrawOpts { font_size: FONT, color: theme::text(), bold: false, italic: false });
-    }
+    with_fitted(g, title, w, FONT, false, layout.lines, |g, fit| {
+        let top = y + (h - fit.len() as f32 * LINE) * 0.5;
+        for (i, (line, width)) in fit.iter().enumerate() {
+            let left = if layout.horizontal { x } else { x + (w - width).max(0.0) * 0.5 };
+            g.draw_text(left, top + i as f32 * LINE, line,
+                gpu::DrawOpts { font_size: FONT, color: theme::text(), bold: false, italic: false });
+        }
+    });
     g.pop_clip();
 }
 

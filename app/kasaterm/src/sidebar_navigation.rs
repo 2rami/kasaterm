@@ -389,8 +389,10 @@ fn draw_web_shells(
 }
 
 fn text(g: &mut gpu::GpuRenderer, value: &str, x: f32, y: f32, width: f32, size: f32, color: [u8; 4], bold: bool) {
-    let value = crate::info::fit_text(g, value, width.max(0.0), size, bold);
-    g.draw_text(x, y, &value, gpu::DrawOpts { font_size: size, color, bold, italic: false });
+    crate::sidebar_map::with_fitted(g, value, width.max(0.0), size, bold, 0, |g, fit| {
+        let line = fit.first().map_or("", |(line, _)| line.as_str());
+        g.draw_text(x, y, line, gpu::DrawOpts { font_size: size, color, bold, italic: false });
+    });
 }
 
 fn status(machine: &state::MachinesColMachine) -> String {
