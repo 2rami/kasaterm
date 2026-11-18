@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../look.dart';
 import '../screens/controls.dart';
+import '../twins_loading.dart';
 import 'model.dart';
 import 'store.dart';
 
@@ -81,140 +82,165 @@ class CardWeatherRow extends StatelessWidget {
 class _WeatherSheet extends StatelessWidget {
   const _WeatherSheet();
 
-  static const _rewet = [30, 60, 120, 180, 300, 600];
-
   @override
   Widget build(BuildContext context) => DraggableScrollableSheet(
     expand: false,
     initialChildSize: 0.85,
     maxChildSize: 0.95,
-    builder: (context, scroll) => ListenableBuilder(
-      listenable: Listenable.merge([
-        weather.settings,
-        weather.perDevice,
-        weather.syncNote,
-        weather.reduceTransparency,
-        weather.reduceMotion,
-      ]),
-      builder: (context, _) {
-        final s = weather.settings.value;
-        void set(WeatherSettings n) => weather.set(n);
-        final dim = Theme.of(context).colorScheme.onSurfaceVariant;
-        final motion = weather.reduceMotion.value || MediaQuery.disableAnimationsOf(context);
-        final glassOff = weather.reduceTransparency.value;
-        return ListView(
-          controller: scroll,
-          padding: const EdgeInsets.fromLTRB(0, 0, 0, Look.groupGap),
-          children: [
-            SwitchListTile(
-              title: const Text('날씨'),
-              subtitle: const Text('카드·단추·바탕에 비를 내린다. 끄면 그리는 비용이 없다'),
-              value: s.enabled,
-              onChanged: (v) => set(s.copyWith(enabled: v)),
-            ),
-            _Title('비 양'),
-            _Pad(
-              SegmentedButton<RainAmount>(
-                showSelectedIcon: false,
-                segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(a.label))],
-                selected: {s.amount},
-                onSelectionChanged: (v) => set(s.copyWith(amount: v.first)),
-              ),
-            ),
-            _Title('바람'),
-            _Slider(
-              label: '방향',
-              value: s.windDir,
-              min: -1,
-              max: 1,
-              divisions: 8,
-              text: s.windDir == 0 ? '곧게' : (s.windDir < 0 ? '왼쪽 ${(-s.windDir * 100).round()}%' : '오른쪽 ${(s.windDir * 100).round()}%'),
-              onChanged: (v, commit) => weather.set(s.copyWith(windDir: v), commit: commit),
-            ),
-            _Slider(
-              label: '세기',
-              value: s.windStrength,
-              min: 0,
-              max: 1,
-              divisions: 4,
-              text: '${(s.windStrength * 100).round()}%',
-              onChanged: (v, commit) => weather.set(s.copyWith(windStrength: v), commit: commit),
-            ),
-            _Title('어디에'),
-            for (final t in WeatherTarget.values)
-              ListTile(
-                title: Text(t.label),
-                subtitle: t == WeatherTarget.focusedOnly
-                    ? const Text('방금 만지거나 스크롤한 카드')
-                    : t == WeatherTarget.pickedOnly
-                    ? const Text('카드를 길게 눌러 「이 카드도 비」로 고른 것')
-                    : null,
-                trailing: t == s.target ? const Icon(Icons.check) : null,
-                onTap: () => set(s.copyWith(target: t)),
-              ),
-            _Title('효과'),
-            for (final e in Effect.values)
-              SwitchListTile(
-                title: Text(e.label),
-                value: s.has(e),
-                onChanged: (v) => set(s.withEffect(e, v)),
-              ),
-            _Title('젖는 시간'),
-            _Slider(
-              label: '',
-              value: _rewet.indexOf(_nearest(s.rewetSecs)).toDouble(),
-              min: 0,
-              max: (_rewet.length - 1).toDouble(),
-              divisions: _rewet.length - 1,
-              text: rewetLabel(s.rewetSecs),
-              onChanged: (v, commit) => weather.set(s.copyWith(rewetSecs: _rewet[v.round()]), commit: commit),
-            ),
-            _Title('학생 상태 날씨'),
-            SwitchListTile(
-              title: const Text('상태마다 비 양'),
-              subtitle: const Text('비 양만 바꾸고 「어디에」는 그대로 따른다'),
-              value: s.byStatus,
-              onChanged: (v) => set(s.copyWith(byStatus: v)),
-            ),
-            if (s.byStatus)
-              for (final m in Mood.values) ...[
-                _Pad(Text(m.label, style: TextStyle(color: dim, fontSize: Look.sub))),
-                _Pad(
-                  SegmentedButton<RainAmount>(
-                    showSelectedIcon: false,
-                    segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(a.label))],
-                    selected: {s.moodAmount(m)},
-                    onSelectionChanged: (v) => set(s.withMood(m, v.first)),
-                  ),
-                ),
-              ],
-            _Title('접근성'),
-            SwitchListTile(
-              title: const Text('OS 설정 무시'),
-              subtitle: Text(
-                '끄면 「동작 줄이기」에선 맺힌 물방울만 남기고, 「투명도 줄이기」에선 날씨를 끈다.'
-                ' 지금 이 폰: 동작 줄이기 ${motion ? '켬' : '끔'} · 투명도 줄이기 ${glassOff ? '켬' : '끔'}',
-              ),
-              value: s.ignoreOs,
-              onChanged: (v) => set(s.copyWith(ignoreOs: v)),
-            ),
-            _Title('동기화'),
-            SwitchListTile(
-              title: const Text('날씨는 기기마다'),
-              subtitle: const Text('켜면 이 폰만 따로 고른다(배터리). 끄면 계정으로 다른 기기와 같이 맞춘다'),
-              value: weather.perDevice.value,
-              onChanged: weather.setPerDevice,
-            ),
-            if (weather.syncNote.value != null && !weather.perDevice.value)
-              _Note(weather.syncNote.value!, dim),
-          ],
-        );
-      },
+    builder: (context, scroll) => WeatherSettingsList(controller: scroll),
+  );
+}
+
+/// 넓은 설정의 오른쪽 칸 「날씨」 — 폰 판의 시트와 같은 줄을 페이지로.
+class WeatherSettingsScreen extends StatelessWidget {
+  const WeatherSettingsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) => TwinBackdrop(
+    child: Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('날씨')),
+      body: const WeatherSettingsList(),
     ),
   );
+}
 
-  static int _nearest(int secs) =>
-      _rewet.reduce((a, b) => (a - secs).abs() <= (b - secs).abs() ? a : b);
+/// 날씨 설정 줄 전부 — 시트와 페이지가 같이 쓴다.
+class WeatherSettingsList extends StatelessWidget {
+  const WeatherSettingsList({super.key, this.controller});
+
+  final ScrollController? controller;
+
+  static const _rewet = [30, 60, 120, 180, 300, 600];
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Listenable.merge([
+      weather.settings,
+      weather.perDevice,
+      weather.syncNote,
+      weather.reduceTransparency,
+      weather.reduceMotion,
+    ]),
+    builder: (context, _) {
+      final s = weather.settings.value;
+      void set(WeatherSettings n) => weather.set(n);
+      final dim = Theme.of(context).colorScheme.onSurfaceVariant;
+      final motion = weather.reduceMotion.value || MediaQuery.disableAnimationsOf(context);
+      final glassOff = weather.reduceTransparency.value;
+      return ListView(
+        controller: controller,
+        padding: const EdgeInsets.fromLTRB(0, 0, 0, Look.groupGap),
+        children: [
+          SwitchListTile(
+            title: const Text('날씨'),
+            subtitle: const Text('카드·단추·바탕에 비를 내린다. 끄면 그리는 비용이 없다'),
+            value: s.enabled,
+            onChanged: (v) => set(s.copyWith(enabled: v)),
+          ),
+          _Title('비 양'),
+          _Pad(
+            SegmentedButton<RainAmount>(
+              showSelectedIcon: false,
+              segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(a.label))],
+              selected: {s.amount},
+              onSelectionChanged: (v) => set(s.copyWith(amount: v.first)),
+            ),
+          ),
+          _Title('바람'),
+          _Slider(
+            label: '방향',
+            value: s.windDir,
+            min: -1,
+            max: 1,
+            divisions: 8,
+            text: s.windDir == 0
+                ? '곧게'
+                : (s.windDir < 0 ? '왼쪽 ${(-s.windDir * 100).round()}%' : '오른쪽 ${(s.windDir * 100).round()}%'),
+            onChanged: (v, commit) => weather.set(s.copyWith(windDir: v), commit: commit),
+          ),
+          _Slider(
+            label: '세기',
+            value: s.windStrength,
+            min: 0,
+            max: 1,
+            divisions: 4,
+            text: '${(s.windStrength * 100).round()}%',
+            onChanged: (v, commit) => weather.set(s.copyWith(windStrength: v), commit: commit),
+          ),
+          _Title('어디에'),
+          for (final t in WeatherTarget.values)
+            ListTile(
+              title: Text(t.label),
+              subtitle: t == WeatherTarget.focusedOnly
+                  ? const Text('방금 만지거나 스크롤한 카드')
+                  : t == WeatherTarget.pickedOnly
+                  ? const Text('카드를 길게 눌러 「이 카드도 비」로 고른 것')
+                  : null,
+              trailing: t == s.target ? const Icon(Icons.check) : null,
+              onTap: () => set(s.copyWith(target: t)),
+            ),
+          _Title('효과'),
+          for (final e in Effect.values)
+            SwitchListTile(title: Text(e.label), value: s.has(e), onChanged: (v) => set(s.withEffect(e, v))),
+          _Title('젖는 시간'),
+          _Slider(
+            label: '',
+            value: _rewet.indexOf(_nearest(s.rewetSecs)).toDouble(),
+            min: 0,
+            max: (_rewet.length - 1).toDouble(),
+            divisions: _rewet.length - 1,
+            text: rewetLabel(s.rewetSecs),
+            onChanged: (v, commit) => weather.set(s.copyWith(rewetSecs: _rewet[v.round()]), commit: commit),
+          ),
+          _Title('학생 상태 날씨'),
+          SwitchListTile(
+            title: const Text('상태마다 비 양'),
+            subtitle: const Text('비 양만 바꾸고 「어디에」는 그대로 따른다'),
+            value: s.byStatus,
+            onChanged: (v) => set(s.copyWith(byStatus: v)),
+          ),
+          if (s.byStatus)
+            for (final m in Mood.values) ...[
+              _Pad(
+                Text(
+                  m.label,
+                  style: TextStyle(color: dim, fontSize: Look.sub),
+                ),
+              ),
+              _Pad(
+                SegmentedButton<RainAmount>(
+                  showSelectedIcon: false,
+                  segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(a.label))],
+                  selected: {s.moodAmount(m)},
+                  onSelectionChanged: (v) => set(s.withMood(m, v.first)),
+                ),
+              ),
+            ],
+          _Title('접근성'),
+          SwitchListTile(
+            title: const Text('OS 설정 무시'),
+            subtitle: Text(
+              '끄면 「동작 줄이기」에선 맺힌 물방울만 남기고, 「투명도 줄이기」에선 날씨를 끈다.'
+              ' 지금 이 폰: 동작 줄이기 ${motion ? '켬' : '끔'} · 투명도 줄이기 ${glassOff ? '켬' : '끔'}',
+            ),
+            value: s.ignoreOs,
+            onChanged: (v) => set(s.copyWith(ignoreOs: v)),
+          ),
+          _Title('동기화'),
+          SwitchListTile(
+            title: const Text('날씨는 기기마다'),
+            subtitle: const Text('켜면 이 폰만 따로 고른다(배터리). 끄면 계정으로 다른 기기와 같이 맞춘다'),
+            value: weather.perDevice.value,
+            onChanged: weather.setPerDevice,
+          ),
+          if (weather.syncNote.value != null && !weather.perDevice.value) _Note(weather.syncNote.value!, dim),
+        ],
+      );
+    },
+  );
+
+  static int _nearest(int secs) => _rewet.reduce((a, b) => (a - secs).abs() <= (b - secs).abs() ? a : b);
 }
 
 class _Title extends StatelessWidget {
@@ -257,7 +283,10 @@ class _Note extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, 4),
-    child: Text(text, style: TextStyle(fontSize: Look.sub, color: color)),
+    child: Text(
+      text,
+      style: TextStyle(fontSize: Look.sub, color: color),
+    ),
   );
 }
 

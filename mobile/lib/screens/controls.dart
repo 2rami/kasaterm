@@ -238,6 +238,7 @@ class SettingsRow extends StatelessWidget {
     this.tone = 0,
     this.chevron = false,
     this.danger = false,
+    this.selected = false,
     this.logo,
   });
 
@@ -253,6 +254,9 @@ class SettingsRow extends StatelessWidget {
   final int tone;
   final bool chevron;
   final bool danger;
+
+  /// 넓은 설정의 왼쪽 목록에서 오른쪽에 열린 페이지 — 고른 칸과 같은 강조 18% 물.
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
@@ -316,7 +320,9 @@ class SettingsRow extends StatelessWidget {
               ),
             ],
           );
-    return onTap == null ? body : InkWell(onTap: onTap, child: body);
+    final marked = selected ? ColoredBox(color: scheme.primary.withValues(alpha: 0.18), child: body) : body;
+    final pressable = onTap == null ? marked : InkWell(onTap: onTap, child: marked);
+    return selected ? Semantics(container: true, selected: true, child: pressable) : pressable;
   }
 }
 

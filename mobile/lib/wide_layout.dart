@@ -13,6 +13,16 @@ const roomColumnMinWidth = 340.0;
 /// 방 상자 열 사이. 상자의 아래 여백(10)과 같게 둬 가로·세로 틈이 같아 보이게.
 const roomColumnGap = 10.0;
 
+/// 넓은 설정의 왼쪽 목록 폭 — 폰 설정 첫 화면(계정 판·줄 보조글)이 가장 좁은 폰(320) 그대로 들어간다.
+const settingsNavWidth = 320.0;
+
+/// 넓은 설정의 오른쪽 페이지 내용 열 상한 — 데스크톱 설정 `CONTENT_MAX_W` 와 같다. 판 좌우 여백은 그 밖이다.
+const settingsPageMaxWidth = 800.0;
+
+/// 설정을 목록 + 페이지 두 칸으로 나누는 폭. 오른쪽에도 방 상자 한 열만큼은 남아야 페이지 줄이 눌리지 않는다 —
+/// 아이패드 세로·가로와 눕힌 폰은 두 칸, 그보다 좁은 스플릿 뷰와 세운 폰은 폰 판 그대로.
+bool settingsSplit(double width) => width >= settingsNavWidth + roomColumnMinWidth;
+
 /// [width] 에 [minWidth] 이상인 열이 몇 개 들어가는지. 폰 세로는 1열이다.
 int columnsFor(
   double width, {

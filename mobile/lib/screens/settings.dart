@@ -11,6 +11,7 @@ import '../theme_prefs.dart';
 import '../twins_loading.dart';
 import '../weather/sheet.dart';
 import '../weather/store.dart';
+import '../wide_layout.dart';
 import 'account_profile.dart';
 import 'character_picks.dart';
 import 'claude_accounts.dart';
@@ -41,10 +42,20 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
+/// 첫 화면의 페이지 줄 — 데스크톱 설정 옆 목록의 같은 이름 페이지.
+enum _Page { look, weather, account, agents, characters, devices }
+
 /// 설정 첫 화면 — 데스크톱 설정 옆 목록과 같은 묶음 셋(화면·에이전트·앱)에 같은 이름의 페이지 줄.
-/// 줄을 누르면 그 페이지로 들어간다. 페이지가 화면 하나뿐이면(코딩 에이전트·캐릭터·날씨) 그 화면을 바로 연다.
+/// 좁으면(폰) 줄을 눌러 그 페이지로 들어가고, 페이지가 화면 하나뿐이면(코딩 에이전트·캐릭터) 그 화면을, 날씨는 시트를 바로 연다.
+/// 넓으면(아이패드·눕힌 폰, `settingsSplit`) 데스크톱처럼 왼쪽 목록 + 오른쪽 페이지 두 칸이다.
 class _SettingsScreenState extends State<SettingsScreen> {
   Server get server => widget.server;
+
+  /// 마지막으로 그린 판이 두 칸인지 — 줄을 눌렀을 때 들어갈지 오른쪽 칸을 바꿀지 가른다.
+  bool _split = false;
+
+  /// 두 칸일 때 오른쪽에 연 페이지. 처음은 목록 맨 위(데스크톱 설정과 같다).
+  _Page _selected = _Page.look;
 
   late final Future<AppRelease?> _release = server.latestRelease();
   late final Future<OAuthProviders> _providers = _loadProviders();
@@ -117,13 +128,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _loadProfile();
   }
 
-  /// 페이지에 들어갔다 돌아오면 계정 판·줄 요약을 다시 받는다 — 페이지 안에서 로그인 방법·밝기가 바뀌었을 수 있다.
-  Future<void> _open(Widget page) async {
-    await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => page));
-    if (!mounted) return;
-    setState(() {});
-    unawaited(_loadProfile());
+  Widget _pageOf(_Page page) => switch (page) {
+    _Page.look => LookSettingsScreen(server: server),
+    _Page.weather => const WeatherSettingsScreen(),
+    _Page.account => AccountSettingsScreen(
+      api: _api!,
+      providers: _providers,
+      profile: _profile,
+      installId: widget.installId,
+      onProfile: (p) {
+        if (mounted) setState(() => _profile = p);
+      },
+    ),
+    _Page.agents => ClaudeAccountsScreen(server: server),
+    _Page.characters => CharacterPicksScreen(server: server, api: _api!),
+    _Page.devices => DeviceSettingsScreen(server: server, api: _api),
+  };
+
+  void _go(_Page page) {
+    if (_split) {
+      setState(() => _selected = page);
+    } else if (page == _Page.weather) {
+      unawaited(showWeatherSheet(context));
+    } else {
+      unawaited(Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => _pageOf(page))));
+    }
   }
+
+  /// 페이지로 가는 줄 — 두 칸이면 › 대신 연 페이지를 강조 물로.
+  Widget _pageRow(
+    _Page page, {
+    required String key,
+    required int tone,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) => SettingsRow(
+    key: Key(key),
+    tone: tone,
+    icon: icon,
+    title: title,
+    subtitle: subtitle,
+    chevron: !_split,
+    selected: _split && _selected == page,
+    onTap: () => _go(page),
+  );
 
   /// 새 판 설치가 실기에서 어디까지 갔는지(`ReleaseTrail`) — 원인을 찾는 사람에게 넘길 수 있게 복사·데스크톱 보내기.
   Future<void> _showTrail(List<String> lines) {
@@ -219,7 +268,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) {
+      _split = settingsSplit(box.maxWidth);
+      if (!_split) return _list();
+      final bg = Theme.of(context).scaffoldBackgroundColor;
+      // 눕힌 폰의 노치는 옆 가장자리에 온다 — 칸 안 목록은 고정 여백이라 칸째 비켜 둔다.
+      return ColoredBox(
+        color: bg,
+        child: Row(
+          children: [
+            SafeArea(
+              top: false,
+              bottom: false,
+              right: false,
+              child: SizedBox(width: settingsNavWidth, child: _list()),
+            ),
+            const VerticalDivider(width: 1, thickness: 1),
+            Expanded(
+              child: SafeArea(top: false, bottom: false, left: false, child: _pagePane(bg)),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+
+  /// 두 칸의 오른쪽 — 페이지마다 제 길(Navigator)이라 그 안에서 여는 화면(일 권한·기기 이름 …)도 이 칸에 선다.
+  /// 머리 빛은 왼쪽 목록이 그리고 여기는 바탕색만(`PlainBackdrop`). 내용 열은 데스크톱처럼 상한 폭으로 가운데.
+  /// 알림 띠도 이 칸 것만 이 칸에 — 두 Scaffold 가 한 ScaffoldMessenger 에 붙으면 같은 띠가 양쪽에 뜬다.
+  Widget _pagePane(Color bg) => ScaffoldMessenger(
+    child: PlainBackdrop(
+      child: ColoredBox(
+        color: bg,
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: settingsPageMaxWidth + 2 * Look.pagePad),
+            child: Navigator(
+              key: ValueKey(_selected),
+              onGenerateRoute: (_) => MaterialPageRoute<void>(builder: (_) => _pageOf(_selected)),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Widget _list() {
     final account = server.account;
     return TwinBackdrop(
       child: Scaffold(
@@ -257,27 +353,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// 「화면」 — 데스크톱 「외형」·「날씨」. 「앱 하단바」는 폰에 없다.
   List<Widget> _screenRows(int tone) => [
-    SettingsRow(
-      key: const Key('settings-look'),
-      tone: tone,
-      icon: Icons.palette_outlined,
-      title: '외형',
-      subtitle: '${phoneModes.firstWhere((m) => m.$1 == phoneThemeMode.value).$3} · 강조색 · 모서리',
-      chevron: true,
-      onTap: () => unawaited(_open(LookSettingsScreen(server: server))),
+    ValueListenableBuilder<ThemeMode>(
+      valueListenable: phoneThemeMode,
+      builder: (context, mode, _) => _pageRow(
+        _Page.look,
+        key: 'settings-look',
+        tone: tone,
+        icon: Icons.palette_outlined,
+        title: '외형',
+        subtitle: '${phoneModes.firstWhere((m) => m.$1 == mode).$3} · 강조색 · 모서리',
+      ),
     ),
     ListenableBuilder(
       listenable: weather.settings,
       builder: (context, _) {
         final w = weather.settings.value;
-        return SettingsRow(
-          key: const Key('settings-weather'),
+        return _pageRow(
+          _Page.weather,
+          key: 'settings-weather',
           tone: tone,
           icon: Icons.umbrella_outlined,
           title: '날씨',
           subtitle: w.enabled ? '${w.amount.label} · ${w.target.label}' : '꺼짐 · 카드와 단추에 비를 내려요',
-          chevron: true,
-          onTap: () => showWeatherSheet(context),
         );
       },
     ),
@@ -288,37 +385,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final api = _api;
     return [
       if (api != null)
-        SettingsRow(
-          key: const Key('settings-account'),
+        _pageRow(
+          _Page.account,
+          key: 'settings-account',
           tone: tone,
           icon: Icons.manage_accounts_outlined,
           title: '계정',
           subtitle: _accountLine(),
-          chevron: true,
-          onTap: () => unawaited(
-            _open(
-              AccountSettingsScreen(api: api, providers: _providers, profile: _profile, installId: widget.installId),
-            ),
-          ),
         ),
-      SettingsRow(
-        key: const Key('claude-accounts'),
+      _pageRow(
+        _Page.agents,
+        key: 'claude-accounts',
         tone: tone,
         icon: Icons.smart_toy_outlined,
         title: '코딩 에이전트',
         subtitle: 'Claude 계정 · 폰에서 다시 로그인',
-        chevron: true,
-        onTap: () => unawaited(_open(ClaudeAccountsScreen(server: server))),
       ),
       if (api != null)
-        SettingsRow(
-          key: const Key('character-picks'),
+        _pageRow(
+          _Page.characters,
+          key: 'character-picks',
           tone: tone,
           icon: Icons.groups_2_outlined,
           title: '캐릭터',
           subtitle: '학생 테마와 새 창에 나올 학생 · 모든 기기 같이',
-          chevron: true,
-          onTap: () => unawaited(_open(CharacterPicksScreen(server: server, api: api))),
         ),
     ];
   }
@@ -337,14 +427,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// 「앱」 — 데스크톱 「연결 기기」와 이 앱의 판. 「앱 일반」·「피드백」은 폰에 없다.
   List<Widget> _appRows(int tone) => [
-    SettingsRow(
-      key: const Key('settings-devices'),
+    _pageRow(
+      _Page.devices,
+      key: 'settings-devices',
       tone: tone,
       icon: Icons.devices_outlined,
       title: '연결 기기',
       subtitle: _api != null ? '기기 이름 · PC 기능 · 비밀 승인 · 브라우저' : 'PC 기능 · 브라우저 · 개발 서버',
-      chevron: true,
-      onTap: () => unawaited(_open(DeviceSettingsScreen(server: server, api: _api))),
     ),
     FutureBuilder<AppRelease?>(
       future: _release,

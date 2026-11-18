@@ -496,6 +496,8 @@ class TwinBackdrop extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bg = Theme.of(context).scaffoldBackgroundColor;
+    if (context.dependOnInheritedWidgetOfExactType<PlainBackdrop>() != null) return ColoredBox(color: bg, child: child);
     final tone = TwinTone.of(context);
     RadialGradient glow(Alignment at, Color c) => RadialGradient(
       center: at,
@@ -503,7 +505,7 @@ class TwinBackdrop extends StatelessWidget {
       colors: [c, c.withValues(alpha: 0)],
     );
     return ColoredBox(
-      color: Theme.of(context).scaffoldBackgroundColor,
+      color: bg,
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -530,4 +532,13 @@ class TwinBackdrop extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 머리 빛 없이 바탕색만 — 넓은 설정의 오른쪽 페이지 칸. 빛은 왼쪽 목록이 그리고, 상한 폭으로 가운데 선 페이지가
+/// 제 빛을 따로 그리면 그 둘레에 빛이 끊긴 경계가 생긴다. 이 안의 [TwinBackdrop] 은 바탕색만 칠한다(장면 전환이 비치지 않게).
+class PlainBackdrop extends InheritedWidget {
+  const PlainBackdrop({super.key, required super.child});
+
+  @override
+  bool updateShouldNotify(PlainBackdrop oldWidget) => false;
 }

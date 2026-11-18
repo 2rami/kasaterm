@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/screens/settings.dart';
 import 'package:kasaterm_mobile/server.dart';
+import 'package:kasaterm_mobile/wide_layout.dart';
 
 import 'fixtures/settings.dart';
 
@@ -113,5 +114,75 @@ void main() {
     expect(find.text('이 폰'), findsNothing);
     expect(find.byKey(const Key('desktop-tools')), findsOneWidget);
     expect(find.byKey(const Key('browser-device')), findsOneWidget);
+  });
+
+  Future<void> pad(WidgetTester tester, Size size) async {
+    tester.view.physicalSize = size * 2;
+    tester.view.devicePixelRatio = 2;
+    addTearDown(tester.view.reset);
+  }
+
+  Finder chevronIn(String key) =>
+      find.descendant(of: find.byKey(Key(key)), matching: find.byIcon(Icons.chevron_right_rounded));
+
+  testWidgets('넓으면 왼쪽 목록 + 오른쪽 페이지 두 칸, 하위 화면도 오른쪽 칸 안에서', (tester) async {
+    await pad(tester, const Size(1376, 1032)); // 아이패드 프로 13 가로 — 오른쪽 칸이 내용 열 상한보다 넓다
+    final fx = SettingsFixture();
+    addTearDown(fx.server.close);
+    await tester.pumpWidget(fx.screen());
+    await tester.pumpAndSettle();
+
+    expect(tester.getRect(find.byKey(const Key('group-screen'))).right, lessThanOrEqualTo(settingsNavWidth));
+    final brightness = find.byKey(const Key('phone-brightness'));
+    expect(brightness, findsOneWidget, reason: '처음은 목록 맨 위 「외형」이 오른쪽에 열려 있다');
+    final page = tester.getRect(brightness);
+    expect(page.left, greaterThan(settingsNavWidth));
+    expect(page.width, settingsPageMaxWidth, reason: '내용 열은 데스크톱 CONTENT_MAX_W 상한까지');
+    final pane = (settingsNavWidth + 1 + 1376) / 2;
+    expect(page.center.dx, closeTo(pane, 1), reason: '상한 폭 열은 오른쪽 칸 가운데');
+    expect(chevronIn('settings-look'), findsNothing, reason: '두 칸이면 › 대신 연 페이지 강조');
+    bool selected(String key) => find
+        .descendant(
+          of: find.byKey(Key(key)),
+          matching: find.byWidgetPredicate((w) => w is Semantics && (w.properties.selected ?? false)),
+        )
+        .evaluate()
+        .isNotEmpty;
+    expect(selected('settings-look'), isTrue, reason: '연 페이지 줄은 선택 상태로 읽힌다');
+    expect(selected('settings-account'), isFalse);
+
+    await tester.tap(find.byKey(const Key('settings-account')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('change-login')), findsOneWidget);
+    expect(brightness, findsNothing);
+    expect(find.byKey(const Key('group-screen')), findsOneWidget, reason: '목록은 그대로 남는다');
+
+    await tester.tap(find.byKey(const Key('work-permissions')));
+    await tester.pumpAndSettle();
+    final work = find.widgetWithText(AppBar, '일 권한');
+    expect(work, findsOneWidget);
+    expect(tester.getTopLeft(work).dx, greaterThan(settingsNavWidth), reason: '하위 화면도 오른쪽 칸 안');
+    expect(find.byKey(const Key('group-screen')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('settings-weather')));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(AppBar, '날씨'), findsOneWidget, reason: '두 칸이면 날씨도 시트 대신 페이지');
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(find.widgetWithText(AppBar, '일 권한'), findsNothing);
+  });
+
+  testWidgets('좁은 스플릿 뷰는 폰 판 그대로 — 줄을 누르면 들어간다', (tester) async {
+    await pad(tester, Size(settingsNavWidth + roomColumnMinWidth - 1, 1376));
+    final fx = SettingsFixture();
+    addTearDown(fx.server.close);
+    await tester.pumpWidget(fx.screen());
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('phone-brightness')), findsNothing);
+    expect(chevronIn('settings-account'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('settings-account')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('change-login')), findsOneWidget);
+    expect(find.byKey(const Key('group-screen')), findsNothing, reason: '페이지가 첫 화면을 덮는다');
   });
 }

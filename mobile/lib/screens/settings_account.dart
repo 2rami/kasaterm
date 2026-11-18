@@ -22,6 +22,7 @@ class AccountSettingsScreen extends StatefulWidget {
     required this.providers,
     this.profile,
     this.installId,
+    this.onProfile,
   });
 
   final RelayAccountApi Function() api;
@@ -30,6 +31,9 @@ class AccountSettingsScreen extends StatefulWidget {
   /// 앞 화면이 이미 받은 값 — 들어오자마자 그리고, 곧 다시 받는다.
   final AccountProfile? profile;
   final Future<String> Function()? installId;
+
+  /// 받거나 바꾼 프로필을 첫 화면에 — 계정 판·계정 줄 요약이 같이 바뀐다(두 칸이면 이 페이지가 닫히지 않는다).
+  final ValueChanged<AccountProfile>? onProfile;
 
   @override
   State<AccountSettingsScreen> createState() => _AccountSettingsScreenState();
@@ -55,6 +59,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           _profile = profile;
           _profileError = null;
         });
+        widget.onProfile?.call(profile);
       }
     } on AccountException catch (e) {
       if (mounted) setState(() => _profileError = e.message);
@@ -69,6 +74,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     final next = await showSecretSheet(context, profile: profile, api: widget.api, password: password);
     if (next == null || !mounted) return;
     setState(() => _profile = next);
+    widget.onProfile?.call(next);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
