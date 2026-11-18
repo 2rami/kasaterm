@@ -323,9 +323,9 @@ fn student_names() -> HashSet<String> {
 
 /// 로스터 여럿 → 이름 하나의 집합. **합집합인 것이 요점**이라 순수 함수로 떼어
 /// 테스트가 지킨다.
-fn names_from_rosters(rosters: &[serde_json::Value]) -> HashSet<String> {
+fn names_from_rosters(rosters: &[impl std::borrow::Borrow<serde_json::Value>]) -> HashSet<String> {
     let mut out = HashSet::new();
-    for c in rosters {
+    for c in rosters.iter().map(std::borrow::Borrow::borrow) {
         if let Some(n) = c.get("leader").and_then(|l| l.get("name")).and_then(|n| n.as_str()) {
             out.insert(n.to_string());
         }
