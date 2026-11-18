@@ -48,7 +48,8 @@ pub(crate) struct ScreenView {
     shared: Arc<Shared>,
     watch: Option<Watch>,
     uploaded: u64,
-    /// 조작 중 — 칸 위 누름·휠·키를 그 기기에 넣는다. 처음엔 보기만 한다(보다가 잘못 누르면 그 기기에서 일이 일어난다).
+    /// 조작 중 — 칸 위 누름·휠·키를 그 기기에 넣는다. 열면 곧바로 조작이다(2026-11-18 「조작 안 눌러도 그냥 조작되게」) —
+    /// 화면 칸은 그 기기를 쓰려고 연다. 보기만 하려면 「조작 중」을 눌러 끈다.
     pub control: bool,
     pub layout: Option<Layout>,
     /// 확대 배율(1 = 칸에 맞춤)과 칸 가운데에 둘 장 안 자리(비율).
@@ -161,7 +162,7 @@ impl ScreenView {
             .name("screen-stream-decode".into())
             .spawn(move || decode_loop(rx, keyframes, &worker_shared, &wake))
             .ok()?;
-        Some(Self {
+        let mut view = Self {
             label: label.to_string(),
             shared,
             watch,
@@ -182,7 +183,9 @@ impl ScreenView {
             surface: Surface::Main,
             closed_since: None,
             audio,
-        })
+        };
+        view.set_control(true);
+        Some(view)
     }
 
     /// 조작을 켜면 그 기기 커서를 장에서 뺀다 — 이 기기 포인터가 곧 커서가 되어 영상 지연 없이 따라온다(Parsec 처럼).

@@ -22,7 +22,7 @@ fn texture_key(view: u64) -> String {
 
 /// 새로 풀린 장을 올리고 칸 본문 안에 비율을 지켜 그린다. 아직 장이 없으면 상태 글을 가운데에, 장이 흐르면 오른쪽
 /// 위에 「조작」 단추와 `fps · 지연 · 길` 을 작게 얹고, 확대했으면 그 왼쪽에 배율(누르면 맞춤으로)을 둔다. 장은 그 기기의 기기색 테로 두른다 — 이 기기 화면과 다른 기기
-/// 화면이 한눈에 갈리게(사이드바 기기 묶음 둘레선과 같은 색). 조작 중이면 강조색 테가 그 자리를 대신하고, 조작을 못
+/// 화면이 한눈에 갈리게(사이드바 기기 묶음 둘레선과 같은 색). 조작은 열면 늘 켜져 있어 테 색으로 가르지 않고 「조작 중」 알약이 말한다. 조작을 못
 /// 넣으면 그 까닭을 아래에 띄운다. 그린 자리는 누름 판정에 쓰도록 보기에 적어 둔다.
 pub(crate) fn paint(
     g: &mut gpu::GpuRenderer,
@@ -83,7 +83,7 @@ pub(crate) fn paint(
         let label = if view.control { "조작 중" } else { "조작" };
         let tw = g.measure_chrome_text(label, HUD_FONT, false) + HUD_PAD * 2.0;
         let toggle = (hud_box.0 - HUD_PAD - tw, y + HUD_PAD, tw, box_h);
-        g.round_rect_stroke(image.0, image.1, image.2, image.3, 0.0, EDGE, if view.control { theme::accent() } else { edge });
+        g.round_rect_stroke(image.0, image.1, image.2, image.3, 0.0, EDGE, edge);
         let key_button = view.control.then(|| {
             let kw = g.measure_chrome_text(KEY_LABEL, HUD_FONT, false) + HUD_PAD * 2.0;
             let b = (toggle.0 - HUD_PAD - kw, y + HUD_PAD, kw, box_h);

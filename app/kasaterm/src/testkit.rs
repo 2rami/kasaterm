@@ -7071,9 +7071,10 @@ impl App {
             }
         }
         // 첫 장 뒤 조작을 켜고 키 메뉴를 연 채로 둔다 — 메뉴 모양을 캡처로 본다.
-        if std::env::var_os("KASATERM_TEST_SCREEN_KEYMENU").is_some() {
-            if let Some(view) = self.screen_views.values_mut().find(|v| v.layout.is_some() && !v.control) {
-                view.set_control(true);
+        static KEYMENU: AtomicBool = AtomicBool::new(false);
+        if std::env::var_os("KASATERM_TEST_SCREEN_KEYMENU").is_some() && !KEYMENU.load(Ordering::Relaxed) {
+            if let Some(view) = self.screen_views.values_mut().find(|v| v.layout.is_some()) {
+                KEYMENU.store(true, Ordering::Relaxed);
                 view.key_menu = Some(Vec::new());
                 eprintln!("[screen-view-test] key menu open windows={}", view.remote_windows());
             }
