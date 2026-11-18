@@ -46,12 +46,13 @@ pub fn index() -> String {
 
 #[cfg(test)]
 mod tests {
-    /// 스킬 설명이 늘 실리는 유일한 자리다 — 완료 보고 규칙이 빠지면 폰·맥 알림과 `board --wait` 가 멎는다.
+    /// 스킬 설명이 늘 실리는 유일한 자리다 — 완료 보고 규칙이 빠지면 폰·맥 알림과 `board --wait` 가 멎고, 카드 명령이
+    /// 빠지면 결과물이 경로로만 건너간다(본문을 열어야 보이던 때 자주 빠졌다).
     /// codex 는 설명이 1024 바이트를 넘는 스킬을 싣지 않는다.
     #[test]
     fn the_skill_description_carries_the_standing_rules() {
         let description = super::SKILL.lines().find_map(|l| l.strip_prefix("description: ")).unwrap();
-        for rule in ["kasaterm-cli done", "⟦폰⟧", "kasaterm-cli tell 이름@기기"] {
+        for rule in ["kasaterm-cli done", "⟦폰⟧", "kasaterm-cli tell 이름@기기", "imgopen --block", "mediaopen --block"] {
             assert!(description.contains(rule), "{rule}");
         }
         assert!(description.len() <= 1024, "{}", description.len());
