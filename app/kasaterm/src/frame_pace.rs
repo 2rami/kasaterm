@@ -90,7 +90,14 @@ fn spawn_waker(proxy: EventLoopProxy<crate::UserEvent>) {
                 };
                 let now = Instant::now();
                 if now < due {
-                    p = WAKE.wait_timeout(p, due - now).unwrap().0;
+                    // 조건 변수의 시간 제한은 Windows 에서 프로세스 타이머 해상도에 묶인다 — 아무도 해상도를
+                    // 올리지 않은 프로세스는 3ms 를 맡겨도 12ms 뒤에 깨고, 올린 앱 안에서도 1ms 씩 늦었다
+                    // (거울 15칸 리그에서 미룬 그림 p50 3.8→2.5ms). 해상도는 드라이버 같은 남의 사정이라
+                    // 기대지 않고, 고해상도 타이머로 자는 std 의 sleep 을 쓴다.
+                    // 자는 동안 `due` 는 `drew` 가 지우거나 더 늦은 값으로만 바뀌어 일찍 깰 일이 없다.
+                    drop(p);
+                    std::thread::sleep(due - now);
+                    p = PACE.lock().unwrap();
                     continue;
                 }
                 p.due = None;
