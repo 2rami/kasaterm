@@ -8,6 +8,44 @@
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// 같은 수정 시각·크기라도 이만큼 지나면 다시 읽는다 — 같은 시각에 같은 크기로 두 번 쓰인 드문 경우.
+const JSON_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 명부·테마·설정 JSON 을 파일이 바뀔 때만 다시 읽는다. 다른 기기가 몇 초마다 묻는 칸 목록 창구가 칸마다 색·얼굴을
+/// 찾으며 명부·테마 파일을 전부 열어 파싱했다 — 맥북 표본(2026-11-18, 칸 13·거울 연결 20여 개)에서 tokio 일꾼의
+/// 바쁜 표본 상위(from_utf8·__open·serde)가 이것이었다. 없거나 깨진 파일은 None 이다(읽던 자리들과 같다).
+fn read_json(path: &Path) -> Option<Arc<Value>> {
+    type Mark = (Option<std::time::SystemTime>, u64);
+    struct Seen {
+        mark: Mark,
+        read_at: std::time::Instant,
+        value: Option<Arc<Value>>,
+    }
+    static SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, Seen>>> =
+        std::sync::LazyLock::new(Default::default);
+    let Ok(meta) = std::fs::metadata(path) else {
+        if let Ok(mut seen) = SEEN.lock() {
+            seen.remove(path);
+        }
+        return None;
+    };
+    let mark = (meta.modified().ok(), meta.len());
+    if let Ok(seen) = SEEN.lock() {
+        if let Some(hit) = seen.get(path).filter(|s| s.mark == mark && s.read_at.elapsed() < JSON_MAX_AGE) {
+            return hit.value.clone();
+        }
+    }
+    let value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .map(Arc::new);
+    if let Ok(mut seen) = SEEN.lock() {
+        seen.insert(path.to_path_buf(), Seen { mark, read_at: std::time::Instant::now(), value: value.clone() });
+    }
+    value
+}
 
 /// Windows GUI 프로세스엔 HOME 이 없다 — USERPROFILE 이 그 자리.
 fn home() -> Option<PathBuf> {
@@ -232,13 +270,7 @@ fn candidate_paths() -> Vec<PathBuf> {
 
 /// 후보 중 첫 번째로 파싱되는 characters.json. 없으면 None(테마 미설치 = 배정 skip).
 pub fn characters_json() -> Option<Value> {
-    for p in candidate_paths() {
-        let Ok(s) = std::fs::read_to_string(&p) else { continue };
-        if let Ok(v) = serde_json::from_str::<Value>(&s) {
-            return Some(v);
-        }
-    }
-    None
+    candidate_paths().iter().find_map(|p| read_json(p)).map(|v| Value::clone(&v))
 }
 
 /// **실제로 쓰는 명부** — 활성 명부에 고른 캐릭터를 그 사람이 고른 테마의 것으로 얹는다.
@@ -384,17 +416,15 @@ pub fn picked_sprite_dir(theme: &str) -> Option<PathBuf> {
 /// 손대지 않는다(2026-08-27 실측: /resume 피커에 옛 테마의 페이몬 얼굴이 붙은 채
 /// 굳었다 — 그 세션의 배정은 진작 아리스로 바뀌어 있었다). `agent_slug` 가 같은
 /// 이유로 전 테마 합집합을 보게 넓혀졌다(`0eedb9c4`) — 같은 함정의 다른 자리다.
-pub fn all_rosters() -> Vec<Value> {
+pub fn all_rosters() -> Vec<Arc<Value>> {
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = Default::default();
-    let mut push = |p: PathBuf, out: &mut Vec<Value>| {
+    let mut push = |p: PathBuf, out: &mut Vec<Arc<Value>>| {
         if !seen.insert(p.clone()) {
             return;
         }
-        if let Ok(s) = std::fs::read_to_string(&p) {
-            if let Ok(v) = serde_json::from_str::<Value>(&s) {
-                out.push(v);
-            }
+        if let Some(v) = read_json(&p) {
+            out.push(v);
         }
     };
     for p in candidate_paths() {
@@ -448,9 +478,8 @@ pub fn base_characters_json() -> Option<Value> {
         if skip.as_deref() == Some(p.as_path()) {
             continue;
         }
-        let Ok(s) = std::fs::read_to_string(&p) else { continue };
-        if let Ok(v) = serde_json::from_str::<Value>(&s) {
-            return Some(v);
+        if let Some(v) = read_json(&p) {
+            return Some(Value::clone(&v));
         }
     }
     None
@@ -461,8 +490,7 @@ pub fn theme_characters_json(id: &str) -> Option<Value> {
     if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
         return None;
     }
-    let s = std::fs::read_to_string(themes_root()?.join(id).join("theme.json")).ok()?;
-    serde_json::from_str(&s).ok()
+    read_json(&themes_root()?.join(id).join("theme.json")).map(|v| Value::clone(&v))
 }
 
 /// persona 합집합 조회 — 활성 → 기본(번들) → 설치 테마 전부. 진행 중 pane 이
@@ -528,8 +556,7 @@ pub fn persona_for_any(name: &str) -> Option<String> {
     }
     let root = themes_root()?;
     for e in std::fs::read_dir(root).ok()?.flatten() {
-        let Ok(s) = std::fs::read_to_string(e.path().join("theme.json")) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&s) else { continue };
+        let Some(v) = read_json(&e.path().join("theme.json")) else { continue };
         if let Some(p) = persona_for(&v, name) {
             return Some(p);
         }
@@ -602,9 +629,7 @@ fn read_character_picks() -> Vec<(String, Vec<String>)> {
 
 /// settings.json 의 값 하나(문자열이 아닌 것도). `read_setting_str` 과 같은 경로 규칙.
 fn read_setting_value(key: &str) -> Option<Value> {
-    let p = settings_path()?;
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
-    v.get(key).cloned()
+    read_json(&settings_path()?)?.get(key).cloned()
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -2648,5 +2673,27 @@ mod theme_roster_tests {
         assert_eq!(got.len(), 2, "폴더마다 하나씩: {got:?}");
         assert!(got.iter().all(|p| p.ends_with("theme.json")));
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod read_json_tests {
+    use super::*;
+
+    #[test]
+    fn an_unchanged_roster_is_parsed_once_and_a_changed_or_removed_one_is_seen() {
+        let dir = std::env::temp_dir().join(format!("kasatest-roster-memo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("theme.json");
+        std::fs::write(&path, r#"{"members":[{"name":"하나"}]}"#).unwrap();
+        let first = read_json(&path).unwrap();
+        assert!(Arc::ptr_eq(&first, &read_json(&path).unwrap()), "그대로인 파일은 다시 파싱하지 않는다");
+        std::fs::write(&path, r#"{"members":[{"name":"하나"},{"name":"둘"}]}"#).unwrap();
+        assert_eq!(read_json(&path).unwrap()["members"].as_array().unwrap().len(), 2);
+        std::fs::write(&path, "{broken").unwrap();
+        assert!(read_json(&path).is_none(), "깨진 파일은 읽던 자리들처럼 없음");
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_json(&path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
