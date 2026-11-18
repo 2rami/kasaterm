@@ -46,7 +46,6 @@ rmSync(join(OUT, 'scripts', 'icons-brand.mjs'), { force: true })
 rmSync(join(OUT, 'mcp', 'kasaterm.mjs'), { force: true })
 rmSync(join(OUT, 'mcp', 'kasaterm-root.mjs'), { force: true })
 rmSync(join(OUT, 'mcp', 'kasaterm-root.test.mjs'), { force: true })
-rmSync(join(OUT, 'scripts', 'install-kasaterm.mjs'), { force: true })
 
 function swap(rel, pairs) {
   const p = join(OUT, rel)
@@ -56,15 +55,6 @@ function swap(rel, pairs) {
     t = t.split(from).join(to)
   }
   writeFileSync(p, t)
-}
-
-// 호스트 터미널을 안 쓰는 사람에게는 읽을 이유가 없는 절. 마커째 들어낸다.
-function dropSection(rel, marker) {
-  const p = join(OUT, rel)
-  const t = readFileSync(p, 'utf8')
-  const re = new RegExp(`\\n?<!-- ${marker} -->[\\s\\S]*?<!-- /${marker} -->\\n`, 'g')
-  if (!re.test(t)) throw new Error(`${rel} 에 <!-- ${marker} --> 절이 없습니다`)
-  writeFileSync(p, t.replace(re, ''))
 }
 
 // 개인판에만 두는 장식. 회사 화면에 섞이면 튀므로 통째로 뺀다.
@@ -82,7 +72,6 @@ swap('extension/sidepanel.html', [[SRC_NAME, BRAND.name]])
 swap('mcp/server.mjs', [[`const NAME = '${SRC_KEY}'`, `const NAME = '${BRAND.key}'`]])
 swap('package.json', [[`"name": "${SRC_KEY}"`, `"name": "${BRAND.key}"`]])
 swap('README.md', [[`# ${SRC_NAME}`, `# ${BRAND.name}`]])
-dropSection('README.md', 'host-only')
 dropBlock('extension/content.js', 'brand-skip')
 
 console.log(`${OUT}\n확장 로드 경로: ${join(OUT, 'extension')}`)

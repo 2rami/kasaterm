@@ -231,7 +231,6 @@ class Migration:
             self.home / ".config/kasaterm/sessions/viewer-documents.json",
             self.home / ".config/kasaterm/window.json",
             self.home / ".config/kasaterm/settings.json",
-            self.home / ".config/kasaterm/claude-mcp.json",
         ]
         fixed = [target for path in fixed_slots if (target := self.config_target(path)) is not None]
         patterns = [

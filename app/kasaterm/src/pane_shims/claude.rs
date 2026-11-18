@@ -445,30 +445,6 @@ set -- --model \"$KASATERM_MODEL\" \"$@\"\n\
 fi\n";
     let persona_block =
         format!("{backend_line}{persona_line}{model_line}");
-    // MCP 자동 주입. 위 노브들과 달리 **prepend 가 아니라 append** 라서 블록이 따로다 —
-    // `--mcp-config` 는 variadic 이라 뒤따르는 non-flag 를 값으로 삼켜, 앞에 두면 사용자
-    // 프롬프트가 통째로 사라진다. 반복 지정은 누적되므로 사용자가 자기 것을 줘도 안 부딪힌다.
-    let mcp_block = match socket::claude_mcp_config_path() {
-        Some(p) if socket::read_claude_mcp() => {
-            let q = p
-                .to_string_lossy()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('$', "\\$")
-                .replace('`', "\\`");
-            format!(
-                "MCPCFG=\"{q}\"\n\
-                 # 파일이 비었거나 mcpServers 키가 없으면 claude 가 **부팅 자체를 거부**한다.\n\
-                 # 문법 오류까지는 못 잡지만(복구는 그 파일을 지우는 것 한 줄이고 claude 가\n\
-                 # 경로를 그대로 찍어준다), 빈 파일 하나로 모든 pane 을 벽돌로 만드는 사고는\n\
-                 # 이 얕은 검사로 막힌다.\n\
-                 if [ -n \"$PERSONA_OK\" ] && [ -s \"$MCPCFG\" ] && grep -q '\"mcpServers\"' \"$MCPCFG\" 2>/dev/null; then\n\
-                 case \" $* \" in *\" --strict-mcp-config \"*|*\" -- \"*) ;; *) set -- \"$@\" --mcp-config \"$MCPCFG\" ;; esac\n\
-                 fi\n"
-            )
-        }
-        _ => String::new(),
-    };
     // 계정 전환. persona/model 노브와 달리 **PERSONA_OK 게이트 밖**이다 — 저것들은
     // attach·agents·-p·stop/logs 에서 일부러 빠지지만, 인증이 서브커맨드마다 다른
     // 계정을 보면 그건 그냥 고장이다. 디렉터리는 여기서 만들어 둔다: macOS 는 경로를
@@ -658,8 +634,8 @@ case \" $* \" in *\" attach \"*|*\" agents \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\"
 # zshrc claude() 알리아스(--dangerously-skip-permissions prepend)에 깨진다(실측) — 첫 non-flag\n\
 # 인자로 판정. 값 받는 플래그가 stop/logs 앞에 오는 조합은 비현실적이라 허용 리스크.\n\
 SUB=\"\"; for a in \"$@\"; do case \"$a\" in -*) ;; *) SUB=\"$a\"; break ;; esac; done\n\
-# 서브커맨드에는 노브를 하나도 얹지 않는다 — `--mcp-config` 처럼 대화형 실행에만 있는 플래그를\n\
-# 붙이면 `claude mcp list` 가 통째로 `unknown option` 으로 죽는다(2026-08-03 실사고). 첫 non-flag\n\
+# 서브커맨드에는 노브를 하나도 얹지 않는다 — 대화형 실행에만 있는 플래그를(그때는 `--mcp-config`)\n\
+# 붙이면 `claude mcp list` 가 통째로 `unknown option` 으로 죽었다(2026-08-03 실사고). 첫 non-flag\n\
 # 인자가 **정확히** 이 이름일 때만이라 프롬프트(`claude \"mcp 어떻게 써\"`)는 안 걸린다.\n\
 # claude 가 새 서브커맨드를 내면 여기 추가할 것.\n\
 case \"$SUB\" in mcp|config|configuration|doctor|update|upgrade|install|installation|plugin|plugins|project|auth|gateway|setup-token|auto-mode|ultrareview|migrate-installer) SID=\"\"; PERSONA_OK=\"\" ;; esac\n\
@@ -694,7 +670,6 @@ fi\n\
 # 이름은 CLAUDE_CODE_ 접두어다. CLAUDE_TASK_LIST_ID 로 주면 claude 가 안 읽고, 그러면\n\
 # 목록 키가 안 잡히면서 Task 도구 자체가 세션에 안 실린다(2026-09-15 실측).\n\
 [ -n \"$SID\" ] && export CLAUDE_CODE_TASK_LIST_ID=\"$SID\"\n\
-{mblk}\
 {permissions}\
 # 폴더 신뢰 화면(「Is this a project you trust?」) 선해결 — 무인으로 띄운 학생이 거기서\n\
 # 멈춘다. codex shim 의 config.toml 신뢰와 같은 자리다. 서브커맨드·-p 엔 그 화면이 없다.\n\
@@ -705,7 +680,7 @@ if [ \"$USER_SETTINGS\" = 1 ] || [ -n \"$HEADLESS\" ] || [ -n \"$BARE\" ] || [ !
   exec \"$REAL\" \"$@\"\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
-        hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block, mblk = mcp_block,
+        hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block,
         nblk = claude_mods_block(&install_claude_mods(&hooks_dir, shim_dir)),
         permissions = format!("if [ -n \"$PERSONA_OK\" ]; then\n{}fi\n", agent_preferences::permission_shell("claude", agent_preferences::permission("claude")) + ":\n"));
     let wrapper = accept_prompt_file(wrapper);
@@ -1054,35 +1029,6 @@ mod tests {
                 assert!(at < body.find("exec \"$REAL\"").unwrap(), "--plugin-dir 가 exec 뒤에 있다");
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn claude_wrapper_appends_mcp_config_after_user_args() {
-        // `--mcp-config` 는 variadic 이라 **뒤따르는 non-flag 를 값으로 삼킨다** — 다른 노브들처럼
-        // prepend 로 바꾸면 사용자 프롬프트가 통째로 인자에 먹혀 조용히 사라진다. 그리고 exec 이
-        // 두 갈래(사용자 --settings 유무)라 분기 뒤에 붙이면 한쪽에서만 빠진다.
-        let dir = std::env::temp_dir().join(format!("kt-shim-mcp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        install_claude_hook_shim(&dir);
-        let Ok(body) = std::fs::read_to_string(dir.join("claude")) else {
-            return;
-        };
-        if !body.contains("--mcp-config") {
-            // 설정에서 껐거나 홈을 못 찾은 환경 — 블록 자체가 안 실린 것이라 검사할 대상이 없다.
-            let _ = std::fs::remove_dir_all(&dir);
-            return;
-        }
-        assert!(
-            body.contains("set -- \"$@\" --mcp-config"),
-            "--mcp-config 가 prepend 로 돌아갔다 — 사용자 프롬프트를 삼킨다"
-        );
-        let at = body.find("--mcp-config").unwrap();
-        // 닻은 **진짜 claude 를 부르는 exec**($REAL)다 — 그보다 앞의 exec(kimi 런처)는
-        // claude 에 닿지 않는 갈래라 이 검사의 대상이 아니다. 아무 `exec` 나 잡으면 그 갈래가 하나 늘 때마다 헛경보가 선다.
-        let exec_at = body.find("exec \"$REAL\"").unwrap();
-        assert!(at < exec_at, "--mcp-config 주입이 exec 분기보다 뒤에 있다");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
