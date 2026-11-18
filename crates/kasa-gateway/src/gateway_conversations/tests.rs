@@ -87,6 +87,7 @@ struct Desktop {
     id: String,
     source: std::sync::Mutex<String>,
     calls: std::sync::Mutex<Vec<u64>>,
+    boards: std::sync::atomic::AtomicUsize,
 }
 impl kasa_socket::backend::Backend for Desktop {
     fn list_workspaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
@@ -97,6 +98,10 @@ impl kasa_socket::backend::Backend for Desktop {
     fn send_key(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
     fn send_text(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
     fn pane_windows(&self) -> Vec<(String, usize)> { vec![(self.id.clone(), 0)] }
+    fn collab_board(&self) -> anyhow::Result<Vec<kasa_socket::backend::PaneActivity>> {
+        self.boards.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Vec::new())
+    }
     fn collab_pane_identity(&self, _: &str) -> anyhow::Result<Value> { Ok(json!({"surface_key":"key","machine_id":"archive-desktop"})) }
     fn transcript_archive(&self, _: &str, offset: u64) -> anyhow::Result<kasa_socket::backend::TranscriptChunk> {
         self.calls.lock().unwrap().push(offset);
@@ -111,7 +116,7 @@ async fn desktop_sync_uploads_the_whole_history_and_tracks_source_changes_withou
     let fixture = Fixture::new(); let addr = spawn_relay(fixture.gate()).await;
     let token = login(addr, "alice", "desktop").await;
     let credential = kasa_device::device_auth::DeviceCred { relay:format!("http://{addr}"), account:"alice".into(), device_id:"fixture".into(), token:token.clone(), display_name:None };
-    let source = Desktop { id:format!("archive-test-{}", uuid::Uuid::new_v4()), source:std::sync::Mutex::new("first.jsonl".into()), calls:Default::default() };
+    let source = Desktop { id:format!("archive-test-{}", uuid::Uuid::new_v4()), source:std::sync::Mutex::new("first.jsonl".into()), calls:Default::default(), boards:Default::default() };
     let client = reqwest::Client::new();
     let sync = || kasa_remote::conversation_archive::sync::synchronize(&source, &client, &credential, "archive-desktop", &|| true);
     assert!(!sync().await.unwrap()); assert!(source.calls.lock().unwrap().is_empty(), "disabled accounts are not read");
@@ -125,4 +130,21 @@ async fn desktop_sync_uploads_the_whole_history_and_tracks_source_changes_withou
     assert!(sync().await.unwrap()); assert!(sync().await.unwrap()); assert!(!sync().await.unwrap());
     assert_eq!(get_json(addr, "/relay/conversations", &token).await.1["conversations"].as_array().unwrap().len(), 2);
     assert_eq!(get_json(addr, &path, &token).await.1["chunk"]["raw"], "first:first.jsonl\nlast:first.jsonl\n");
+}
+
+#[tokio::test]
+async fn the_sync_loop_keeps_its_board_between_quick_rounds() {
+    let fixture = Fixture::new(); let addr = spawn_relay(fixture.gate()).await;
+    let token = login(addr, "alice", "desktop").await; enable(addr, &token).await;
+    let credential = kasa_device::device_auth::DeviceCred { relay:format!("http://{addr}"), account:"alice".into(), device_id:"fixture".into(), token, display_name:None };
+    let source = Desktop { id:format!("archive-test-{}", uuid::Uuid::new_v4()), source:std::sync::Mutex::new("first.jsonl".into()), calls:Default::default(), boards:Default::default() };
+    let client = reqwest::Client::new();
+    let mut board = kasa_remote::conversation_archive::sync::BoardCache::default();
+    for _ in 0..3 {
+        kasa_remote::conversation_archive::sync::synchronize_with(&mut board, &source, &client, &credential, "archive-desktop", &|| true).await.unwrap();
+    }
+    assert_eq!(source.calls.lock().unwrap().as_slice(), [0, 100, 200], "기록은 바퀴마다 이어 읽는다");
+    assert_eq!(source.boards.load(std::sync::atomic::Ordering::Relaxed), 1, "빠른 바퀴들은 보드를 한 번만 짓는다");
+    kasa_remote::conversation_archive::sync::synchronize(&source, &client, &credential, "archive-desktop", &|| true).await.unwrap();
+    assert_eq!(source.boards.load(std::sync::atomic::Ordering::Relaxed), 2, "한 번 부르는 쪽은 그때 보드를 짓는다");
 }
