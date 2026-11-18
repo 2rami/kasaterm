@@ -177,5 +177,5 @@ KASATERM_OP_AUTOTRUST_MS=5000 KASATERM_OP_AUTOTRUST_SHOT=/tmp/<리그>/trust.png
 
 - 관문: `tools/kasa-gateway-seoul/gateway.sh build` → `gateway.sh upgrade ./out/kasa-relay`. 폰 키는 상태 폴더의
   `relay-approval-keys.json`(0600)에 남는다.
-- 사람이 처음 한 번: 폰 설정 → 계정 → 비밀 승인 → 「Face ID 로 연결」. 꺼낼 비밀은 맥 키체인에 넣어 둔다
+- 사람이 처음 한 번: 폰 설정 → 연결 기기 → 비밀 승인 → 「Face ID 로 연결」. 꺼낼 비밀은 맥 키체인에 넣어 둔다
   (`security add-generic-password -s 서비스 -a 계정 -w`, 또는 키체인 접근 앱). 항목마다 처음 한 번 맥의 허용 창에서 「항상 허용」.

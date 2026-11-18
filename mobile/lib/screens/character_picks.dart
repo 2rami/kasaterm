@@ -308,7 +308,7 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
   Widget build(BuildContext context) => TwinBackdrop(
     child: Scaffold(
       backgroundColor: Colors.transparent,
-      appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('학생 고르기')),
+      appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('캐릭터')),
       body: ListenableBuilder(listenable: store, builder: (context, _) => _body()),
     ),
   );

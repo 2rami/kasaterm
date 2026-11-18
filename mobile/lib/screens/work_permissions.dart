@@ -228,7 +228,7 @@ class _WorkPermissionsScreenState extends State<WorkPermissionsScreen> {
                         ? '설정 「계정」의 GitHub 연결 한 번이면 로그인과 함께 PR 권한이 붙어요.'
                         : list.connections.any((c) => c['state'] == 'reconnect_required')
                         ? '「다시 연결 필요」는 설정 「계정」의 GitHub 연결을 한 번 더 누르면 돼요.'
-                        : '학생은 kasaterm-cli pr, 나쵸는 kasa-device work 로 써요. PR 만들기는 여기나 데스크톱 설정에서 승인해야 나가요.',
+                        : '학생은 kasaterm-cli pr, 나쵸는 kasa-device work 로 써요. PR 만들기는 여기나 데스크톱 확인 창에서 승인해야 나가요.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
