@@ -10,8 +10,6 @@ GUI 없는 호스트는 `crates/kasa-collab/src/hooks.rs`에서 별도로 구성
 |---|---|
 | `kasaterm-bind-transcript.sh` | SessionStart: 대화·학생 신원 연동 |
 | `kasaterm-conflict-guard.py` | Edit/Write/MultiEdit 전: 동시 편집과 미커밋 파일 소유 보호 |
-| `kasaterm-subagent-guard.py` | Agent/Task 전: 학생 칸 위임 안내, 읽기 전용 탐색·명시 요청 예외 |
-| `kasaterm-build-expiry-guard.py` | Bash 전: 설치된 앱을 멈추게 하는 빌드 만료 차단 |
 | `kasaterm-closed-pane-guard.py` | 도구 호출·프롬프트 제출 전: 닫힌 칸 작업 거부 |
 | `kasaterm-agent-status.sh` | 도구 전후·Stop: 진행 상태 기록 |
 | `kasaterm-turn.sh` | 프롬프트·Stop·PreCompact: 턴·압축 경계 기록 |
