@@ -4125,45 +4125,41 @@ impl Backend for PtyBackend {
                 row.title = crate::strip_activity_prefix(t).to_string();
             }
             row.title_pinned = pinned.contains(&row.surface_id);
-            row.effort_default = saved_effort.clone();
+            // settings.json effort 와 statusline 보고는 claude 의 것이다. 같은 칸이 codex 로
+            // 바뀐 뒤에도 칸 id 로 남아 있어, codex 칸에 옛 claude 모델·창·경로가 떴다.
+            let claude_row = statusline_reports_apply(row.harness.as_deref());
+            row.effort_default = if claude_row {
+                saved_effort.clone()
+            } else if row.harness.as_deref() == Some("codex") {
+                self.codex_rollouts
+                    .lock()
+                    .unwrap()
+                    .get(&row.surface_id)
+                    .map(|s| s.effort.clone())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            if !claude_row {
+                let cwd = self.reported_cwd.lock().unwrap().remove(&row.surface_id);
+                let label = self.reported_model_label.lock().unwrap().remove(&row.surface_id);
+                let ctx = self.reported_ctx.lock().unwrap().remove(&row.surface_id);
+                // 방금 claude 에서 바뀐 칸 — 깜빡임 막이 캐시도 그 claude 의 토큰·창이다.
+                if cwd.is_some() || label.is_some() || ctx.is_some() {
+                    self.last_ctx.lock().unwrap().remove(&row.surface_id);
+                }
+            }
             if let Some(&pid) = pane_pids.get(&row.surface_id) {
                 if let Some(cwd) = self.pane_cwd_live(pid) {
                     row.cwd = cwd.to_string_lossy().into_owned();
                 }
             }
-            // statusLine 이 보고한 "현재 보는 경로"(claude 내부 cd). 없으면 빈값(=cwd 만 표시).
-            if let Some(vc) = self.reported_cwd.lock().unwrap().get(&row.surface_id) {
-                row.view_cwd = vc.clone();
-            }
-            // 모델 표시명은 statusline 이 `report-cwd` 로 보고한 것(`model_label`) — 화면에서
-            // 읽던 시절엔 좁은 pane 에서 "(1M context)" 꼬리가 잘려 1M 세션이 200k 로 보였다.
-            // 없으면 기록의 model id 그대로. 컨텍스트 %도 상태바를 안 쓴다(transcript usage).
-            if let Some(m) = self.reported_model_label.lock().unwrap().get(&row.surface_id) {
-                if !m.is_empty() {
-                    row.model = m.clone();
-                }
-            }
-            // 컨텍스트 창 — statusLine 이 보고한 하네스 정본이 최우선. transcript 의 model
-            // 엔 `[1m]` 이 안 실리고(API 응답이 `claude-opus-5`) 상태바 모델명도 좁은 pane
-            // 대비로 "(1M context)" 괄호가 잘려 나가, 추정 3종이 모두 빗나가면 1M 세션이
-            // 200k 로 잡혔다 — 18만 토큰이 92%(빨강)로 보이다 200k 를 넘는 순간 20% 로
-            // 떨어지는 역주행의 원인. 보고가 없을 때만 종전 상태바 폴백을 쓴다.
-            let reported = self
-                .reported_ctx
-                .lock()
-                .unwrap()
-                .get(&row.surface_id)
-                .copied();
-            if let Some((win, tok)) = reported {
-                row.context_limit = win;
-                // transcript usage 가 tail 윈도 밖이라 0 이면 보고된 토큰으로 메운다.
-                if row.context_tokens == 0 {
-                    row.context_tokens = tok;
-                }
-            } else if row.model.to_ascii_lowercase().contains("1m") && row.context_limit < 1_000_000
-            {
-                row.context_limit = 1_000_000;
-            }
+            let report = StatuslineReport {
+                view_cwd: self.reported_cwd.lock().unwrap().get(&row.surface_id).cloned(),
+                model_label: self.reported_model_label.lock().unwrap().get(&row.surface_id).cloned(),
+                ctx: self.reported_ctx.lock().unwrap().get(&row.surface_id).copied(),
+            };
+            apply_statusline_report(row, report);
             // 정확 소스(transcript usage)가 tail 윈도에 없어 0 이면 직전 유효값을 유지 — 컨텍스트량·
             // 인연%가 0 으로 깜빡이지 않게(사용자: statusline 잘려도 0 안 됨). 0 이상이면 캐시 갱신.
             {
@@ -4445,6 +4441,42 @@ fn registry_shell_pids(known: &HashSet<String>, ids: &[String], shell: impl Fn(&
         .collect()
 }
 
+/// `kasaterm-cli statusline` 은 claude 만 부르니, 하네스를 아직 못 가린 칸(None)까지만 받는다.
+fn statusline_reports_apply(harness: Option<&str>) -> bool {
+    harness.is_none_or(|h| h == "claude")
+}
+
+/// claude statusline 이 `report-cwd` 로 칸 id 에 남긴 값.
+struct StatuslineReport {
+    view_cwd: Option<String>,
+    model_label: Option<String>,
+    ctx: Option<(u64, u64)>,
+}
+
+fn apply_statusline_report(row: &mut PaneActivity, report: StatuslineReport) {
+    if !statusline_reports_apply(row.harness.as_deref()) {
+        return;
+    }
+    if let Some(view_cwd) = report.view_cwd {
+        row.view_cwd = view_cwd;
+    }
+    // 화면에서 읽던 시절엔 좁은 pane 에서 "(1M context)" 꼬리가 잘려 1M 세션이 200k 로 보였다.
+    if let Some(label) = report.model_label.filter(|m| !m.is_empty()) {
+        row.model = label;
+    }
+    // transcript 의 model 엔 `[1m]` 이 안 실려(API 응답이 `claude-opus-5`) 추정이 빗나가면
+    // 18만 토큰이 92%(빨강)로 보이다 200k 를 넘는 순간 20% 로 떨어졌다. 하네스가 준 창이 정본이다.
+    if let Some((win, tok)) = report.ctx {
+        row.context_limit = win;
+        // transcript usage 가 tail 윈도 밖이라 0 이면 보고된 토큰으로 메운다.
+        if row.context_tokens == 0 {
+            row.context_tokens = tok;
+        }
+    } else if row.model.to_ascii_lowercase().contains("1m") && row.context_limit < 1_000_000 {
+        row.context_limit = 1_000_000;
+    }
+}
+
 fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
     if facts.get("state_fresh").and_then(|v| v.as_bool()) == Some(false) {
         row.status = "unknown".into();
@@ -4585,6 +4617,48 @@ mod remote_board_tests {
         let known = HashSet::from(["web-b".to_string()]);
         let got: Vec<String> = registry_shell_pids(&known, &ids, fake).into_iter().map(|(p, _)| p).collect();
         assert_eq!(got, ["%3", "web-b"]);
+    }
+
+    fn old_claude_report() -> StatuslineReport {
+        StatuslineReport {
+            view_cwd: Some("/claude/project".into()),
+            model_label: Some("Opus 5.5 1M".into()),
+            ctx: Some((1_000_000, 120_000)),
+        }
+    }
+
+    /// claude 로 쓰던 칸에서 codex 를 띄우면 칸 id 로 남은 옛 statusline 보고가
+    /// codex 모델·창을 덮어 「Opus 5.5 1M」으로 보였다(2026-11-19 폰 보고).
+    #[test]
+    fn codex_row_ignores_statusline_reports_left_by_an_earlier_claude() {
+        let mut row = PaneActivity {
+            harness: Some("codex".into()), model: "gpt-6.2-astra".into(),
+            cwd: "/codex/project".into(), context_limit: 828_400, context_tokens: 436_182,
+            ..Default::default()
+        };
+        apply_statusline_report(&mut row, old_claude_report());
+        assert_eq!(row.model, "gpt-6.2-astra");
+        assert_eq!(row.context_limit, 828_400);
+        assert!(row.view_cwd.is_empty());
+
+        let mut unknown = PaneActivity { harness: Some("codex".into()), ..Default::default() };
+        apply_statusline_report(&mut unknown, old_claude_report());
+        assert!(unknown.model.is_empty(), "모르는 codex 모델은 비워 둔다");
+        assert_eq!(unknown.context_limit, 0);
+    }
+
+    #[test]
+    fn claude_row_takes_its_statusline_report() {
+        let mut row = PaneActivity {
+            harness: Some("claude".into()), model: "claude-opus-5-5".into(),
+            context_limit: 200_000, ..Default::default()
+        };
+        apply_statusline_report(&mut row, old_claude_report());
+        assert_eq!(row.model, "Opus 5.5 1M");
+        assert_eq!((row.context_limit, row.context_tokens), (1_000_000, 120_000));
+        assert_eq!(row.view_cwd, "/claude/project");
+        assert!(statusline_reports_apply(None));
+        assert!(!statusline_reports_apply(Some("agy")));
     }
 
     #[test]
