@@ -108,6 +108,7 @@ pub(crate) fn comm_name(comm: &str) -> String {
 /// 커널이 아예 답을 안 하는 남의 시스템 프로세스는 표에서 빠진다(학생·셸·도구는 전부 내 것이다).
 #[cfg(target_os = "macos")]
 pub(crate) fn process_table() -> Option<Vec<(u32, u32, String)>> {
+    use std::time::Instant;
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if count <= 0 {
         return None;
@@ -123,6 +124,9 @@ pub(crate) fn process_table() -> Option<Vec<(u32, u32, String)>> {
     let me = unsafe { libc::getuid() };
     let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let mut out = Vec::with_capacity(pids.len());
+    let now = Instant::now();
+    let mut known = ARGV0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut kept = std::collections::HashMap::with_capacity(known.len());
     for pid in pids {
         if pid <= 0 {
             continue;
@@ -135,7 +139,26 @@ pub(crate) fn process_table() -> Option<Vec<(u32, u32, String)>> {
         if got != size {
             continue;
         }
-        let own = (info.pbsi_uid == me).then(|| with_procargs(pid as u32, parse_argv0)).flatten();
+        let own = (info.pbsi_uid == me)
+            .then(|| {
+                let prev = known
+                    .remove(&(pid as u32))
+                    .filter(|k: &Argv0| k.ppid == info.pbsi_ppid && k.comm == info.pbsi_comm);
+                let first_seen = prev.as_ref().map_or(now, |k| k.first_seen);
+                let settled = |k: &Argv0| {
+                    now.duration_since(k.first_seen) >= ARGV0_YOUNG && now.duration_since(k.read_at) < ARGV0_RECHECK
+                };
+                let (name, read_at) = match prev.filter(settled) {
+                    Some(k) => (k.name, k.read_at),
+                    None => (with_procargs(pid as u32, parse_argv0), now),
+                };
+                kept.insert(
+                    pid as u32,
+                    Argv0 { ppid: info.pbsi_ppid, comm: info.pbsi_comm, first_seen, read_at, name: name.clone() },
+                );
+                name
+            })
+            .flatten();
         let name = own.or_else(|| {
             let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
             (n > 0).then(|| String::from_utf8_lossy(&path[..n as usize]).into_owned())
@@ -149,8 +172,34 @@ pub(crate) fn process_table() -> Option<Vec<(u32, u32, String)>> {
         };
         out.push((pid as u32, info.pbsi_ppid, name));
     }
+    *known = kept;
     Some(out)
 }
+
+/// 내 프로세스의 argv[0] 을 pid 마다 기억한다. 표는 렌더가 300ms 마다, 다른 기기의 기기 스냅샷은 요청마다
+/// 새로 뜨는데, 그때마다 내 프로세스 전부(실측 800여 개)의 argv·환경을 `KERN_PROCARGS2` 로 복사해 왔다 — 맥북
+/// 표본(2026-11-18, 칸 13)에서 표 갱신 스레드·tokio 일꾼의 `__sysctl` 이 그것이었다.
+///
+/// `node` 처럼 뜬 직후 제목을 바꾸는 것이 있어 처음 본 지 [`ARGV0_YOUNG`] 안에는 매번 읽고, 그 뒤로는
+/// [`ARGV0_RECHECK`] 마다 읽는다. 실행 파일(comm)이나 부모가 바뀌면(exec·pid 재사용) 그 자리에서 다시 읽는다.
+#[cfg(target_os = "macos")]
+struct Argv0 {
+    ppid: u32,
+    comm: [libc::c_char; libc::MAXCOMLEN],
+    first_seen: std::time::Instant,
+    read_at: std::time::Instant,
+    name: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+const ARGV0_YOUNG: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(target_os = "macos")]
+const ARGV0_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(target_os = "macos")]
+static ARGV0: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u32, Argv0>>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// pid 의 명령줄(argv 를 공백으로 이은 것, `ps -o args=` 와 같은 모양).
 pub fn process_cmdline(pid: u32) -> Option<String> {
@@ -541,5 +590,38 @@ mod tests {
         child.wait().unwrap();
         assert!(procargs(pid).is_none());
         assert!(process_env_vars(pid, &["PATH"]).is_empty());
+    }
+
+    /// argv[0] 을 기억한 뒤에도 새로 뜬 프로세스는 다음 표에 제 이름으로 선다.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_remembered_table_still_shows_a_new_process_by_name() {
+        process_table().expect("kernel table");
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let table = process_table().expect("kernel table");
+        let row = table.iter().find(|(pid, _, _)| *pid == child.id()).cloned();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(row.map(|(_, _, name)| name).as_deref(), Some("sleep"));
+        let gone = process_table().expect("kernel table");
+        assert!(!gone.iter().any(|(pid, _, _)| *pid == child.id()), "죽은 프로세스는 표에서 빠진다");
+    }
+
+    /// 처음 뜰 때와 기억한 뒤의 값 — 손으로 돌린다(`cargo test -p kasa-pty --lib process_table_cost -- --ignored --nocapture`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn process_table_cost_cold_and_remembered() {
+        super::ARGV0.lock().unwrap().clear();
+        let started = std::time::Instant::now();
+        let count = process_table().expect("kernel table").len();
+        let cold = started.elapsed();
+        std::thread::sleep(super::ARGV0_YOUNG);
+        let started = std::time::Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(process_table());
+        }
+        let remembered = started.elapsed() / 10;
+        eprintln!("processes {count}: every argv read {cold:?} · remembered {remembered:?}");
     }
 }
