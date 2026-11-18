@@ -35,6 +35,8 @@ pub mod ctl {
     /// 보는 쪽이 조작 중인지 — 본문 1바이트(1 = 조작 중). 조작 중이면 보내는 쪽은 커서를 장에서 뺀다: 보는 쪽 자기
     /// 포인터가 곧 커서라 영상 지연만큼 늦게 따라오는 그 기기 커서가 겹쳐 굼떠 보였다(Parsec 처럼).
     pub const CURSOR: u8 = b'M';
+    /// 소리를 보낼지 — 본문 1바이트(1 = 보낸다). 보는 쪽이 「소리 끔」을 누르면 0 이다(`audio`).
+    pub const AUDIO: u8 = b'A';
 }
 
 /// 압축 장 하나의 상한. 원래 해상도 키프레임도 1MB 를 넘지 않았다(S0) — 넉넉히 잡되 끝은 둔다.
@@ -60,12 +62,14 @@ pub struct Config {
     pub max_h: u32,
     /// 볼 화면 — 그 기기가 압축 정보 `displays` 로 알린 번호(맥은 CG 화면 번호, Windows 는 모니터 차례). 없으면 주 화면.
     pub display: Option<u32>,
+    /// 그 기기 시스템 소리를 데이터그램으로 함께 보낸다(`audio`).
+    pub audio: bool,
 }
 
 impl Default for Config {
     /// S0 실측으로 정한 기본값 — HEVC 30Mbps 60fps 원래 해상도, 멈추면 30장(0.5초) 다듬기.
     fn default() -> Self {
-        Self { codec: "hevc".into(), bitrate: 30_000_000, fps: 60, scale: 1.0, refine: 30, max_w: 0, max_h: 0, display: None }
+        Self { codec: "hevc".into(), bitrate: 30_000_000, fps: 60, scale: 1.0, refine: 30, max_w: 0, max_h: 0, display: None, audio: true }
     }
 }
 
@@ -73,7 +77,7 @@ impl Config {
     pub fn to_json(&self) -> Value {
         json!({
             "codec": self.codec, "bitrate": self.bitrate, "fps": self.fps, "scale": self.scale, "refine": self.refine,
-            "max_w": self.max_w, "max_h": self.max_h, "display": self.display,
+            "max_w": self.max_w, "max_h": self.max_h, "display": self.display, "audio": self.audio,
         })
     }
 
@@ -92,6 +96,8 @@ impl Config {
             max_w: v.get("max_w").and_then(Value::as_u64).map_or(0, |w| if w == 0 { 0 } else { w.clamp(160, 16384) as u32 }),
             max_h: v.get("max_h").and_then(Value::as_u64).map_or(0, |h| if h == 0 { 0 } else { h.clamp(120, 16384) as u32 }),
             display: v.get("display").and_then(Value::as_u64).and_then(|d| u32::try_from(d).ok()),
+            // 없으면 끈다 — 이 값을 안 싣는 옛 보는 쪽·폰 소켓은 소리 데이터그램을 읽지 않는다.
+            audio: v.get("audio").and_then(Value::as_bool).unwrap_or(false),
         }
     }
 }
@@ -257,9 +263,13 @@ pub async fn serve(conn: Connection) {
 }
 
 pub(crate) async fn serve_conn(conn: Connection, capture: Option<Arc<dyn Capture>>) {
+    serve_conn_audio(conn, capture, audio::hub()).await;
+}
+
+pub(crate) async fn serve_conn_audio(conn: Connection, capture: Option<Arc<dyn Capture>>, sound: Option<Arc<audio::Hub>>) {
     let Ok((mut send, mut recv)) = conn.accept_bi().await else { return };
     match capture {
-        Some(capture) => drop(serve_with(&conn, capture, &mut send, &mut recv).await),
+        Some(capture) => drop(serve_with(&conn, capture, sound, &mut send, &mut recv).await),
         None => drop(write_msg(&mut send, ctl::DENIED, json!({ "reason": "unavailable" }).to_string().as_bytes()).await),
     }
     // 마지막 메시지(거절 까닭)가 닿을 때까지 — 바로 돌아가면 연결이 먼저 닫혀 보는 쪽은 「끊김」만 본다.
@@ -270,6 +280,7 @@ pub(crate) async fn serve_conn(conn: Connection, capture: Option<Arc<dyn Capture
 async fn serve_with(
     conn: &Connection,
     capture: Arc<dyn Capture>,
+    sound: Option<Arc<audio::Hub>>,
     send: &mut SendStream,
     recv: &mut RecvStream,
 ) -> std::io::Result<()> {
@@ -305,7 +316,13 @@ async fn serve_with(
             return Ok(());
         }
     };
-    write_msg(send, ctl::INFO, session.info().to_string().as_bytes()).await?;
+    let mut info = session.info();
+    if let Some(o) = info.as_object_mut() {
+        o.insert("audio".into(), json!(sound.is_some()));
+    }
+    write_msg(send, ctl::INFO, info.to_string().as_bytes()).await?;
+    let mut listening = None;
+    set_audio(&mut listening, sound.as_ref(), conn, config.audio);
     let display = session.display();
     let session: Arc<Mutex<Box<dyn Session>>> = Arc::new(Mutex::new(session));
     let sender = tokio::spawn(send_frames(conn.clone(), rx, session.clone(), config.bitrate));
@@ -326,6 +343,11 @@ async fn serve_with(
                     session.lock().unwrap_or_else(|e| e.into_inner()).set_cursor_hidden(hidden != 0);
                 }
             }
+            ctl::AUDIO => {
+                if let Some(&on) = body.first() {
+                    set_audio(&mut listening, sound.as_ref(), conn, on != 0);
+                }
+            }
             ctl::INPUT => {
                 let Some(event) = std::str::from_utf8(&body).ok().and_then(crate::screen_mirror::input_of) else { continue };
                 if let Some(told) = input.put(&capture, display, event).await {
@@ -336,11 +358,32 @@ async fn serve_with(
             _ => {}
         }
     };
+    drop(listening);
     input.release(&capture, display).await;
     sender.abort();
     // 세션은 압축 일꾼 스레드에서 멈추게 한다 — 멈추기가 SCK·VT 를 기다린다.
     let _ = tokio::task::spawn_blocking(move || drop(session)).await;
     result
+}
+
+/// 이 연결이 소리를 받는지 — 구독을 쥐고 있으면 덩이가 데이터그램으로 간다. 기기에 소리 뜨기가 없으면 할 일이 없다.
+fn set_audio(listening: &mut Option<audio::Subscription>, sound: Option<&Arc<audio::Hub>>, conn: &Connection, on: bool) {
+    match (on, sound) {
+        (true, Some(hub)) if listening.is_none() => {
+            let conn = conn.clone();
+            // 못 보내면(연결이 닫히는 중·데이터그램을 안 받는 상대) 그 연결에서 한 번만 적는다.
+            let told = AtomicBool::new(false);
+            *listening = Some(hub.subscribe(move |chunk| {
+                if let Err(e) = conn.send_datagram(chunk) {
+                    if !told.swap(true, Ordering::Relaxed) {
+                        eprintln!("[screen-audio] 소리 데이터그램을 못 보낸다: {e}");
+                    }
+                }
+            }));
+        }
+        (false, _) => *listening = None,
+        _ => {}
+    }
 }
 
 /// 연결이 쥔 조작 상태 — 화면 거울과 같은 규칙(`docs/screen-mirror.md` 「조작」).
@@ -577,6 +620,8 @@ pub enum Event {
     Info(Value),
     /// 받은 장. `t_recv` 는 이쪽 시계, `offset` 은 「보내는 쪽 시계 = 이쪽 시계 + offset」.
     Frame { frame: Frame, t_recv: f64, offset: f64 },
+    /// 받은 소리 덩이 — 시각은 `Frame` 과 같다.
+    Audio { chunk: audio::Chunk, t_recv: f64, offset: f64 },
     /// 그쪽이 못 보낸다 — `permission`(화면 기록 권한)·`unavailable`(꽂지 않은 판).
     Denied(String),
     /// 조작을 넣을 수 있는지가 바뀌었다 — 안 되면 `permission`(손쉬운 사용 권한)·`unavailable`.
@@ -617,6 +662,11 @@ impl Watch {
     /// 조작 중이면 그 기기 커서를 장에서 빼 달라고 한다. 붙기 전에 불러도 붙은 뒤 차례대로 간다.
     pub fn set_cursor_hidden(&self, hidden: bool) {
         let _ = self.ctl.send((ctl::CURSOR, vec![u8::from(hidden)]));
+    }
+
+    /// 그 기기 소리를 보내라·그만 보내라. 붙을 때는 설정의 `audio` 를 따른다.
+    pub fn set_audio(&self, on: bool) {
+        let _ = self.ctl.send((ctl::AUDIO, vec![u8::from(on)]));
     }
 }
 
@@ -696,6 +746,18 @@ pub async fn run_watch(
             }
         })
     };
+    // 소리는 장 스트림을 받는 차례와 따로 읽는다 — 큰 키프레임을 다 받을 때까지 덩이가 기다리지 않게.
+    let sound = {
+        let (conn, on, clock) = (conn.clone(), on.clone(), clock.clone());
+        tokio::spawn(async move {
+            while let Ok(d) = conn.read_datagram().await {
+                if let Some(chunk) = audio::Chunk::decode(&d) {
+                    let offset = clock.lock().unwrap_or_else(|e| e.into_inner()).offset;
+                    on(Event::Audio { chunk, t_recv: now(), offset });
+                }
+            }
+        })
+    };
     let mut ping = tokio::time::interval(Duration::from_secs(1));
     let why = loop {
         tokio::select! {
@@ -734,6 +796,7 @@ pub async fn run_watch(
         }
     };
     frames.abort();
+    sound.abort();
     why
 }
 
@@ -760,6 +823,8 @@ impl Clock {
         }
     }
 }
+
+pub mod audio;
 
 #[cfg(test)]
 mod tests;

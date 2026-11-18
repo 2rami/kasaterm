@@ -63,6 +63,7 @@ pub(crate) fn paint(
         let edge = crate::render::pane_identity::device_section_border(theme::panel_bg(), &view.label);
         if !view.has_frame() {
             view.layout = None;
+            view.audio.pill = None;
             g.round_rect_stroke(*x, *y, *w, *h, 0.0, EDGE, edge);
             let text = view.status();
             let tw = g.measure_chrome_text(&text, STATUS_FONT, false);
@@ -94,16 +95,18 @@ pub(crate) fn paint(
             view.key_menu = None;
         }
         let mut left_of = key_button.unwrap_or(toggle).0;
-        let mut chip = |g: &mut gpu::GpuRenderer, text: &str| {
+        let mut chip = |g: &mut gpu::GpuRenderer, text: &str, color: [u8; 4]| {
             let cw = g.measure_chrome_text(text, HUD_FONT, false) + HUD_PAD * 2.0;
             let r = (left_of - HUD_PAD - cw, y + HUD_PAD, cw, box_h);
             g.round_rect_fill(r.0, r.1, r.2, r.3, 4.0, dim);
-            g.draw_text(r.0 + HUD_PAD, r.1 + HUD_PAD * 0.75, text, opts(HUD_FONT, white));
+            g.draw_text(r.0 + HUD_PAD, r.1 + HUD_PAD * 0.75, text, opts(HUD_FONT, color));
             left_of = r.0;
             r
         };
-        let display_chip = view.display_cycle().map(|(at, n, _)| chip(g, &format!("화면 {at}/{n}")));
-        let zoom_chip = (view.zoom > 1.001).then(|| chip(g, &format!("{:.0}%", view.zoom * 100.0)));
+        let display_chip = view.display_cycle().map(|(at, n, _)| chip(g, &format!("화면 {at}/{n}"), white));
+        let zoom_chip = (view.zoom > 1.001).then(|| chip(g, &format!("{:.0}%", view.zoom * 100.0), white));
+        let audio_text = view.audio.shown().then(|| (view.audio.text(), if view.audio.on { white } else { [255, 255, 255, 150] }));
+        view.audio.pill = audio_text.map(|(text, color)| chip(g, text, color));
         g.round_rect_fill(toggle.0, toggle.1, toggle.2, toggle.3, 4.0, if view.control { theme::accent() } else { dim });
         g.draw_text(toggle.0 + HUD_PAD, toggle.1 + HUD_PAD * 0.75, label, opts(HUD_FONT, white));
         g.round_rect_fill(hud_box.0, hud_box.1, hud_box.2, hud_box.3, 4.0, dim);

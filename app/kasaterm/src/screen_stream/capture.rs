@@ -199,7 +199,7 @@ impl Drop for Capture {
     }
 }
 
-fn shareable_content() -> Result<Retained<SCShareableContent>> {
+pub(super) fn shareable_content() -> Result<Retained<SCShareableContent>> {
     let (tx, rx) = mpsc::channel();
     let block = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
         let r = match unsafe { Retained::retain(content) } {

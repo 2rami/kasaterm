@@ -75,6 +75,8 @@ pub(crate) struct ScreenView {
     pub surface: Surface,
     /// 연결이 닫힌 때 — 보이는 동안 잠시 뒤 다시 붙는다(`pane.rs sync_screen_views`).
     pub closed_since: Option<std::time::Instant>,
+    /// 그 기기 시스템 소리(`audio.rs`).
+    pub audio: super::audio::ViewAudio,
 }
 
 impl ScreenView {
@@ -92,11 +94,12 @@ impl ScreenView {
             windows: AtomicBool::new(false),
             displays: Mutex::new((Vec::new(), None)),
         });
-        let config = Config { codec: VideoDecoder::CODEC.into(), max_w: fit.0, max_h: fit.1, display, ..Config::default() };
+        let audio = super::audio::ViewAudio::new(label);
+        let config = Config { codec: VideoDecoder::CODEC.into(), max_w: fit.0, max_h: fit.1, display, audio: audio.on, ..Config::default() };
         let (tx, rx) = mpsc::channel::<Incoming>();
         let keyframes: Arc<Mutex<Option<Keyframes>>> = Arc::new(Mutex::new(None));
         let on = {
-            let (shared, wake) = (shared.clone(), wake.clone());
+            let (shared, wake, player) = (shared.clone(), wake.clone(), audio.player());
             let tx = Mutex::new(tx);
             move |event: Event| match event {
                 Event::Connected { path, .. } => {
@@ -106,6 +109,7 @@ impl ScreenView {
                 Event::Info(info) => {
                     let windows = info.get("os").and_then(|v| v.as_str()) == Some("windows") || info.get("agent").is_some();
                     shared.windows.store(windows, Ordering::Relaxed);
+                    player.set_remote(info.get("audio").and_then(|v| v.as_bool()) == Some(true));
                     let ids: Vec<u32> = info
                         .get("displays")
                         .and_then(|v| v.as_array())
@@ -115,6 +119,7 @@ impl ScreenView {
                     *shared.displays.lock().unwrap_or_else(|e| e.into_inner()) = (ids, now);
                     wake();
                 }
+                Event::Audio { chunk, t_recv, offset } => player.push(chunk, t_recv, offset),
                 Event::Frame { frame, offset, .. } => {
                     let _ = tx.lock().unwrap_or_else(|e| e.into_inner()).send(Incoming { frame, offset });
                 }
@@ -176,6 +181,7 @@ impl ScreenView {
             hidden_since: None,
             surface: Surface::Main,
             closed_since: None,
+            audio,
         })
     }
 
@@ -185,6 +191,12 @@ impl ScreenView {
         if let Some(w) = &self.watch {
             w.set_cursor_hidden(on);
         }
+    }
+
+    /// 「소리」 알약 — 이쪽 틀기를 멈추고 그 기기에도 그만 보내라고 알린다.
+    pub(crate) fn toggle_audio(&mut self) {
+        let on = !self.audio.on;
+        self.audio.set(on, self.watch.as_ref());
     }
 
     /// 연결이 없거나 닫혔다.

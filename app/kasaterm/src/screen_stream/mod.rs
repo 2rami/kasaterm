@@ -2,6 +2,12 @@
 //! 틀과 흐름은 `kasa_remote::screen_stream`, 여기는 macOS 의 화면 뜨기(SCK)·압축·풀기(VT)와 Windows 의 보내기(DXGI·MF, `win.rs`)·
 //! 풀기(MF·D3D11, `win_view.rs`)다. 보는 칸(`view.rs`)은 둘이 같고 풀기만 `platform` 으로 갈린다.
 
+#[cfg(any(target_os = "macos", windows))]
+mod audio;
+#[cfg(target_os = "macos")]
+mod audio_mac;
+#[cfg(windows)]
+mod audio_win;
 #[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
@@ -52,6 +58,7 @@ pub(crate) fn host_now() -> f64 {
 #[cfg(target_os = "macos")]
 pub(crate) fn install() {
     kasa_remote::screen_stream::install(std::sync::Arc::new(host::Host));
+    audio::install();
 }
 
 /// `kasaterm.exe --screen-service`·`--screen-agent` 면 Windows 화면 도우미로 돌고 참 — 앱 초기화 전에 부른다.
@@ -64,6 +71,7 @@ pub(crate) fn run_helper(args: &[std::ffi::OsString]) -> bool {
 #[cfg(windows)]
 pub(crate) fn install() {
     win::install();
+    audio::install();
 }
 
 /// 그 기기를 네이티브 칸으로 볼 수 있나 — 이 판이 보고, 그 기기가 보내는 판이고, 카사넷 직통·믿는 중계일 때.

@@ -7006,6 +7006,8 @@ impl App {
     /// `KASATERM_TEST_SCREEN_ANYPATH=1` 이면 직통을 기다리지 않고 바로 연다 — 못 붙는 칸의 상태 글을 본다.
     /// `KASATERM_TEST_SCREEN_ZOOM=<배율>` 이면 첫 장 뒤 칸 왼쪽 위 1/4 자리를 축으로 그만큼 확대한다.
     /// `KASATERM_TEST_SCREEN_KEYMENU=1` 이면 첫 장 뒤 조작을 켜고 키 메뉴를 연다.
+    /// `KASATERM_TEST_SCREEN_AUDIO_OFF=<초>` 면 첫 장 뒤 그만큼 지나 「소리 끔」을 누르고, 또 그만큼 뒤 다시 켠다. 로그 줄의
+    /// `audio=` 는 받은 소리 덩이·버린 덩이·모아 둔 양·받은 소리 크기다.
     pub(crate) fn run_pending_screen_view_test(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
         use std::sync::{Mutex, OnceLock};
@@ -7076,6 +7078,19 @@ impl App {
                 eprintln!("[screen-view-test] key menu open windows={}", view.remote_windows());
             }
         }
+        static AUDIO_STEP: AtomicU8 = AtomicU8::new(0);
+        static FIRST_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
+        if let Some(secs) = std::env::var("KASATERM_TEST_SCREEN_AUDIO_OFF").ok().and_then(|s| s.parse::<f64>().ok()) {
+            if let Some(view) = self.screen_views.values_mut().find(|v| v.has_frame()) {
+                let since = *FIRST_FRAME.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Instant::now);
+                let step = AUDIO_STEP.load(Ordering::Relaxed);
+                if step < 2 && since.elapsed().as_secs_f64() >= secs * f64::from(step + 1) {
+                    view.toggle_audio();
+                    AUDIO_STEP.store(step + 1, Ordering::Relaxed);
+                    eprintln!("[screen-view-test] audio toggled on={}", view.audio.on);
+                }
+            }
+        }
         let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
         if logged.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
             return;
@@ -7083,7 +7098,7 @@ impl App {
         *logged = Some(Instant::now());
         for view in self.screen_views.values() {
             eprintln!(
-                "[screen-view-test] {} surface={:?} frame={} hud={} upload={:.2}ms zero_copy={} uploads={} control={} toggle={:?} image={:?} displays={:?} status={}",
+                "[screen-view-test] {} surface={:?} frame={} hud={} upload={:.2}ms zero_copy={} uploads={} control={} toggle={:?} image={:?} displays={:?} audio_pill={:?} audio=[{}] status={}",
                 view.label,
                 view.surface,
                 view.has_frame(),
@@ -7095,6 +7110,8 @@ impl App {
                 view.layout.map(|l| l.toggle),
                 view.layout.map(|l| (l.image, l.uv)),
                 view.display_cycle(),
+                view.audio.pill,
+                view.audio.stats(),
                 view.status()
             );
         }

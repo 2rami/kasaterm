@@ -68,7 +68,8 @@ impl App {
                         .iter()
                         .find(|(_, v)| {
                             v.surface == on
-                                && (v.on_toggle(p) || v.on_zoom_chip(p) || v.on_key_button(p) || v.on_display_chip(p) || (v.control && v.on_image(p)))
+                                && (v.on_toggle(p) || v.on_zoom_chip(p) || v.on_key_button(p) || v.on_display_chip(p) || v.audio.on_pill(p)
+                                    || (v.control && v.on_image(p)))
                         })
                         .map(|(id, _)| *id)
                 });
@@ -86,6 +87,13 @@ impl App {
                 if held.is_none() && view.on_zoom_chip(p) {
                     if pressed && bit == 1 {
                         view.zoom_reset();
+                    }
+                    return true;
+                }
+                if held.is_none() && view.audio.on_pill(p) {
+                    if pressed && bit == 1 {
+                        view.toggle_audio();
+                        self.chrome_dirty = true;
                     }
                     return true;
                 }

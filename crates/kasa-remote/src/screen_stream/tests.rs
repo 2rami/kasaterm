@@ -308,14 +308,152 @@ fn frame_round_trips_and_refuses_truncation() {
 #[test]
 fn viewer_config_is_clamped_on_the_sending_side() {
     let c = Config::from_json(&json!({ "codec": "vp9", "bitrate": 1u64 << 40, "fps": 0, "scale": 4.0, "refine": 100000, "max_w": 3, "max_h": 1u64 << 40 }));
-    assert_eq!(c, Config { codec: "hevc".into(), bitrate: 200_000_000, fps: 1, scale: 1.0, refine: 240, max_w: 160, max_h: 16384, display: None });
+    assert_eq!(c, Config { codec: "hevc".into(), bitrate: 200_000_000, fps: 1, scale: 1.0, refine: 240, max_w: 160, max_h: 16384, display: None, audio: false });
     let second = Config { display: Some(2), ..Config::default() };
     assert_eq!(Config::from_json(&second.to_json()), second, "고른 화면이 건너간다");
     assert_eq!(Config::from_json(&json!({ "display": -1 })).display, None);
     let fit = Config { max_w: 2560, max_h: 1440, ..Config::default() };
     assert_eq!(Config::from_json(&fit.to_json()), fit, "보는 쪽 모니터 크기는 그대로 건너간다");
-    assert_eq!(Config::from_json(&Value::Null), Config::default());
+    assert!(Config::default().audio && Config::from_json(&Config::default().to_json()).audio, "소리는 기본으로 켠다");
+    assert_eq!(Config::from_json(&Value::Null), Config { audio: false, ..Config::default() }, "소리 값을 안 싣는 옛 보는 쪽에는 안 보낸다");
+    assert!(!Config::from_json(&json!({ "audio": "yes" })).audio && !Config::from_json(&json!({ "audio": 1 })).audio);
     assert_eq!(Config::from_json(&Config { codec: "h264".into(), ..Config::default() }.to_json()).codec, "h264");
+}
+
+/// 5ms 마다 소리 덩이 하나 — 시각은 `FakeCapture::now` 와 같은 보내는 쪽 시계다.
+struct Tone {
+    running: Arc<AtomicBool>,
+}
+
+struct ToneRun(Arc<AtomicBool>);
+
+impl Drop for ToneRun {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+impl audio::Source for Tone {
+    fn start(&self, mut out: Box<dyn FnMut(f64, &[i16]) + Send>) -> Result<Box<dyn Send>, String> {
+        self.running.store(true, Ordering::Relaxed);
+        let running = self.running.clone();
+        std::thread::spawn(move || {
+            while running.load(Ordering::Relaxed) {
+                out(now() + 100.0, &[1000; audio::CHUNK_FRAMES * audio::CHANNELS]);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        Ok(Box::new(ToneRun(self.running.clone())))
+    }
+}
+
+#[derive(Clone)]
+struct AudioHost(Arc<dyn Capture>, Arc<audio::Hub>);
+
+impl std::fmt::Debug for AudioHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AudioHost")
+    }
+}
+
+impl ProtocolHandler for AudioHost {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        serve_conn_audio(conn, Some(self.0.clone()), Some(self.1.clone())).await;
+        Ok(())
+    }
+}
+
+async fn sound_session(audio: bool) -> (Router, Endpoint, Arc<audio::Hub>, Arc<AtomicBool>, mpsc::UnboundedReceiver<Event>, mpsc::UnboundedSender<(u8, Vec<u8>)>, tokio::task::JoinHandle<String>) {
+    let running = Arc::new(AtomicBool::new(false));
+    let hub = audio::Hub::new(Arc::new(Tone { running: running.clone() }));
+    let host = node().await;
+    let capture = FakeCapture { counts: Arc::new(Counts::default()), deny: None, deny_input: None };
+    let router = Router::builder(host.clone()).accept(SCREEN_ALPN, AudioHost(Arc::new(capture), hub.clone())).spawn();
+    let viewer = node().await;
+    let conn = tokio::time::timeout(T, viewer.connect(host.addr(), SCREEN_ALPN)).await.unwrap().unwrap();
+    let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+    let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+    let config = Config { fps: 30, audio, ..Config::default() };
+    let run = tokio::spawn(run_watch(conn, config, Arc::new(move |e| drop(ev_tx.send(e))), ctl_rx));
+    (router, viewer, hub, running, ev_rx, ctl_tx, run)
+}
+
+async fn until(what: impl Fn() -> bool) {
+    let waited = Instant::now();
+    while !what() {
+        assert!(waited.elapsed() < T, "기다리다 지쳤다");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// 받은 사건에서 소리 덩이만 — (덩이, 받은 때의 나이).
+fn sound_of(rx: &mut mpsc::UnboundedReceiver<Event>) -> Vec<(audio::Chunk, f64)> {
+    let mut got = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        if let Event::Audio { chunk, t_recv, offset } = e {
+            let age = t_recv + offset - chunk.t_cap;
+            got.push((chunk, age));
+        }
+    }
+    got
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sound_rides_datagrams_beside_frames_and_stops_when_the_viewer_turns_it_off() {
+    let (_router, _viewer, hub, running, mut rx, ctl, run) = sound_session(true).await;
+    let info = loop {
+        match tokio::time::timeout(T, rx.recv()).await.unwrap().unwrap() {
+            Event::Info(v) => break v,
+            Event::Closed(why) => panic!("닫힘: {why}"),
+            _ => {}
+        }
+    };
+    assert_eq!(info["audio"], json!(true), "보는 쪽은 그 기기가 소리를 보낼 수 있는지 압축 정보로 안다");
+    next_frame(&mut rx).await;
+    let mut got = Vec::new();
+    let waited = Instant::now();
+    while got.len() < 20 && waited.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        got.extend(sound_of(&mut rx));
+    }
+    assert!(got.len() >= 20, "장과 함께 소리 덩이가 온다: {}", got.len());
+    assert!(got.windows(2).all(|w| w[1].0.seq > w[0].0.seq), "루프백에서는 차례대로");
+    assert!(got.iter().all(|(c, _)| c.frames() == audio::CHUNK_FRAMES && c.pcm.iter().all(|s| *s == 1000)));
+    assert!(got.iter().all(|(_, age)| (0.0..0.2).contains(age)), "시각은 보내는 쪽 시계 — 시계 차이로 나이를 잰다: {:?}", got.iter().map(|g| g.1).collect::<Vec<_>>());
+
+    ctl.send((ctl::AUDIO, vec![0])).unwrap();
+    until(|| hub.subscribers() == 0 && !running.load(Ordering::Relaxed)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sound_of(&mut rx);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(sound_of(&mut rx).is_empty(), "「소리 끔」 뒤에는 안 온다 — 마지막 보는 쪽이 끄면 뜨기도 멈춘다");
+
+    ctl.send((ctl::AUDIO, vec![1])).unwrap();
+    until(|| running.load(Ordering::Relaxed)).await;
+    let waited = Instant::now();
+    let mut again = Vec::new();
+    while again.is_empty() && waited.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        again.extend(sound_of(&mut rx));
+    }
+    assert!(again[0].0.seq > got.last().unwrap().0.seq, "다시 켜도 seq 는 이어 센다");
+
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
+    tokio::time::timeout(T, run).await.unwrap().unwrap();
+    until(|| hub.subscribers() == 0 && !running.load(Ordering::Relaxed)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_that_does_not_ask_for_sound_gets_none() {
+    let (_router, _viewer, hub, running, mut rx, ctl, run) = sound_session(false).await;
+    for _ in 0..20 {
+        next_frame(&mut rx).await;
+    }
+    assert!(sound_of(&mut rx).is_empty());
+    assert_eq!(hub.subscribers(), 0);
+    assert!(!running.load(Ordering::Relaxed), "아무도 안 들으면 뜨지 않는다");
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
+    tokio::time::timeout(T, run).await.unwrap().unwrap();
 }
 
 mod ws {
