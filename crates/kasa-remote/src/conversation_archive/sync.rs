@@ -16,6 +16,61 @@ const BOARD_FRESH: Duration = Duration::from_secs(15);
 /// 이름·제목 없이 올라가지 않게. 보드에 끝내 안 서는 칸이 있어도 이 박자보다 자주 짓지 않는다.
 const BOARD_MISSING_RETRY: Duration = Duration::from_secs(2);
 
+/// 한 바퀴에 이만큼 넘게 올렸으면 기록이 밀려 있다 — 읽기 한도(512KiB)에 걸려 끊긴 바퀴라 곧장 다음 바퀴로 간다.
+const BACKLOG_CHUNK: usize = 256 << 10;
+
+/// 대화를 보는 요청이 끝난 뒤에도 이만큼은 「보는 중」이다 — 폰 대화 보기는 1.5초마다 다시 묻는다.
+const WATCH_GRACE: Duration = Duration::from_secs(5);
+
+/// 다음 바퀴까지 쉴 시간. 밀린 기록을 따라잡거나 자라는 기록을 누가 보고 있으면 1초, 자라기만 하면 5초, 다 올렸으면
+/// 15초. 기록이 자라는 동안 늘 1초로 돌던 것을 줄였다 — 바퀴마다 관문 목록·칸마다 기록 열기가 고정으로 들어 맥북
+/// 표본(2026-11-18)에서 이 스레드가 한 코어의 약 9% 였다. 폰은 실시간 대화를 원본에 바로 물으므로 보관본이
+/// 몇 초 늦어도 보는 화면은 안 늦는다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Pace {
+    Rest,
+    Follow,
+    Hurry,
+}
+
+impl Pace {
+    pub fn wait(self) -> Duration {
+        Duration::from_secs(match self { Pace::Rest => 15, Pace::Follow => 5, Pace::Hurry => 1 })
+    }
+}
+
+/// 그 칸 대화를 지금 보는 쪽이 있다 — 폰·다른 기기의 대화 보기는 원본의 `/transcript-raw` 에 새 줄을 기다리는
+/// 요청을 걸어 둔다. 그 창구가 이것을 쥔 동안과 놓은 뒤 [`WATCH_GRACE`] 동안을 「보는 중」으로 친다.
+pub struct Watching(String);
+
+static WATCHERS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, (usize, Instant)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+pub fn watching(surface: &str) -> Watching {
+    if let Ok(mut watchers) = WATCHERS.lock() {
+        let now = Instant::now();
+        watchers.retain(|_, (open, last)| *open > 0 || now.duration_since(*last) < WATCH_GRACE);
+        watchers.entry(surface.to_string()).or_insert((0, now)).0 += 1;
+    }
+    Watching(surface.to_string())
+}
+
+impl Drop for Watching {
+    fn drop(&mut self) {
+        if let Ok(mut watchers) = WATCHERS.lock() {
+            if let Some((open, last)) = watchers.get_mut(&self.0) {
+                *open = open.saturating_sub(1);
+                *last = Instant::now();
+            }
+        }
+    }
+}
+
+fn watched_within(surface: &str, grace: Duration) -> bool {
+    WATCHERS.lock().ok().and_then(|watchers| watchers.get(surface).copied())
+        .is_some_and(|(open, last)| open > 0 || last.elapsed() < grace)
+}
+
 #[derive(Default)]
 pub struct BoardCache {
     at: Option<Instant>,
@@ -49,11 +104,11 @@ pub fn spawn(backend: Arc<dyn Backend>) {
                 .redirect(reqwest::redirect::Policy::none()).build() else { return };
             let mut board = BoardCache::default();
             loop {
-                let mut pending = false;
+                let mut pace = Pace::Rest;
                 if let (Some((credential, stamp)), Some(machine)) = (kasa_device::device_auth::capture(), kasa_device::mobile::machine_identity()) {
-                    pending = synchronize_with(&mut board, backend.as_ref(), &client, &credential, &machine, &|| current(&stamp)).await.unwrap_or(false);
+                    pace = synchronize_with(&mut board, backend.as_ref(), &client, &credential, &machine, &|| current(&stamp)).await.unwrap_or(Pace::Rest);
                 }
-                tokio::time::sleep(Duration::from_secs(if pending { 1 } else { 15 })).await;
+                tokio::time::sleep(pace.wait()).await;
             }
         });
     });
@@ -80,21 +135,21 @@ fn clipped(value: &str, max: usize) -> String {
 }
 
 pub async fn synchronize(backend: &dyn Backend, client: &reqwest::Client, credential: &DeviceCred, machine: &str, authorized: &dyn Fn() -> bool) -> Result<bool, ()> {
-    synchronize_with(&mut BoardCache::default(), backend, client, credential, machine, authorized).await
+    synchronize_with(&mut BoardCache::default(), backend, client, credential, machine, authorized).await.map(|pace| pace != Pace::Rest)
 }
 
-/// 바퀴 사이에 보드를 들고 다니는 쪽 — [`BOARD_FRESH`].
-pub async fn synchronize_with(board: &mut BoardCache, backend: &dyn Backend, client: &reqwest::Client, credential: &DeviceCred, machine: &str, authorized: &dyn Fn() -> bool) -> Result<bool, ()> {
+/// 바퀴 사이에 보드를 들고 다니는 쪽 — [`BOARD_FRESH`]. 돌려주는 것은 다음 바퀴까지의 [`Pace`].
+pub async fn synchronize_with(board: &mut BoardCache, backend: &dyn Backend, client: &reqwest::Client, credential: &DeviceCred, machine: &str, authorized: &dyn Fn() -> bool) -> Result<Pace, ()> {
     if !authorized() { return Err(()); }
     let url = format!("{}/relay/conversations", credential.relay.trim_end_matches('/'));
     let listed: List = json(client.get(&url).bearer_auth(&credential.token).send().await.map_err(|_| ())?).await?;
-    if !listed.enabled { return Ok(false); }
+    if !listed.enabled { return Ok(Pace::Rest); }
     let mut known: HashMap<_, _> = listed.conversations.into_iter().filter(|e| e.machine_id == machine).map(|e| (e.id.clone(), e)).collect();
     if board.older_than(BOARD_FRESH) { board.refresh(backend); }
     let mut ids: Vec<_> = backend.pane_windows().into_iter().map(|(id, _)| id)
         .chain(board.rows.iter().map(|row| row.surface_id.clone())).collect();
     ids.sort(); ids.dedup();
-    let mut pending = false;
+    let mut pace = Pace::Rest;
     for id in ids {
         if !authorized() { return Err(()); }
         if crate::remote::is_remote_pane(&id) { continue; }
@@ -130,6 +185,7 @@ pub async fn synchronize_with(board: &mut BoardCache, backend: &dyn Backend, cli
         if previous.is_some_and(|e| e.ready && caught_up && e.surface_key == key && e.title == title && e.name == name && e.cwd == cwd) {
             continue;
         }
+        let update_len = chunk.raw.len();
         let update = Append {
             source: chunk.source, surface_key: key.into(), title, name, harness: harness.into(), cwd,
             expected_revision: previous.map_or(0, |e| e.revision), from: if chunk.reset { 0 } else { from }, next: chunk.offset,
@@ -142,7 +198,33 @@ pub async fn synchronize_with(board: &mut BoardCache, backend: &dyn Backend, cli
         if !authorized() { return Err(()); }
         if saved.conversation.id != archive_id || saved.conversation.machine_id != machine { return Err(()); }
         known.insert(archive_id, saved.conversation);
-        pending |= !caught_up;
+        if !caught_up {
+            let hurry = update_len >= BACKLOG_CHUNK || watched_within(&id, WATCH_GRACE);
+            pace = pace.max(if hurry { Pace::Hurry } else { Pace::Follow });
+        }
     }
-    Ok(pending)
+    Ok(pace)
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+
+    #[test]
+    fn a_held_or_just_finished_transcript_request_counts_as_watching() {
+        let surface = format!("%kasatest-watch-{}", std::process::id());
+        assert!(!watched_within(&surface, WATCH_GRACE));
+        let held = watching(&surface);
+        assert!(watched_within(&surface, Duration::ZERO), "기다리는 요청이 걸린 동안은 보는 중");
+        drop(held);
+        assert!(watched_within(&surface, WATCH_GRACE), "끝난 직후도 보는 중 — 폰은 1.5초마다 다시 묻는다");
+        assert!(!watched_within(&surface, Duration::ZERO), "유예가 지나면 안 보는 것");
+        assert!(!watched_within("%kasatest-watch-other", WATCH_GRACE), "다른 칸과 섞이지 않는다");
+    }
+
+    #[test]
+    fn the_fastest_need_of_a_round_sets_its_wait() {
+        assert_eq!(Pace::Rest.max(Pace::Follow).max(Pace::Hurry), Pace::Hurry);
+        assert_eq!([Pace::Hurry, Pace::Follow, Pace::Rest].map(Pace::wait), [1, 5, 15].map(Duration::from_secs));
+    }
 }
