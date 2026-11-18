@@ -74,6 +74,10 @@ pub struct GpuRenderer {
     ui_font_gen: Option<u32>,
     /// 해석 결과. 라벨 하나 그릴 때마다 카탈로그를 뒤지지 않도록 캐시한다.
     ui_face: UiFace,
+    /// `(글꼴 칸, size_px 비트)` 별 띄어쓰기 폭. `Shaper::advance` 는 부를 때마다 글꼴 표를 다시 읽는데
+    /// 크롬 글자의 띄어쓰기마다 불려, 집 PC 메인 스레드 그리기 일의 몇 %였다(2026-11-18 0.2.246 표본).
+    /// 글꼴 칸이 갈리는 곳은 UI 글꼴 세대뿐이라 거기서 비운다.
+    space_advance: Vec<((u8, u32), f32)>,
     /// Secondary shaper for markdown body/heading text — a proportional gothic
     /// (Noto Sans KR if installed, else Apple SD Gothic Neo) so documents read
     /// like prose, not code. Glyphs go into the SAME atlas keyed by font=1.
@@ -348,6 +352,7 @@ impl GpuRenderer {
             ui_shaper: None,
             ui_font_gen: None,
             ui_face: UiFace::Terminal,
+            space_advance: Vec::new(),
             md_shaper,
             md_bold_shaper,
             text_log: std::env::var_os("KASATERM_TEXT_LOG").map(|_| Vec::new()),
@@ -503,6 +508,7 @@ impl GpuRenderer {
             return;
         }
         self.ui_font_gen = Some(gen);
+        self.space_advance.clear();
         let before = self.ui_face;
         let value = crate::theme::ui_font();
         self.ui_face = match value.as_str() {
@@ -590,21 +596,23 @@ impl GpuRenderer {
     /// answer for itself, but on the proportional pixel face it would space words
     /// out to an 'M' — that face gets its own designed space instead.
     fn chrome_space_advance(&mut self, size_px: f32, font: u8) -> f32 {
-        if font == 3 {
-            if let Some(sh) = self.chrome_shaper.as_ref() {
-                return sh.advance(' ', size_px);
-            }
+        let key = (font, size_px.to_bits());
+        if let Some(&(_, width)) = self.space_advance.iter().find(|(seen, _)| *seen == key) {
+            return width;
         }
-        if font == 4 {
-            if let Some(sh) = self.ui_shaper.as_ref() {
-                return sh.advance(' ', size_px);
-            }
-        }
-        match font {
-            2 => self.md_bold_shaper.advance(' ', size_px),
-            1 => self.md_shaper.advance(' ', size_px),
-            _ => self.grid.shaper.cell_advance(size_px),
-        }
+        let shaper = match font {
+            3 => self.chrome_shaper.as_ref(),
+            4 => self.ui_shaper.as_ref(),
+            2 => Some(&self.md_bold_shaper),
+            1 => Some(&self.md_shaper),
+            _ => None,
+        };
+        let Some(shaper) = shaper else {
+            return self.grid.shaper.cell_advance(size_px);
+        };
+        let width = shaper.advance(' ', size_px);
+        self.space_advance.push((key, width));
+        width
     }
 
     pub(crate) fn chrome_text_metrics(&mut self, text: &str, font_size: f32, bold: bool) -> ChromeTextMetrics {
