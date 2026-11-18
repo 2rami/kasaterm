@@ -3,6 +3,7 @@
 //! 관문에는 잠긴 덩어리만 가고, 브라우저와는 그 데이터 폴더의 로컬 창구(`sync.*`)로만 주고받는다.
 //! 로그에는 개수만 남긴다. 주소·제목은 어디에도 찍지 않는다.
 
+pub mod bridge;
 pub mod browser;
 pub mod engine;
 pub mod order;

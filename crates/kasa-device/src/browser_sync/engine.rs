@@ -13,7 +13,12 @@ use super::tree;
 use crate::login_vault::crypto::VaultKey;
 use crate::login_vault::engine::{Remote, RemoteError};
 use crate::login_vault::record::{stamp, MAX_SKEW_MS, TOMBSTONE_KEEP_MS};
-use crate::login_vault::server::{put_message, Put, PutOutcome, RemoteItem, MAX_PUT};
+use crate::login_vault::server::{put_message, Limits, Put, PutOutcome, RemoteItem, MAX_PUT};
+
+/// 관문 보관소의 한도. 탭 목록 덩어리(봉인 64KB 의 base64)가 들어가고, 북마크 2만 개까지.
+pub const RELAY_LIMITS: Limits = Limits { items: 20_000, blob: 96 * 1024, file: 64 << 20 };
+/// 관문 본문 한도(1MB) 안에 들도록 한 번에 올리는 덩어리 크기.
+const PUT_BYTES: usize = 768 * 1024;
 
 /// 북마크 덩어리는 로그인처럼 256바이트 단위, 탭 목록은 4KB 단위로 채운다.
 const MARK_PAD: usize = 256;
@@ -603,7 +608,19 @@ impl Engine<'_> {
     }
 
     fn upload(&self, state: &mut State, outgoing: Vec<Outgoing>, key_id: &str, counts: &mut Counts) -> Result<(), SyncError> {
-        for chunk in outgoing.chunks(MAX_PUT) {
+        let mut chunks: Vec<&[Outgoing]> = Vec::new();
+        let (mut start, mut bytes) = (0, 0);
+        for (i, o) in outgoing.iter().enumerate() {
+            if i > start && (i - start == MAX_PUT || bytes + o.blob.len() > PUT_BYTES) {
+                chunks.push(&outgoing[start..i]);
+                (start, bytes) = (i, 0);
+            }
+            bytes += o.blob.len() + 128;
+        }
+        if start < outgoing.len() {
+            chunks.push(&outgoing[start..]);
+        }
+        for chunk in chunks {
             let puts: Vec<Put> = chunk.iter().map(|o| Put { id: o.id.clone(), expected_rev: o.expected_rev, blob: Some(o.blob.clone()) }).collect();
             let sig = self.key.sign(&put_message(self.account, key_id, &puts));
             for outcome in self.remote.put(key_id, &puts, &sig)? {
