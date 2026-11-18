@@ -149,8 +149,8 @@ pub(super) fn announce_closed(
     pane_id: &str,
     output_closed: &std::sync::atomic::AtomicBool,
     tx: &Sender<ScreenUpdate>,
-    screen_taps: &Mutex<Vec<Sender<ScreenUpdate>>>,
-    byte_taps: &Mutex<Vec<Sender<Vec<u8>>>>,
+    screen_taps: &Mutex<Vec<TapSender<ScreenUpdate>>>,
+    byte_taps: &Mutex<Vec<TapSender<Vec<u8>>>>,
 ) -> bool {
     if output_closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return false;
@@ -186,8 +186,8 @@ pub(super) fn spawn_reader_thread(
     block_rev: Arc<std::sync::atomic::AtomicU64>,
     content_rev: Arc<std::sync::atomic::AtomicU64>,
     cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
-    byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
-    screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
+    byte_taps: Arc<Mutex<Vec<TapSender<Vec<u8>>>>>,
+    screen_taps: Arc<Mutex<Vec<TapSender<ScreenUpdate>>>>,
     inline_imgs: Arc<Mutex<InlineImgs>>,
     responder: PtyEventForwarder,
     scheme_reports: Arc<std::sync::atomic::AtomicBool>,

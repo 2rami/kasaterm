@@ -29,6 +29,10 @@ use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb
 use alacritty_terminal::Term;
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
+/// 거울 구독(탭) 쪽 송신. std 채널인 까닭: crossbeam 의 막힘 recv 는 비었을 때 잠들기 전에 yield 를 네 번 하는데,
+/// 맥에서는 그게 우선순위를 낮추는 swtch_pri 라 거울 연결마다 뜨는 중계 스레드가 출력이 잦을수록 그 양보로 돌았다
+/// (2026-11-18 맥북 칸 13개·거울 20여 연결, 앱 136.9% 중 대기 아닌 표본 1위). std 는 비면 바로 park 한다.
+pub(crate) type TapSender<T> = std::sync::mpsc::SyncSender<T>;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -192,12 +196,12 @@ pub struct PtySession {
     /// 셀이 아니라 셸이 뱉은 바이트 그 자체라, 받는 쪽이 kasaterm 내부 구조에
     /// 전혀 묶이지 않는다. `blocks` 와 같은 이유로 Arc 공유 — HTTP 백엔드가
     /// GUI 스레드를 거치지 않고 직접 붙는다.
-    byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
+    byte_taps: Arc<Mutex<Vec<TapSender<Vec<u8>>>>>,
     /// 우리가 파싱한 **셀 그리드**를 그대로 받는 소비자를 위한 tee. `byte_taps` 가
     /// 바이트를 주는 것과 달리 여기로는 `ScreenUpdate` 가 간다 — 받는 쪽이 자기 VT
     /// 파서 없이 화면을 그린다(웹텀). `screens` 채널을 대신 쓸 수는 없다: 그건 MPMC라
     /// 구독자가 늘면 GUI 와 프레임을 **나눠 갖게 되어** 네이티브 화면이 깨진다.
-    screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
+    screen_taps: Arc<Mutex<Vec<TapSender<ScreenUpdate>>>>,
     /// 셀-흐름 인라인 이미지(OSC 1337) 기록. 리더 스레드가 채우고, 스냅샷을
     /// 만드는 모든 경로(reader·scroll·full_snapshot)가 뷰포트 배치로 환산해
     /// ScreenUpdate 에 싣는다.

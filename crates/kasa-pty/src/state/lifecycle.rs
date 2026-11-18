@@ -149,8 +149,8 @@ impl Wiring {
         let base = NEXT_BASE.fetch_add(1 << 40, std::sync::atomic::Ordering::Relaxed);
         let content_rev = Arc::new(std::sync::atomic::AtomicU64::new(base));
         let cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
-        let byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
-        let screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>> = Arc::new(Mutex::new(Vec::new()));
+        let byte_taps: Arc<Mutex<Vec<TapSender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+        let screen_taps: Arc<Mutex<Vec<TapSender<ScreenUpdate>>>> = Arc::new(Mutex::new(Vec::new()));
         let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
         let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let shell_editor = Arc::new(std::sync::atomic::AtomicU8::new(0));
@@ -694,8 +694,8 @@ fn watch_shell_exit(
     pid: u32,
     pane_id: String,
     tx: Sender<ScreenUpdate>,
-    screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
-    byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
+    screen_taps: Arc<Mutex<Vec<TapSender<ScreenUpdate>>>>,
+    byte_taps: Arc<Mutex<Vec<TapSender<Vec<u8>>>>>,
     output_closed: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let Some(exit) = crate::procinfo::ExitWait::open(pid) else { return };
