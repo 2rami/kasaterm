@@ -19,6 +19,13 @@ pub(crate) fn profiling() -> bool {
     *ON.get_or_init(|| std::env::var_os("KASATERM_PROFILE").is_some())
 }
 
+/// `KASATERM_PUMP_DEBUG` 이 켜졌는지. 사건마다·루프마다·장마다 묻는 자리라 한 번만 읽는다 — Windows 는 env 를
+/// 읽을 때마다 env 잠금을 잡고 UTF-16 을 옮기는데, 일하는 칸이 여럿이면 루프가 초당 천 번 넘게 깬다.
+pub(crate) fn pump_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KASATERM_PUMP_DEBUG").is_some())
+}
+
 /// 이 기계를 사람이 부르는 이름. 원격 pane 은 명부 라벨을 ⇄ 칩으로 달지만 로컬
 /// pane 에는 아무 표가 없어서, 원격이 하나도 없는 창에서는 「이 pane 의 몸이 어디
 /// 있나」에 화면이 답을 못 했다(2026-09-02 감사). macOS 는 사람이 손수 지은 컴퓨터

@@ -6231,7 +6231,7 @@ impl App {
         // 유휴인데 프레임이 나가는지를 **숫자로** 본다(`KASATERM_PUMP_DEBUG=1`).
         // 펌프 사유는 그 옆 계측이 찍지만, 사유가 참인 것과 실제로 몇 장이
         // 나가는지는 다른 얘기다 — 최적화 전후를 견주려면 장수가 필요하다.
-        if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
+        if crate::info::pump_debug() {
             thread_local! {
                 static FPS: std::cell::RefCell<(u32, Option<std::time::Instant>)> =
                     const { std::cell::RefCell::new((0, None)) };
@@ -6270,7 +6270,7 @@ impl App {
             }
         }
         let t0 = Instant::now();
-        let trace = std::env::var_os("KASATERM_PROFILE").is_some();
+        let trace = crate::info::profiling();
         let now = Instant::now();
         let blink_on = self.cursor_blink_on(now);
         // Damage gate: skip the GPU pass when nothing changed since

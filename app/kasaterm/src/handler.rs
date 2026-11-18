@@ -314,7 +314,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // 어떤 이벤트가 루프를 깨우는지 — 종류별로 센다. 「UserEvent 쪽이
         // 원인」까지는 옆 계측이 말해 주지만, 그 다음 질문(무엇이)에는 답이 없다.
-        if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
+        if crate::info::pump_debug() {
             use std::collections::BTreeMap;
             thread_local! {
                 static EV: std::cell::RefCell<(BTreeMap<String, u32>, Option<Instant>)> =
@@ -7647,7 +7647,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 프레임 수와 **루프가 도는 횟수**는 다른 값이다. 화면을 안 그리면서도
         // 루프만 계속 돌면 CPU 는 그대로 탄다 — 그때 fps 만 보면 조용해 보인다
         // (2026-08-28 실측: 2fps 인데 68%).
-        if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
+        if crate::info::pump_debug() {
             thread_local! {
                 static LOOPS: std::cell::RefCell<(u32, Option<Instant>)> =
                     const { std::cell::RefCell::new((0, None)) };
@@ -8145,7 +8145,7 @@ impl ApplicationHandler<UserEvent> for App {
         // **바뀔 때만** 한 줄 찍는다 — 매 프레임 찍으면 그 출력이 프레임을 먹는다.
         // 아래 `if` 를 그대로 두고 따로 재평가하는 이유: 조건을 Vec 수집으로
         // 합치면 `||` 단락이 사라져 모든 조건이 매번 평가된다.
-        if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
+        if crate::info::pump_debug() {
             let mut why: Vec<&'static str> = Vec::new();
             if self.any_notify_flash() {
                 why.push("notify_flash");

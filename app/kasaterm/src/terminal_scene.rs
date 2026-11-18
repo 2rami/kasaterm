@@ -591,6 +591,12 @@ pub(crate) fn inline_texture_key(prefix: &str, tab_pid: &str, v: &kasa_bridge::s
     }
 }
 
+/// `KASATERM_STUDENT_DEBUG` — Claude 칸을 합성할 때마다 묻는 자리라 env 는 한 번만 읽는다.
+fn student_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KASATERM_STUDENT_DEBUG").is_some())
+}
+
 /// 안 바뀐 칸의 합성을 다시 쓰는 상한. 합성은 격자 말고도 인라인 그림·결과, 학생 결속, 에이전트 목록
 /// 같은 바깥 상태를 읽어 내용 번호만으로는 다 못 잡는다 — 그 변화도 이 시간 안에는 화면에 닿는다.
 const COMPOSE_REUSE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -1654,7 +1660,7 @@ impl App {
             if let Some((sr, _, _)) = statusline_face {
                 stand_anchor = find_standing_anchor(&composed, sr, cols_now as usize);
                 // `KASATERM_STUDENT_DEBUG=1` — 왜 학생이 안 서는지 앱이 직접 말한다.
-                if std::env::var_os("KASATERM_STUDENT_DEBUG").is_some() {
+                if student_debug() {
                     use std::sync::{Mutex, OnceLock};
                     static LAST: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
                     let last = LAST.get_or_init(|| Mutex::new(std::time::Instant::now()));
