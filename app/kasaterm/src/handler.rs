@@ -286,6 +286,9 @@ impl ApplicationHandler<UserEvent> for App {
     /// committed-Hangul echo / backspace / space show up without lag.
     // event_loop 는 SocketOpenWeb(자식 창 생성) 한 곳만 쓴다.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        if matches!(event, UserEvent::Redraw) {
+            crate::frame_pace::wake_received();
+        }
         if self.handle_vault_event(&event,event_loop) { return; }
         if let UserEvent::RichDocument { owner, message } = &event {
             self.aux_rich_message(*owner, message, event_loop);
