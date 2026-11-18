@@ -1825,6 +1825,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::BrowserSyncAsk(ask) => {
+                self.browser_sync_ask(*ask);
+                return;
+            }
             UserEvent::SocketOpenUrl(url, target) => {
                 self.open_url_for_pane(url, target.as_deref());
                 return;

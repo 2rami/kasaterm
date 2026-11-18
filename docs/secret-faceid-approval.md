@@ -115,7 +115,7 @@
 **맥이 폰 열쇠를 믿는 규칙**(`op_approval::auto_pick`, 화면 1분 주기·`op-link`·학생 요청 직전에 돈다):
 - 이미 믿은 기기가 갈아 끼운 열쇠(Face ID 재등록)는 늘 믿는다.
 - 그런 열쇠가 없고 믿는 열쇠 중 관문에 살아 있는 것도 없으면, 들어온 열쇠를 다 믿는다(처음 연결).
-- 그 밖의 새 기기(믿는 폰이 이미 있는데 들어온 다른 기기)는 맥 설정 → 계정 → 비밀 승인의 지문 시트로 사람이 믿는다.
+- 그 밖의 새 기기(믿는 폰이 이미 있는데 들어온 다른 기기)는 맥 설정 → 연결 기기 → 폰의 [넣기…] 지문 시트로 사람이 믿는다.
 - 사람이 맥에서 거둔 열쇠 id 는 기억해 다시 집지 않는다(`refused-keys`, 최근 64개).
 
 거두기: 폰에서 「연결 끊기」 · 관문에서 기기 폐기 · 맥 설정에서 믿음 거두기 — 어느 하나면 막힌다.
@@ -150,7 +150,7 @@
 | 맥: 도전값·재확인·nonce·키체인 꺼내기·감사 | `crates/kasa-device/src/op_approval.rs` |
 | 맥: 관문 호출(`create_secret`·`keys`) | `crates/kasa-device/src/device_approvals.rs` |
 | 맥: 소켓 `op.secret`(칸·명령·폴더를 소켓 상대 pid 에서) | `app/kasaterm/src/socket.rs` · `crates/kasa-socket/src/server.rs`(`peer_pid`) |
-| 맥: 설정 「계정」 비밀 승인(믿는 폰·믿기 시트) | `app/kasaterm/src/native_op_approval.rs` |
+| 맥: 설정 「연결 기기」의 「폰」(믿는 폰·믿기 시트) | `app/kasaterm/src/native_op_approval.rs` |
 | 맥: 폰이 부르는 `op-link`(자동 믿기 지금 돌리기) | `app/kasaterm/src/socket.rs` 설정 동작 |
 | CLI | `crates/kasa-socket/src/cli.rs`(`secret read|run|status`, 별칭 `op`) |
 | 폰 | `mobile/lib/secure_key.dart` · `mobile/lib/approvals.dart` · `mobile/lib/screens/approval_screen.dart` · `mobile/lib/screens/approval_key.dart` · `mobile/ios/Runner/AppDelegate.swift`(`ApprovalKey`) |

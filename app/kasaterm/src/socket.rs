@@ -2568,6 +2568,12 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn browser_sync_ask(&self, id: &str) -> Result<String> {
+        let ask = crate::native_settings::device_account::vault::Ask::parse(id).ok_or_else(|| anyhow::anyhow!("모르는 확인이에요: {id}"))?;
+        self.proxy.send_event(UserEvent::BrowserSyncAsk(ask)).map_err(|_| anyhow::anyhow!("카사텀 창이 닫혀 있어요"))?;
+        Ok(ask.reply().to_string())
+    }
+
     fn open_url(&self, url: &str, target: Option<&str>) -> Result<()> {
         let _ = self.proxy.send_event(UserEvent::SocketOpenUrl(
             url.to_string(),

@@ -2596,10 +2596,10 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
         SettingsCat::Appearance => "테마 theme 색상 밝기 다크 폰트 font 글꼴 커서 배율 크기 기기 아이콘 appearance color cursor scale",
         SettingsCat::Statusbar => "하단 상태줄 상태바 사용량 cpu 메모리 계정 표시 statusbar usage memory",
         SettingsCat::Weather => "날씨 비 애니메이션 움직임 투명도 weather rain motion",
-        SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth kasa 구글 github 키체인 비밀 승인 keychain secret account login password",
+        SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth kasa 구글 github 프로필 account login password profile",
         SettingsCat::Claude => "클로드 claude 코덱스 codex 계정 로그인 재인증 자동 전환 한도 사용량 차례 순서 기본 에이전트 권한 상태줄 account login order permission",
         SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
-        SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 덮개 덮어 마저 잠자기 핫스팟 폰 lid sleep hotspot 크롬 chrome 브라우저 device connection machine browser",
+        SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 덮개 덮어 마저 잠자기 핫스팟 폰 face id 키체인 비밀 승인 열쇠 lid sleep hotspot 크롬 chrome 브라우저 device connection machine browser phone keychain secret",
         SettingsCat::Feedback => "피드백 문의 오류 버그 문제 제안 feedback bug report",
     };
     let haystack = search_text(&format!("{title} {detail} {aliases}"));
@@ -4391,7 +4391,8 @@ fn paint_claude(
     paint_setup_section(g, s, hits, caret, x, y, w, 2);
 }
 
-/// 계정 칸. KASA 계정과 그에 딸린 연결·비밀 승인이다. 코딩 에이전트 로그인은 「코딩 에이전트」에 있다.
+/// 계정 칸. KASA 계정과 로그인 방법이다. 코딩 에이전트 로그인은 「코딩 에이전트」, Face ID 로 허락할 폰은
+/// 「연결 기기」, 비밀번호·북마크·탭 동기화는 카사브라우저 설정 「동기화」에 있다.
 fn paint_accounts(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -4402,8 +4403,6 @@ fn paint_accounts(
     w: f32,
 ) {
     device_account::paint(g, s, hits, caret, x, y, w);
-    device_account::op::paint(g, s, hits, x, y, w);
-    device_account::vault::paint(g, s, hits, x, y, w);
 }
 
 /// 한도 자동 전환과 그 기준. 넘어갈 곳은 계정 목록의 차례다.
@@ -6614,12 +6613,12 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         SettingsCat::Accounts => (
             "계정",
             "users",
-            "KASA 계정과 연결한 서비스, 비밀 승인을 정합니다",
+            "KASA 계정과 로그인 방법을 정합니다",
         ),
         SettingsCat::Machines => (
             "연결 기기",
             "server",
-            "다른 기기와의 연결과 카사크롬이 쓸 크롬을 정합니다",
+            "다른 기기·폰과의 연결과 카사크롬이 쓸 크롬을 정합니다",
         ),
         SettingsCat::Theme => ("캐릭터 테마", "image", "캐릭터 명단과 그림을 한 벌로 갈아낍니다"),
         SettingsCat::Students => ("캐릭터", "users", "테마를 섞어 사용할 캐릭터를 고릅니다"),

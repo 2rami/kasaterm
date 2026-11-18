@@ -497,7 +497,7 @@ pub fn status() -> Value {
         Ok(list) => json!({
             "source": "keychain",
             "token": true,
-            "trusted": list.iter().map(|t| json!({"label": t.label, "fingerprint": key_fingerprint(&t.id)})).collect::<Vec<_>>(),
+            "trusted": list.iter().map(|t| json!({"label": t.label, "fingerprint": key_fingerprint(&t.id), "id": t.id, "manual": t.manual})).collect::<Vec<_>>(),
         }),
         Err(error) => json!({"source": "keychain", "token": false, "error": error.to_string()}),
     }

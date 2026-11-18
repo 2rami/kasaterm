@@ -1,6 +1,7 @@
-//! 설정 「계정」의 「비밀 승인」 — 학생이 이 맥 키체인(Windows 는 자격 증명 관리자)의 비밀을 폰 Face ID 한 번으로 읽게 하는 데스크톱 쪽 설정
-//! (docs/secret-faceid-approval.md). 넣을 토큰이 없어 여기서는 폰 열쇠만 다룬다 — `op_approval::auto_pick` 규칙대로
-//! 알아서 믿고, 그 밖의 것만 묻는다. 이름의 `op` 는 1Password 로 읽던 때의 것이다.
+//! 설정 「연결 기기」의 「폰」 — 학생이 이 맥 키체인(Windows 는 자격 증명 관리자)의 비밀을 쓸 때, 새 기기가 로그인 금고
+//! 열쇠를 받을 때 Face ID 로 허락할 폰(docs/secret-faceid-approval.md·docs/login-vault-sync.md). 폰은 기기라 PC 와
+//! 같은 페이지에 둔다. `op_approval::auto_pick` 규칙대로 알아서 믿고, 그 밖의 것만 묻는다. 자동으로 믿은 폰은 비밀
+//! 허락만 하고, 새 기기 들이기는 사람이 지문을 맞춰 보고 직접 믿어야 한다. 이름의 `op` 는 1Password 로 읽던 때의 것이다.
 
 use super::*;
 use std::collections::HashSet;
@@ -31,6 +32,8 @@ const ISOLATED: &str = "검증 실행에서는 자격 증명 관리자를 쓰지
 pub(crate) enum Act {
     Trust(usize),
     Untrust(usize),
+    /// 자동으로 믿은 폰을 사람이 직접 믿는다 — 새 기기에 금고 열쇠를 넘기는 허락에도 쓰인다.
+    Believe(usize),
 }
 
 #[derive(Debug)]
@@ -41,6 +44,7 @@ enum Done {
 
 /// 시트의 답 — 완료 처리기는 App 을 못 잡으니 여기 두고 다음 poll 이 꺼내 간다.
 static TRUST_ANSWER: Mutex<Option<String>> = Mutex::new(None);
+static BELIEVE_ANSWER: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -166,7 +170,7 @@ impl State {
         });
     }
 
-    /// 검증 실행 화면: 믿는 폰 하나, 새로 맡겨진 열쇠 하나. [empty] 면 처음 연결 전(열쇠 없음).
+    /// 검증 실행 화면: 직접 믿은 폰·자동으로 믿은 폰 하나씩, 새로 맡겨진 열쇠 하나. [empty] 면 처음 연결 전(열쇠 없음).
     pub(crate) fn fixture(&mut self, empty: bool) {
         self.fixture = true;
         if empty {
@@ -174,7 +178,8 @@ impl State {
             return;
         }
         self.status = serde_json::json!({"source": "keychain", "token": true,
-            "trusted": [{"label": "내 iPhone", "fingerprint": "3F2A-91C0-7D4E"}]});
+            "trusted": [{"label": "내 iPhone", "fingerprint": "3F2A-91C0-7D4E", "id": "a1", "manual": true},
+                        {"label": "작업 iPad", "fingerprint": "7B0E-44A2-19C3", "id": "a2", "manual": false}]});
         self.untrusted = vec![serde_json::json!({"device": "dev_ipad", "label": "내 iPad", "id": "b81c55e0aa04",
             "fingerprint": "B81C-55E0-AA04", "public": ""})];
     }
@@ -192,6 +197,11 @@ impl App {
                         .map_err(|e| e.to_string())
                 });
             }
+        }
+        if let Some(id) = BELIEVE_ANSWER.lock().ok().and_then(|mut a| a.take()) {
+            self.device_account.op.run(move || {
+                kasa_device::login_vault::confirm_phone(&id).map(|()| "이 폰으로 새 기기 들이기도 허락할 수 있어요".to_string())
+            });
         }
         self.op_autotrust();
         let op = &mut self.device_account.op;
@@ -216,7 +226,7 @@ impl App {
             crate::chrome::notify_desktop(
                 "새 Face ID 승인 열쇠",
                 &format!(
-                    "{} · {} — 설정 → 계정 → 비밀 승인에서 폰의 지문과 맞춰 보고 믿어 주세요",
+                    "{} · {} — 설정 → 연결 기기 → 폰에서 폰의 지문과 맞춰 보고 넣어 주세요",
                     key["label"].as_str().unwrap_or("폰"),
                     key["fingerprint"].as_str().unwrap_or("")
                 ),
@@ -268,6 +278,19 @@ impl App {
                 let Some(key) = self.device_account.op.untrusted.get(index).cloned() else { return };
                 if let Some(window) = &self.window {
                     let _ = trust_sheet(window, &key);
+                }
+            }
+            Act::Believe(index) => {
+                let trusted = self.device_account.op.status["trusted"].as_array().cloned().unwrap_or_default();
+                let Some(key) = trusted.get(index).cloned() else { return };
+                let info = format!(
+                    "{}\n지문  {}\n\n폰 설정 → 계정 → Face ID 승인 열쇠의 지문이 모두 같은지 맞춰 보세요. 처음 연결할 때 자동으로 믿은 열쇠라 관문이 끼워 넣었을 수도 있어요. 믿으면 이 폰의 Face ID 로 새 기기에 로그인 금고 열쇠를 넘기는 것도 허락할 수 있어요.",
+                    key["label"].as_str().unwrap_or("폰"),
+                    key["fingerprint"].as_str().unwrap_or("")
+                );
+                let id = key["id"].as_str().unwrap_or_default().to_string();
+                if let Some(window) = &self.window {
+                    let _ = confirm_sheet(window, "이 폰을 직접 믿을까요?", &info, "믿기", &BELIEVE_ANSWER, id);
                 }
             }
             Act::Untrust(index) => {
@@ -551,73 +574,60 @@ fn act(a: Act) -> Target {
     Target::Setting(SettingsAction::DeviceAccount(Action::Op(a)))
 }
 
-pub(crate) fn paint(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
+/// 「연결 기기」의 「폰」 묶음. 줄마다 폰 이름과 허락 범위, 오른쪽 단추.
+pub(crate) fn paint_phones(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
     let v = &s.device_account.op;
-    g.queue_icon("shield", x, *y - 1.0, 17.0, theme::text());
-    draw_text(g, x + 24.0, *y, "비밀 승인", 14.5, theme::text(), true);
-    *y += 26.0;
+    section_title(g, x, *y, "폰", "");
+    *y += 54.0;
     if !v.signed_in {
-        info_slab(
-            g,
-            x,
-            y,
-            w,
-            &format!("KASA 계정에 로그인하면 학생이 {} {}의 비밀을 폰 Face ID 한 번으로 읽게 할 수 있어요.", STORE.0, STORE.1),
-        );
-        *y += 14.0;
+        plain_hint(g, x, y, w, &format!("KASA 계정에 로그인하면 학생이 {} {}의 비밀을 쓸 때 폰 Face ID 로 허락할 수 있어요.", STORE.0, STORE.1));
         return;
     }
-    let line = if v.status.is_null() { "확인하는 중…".to_string() } else { format!("{} {}에서 꺼내요", STORE.0, STORE.1) };
-    draw_text(g, x, *y + 4.0, &line, 12.0, theme::text(), false);
-    draw_text(g, x, *y + 21.0, FIRST_READ, 10.5, theme::text_dim(), false);
-    if v.busy {
-        draw_text(g, x + w - 64.0, *y + (ROW_H - CTL_H) / 2.0 + 5.0, "처리 중…", 12.0, theme::text_dim(), false);
-    }
-    *y += ROW_H;
-
-    let trusted = v.status["trusted"].as_array().cloned().unwrap_or_default();
-    if !trusted.is_empty() || !v.untrusted.is_empty() {
-        draw_text(g, x, *y + 6.0, "Face ID 승인 열쇠", 11.0, theme::text_dim(), false);
-        *y += 28.0;
-    }
-    for (index, key) in trusted.iter().enumerate() {
-        let label = format!("{} · {}", key["label"].as_str().unwrap_or("폰"), key["fingerprint"].as_str().unwrap_or(""));
-        let label = fit(g, &label, w - 80.0, 12.0, false);
-        draw_text(g, x, *y + 4.0, &label, 12.0, theme::text(), false);
-        draw_text(g, x, *y + 21.0, "믿음", 10.5, theme::text_dim(), false);
-        if !v.busy {
-            button(g, s, hits, (x + w - 64.0, *y + (ROW_H - CTL_H) / 2.0, 64.0, CTL_H), "거두기", act(Act::Untrust(index)), false);
+    let width = |g: &mut gpu::GpuRenderer, label: &str| crate::native_controls::button_width(g, label, CTL_H, true);
+    let line = |g: &mut gpu::GpuRenderer, hits: &mut Vec<Hit>, y: &mut f32, name: &str, bold: bool, dim: &str, buttons: &[(&str, Act, bool)]| {
+        let mut right = x + w;
+        let mut reserve = 0.0;
+        for (label, a, primary) in buttons.iter().rev() {
+            let bw = width(g, label);
+            right -= bw;
+            if !v.busy {
+                button(g, s, hits, (right, *y + (ROW_H - CTL_H) / 2.0, bw, CTL_H), label, act(*a), *primary);
+            }
+            right -= 8.0;
+            reserve += bw + 8.0;
         }
+        let name = fit(g, name, w - reserve - 12.0, 12.0, bold);
+        draw_text(g, x, *y + 4.0, &name, 12.0, theme::text(), bold);
+        let dim = fit(g, dim, w - reserve - 12.0, 10.5, false);
+        draw_text(g, x, *y + 21.0, &dim, 10.5, theme::text_dim(), false);
         *y += ROW_H;
+    };
+    let trusted = v.status["trusted"].as_array().cloned().unwrap_or_default();
+    for (index, key) in trusted.iter().enumerate() {
+        let name = key["label"].as_str().unwrap_or("폰");
+        let print = key["fingerprint"].as_str().unwrap_or("");
+        if key["manual"] == true {
+            line(g, hits, y, name, false, &format!("Face ID 로 허락 · 비밀 쓰기와 새 기기 들이기 · 지문 {print}"), &[("빼기", Act::Untrust(index), false)]);
+        } else {
+            line(g, hits, y, name, false, &format!("자동으로 믿었어요 · 새 기기를 들이려면 직접 믿어 주세요 · 지문 {print}"), &[("직접 믿기…", Act::Believe(index), true), ("빼기", Act::Untrust(index), false)]);
+        }
     }
     for (index, key) in v.untrusted.iter().enumerate() {
-        let label = format!("{} · {}", key["label"].as_str().unwrap_or("폰"), key["fingerprint"].as_str().unwrap_or(""));
-        let label = fit(g, &label, w - 80.0, 12.0, true);
-        draw_text(g, x, *y + 4.0, &label, 12.0, theme::text(), true);
-        draw_text(g, x, *y + 21.0, "다른 기기의 새 열쇠 — 폰의 지문과 맞춰 보고 믿기", 10.5, theme::text_dim(), false);
-        if !v.busy {
-            button(g, s, hits, (x + w - 64.0, *y + (ROW_H - CTL_H) / 2.0, 64.0, CTL_H), "믿기…", act(Act::Trust(index)), true);
-        }
-        *y += ROW_H;
+        let name = format!("{} · 새 열쇠", key["label"].as_str().unwrap_or("폰"));
+        let print = key["fingerprint"].as_str().unwrap_or("");
+        line(g, hits, y, &name, true, &format!("폰 설정의 열쇠 지문과 맞춰 보고 넣어요 · 지문 {print}"), &[("넣기…", Act::Trust(index), true)]);
     }
-    info_slab(
-        g,
-        x,
-        y,
-        w,
-        if trusted.is_empty() {
-            TRUSTS_FIRST_PHONE
-        } else {
-            "학생은 kasaterm-cli secret run -e 이름=서비스#계정 -- 명령 으로 써요. 요청마다 폰 Face ID 한 번, 값은 관문·폰을 지나지 않아요."
-        },
-    );
+    if trusted.is_empty() && v.untrusted.is_empty() {
+        plain_hint(g, x, y, w, if v.status.is_null() { "확인하는 중…" } else { TRUSTS_FIRST_PHONE });
+    } else {
+        plain_hint(g, x, y, w, &format!("학생이 {} {}의 비밀을 쓸 때마다 폰에 Face ID 를 물어요. {FIRST_READ}.", STORE.0, STORE.1));
+    }
     if let Some((message, error)) = &v.message {
         for line in wrap_words(g, message, w, 10.5) {
             draw_text(g, x, *y, &line, 10.5, if *error { theme::danger() } else { theme::text_dim() }, false);
             *y += 18.0;
         }
     }
-    *y += 24.0;
 }
 
 #[cfg(test)]

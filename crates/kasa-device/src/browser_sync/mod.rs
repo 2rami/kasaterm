@@ -5,6 +5,7 @@
 
 pub mod bridge;
 pub mod browser;
+pub mod display;
 pub mod engine;
 pub mod order;
 pub mod record;
@@ -12,7 +13,7 @@ mod service;
 pub mod state;
 pub mod tree;
 
-pub use service::{allow_deletions, poke, set, settings, spawn, status, Settings};
+pub use service::{allow_deletions, poke, spawn, status};
 
 #[cfg(test)]
 mod tests;

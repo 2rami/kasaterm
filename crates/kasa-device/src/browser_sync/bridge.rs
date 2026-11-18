@@ -60,6 +60,11 @@ impl Bridge {
         Err(BrowserError::Failed(error.chars().take(200).collect()))
     }
 
+    /// 카사브라우저 설정 「동기화」에 보일 상태(`display`). 동기화 엔진과 따로 — 맞추기가 멈춰도 상태는 간다.
+    pub fn put_state(&self, state: &Value) -> Result<(), BrowserError> {
+        self.call("sync.state.put", json!({"state": state})).map(|_| ())
+    }
+
     fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, BrowserError> {
         serde_json::from_value(value).map_err(|_| BrowserError::Failed("bad response".into()))
     }

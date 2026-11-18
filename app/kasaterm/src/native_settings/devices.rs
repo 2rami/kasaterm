@@ -118,6 +118,7 @@ pub(super) fn paint(
             "직접 연결할 기기는 기기 추가에서 SSH 별칭이나 주소를 등록할 수 있습니다.",
         );
     }
+    super::device_account::op::paint_phones(g, s, hits, x, y, w);
     *y += 12.0;
     #[cfg(target_os = "macos")]
     paint_lid_away(g, s, hits, x, y, w);

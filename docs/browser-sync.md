@@ -2,7 +2,7 @@
 
 카사브라우저의 북마크를 같은 계정의 기기끼리 합치고, 열린 탭은 기기마다 보낸다. 설계 전체와 브라우저 쪽 창구는
 kasabrowser `docs/browser-sync.md`, 금고 열쇠와 관문 규칙은 [웹 로그인 동기화](login-vault-sync.md)다.
-코드는 `kasa-device` `browser_sync`, 관문 `gateway_login_vault.rs` 의 `store_routes`, 설정 「계정」의 「북마크·탭 동기화」.
+코드는 `kasa-device` `browser_sync`, 관문 `gateway_login_vault.rs` 의 `store_routes`, 화면은 카사브라우저 설정 「동기화」.
 
 ## 열쇠
 
@@ -11,13 +11,26 @@ kasabrowser `docs/browser-sync.md`, 금고 열쇠와 관문 규칙은 [웹 로�
 - 따로 등록하지 않는다. 금고 열쇠가 있고 사람이 지문을 확인한(`unconfirmed-<계정>` 이 없는) 기기만 일한다.
   `K` 원본은 밖으로 내보내지 않고 갈래만 쓴다.
 
-## 켜기
+## 늘 켜짐
 
-- 「북마크 맞추기」·「탭 보내기·받기」를 따로 켠다. 둘 다 기본은 꺼짐이고 계정마다 `~/.config/kasaterm/browser-sync/settings-<계정>.json` 에 둔다.
-- 북마크를 다시 켜면 관문을 처음부터 다시 받는다(꺼 둔 사이의 변경을 놓치지 않게). 다시 켠 첫 바퀴에 이 기기에서 사라진
-  것은 지운 때가 아니라 알아챈 때라 다른 기기의 나중 고침을 이길 수 있어, 하나라도 사람 확인까지 보류한다.
-- 탭을 끄면 30초 묶음을 기다리지 않고 곧바로 내 탭 항목에 묘비를 달고(브라우저가 꺼져 있어도) 받은 다른 기기 탭도
-  브라우저에서 지운다. 둘 다 끄고 그 묘비가 관문에 올라간 뒤에야 쉰다(관문에 묻지 않는다).
+- 금고 열쇠가 있고 지문을 확인한 기기는 북마크와 탭을 늘 맞춘다. 켜고 끄던 단추는 걷었다 — 기기마다 켜 줘야 해서 안 맞춰진 채로
+  남았다(2026-11-18).
+- 켜고 끄던 때의 `~/.config/kasaterm/browser-sync/settings-<계정>.json` 은 첫 바퀴에 지운다. 거기 북마크가 꺼져 있었으면 다시 켤
+  때처럼 관문을 처음부터 받는다(꺼 둔 사이의 변경을 놓치지 않게). 그 첫 바퀴에 이 기기에서 사라진 것은 지운 때가 아니라 알아챈
+  때라 다른 기기의 나중 고침을 이길 수 있어, 하나라도 사람 확인까지 보류한다.
+
+## 브라우저 설정 페이지
+
+- 바퀴마다(그리고 브라우저가 꺼져 있으면 건너뛰고) 다리 명령 `sync.state.put {"state"}` 로 카사브라우저 설정 「동기화」에 보일 한 장을
+  넘긴다(`browser_sync::display`). 금고와 북마크·탭 상태를 묶고, 글은 여기서 다 쓴다 — 브라우저는 그대로 그린다.
+  `{at_ms, phase(on·starting·needs_you·off·error), headline, detail, rows[{label,value,detail?}], note, asks[{id,title,detail,button,tone}]}`.
+  개수·지문·기기 이름만 있고 주소·사이트·아이디는 없다.
+- `asks` 는 사람이 정해야 하는 일: `create_vault`·`join`·`confirm_fingerprint`·`confirm_login_deletions`·`confirm_bookmark_deletions`·
+  `trust_phone`. 브라우저 단추는 `POST 127.0.0.1:<~/.config/kasaterm/mcp_port>/browser-sync/ask {"id"}` 를 부른다. 바깥 peer 와
+  `Origin` 이 붙은 요청(웹 페이지의 fetch)은 거절한다.
+- 그 부름은 아무것도 확정하지 않는다. 카사텀이 지금 상태에서 물을 수 있는 일인지 다시 보고, 카사텀 창에 확인 시트를 띄워
+  사람이 거기서 누를 때만 지문 확인·지우기·금고 만들기를 한다(`native_login_vault.rs`). `join` 은 폰 Face ID 가 확인이라 바로
+  시작하고, `trust_phone` 은 카사텀 설정 「연결 기기」를 연다. 소켓·CLI 에는 이 길을 두지 않는다.
 
 ## 한 바퀴 (15초, 켜기·끄기는 앞당김)
 

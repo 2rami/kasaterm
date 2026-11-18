@@ -265,6 +265,23 @@ async fn claude_mod_face_handler(
     Json(body.unwrap_or_else(|| serde_json::json!({}))).into_response()
 }
 
+/// `POST /browser-sync/ask {"id"}` — 카사브라우저 설정 「동기화」의 확인 단추. 이 기계 안의 브라우저 프로세스만
+/// 부른다: 바깥 peer 와 `Origin` 이 붙은 요청(웹 페이지의 fetch)은 거절한다. 확정은 카사텀 창의 시트에서 사람이 한다.
+async fn browser_sync_ask_handler(backend: Arc<dyn Backend>, req: axum::extract::Request) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if is_remote_peer(&req) || req.headers().contains_key(header::ORIGIN) {
+        return (axum::http::StatusCode::FORBIDDEN, "browser-sync ask is for the local browser app only").into_response();
+    }
+    let Ok(body) = axum::body::to_bytes(req.into_body(), 4096).await else {
+        return Json(serde_json::json!({"ok": false, "error": "요청이 너무 커요"})).into_response();
+    };
+    let id = serde_json::from_slice::<serde_json::Value>(&body).ok().and_then(|v| v["id"].as_str().map(str::to_owned)).unwrap_or_default();
+    match backend.browser_sync_ask(&id) {
+        Ok(message) => Json(serde_json::json!({"ok": true, "message": message})).into_response(),
+        Err(error) => Json(serde_json::json!({"ok": false, "error": error.to_string()})).into_response(),
+    }
+}
+
 /// 업로드 한 벌의 상한(base64 부풀림 포함). 프레임 6장 × 4MB 가 상한이므로 그
 /// 4/3 에 여유를 얹었다 — axum 기본 2MB 로는 큰 원본 한 장에도 요청이 통째로
 /// 거부되고, 그 거부는 화면에 이유 없이 실패로만 온다.
@@ -546,6 +563,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let settings_action_backend = backend.clone();
     let character_face_backend = backend.clone();
     let mod_face_backend = backend.clone();
+    let browser_sync_backend = backend.clone();
     let sprite_get_backend = backend.clone();
     let sprite_status_backend = backend.clone();
     let sprite_save_backend = backend.clone();
@@ -616,6 +634,10 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
             }),
         )
         .route(
+            "/browser-sync/ask",
+            post(move |req: axum::extract::Request| browser_sync_ask_handler(browser_sync_backend.clone(), req)),
+        )
+        .route(
             "/claude-mod/face",
             get(move |q: Query<std::collections::HashMap<String, String>>, req: axum::extract::Request| {
                 claude_mod_face_handler(mod_face_backend.clone(), q, req)
@@ -664,6 +686,32 @@ mod tests {
             if self.fail { anyhow::bail!("transport failed: {}", label.unwrap_or_default()); }
             Ok(serde_json::json!({"ok": true}))
         }
+        fn browser_sync_ask(&self, id: &str) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(format!("asked {id}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_local_browser_app_can_ask_for_a_sync_sheet() {
+        use std::sync::atomic::Ordering;
+        use tower::ServiceExt;
+        let desk = Arc::new(LoginDesk::default());
+        let backend: Arc<dyn Backend> = desk.clone();
+        let ask = |origin: Option<&str>| {
+            let mut request = axum::http::Request::builder().method("POST").uri("/browser-sync/ask");
+            if let Some(origin) = origin {
+                request = request.header(header::ORIGIN, origin);
+            }
+            request.body(axum::body::Body::from(r#"{"id":"confirm_fingerprint"}"#)).unwrap()
+        };
+        let page = routes(&backend).oneshot(ask(Some("https://example.com"))).await.unwrap();
+        assert_eq!(page.status(), axum::http::StatusCode::FORBIDDEN, "a web page's fetch carries an Origin");
+        assert_eq!(desk.calls.load(Ordering::Relaxed), 0);
+        let app = routes(&backend).oneshot(ask(None)).await.unwrap();
+        assert_eq!(app.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(app.into_body(), 4096).await.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["message"], "asked confirm_fingerprint");
     }
 
     async fn login_action(desk: Arc<LoginDesk>, owner: Option<bool>, action: &str, label: &str) -> axum::response::Response {

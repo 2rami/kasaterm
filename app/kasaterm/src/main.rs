@@ -4126,6 +4126,8 @@ enum UserEvent {
     /// `surface.open_url` / `/open-url` — URL 을 사람이 보는 브라우저로.
     /// (url, 요청자 pid). 요청 pane 을 거울로 보는 기계가 있으면 그쪽으로 되돌린다.
     SocketOpenUrl(String, Option<String>),
+    /// 카사브라우저 설정 「동기화」의 확인 단추 — 카사텀 창에 확인 시트를 띄운다(`vault::Ask`).
+    BrowserSyncAsk(crate::native_settings::device_account::vault::Ask),
     /// 원격 호스트가 거울로 되돌려 보낸 `open-url` — (로컬 pane id, url). 이 기계의
     /// 기본 브라우저로 연다(맥북에서 미니 학생의 페이지를 보는 길).
     RemoteOpenUrl(String, String),

@@ -1,5 +1,6 @@
-//! 앱 안에서 도는 북마크·탭 동기화 스레드와 설정 화면이 부르는 동작. 로그인 금고 열쇠가 있고 사람이 지문을 확인한
-//! 기기에서, 사람이 「북마크 맞추기」나 「탭 보내기」를 켰을 때만 일한다. 둘 다 기본은 꺼짐이다.
+//! 앱 안에서 도는 북마크·탭 동기화 스레드. 로그인 금고 열쇠가 있고 사람이 지문을 확인한 기기에서는 늘 맞춘다 —
+//! 켜고 끄는 단추가 있으면 기기마다 켜 줘야 해서 안 맞춰진 채로 남았다(2026-11-18). 바퀴마다 카사브라우저 설정
+//! 「동기화」에 보일 상태(`display`)를 브라우저에 넘긴다.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -7,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::bridge::{self, Bridge};
@@ -24,15 +24,6 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// 금고 열쇠의 갈래 이름 — 이 이름이 바뀌면 다른 열쇠가 된다.
 const PURPOSE: &str = "browser-sync";
 
-/// 사람이 켠 것. 계정마다 따로다.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Settings {
-    #[serde(default)]
-    pub bookmarks: bool,
-    #[serde(default)]
-    pub tabs: bool,
-}
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -45,50 +36,25 @@ fn state_path(account: &str) -> Option<PathBuf> {
     Some(sync_dir()?.join(format!("state-{account}.json")))
 }
 
-fn settings_path(account: &str) -> Option<PathBuf> {
-    Some(sync_dir()?.join(format!("settings-{account}.json")))
-}
-
-fn load_settings(account: &str) -> Settings {
-    settings_path(account).and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-}
-
 fn current_account() -> Option<String> {
     let (credential, _) = device_auth::capture()?;
     Some(account_key(&credential.relay, &credential.account))
 }
 
-/// 지금 계정에서 켠 것.
-pub fn settings() -> Settings {
-    current_account().map(|a| load_settings(&a)).unwrap_or_default()
-}
-
-/// 켜고 끈다. 「북마크 맞추기」를 다시 켜면 관문을 처음부터 다시 받는다 — 꺼 둔 사이 다른 기기가 바꾼 것을 놓치지 않게.
-pub fn set(bookmarks: Option<bool>, tabs: Option<bool>) -> Result<Settings, String> {
-    let account = current_account().ok_or("로그인하지 않았어요")?;
-    let mut settings = load_settings(&account);
-    let turned_on = bookmarks == Some(true) && !settings.bookmarks;
-    settings.bookmarks = bookmarks.unwrap_or(settings.bookmarks);
-    settings.tabs = tabs.unwrap_or(settings.tabs);
-    let path = settings_path(&account).ok_or("설정 폴더가 없어요")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|_| "설정을 저장하지 못했어요")?;
-    }
-    let text = serde_json::to_string(&settings).map_err(|_| "설정을 저장하지 못했어요")?;
-    kasa_identity::relay_auth::write_private(&path, &text).map_err(|_| "설정을 저장하지 못했어요")?;
-    if turned_on {
-        if let Some(path) = state_path(&account) {
-            let mut state = State::load(&path);
-            state.revision = 0;
-            for known in state.marks.values_mut() {
-                known.rev = 0;
-            }
-            state.rejoin = true;
-            let _ = state.save(&path);
+/// 켜고 끄던 때의 설정 파일을 걷는다. 북마크를 꺼 둔 기기는 그사이 다른 기기가 바꾼 것을 놓쳤으니, 다시 켤 때처럼
+/// 관문을 처음부터 받고 그 첫 바퀴에 사라진 것은 사람 확인까지 보류한다.
+fn retire_toggle(account: &str, state: &mut State) {
+    let Some(path) = sync_dir().map(|d| d.join(format!("settings-{account}.json"))) else { return };
+    let Ok(bytes) = std::fs::read(&path) else { return };
+    let bookmarks_were_on = serde_json::from_slice::<Value>(&bytes).is_ok_and(|v| v["bookmarks"] == true);
+    if !bookmarks_were_on {
+        state.revision = 0;
+        for known in state.marks.values_mut() {
+            known.rev = 0;
         }
+        state.rejoin = true;
     }
-    poke();
-    Ok(settings)
+    let _ = std::fs::remove_file(path);
 }
 
 /// 사람이 확인한 보류 지우기 — 누른 때 화면에 보인 그 목록이다. 그 목록을 다 처리한 바퀴가 끝날 때까지 남는다.
@@ -153,27 +119,24 @@ fn round() -> Duration {
         return INTERVAL;
     };
     let account = account_key(&credential.relay, &credential.account);
-    let settings = load_settings(&account);
     let Some(path) = state_path(&account) else { return INTERVAL };
     let mut state = State::load(&path);
-    // 둘 다 끄고 뒷정리(내 탭 묘비·받은 탭 비우기)도 끝났으면 관문에 묻지도 않는다.
-    if !settings.bookmarks && !settings.tabs && state.idle {
-        set_status(json!({"state": "off", "settings": settings}));
-        return INTERVAL;
-    }
     let key = match vault_key::load(&account) {
-        Ok(Some(key)) if key_confirmed(&account) => key.subkey(PURPOSE),
+        Ok(Some(key)) if key_confirmed(&account) => {
+            retire_toggle(&account, &mut state);
+            key.subkey(PURPOSE)
+        }
         Ok(_) => {
-            set_status(json!({"state": "needs_vault", "settings": settings}));
+            set_status(json!({"state": "needs_vault"}));
             return INTERVAL;
         }
         Err(_) => {
-            set_status(json!({"state": "error", "message": "키체인에서 금고 열쇠를 읽지 못했어요", "settings": settings}));
+            set_status(json!({"state": "error", "message": "키체인에서 금고 열쇠를 읽지 못했어요"}));
             return INTERVAL;
         }
     };
     let Some(dir) = bridge::data_dir() else {
-        set_status(json!({"state": "unsupported_platform", "settings": settings}));
+        set_status(json!({"state": "unsupported_platform"}));
         return INTERVAL;
     };
     let Ok(http) = Http::at(&credential, "/relay/browser-sync") else { return INTERVAL };
@@ -189,8 +152,8 @@ fn round() -> Duration {
         remote: &http,
         now_ms: now_ms(),
         allowed_deletions: &confirmed,
-        sync_bookmarks: settings.bookmarks,
-        send_tabs: settings.tabs,
+        sync_bookmarks: true,
+        send_tabs: true,
     };
     let result = engine.round(&mut state);
     if !device_auth::stamp_is_current(&stamp) {
@@ -198,9 +161,6 @@ fn round() -> Duration {
     }
     if let Ok(counts) = &result {
         let clean = !counts.browser_away && counts.failed == 0 && counts.stale == 0;
-        // 내 탭 묘비가 관문에 올라간 뒤에만 쉰다 — 아니면 다른 기기에 끈 탭이 계속 보인다.
-        let retracted = state.tabs_sent == "off" || state.tabs_item_rev == 0;
-        state.idle = !settings.bookmarks && !settings.tabs && clean && retracted;
         if clean {
             if let Ok(mut done) = CONFIRMED.lock() {
                 done.retain(|id| !confirmed.contains(id));
@@ -220,7 +180,6 @@ fn round() -> Duration {
             };
             set_status(json!({
                 "state": phase,
-                "settings": settings,
                 "bookmarks": bookmarks,
                 "devices": devices,
                 "deletions": counts.deletions_held,
@@ -239,10 +198,17 @@ fn round() -> Duration {
                 SyncError::Remote(_) => ("offline", "관문에 닿지 않아요. 이 기기의 북마크는 그대로예요"),
             };
             eprintln!("[browser-sync] 멈춤 {phase}");
-            set_status(json!({"state": phase, "message": message, "settings": settings}));
+            set_status(json!({"state": phase, "message": message}));
             if phase == "offline" { MAX_BACKOFF.min(INTERVAL * 4) } else { INTERVAL }
         }
     }
+}
+
+/// 카사브라우저 설정 「동기화」에 지금 상태를 넘긴다. 브라우저가 꺼져 있으면 그냥 넘어간다 — 켜지면 다음 바퀴에 간다.
+fn show_in_browser() {
+    let Some(dir) = bridge::data_dir() else { return };
+    let state = super::display::display(&crate::login_vault::status(), &status(), now_ms());
+    let _ = Bridge::new(dir).put_state(&state);
 }
 
 /// 다른 기기의 「다른 기기의 탭」에 보일 이 기기 이름 — 앱이 사람이 붙인 기기 이름을 준다.
@@ -261,6 +227,7 @@ pub fn spawn(device_name: fn() -> Option<String>) {
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
         loop {
             let wait = round();
+            show_in_browser();
             runtime.block_on(async {
                 tokio::select! {
                     _ = notify().notified() => {}

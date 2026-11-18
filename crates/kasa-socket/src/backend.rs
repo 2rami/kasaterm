@@ -1470,6 +1470,12 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// 카사브라우저 설정 「동기화」의 확인 단추(`POST /browser-sync/ask`). 확인할 일은 카사텀 창에 시트로 띄워
+    /// 사람이 거기서 누르게만 한다 — 이 부름 자체는 아무것도 확정하지 않는다. 답은 브라우저가 보일 한 줄.
+    fn browser_sync_ask(&self, _id: &str) -> Result<String> {
+        anyhow::bail!("이 카사텀은 브라우저 동기화 확인을 받지 않아요")
+    }
+
     /// 칸 안 claude 의 「학생 얼굴」 mod 가 답 머리에 그릴 학생 — `{name, color, file?, generation?}`.
     /// 얼굴은 화면이 쓰는 자르기 그대로 PNG 파일로 두고 그 경로를 준다(터미널이 파일을 직접 읽는다).
     /// 캐릭터 외형이 꺼져 있으면 None — mod 는 아무것도 안 그린다.
