@@ -432,10 +432,24 @@ impl Pipeline {
         if end <= start {
             return;
         }
+        self.bind(pass, bind_group);
+        self.draw_instances(pass, start, end);
+    }
+
+    /// Set this pipeline, its bind group and instance buffer on the pass. The
+    /// [`Self::draw_instances`] that follow in the same pass need not set them
+    /// again — `encode_render_pass` pays for every state command at `finish`.
+    pub fn bind<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, bind_group: &'a wgpu::BindGroup) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-        pass.draw(0..6, start..end);
+    }
+
+    /// Draw instances `start..end` with whatever [`Self::bind`] last set.
+    pub fn draw_instances(&self, pass: &mut wgpu::RenderPass<'_>, start: u32, end: u32) {
+        if end > start {
+            pass.draw(0..6, start..end);
+        }
     }
 
     /// Draw a single instance at `instance_index` with its own bind group.

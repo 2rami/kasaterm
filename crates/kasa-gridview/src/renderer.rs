@@ -52,6 +52,9 @@ pub struct GridRenderer {
     /// Per-frame chrome instances. Callers push via `rect()` / text draws
     /// between frames; `render()` drains.
     pub chrome: Vec<CellInstance>,
+    /// Each pane's cell quads from the frame that last built them, by origin —
+    /// see `draw_cells`.
+    pane_cells: HashMap<(u32, u32), PaneCells>,
     /// Scale we cached on init. winit logical→physical conversion.
     pub scale: f32,
     /// [`begin_zoom`](Self::begin_zoom) 이 `scale` 에 곱해 둔 몫. 물리 크기에서 논리 크기를 되짚는 값
@@ -455,6 +458,7 @@ impl GridRenderer {
             cell_w: cell_w / scale,
             cell_h: cell_h / scale,
             chrome: Vec::with_capacity(1024),
+            pane_cells: HashMap::new(),
             scale,
             zoom: 1.0,
             p3_root_owned: p3_root,
@@ -1675,275 +1679,52 @@ impl GridRenderer {
     /// layers fall out naturally from the call sequence.
     pub fn draw_cells(&mut self, panes: &[PaneSlot<'_>]) {
         DRAW_CELLS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // The URL currently under the mouse renders in this blue — both its
-        // glyphs (Pass 2) and its underline (Pass 3) — so a hovered link reads
-        // like a hyperlink. `pane.links` holds the 0..1 hovered range.
-        const LINK_BLUE: [u8; 4] = [0x0a, 0x84, 0xff, 0xff];
-        // Glyph alpha for unfocused panes (PaneSlot.dim). Backgrounds keep
-        // full alpha — only the text fades, so the box doesn't darken.
-        const DIM_TEXT_ALPHA: f32 = 0.70;
-        let pal = self.palette;
-        // Pass 1: backgrounds only. A tall CJK glyph bleeds a little
-        // into the row below; emitting EVERY background first stops the
-        // next row's bg fill from painting over the previous glyph's
-        // bottom half. That over-paint was clipping Hangul in claude's
-        // input-echo row (a run of reverse/bg cells); claude's normal
-        // output rows have no bg below them, so they rendered fine.
-        // (Reverse-video spaces still fill here — claude's cursor is an
-        // inverse space, "띄어쓰기 커서".)
+        // A pane whose cells, place, colours and atlas are what they were last
+        // frame reuses that frame's quads. Rebuilding every pane on every frame
+        // was the larger part of the grid's draw time while one pane's spinner
+        // kept the window repainting. All backgrounds still go down before any
+        // glyph (see `pane_backgrounds`).
+        enum Placed {
+            Kept((u32, u32)),
+            Once(usize),
+        }
+        let mut kept = std::mem::take(&mut self.pane_cells);
+        let mut once: Vec<PaneCells> = Vec::new();
+        let mut order: Vec<Placed> = Vec::with_capacity(panes.len());
         for pane in panes {
-            // Per-pane cell size: base metric × this pane's font multiplier.
-            let cell_w_px = self.cell_w * self.scale * pane.font_scale;
-            let cell_h_px = self.cell_h * self.scale * pane.font_scale;
-            for (r, row) in pane.rows.iter().enumerate() {
-                for (col, cell) in row.iter().enumerate() {
-                    let adapted = crate::palette::adapt_to_viewer(cell, pane.source.as_ref());
-                    let cell = adapted.as_ref();
-                    let want_bg = !matches!(cell.bg, kasa_screen::Color::Default)
-                        || cell.inverse;
-                    let bg = pal.cell_bg_with(cell, pane.default_fg);
-                    if want_bg && bg[3] > 0 {
-                        let cx = pane.origin_px.0 + col as f32 * cell_w_px;
-                        let cy = pane.origin_px.1 + r as f32 * cell_h_px;
-                        self.chrome.push(CellInstance {
-                            cell_px: [cx, cy, cell_w_px, cell_h_px],
-                            uv_min: Atlas::SOLID_UV,
-                            uv_max: Atlas::SOLID_UV,
-                            fg_rgba: srgb_rgba_to_linear(bg),
-                            ..Default::default()
-                        });
-                    }
-                }
+            let id = (pane.origin_px.0.to_bits(), pane.origin_px.1.to_bits());
+            let look = self.pane_look(pane);
+            let twin = order.iter().any(|p| matches!(p, Placed::Kept(o) if *o == id));
+            if !twin && kept.get(&id).is_some_and(|c| c.look == look && c.rows.as_slice() == pane.rows) {
+                order.push(Placed::Kept(id));
+                continue;
+            }
+            let mut cells = PaneCells { look, rows: Vec::new(), backgrounds: Vec::new(), glyphs: Vec::new() };
+            self.pane_backgrounds(pane, &mut cells.backgrounds);
+            self.pane_glyphs(pane, &mut cells.glyphs);
+            // Out of atlas room means blank quads in there; the repack before
+            // the next frame fills them only if that frame builds them again.
+            if twin || self.atlas.ran_out_this_frame() {
+                order.push(Placed::Once(once.len()));
+                once.push(cells);
+            } else {
+                cells.rows = pane.rows.to_vec();
+                kept.insert(id, cells);
+                order.push(Placed::Kept(id));
             }
         }
-        // Pass 2: glyphs, drawn over every background.
-        for pane in panes {
-            let cell_w_px = self.cell_w * self.scale * pane.font_scale;
-            let cell_h_px = self.cell_h * self.scale * pane.font_scale;
-            let pane_size_px = ((self.font_size_px as f32 * pane.font_scale).round() as u32).max(8);
-            for (r, row) in pane.rows.iter().enumerate() {
-                probe_cell_row(r, row, pane.dim, pane.font_scale);
-                // Right edge of the last glyph painted on this row. A blank
-                // cell an oversized neighbour already spilled into is not free
-                // room any more, so `fit_cell_glyph` is told about it.
-                let mut glyph_right = f32::NEG_INFINITY;
-                for (col, cell) in row.iter().enumerate() {
-                    let adapted = crate::palette::adapt_to_viewer(cell, pane.source.as_ref());
-                    let cell = adapted.as_ref();
-                    // Blanks contribute no glyph.
-                    let ch = cell.ch;
-                    if ch == ' ' || ch == '\0' {
-                        continue;
-                    }
-                    // SGR 8(conceal) — 배경은 위 패스에서 칠했고 글리프만 생략.
-                    // statusline 의 세션 id 마커가 이 플래그로 화면에서 숨는다.
-                    if cell.hidden {
-                        continue;
-                    }
-                    // Box Drawing(U+2500..257F)과 Block Elements(U+2580..259F)는
-                    // 폰트 글리프 대신 GPU 사각형으로 — 글리프는 advance 폭까지만
-                    // 그려서 칸이 그보다 넓으면 이웃 칸과 틈이 남는다(표 가로줄이
-                    // 점선이 되고, 반칸 블록으로 짠 학생 도트가 찢어진다). 선은
-                    // `box_line_rects`(px), 면은 `block_rects`(비율). 혼합 굵기
-                    // 교차처럼 안 다루는 글자만 폰트로 떨어진다.
-                    if ('\u{2500}'..='\u{259F}').contains(&ch) {
-                        let mut fg = pal.cell_fg_with(cell, pane.default_fg);
-                        if pane.dim {
-                            fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
-                        }
-                        let lin = srgb_rgba_to_linear(fg);
-                        let cx = pane.origin_px.0 + col as f32 * cell_w_px;
-                        let cy = pane.origin_px.1 + r as f32 * cell_h_px;
-                        let chrome = &mut self.chrome;
-                        let mut put = |x0: f32, y0: f32, x1: f32, y1: f32, alpha: f32| {
-                            let mut c = lin;
-                            c[3] *= alpha;
-                            chrome.push(CellInstance {
-                                cell_px: [cx + x0, cy + y0, x1 - x0, y1 - y0],
-                                uv_min: Atlas::SOLID_UV,
-                                uv_max: Atlas::SOLID_UV,
-                                fg_rgba: c,
-                                ..Default::default()
-                            });
-                        };
-                        if crate::geometry::box_line_rects(ch, cell_w_px, cell_h_px, &mut put) {
-                            continue;
-                        }
-                        if let Some(rects) = crate::geometry::block_rects(ch) {
-                            for &(x0, y0, x1, y1, alpha) in rects {
-                                put(
-                                    x0 * cell_w_px,
-                                    y0 * cell_h_px,
-                                    x1 * cell_w_px,
-                                    y1 * cell_h_px,
-                                    alpha,
-                                );
-                            }
-                            continue;
-                        }
-                    }
-                    let cell_x = pane.origin_px.0 + col as f32 * cell_w_px;
-                    let cell_y = pane.origin_px.1 + r as f32 * cell_h_px;
-                    let mut fg = pal.cell_fg_with(cell, pane.default_fg);
-                    if pane.links.iter().any(|l| {
-                        l.row as usize == r
-                            && (col as u16) >= l.col_start
-                            && (col as u16) < l.col_end
-                    }) {
-                        fg = LINK_BLUE;
-                    }
-                    if pane.dim {
-                        fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
-                    }
-                    let icon = is_icon_codepoint(ch as u32);
-                    if icon {
-                        // Ghostty-style fit-to-cell, done CRISP: scale
-                        // happens at raster time, never on a finished
-                        // bitmap. Two-pass — probe-bake at cell height
-                        // to read the glyph's natural bbox, compute the
-                        // size that lands the bbox at ~0.82 of the cell
-                        // height, then re-bake natively at that size.
-                        // Both bakes are atlas-cached so it's one-time
-                        // per glyph. The final bitmap is sharp because
-                        // swash rasterized the outline at the target
-                        // size directly.
-                        let target_h = cell_h_px * 0.82;
-                        let probe_size = cell_h_px.round().max(1.0) as u32;
-                        let probe = self.atlas.get_or_bake(
-                            &self.device,
-                            &self.queue,
-                            &mut self.shaper,
-                            GlyphKey { ch, bold: cell.bold, italic: cell.italic, size_px: probe_size, font: 0 },
-                        );
-                        if let Some(p) = probe {
-                            if p.px_h > 0 {
-                                let mut final_size =
-                                    (probe_size as f32 * target_h / p.px_h as f32).round();
-                                // Guard the width: scale down if the
-                                // glyph would exceed ~1.9 cells.
-                                let projected_w = p.px_w as f32
-                                    * (final_size / probe_size as f32);
-                                let max_w = cell_w_px * 1.9;
-                                if projected_w > max_w {
-                                    final_size *= max_w / projected_w;
-                                }
-                                let final_size = (final_size.round() as u32).max(1);
-                                let entry = self.atlas.get_or_bake(
-                                    &self.device,
-                                    &self.queue,
-                                    &mut self.shaper,
-                                    GlyphKey { ch, bold: cell.bold, italic: cell.italic, size_px: final_size, font: 0 },
-                                );
-                                if let Some(e) = entry {
-                                    let x = cell_x + (cell_w_px - e.px_w as f32) * 0.5;
-                                    let y = cell_y + (cell_h_px - e.px_h as f32) * 0.5;
-                                    self.chrome.push(CellInstance {
-                                        cell_px: [x, y, e.px_w as f32, e.px_h as f32],
-                                        uv_min: e.uv_min,
-                                        uv_max: e.uv_max,
-                                        fg_rgba: srgb_rgba_to_linear(fg),
-                                        ..Default::default()
-                                    });
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    let key = GlyphKey {
-                        ch,
-                        bold: cell.bold,
-                        italic: cell.italic,
-                        size_px: pane_size_px,
-                        font: 0,
-                    };
-                    let Some(entry) = self.atlas.get_or_bake(
-                        &self.device,
-                        &self.queue,
-                        &mut self.shaper,
-                        key,
-                    ) else {
-                        continue;
-                    };
-                    let baseline_y = cell_y + cell_h_px * 0.78;
-                    if entry.is_color {
-                        // Color emoji: the atlas holds a verbatim RGBA
-                        // bitmap. Fit it into a 2-cell box (emoji read as
-                        // full-width) keeping aspect, never upscaling past
-                        // native, and center it in the row. FLAG_COLOR
-                        // tells the shader to sample the texture directly
-                        // instead of fg × coverage.
-                        let span_w = cell_w_px * 2.0;
-                        let gw0 = entry.px_w as f32;
-                        let gh0 = entry.px_h as f32;
-                        let fit = (span_w / gw0).min(cell_h_px / gh0).min(1.0);
-                        let gw = gw0 * fit;
-                        let gh = gh0 * fit;
-                        let x = cell_x + (span_w - gw) * 0.5;
-                        let y = cell_y + (cell_h_px - gh) * 0.5;
-                        glyph_right = x + gw;
-                        self.chrome.push(CellInstance {
-                            cell_px: [x, y, gw, gh],
-                            uv_min: entry.uv_min,
-                            uv_max: entry.uv_max,
-                            fg_rgba: srgb_rgba_to_linear(fg),
-                            flags: CellInstance::FLAG_COLOR,
-                            ..Default::default()
-                        });
-                        continue;
-                    }
-                    if is_wide_char(ch) {
-                        // Fit the glyph into its 2-cell box. Scale down
-                        // (keeping aspect) only if it overflows, then
-                        // center horizontally so syllables sit on the
-                        // grid instead of bleeding into the next cell.
-                        let span_w = cell_w_px * 2.0;
-                        let gw0 = entry.px_w as f32;
-                        let scale_fit = if gw0 > span_w { span_w / gw0 } else { 1.0 };
-                        let gw = gw0 * scale_fit;
-                        let gh = entry.px_h as f32 * scale_fit;
-                        let x = cell_x + (span_w - gw) * 0.5;
-                        let y = baseline_y - entry.bearing_y as f32 * scale_fit;
-                        glyph_right = x + gw;
-                        self.chrome.push(CellInstance {
-                            cell_px: [x, y, gw, gh],
-                            uv_min: entry.uv_min,
-                            uv_max: entry.uv_max,
-                            fg_rgba: srgb_rgba_to_linear(fg),
-                            ..Default::default()
-                        });
-                    } else {
-                        // An oversized ambiguous-width glyph is slid into the
-                        // blank columns beside it. A column counts as free only
-                        // when it really exists — past the row's end there is
-                        // nothing to borrow and the spill would cross into the
-                        // neighbouring pane — and only up to where the previous
-                        // glyph already reaches, so `① ②잠금` cannot have the ②
-                        // slide left onto the ①.
-                        let room_right = match row.get(col + 1) {
-                            Some(n) if matches!(n.ch, ' ' | '\0') => cell_w_px,
-                            _ => 0.0,
-                        };
-                        let room_left = match col.checked_sub(1).and_then(|c| row.get(c)) {
-                            Some(p) if matches!(p.ch, ' ' | '\0') => {
-                                cell_w_px.min((cell_x - glyph_right).max(0.0))
-                            }
-                            _ => 0.0,
-                        };
-                        let rect = fit_cell_glyph(
-                            &entry, cell_x, baseline_y, cell_w_px, room_left, room_right,
-                        );
-                        glyph_right = rect[0] + rect[2];
-                        self.chrome.push(CellInstance {
-                            cell_px: rect,
-                            uv_min: entry.uv_min,
-                            uv_max: entry.uv_max,
-                            fg_rgba: srgb_rgba_to_linear(fg),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
+        let cells_of = |p: &Placed| match p {
+            Placed::Kept(id) => &kept[id],
+            Placed::Once(i) => &once[*i],
+        };
+        for p in &order {
+            self.chrome.extend_from_slice(&cells_of(p).backgrounds);
         }
+        for p in &order {
+            self.chrome.extend_from_slice(&cells_of(p).glyphs);
+        }
+        kept.retain(|id, _| order.iter().any(|p| matches!(p, Placed::Kept(o) if o == id)));
+        self.pane_cells = kept;
         // Pass 3: blue underline beneath the URL currently under the mouse —
         // the hover hyperlink affordance (links are bare text until hovered).
         // The event handler flips the cursor to a pointer over the same range
@@ -1973,6 +1754,287 @@ impl GridRenderer {
                     fg_rgba: lin,
                     ..Default::default()
                 });
+            }
+        }
+    }
+
+    /// Everything besides a pane's cells that its quads depend on.
+    fn pane_look(&self, pane: &PaneSlot<'_>) -> PaneLook {
+        PaneLook {
+            origin_px: pane.origin_px,
+            font_scale: pane.font_scale,
+            dim: pane.dim,
+            links: pane.links.clone(),
+            default_fg: pane.default_fg,
+            source: pane.source,
+            palette: self.palette,
+            cell: (self.cell_w, self.cell_h),
+            scale: self.scale,
+            font_size_px: self.font_size_px,
+            atlas: self.atlas.generation(),
+        }
+    }
+
+    /// Pass 1 of a pane: backgrounds only. A tall CJK glyph bleeds a little
+    /// into the row below; emitting EVERY background first stops the next
+    /// row's bg fill from painting over the previous glyph's bottom half. That
+    /// over-paint was clipping Hangul in claude's input-echo row (a run of
+    /// reverse/bg cells); claude's normal output rows have no bg below them,
+    /// so they rendered fine. (Reverse-video spaces still fill here — claude's
+    /// cursor is an inverse space, "띄어쓰기 커서".)
+    fn pane_backgrounds(&self, pane: &PaneSlot<'_>, out: &mut Vec<CellInstance>) {
+        let pal = self.palette;
+        // Per-pane cell size: base metric × this pane's font multiplier.
+        let cell_w_px = self.cell_w * self.scale * pane.font_scale;
+        let cell_h_px = self.cell_h * self.scale * pane.font_scale;
+        for (r, row) in pane.rows.iter().enumerate() {
+            for (col, cell) in row.iter().enumerate() {
+                let adapted = crate::palette::adapt_to_viewer(cell, pane.source.as_ref());
+                let cell = adapted.as_ref();
+                let want_bg = !matches!(cell.bg, kasa_screen::Color::Default)
+                    || cell.inverse;
+                let bg = pal.cell_bg_with(cell, pane.default_fg);
+                if want_bg && bg[3] > 0 {
+                    let cx = pane.origin_px.0 + col as f32 * cell_w_px;
+                    let cy = pane.origin_px.1 + r as f32 * cell_h_px;
+                    out.push(CellInstance {
+                        cell_px: [cx, cy, cell_w_px, cell_h_px],
+                        uv_min: Atlas::SOLID_UV,
+                        uv_max: Atlas::SOLID_UV,
+                        fg_rgba: srgb_rgba_to_linear(bg),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+
+    /// Pass 2 of a pane: glyphs, drawn over every background.
+    fn pane_glyphs(&mut self, pane: &PaneSlot<'_>, out: &mut Vec<CellInstance>) {
+        let pal = self.palette;
+        let cell_w_px = self.cell_w * self.scale * pane.font_scale;
+        let cell_h_px = self.cell_h * self.scale * pane.font_scale;
+        let pane_size_px = ((self.font_size_px as f32 * pane.font_scale).round() as u32).max(8);
+        for (r, row) in pane.rows.iter().enumerate() {
+            probe_cell_row(r, row, pane.dim, pane.font_scale);
+            // Right edge of the last glyph painted on this row. A blank
+            // cell an oversized neighbour already spilled into is not free
+            // room any more, so `fit_cell_glyph` is told about it.
+            let mut glyph_right = f32::NEG_INFINITY;
+            for (col, cell) in row.iter().enumerate() {
+                let adapted = crate::palette::adapt_to_viewer(cell, pane.source.as_ref());
+                let cell = adapted.as_ref();
+                // Blanks contribute no glyph.
+                let ch = cell.ch;
+                if ch == ' ' || ch == '\0' {
+                    continue;
+                }
+                // SGR 8(conceal) — 배경은 위 패스에서 칠했고 글리프만 생략.
+                // statusline 의 세션 id 마커가 이 플래그로 화면에서 숨는다.
+                if cell.hidden {
+                    continue;
+                }
+                // Box Drawing(U+2500..257F)과 Block Elements(U+2580..259F)는
+                // 폰트 글리프 대신 GPU 사각형으로 — 글리프는 advance 폭까지만
+                // 그려서 칸이 그보다 넓으면 이웃 칸과 틈이 남는다(표 가로줄이
+                // 점선이 되고, 반칸 블록으로 짠 학생 도트가 찢어진다). 선은
+                // `box_line_rects`(px), 면은 `block_rects`(비율). 혼합 굵기
+                // 교차처럼 안 다루는 글자만 폰트로 떨어진다.
+                if ('\u{2500}'..='\u{259F}').contains(&ch) {
+                    let mut fg = pal.cell_fg_with(cell, pane.default_fg);
+                    if pane.dim {
+                        fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
+                    }
+                    let lin = srgb_rgba_to_linear(fg);
+                    let cx = pane.origin_px.0 + col as f32 * cell_w_px;
+                    let cy = pane.origin_px.1 + r as f32 * cell_h_px;
+                    let chrome = &mut *out;
+                    let mut put = |x0: f32, y0: f32, x1: f32, y1: f32, alpha: f32| {
+                        let mut c = lin;
+                        c[3] *= alpha;
+                        chrome.push(CellInstance {
+                            cell_px: [cx + x0, cy + y0, x1 - x0, y1 - y0],
+                            uv_min: Atlas::SOLID_UV,
+                            uv_max: Atlas::SOLID_UV,
+                            fg_rgba: c,
+                            ..Default::default()
+                        });
+                    };
+                    if crate::geometry::box_line_rects(ch, cell_w_px, cell_h_px, &mut put) {
+                        continue;
+                    }
+                    if let Some(rects) = crate::geometry::block_rects(ch) {
+                        for &(x0, y0, x1, y1, alpha) in rects {
+                            put(
+                                x0 * cell_w_px,
+                                y0 * cell_h_px,
+                                x1 * cell_w_px,
+                                y1 * cell_h_px,
+                                alpha,
+                            );
+                        }
+                        continue;
+                    }
+                }
+                let cell_x = pane.origin_px.0 + col as f32 * cell_w_px;
+                let cell_y = pane.origin_px.1 + r as f32 * cell_h_px;
+                let mut fg = pal.cell_fg_with(cell, pane.default_fg);
+                if pane.links.iter().any(|l| {
+                    l.row as usize == r
+                        && (col as u16) >= l.col_start
+                        && (col as u16) < l.col_end
+                }) {
+                    fg = LINK_BLUE;
+                }
+                if pane.dim {
+                    fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
+                }
+                let icon = is_icon_codepoint(ch as u32);
+                if icon {
+                    // Ghostty-style fit-to-cell, done CRISP: scale
+                    // happens at raster time, never on a finished
+                    // bitmap. Two-pass — probe-bake at cell height
+                    // to read the glyph's natural bbox, compute the
+                    // size that lands the bbox at ~0.82 of the cell
+                    // height, then re-bake natively at that size.
+                    // Both bakes are atlas-cached so it's one-time
+                    // per glyph. The final bitmap is sharp because
+                    // swash rasterized the outline at the target
+                    // size directly.
+                    let target_h = cell_h_px * 0.82;
+                    let probe_size = cell_h_px.round().max(1.0) as u32;
+                    let probe = self.atlas.get_or_bake(
+                        &self.device,
+                        &self.queue,
+                        &mut self.shaper,
+                        GlyphKey { ch, bold: cell.bold, italic: cell.italic, size_px: probe_size, font: 0 },
+                    );
+                    if let Some(p) = probe {
+                        if p.px_h > 0 {
+                            let mut final_size =
+                                (probe_size as f32 * target_h / p.px_h as f32).round();
+                            // Guard the width: scale down if the
+                            // glyph would exceed ~1.9 cells.
+                            let projected_w = p.px_w as f32
+                                * (final_size / probe_size as f32);
+                            let max_w = cell_w_px * 1.9;
+                            if projected_w > max_w {
+                                final_size *= max_w / projected_w;
+                            }
+                            let final_size = (final_size.round() as u32).max(1);
+                            let entry = self.atlas.get_or_bake(
+                                &self.device,
+                                &self.queue,
+                                &mut self.shaper,
+                                GlyphKey { ch, bold: cell.bold, italic: cell.italic, size_px: final_size, font: 0 },
+                            );
+                            if let Some(e) = entry {
+                                let x = cell_x + (cell_w_px - e.px_w as f32) * 0.5;
+                                let y = cell_y + (cell_h_px - e.px_h as f32) * 0.5;
+                                out.push(CellInstance {
+                                    cell_px: [x, y, e.px_w as f32, e.px_h as f32],
+                                    uv_min: e.uv_min,
+                                    uv_max: e.uv_max,
+                                    fg_rgba: srgb_rgba_to_linear(fg),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let key = GlyphKey {
+                    ch,
+                    bold: cell.bold,
+                    italic: cell.italic,
+                    size_px: pane_size_px,
+                    font: 0,
+                };
+                let Some(entry) = self.atlas.get_or_bake(
+                    &self.device,
+                    &self.queue,
+                    &mut self.shaper,
+                    key,
+                ) else {
+                    continue;
+                };
+                let baseline_y = cell_y + cell_h_px * 0.78;
+                if entry.is_color {
+                    // Color emoji: the atlas holds a verbatim RGBA
+                    // bitmap. Fit it into a 2-cell box (emoji read as
+                    // full-width) keeping aspect, never upscaling past
+                    // native, and center it in the row. FLAG_COLOR
+                    // tells the shader to sample the texture directly
+                    // instead of fg × coverage.
+                    let span_w = cell_w_px * 2.0;
+                    let gw0 = entry.px_w as f32;
+                    let gh0 = entry.px_h as f32;
+                    let fit = (span_w / gw0).min(cell_h_px / gh0).min(1.0);
+                    let gw = gw0 * fit;
+                    let gh = gh0 * fit;
+                    let x = cell_x + (span_w - gw) * 0.5;
+                    let y = cell_y + (cell_h_px - gh) * 0.5;
+                    glyph_right = x + gw;
+                    out.push(CellInstance {
+                        cell_px: [x, y, gw, gh],
+                        uv_min: entry.uv_min,
+                        uv_max: entry.uv_max,
+                        fg_rgba: srgb_rgba_to_linear(fg),
+                        flags: CellInstance::FLAG_COLOR,
+                        ..Default::default()
+                    });
+                    continue;
+                }
+                if is_wide_char(ch) {
+                    // Fit the glyph into its 2-cell box. Scale down
+                    // (keeping aspect) only if it overflows, then
+                    // center horizontally so syllables sit on the
+                    // grid instead of bleeding into the next cell.
+                    let span_w = cell_w_px * 2.0;
+                    let gw0 = entry.px_w as f32;
+                    let scale_fit = if gw0 > span_w { span_w / gw0 } else { 1.0 };
+                    let gw = gw0 * scale_fit;
+                    let gh = entry.px_h as f32 * scale_fit;
+                    let x = cell_x + (span_w - gw) * 0.5;
+                    let y = baseline_y - entry.bearing_y as f32 * scale_fit;
+                    glyph_right = x + gw;
+                    out.push(CellInstance {
+                        cell_px: [x, y, gw, gh],
+                        uv_min: entry.uv_min,
+                        uv_max: entry.uv_max,
+                        fg_rgba: srgb_rgba_to_linear(fg),
+                        ..Default::default()
+                    });
+                } else {
+                    // An oversized ambiguous-width glyph is slid into the
+                    // blank columns beside it. A column counts as free only
+                    // when it really exists — past the row's end there is
+                    // nothing to borrow and the spill would cross into the
+                    // neighbouring pane — and only up to where the previous
+                    // glyph already reaches, so `① ②잠금` cannot have the ②
+                    // slide left onto the ①.
+                    let room_right = match row.get(col + 1) {
+                        Some(n) if matches!(n.ch, ' ' | '\0') => cell_w_px,
+                        _ => 0.0,
+                    };
+                    let room_left = match col.checked_sub(1).and_then(|c| row.get(c)) {
+                        Some(p) if matches!(p.ch, ' ' | '\0') => {
+                            cell_w_px.min((cell_x - glyph_right).max(0.0))
+                        }
+                        _ => 0.0,
+                    };
+                    let rect = fit_cell_glyph(
+                        &entry, cell_x, baseline_y, cell_w_px, room_left, room_right,
+                    );
+                    glyph_right = rect[0] + rect[2];
+                    out.push(CellInstance {
+                        cell_px: rect,
+                        uv_min: entry.uv_min,
+                        uv_max: entry.uv_max,
+                        fg_rgba: srgb_rgba_to_linear(fg),
+                        ..Default::default()
+                    });
+                }
             }
         }
     }
@@ -2121,16 +2183,23 @@ impl GridRenderer {
             let mut drawn = 0u32;
             let mut run_i = 0usize;
             let mut cur: Option<[u32; 4]> = None;
-            // 한 세그먼트를 그리기 직전마다 시저를 **매번** 정한다. 「바뀔 때만
-            // 세운다」로 하면 한 번 세운 사각형이 되돌려지지 않아 그 뒤 전부가
-            // 거기 갇히는 사고가 난다.
+            // 한 세그먼트를 그리기 직전마다 그 세그먼트의 시저를 정한다. 「클립이 바뀔 때만
+            // 세운다」로 하면 한 번 세운 사각형이 되돌려지지 않아 그 뒤 전부가 거기 갇히는
+            // 사고가 났다 — 그래서 견주는 것은 클립이 아니라 패스에 실제로 세워 둔 사각형이다.
+            // 셀 파이프라인도 이미지가 갈아 끼우기 전까지는 다시 세우지 않는다.
+            let mut scissor_set: Option<[u32; 4]> = None;
+            let mut chrome_bound = false;
             macro_rules! scissor {
-                ($c:expr) => {
-                    match $c {
-                        Some([x, y, w, h]) => pass.set_scissor_rect(x, y, w, h),
-                        None => pass.set_scissor_rect(0, 0, full_w, full_h),
+                ($c:expr) => {{
+                    let want = match $c {
+                        Some(rect) => rect,
+                        None => [0, 0, full_w, full_h],
+                    };
+                    if scissor_set != Some(want) {
+                        pass.set_scissor_rect(want[0], want[1], want[2], want[3]);
+                        scissor_set = Some(want);
                     }
-                };
+                }};
             }
             macro_rules! flush_chrome {
                 ($upto:expr) => {{
@@ -2147,10 +2216,13 @@ impl GridRenderer {
                             runs.get(run_i).map(|(i, _)| (*i).min(upto)).unwrap_or(upto);
                         // 빈 클립은 그리기 자체를 건너뛴다 — 0 크기 시저를 세우느니
                         // draw call 을 안 내는 편이 싸고 검증도 명확하다.
-                        if !matches!(cur, Some([_, _, 0, _]) | Some([_, _, _, 0])) {
+                        if !matches!(cur, Some([_, _, 0, _]) | Some([_, _, _, 0])) && seg_end > drawn {
                             scissor!(cur);
-                            self.pipeline
-                                .draw_range(&mut pass, &self.bind_group, drawn, seg_end);
+                            if !chrome_bound {
+                                self.pipeline.bind(&mut pass, &self.bind_group);
+                                chrome_bound = true;
+                            }
+                            self.pipeline.draw_instances(&mut pass, drawn, seg_end);
                         }
                         drawn = seg_end;
                     }
@@ -2166,6 +2238,7 @@ impl GridRenderer {
                         scissor!(qclip);
                         self.image_pipeline
                             .draw_at(&mut pass, &entry.bind_group, buf_idx);
+                        chrome_bound = false;
                     }
                 }
             }
@@ -2351,6 +2424,36 @@ pub struct ImageEntry {
 /// sugarloaf renderer carries through `PaneFrame` but trimmed to
 /// what Phase 2a needs (background fills, fg color, and the wide
 /// markers come back in 2b).
+/// The URL currently under the mouse renders in this blue — both its glyphs
+/// and its underline — so a hovered link reads like a hyperlink.
+const LINK_BLUE: [u8; 4] = [0x0a, 0x84, 0xff, 0xff];
+/// Glyph alpha for unfocused panes (PaneSlot.dim). Backgrounds keep full
+/// alpha — only the text fades, so the box doesn't darken.
+const DIM_TEXT_ALPHA: f32 = 0.70;
+
+/// A pane's quads as `draw_cells` built them, and what they were built from.
+struct PaneCells {
+    look: PaneLook,
+    rows: Vec<Vec<Cell>>,
+    backgrounds: Vec<CellInstance>,
+    glyphs: Vec<CellInstance>,
+}
+
+#[derive(PartialEq)]
+struct PaneLook {
+    origin_px: (f32, f32),
+    font_scale: f32,
+    dim: bool,
+    links: Vec<crate::CellSpan>,
+    default_fg: [u8; 4],
+    source: Option<crate::palette::SourcePalette>,
+    palette: crate::palette::Palette,
+    cell: (f32, f32),
+    scale: f32,
+    font_size_px: u32,
+    atlas: u64,
+}
+
 pub struct PaneSlot<'a> {
     pub rows: &'a [Vec<Cell>],
     /// Pane top-left in physical pixels.

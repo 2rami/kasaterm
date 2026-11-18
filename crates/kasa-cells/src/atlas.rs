@@ -132,6 +132,9 @@ pub struct Atlas {
     consecutive_full: u32,
     /// True once we've given up above, so the diagnostic prints once.
     futility_logged: bool,
+    /// Bumped by every `reset`. A caller that kept quads built from earlier
+    /// entries (their UVs) compares it to know they now point at other texels.
+    generation: u64,
 }
 
 /// Consecutive out-of-room frames tolerated before concluding the live glyph
@@ -195,6 +198,7 @@ impl Atlas {
             sampler,
             oversample: 1,
             wants_reset: false,
+            generation: 0,
             full_this_frame: false,
             consecutive_full: 0,
             futility_logged: false,
@@ -314,11 +318,24 @@ impl Atlas {
     /// Deliberately does not touch `consecutive_full` — that streak exists to
     /// notice that repacking isn't helping, so it has to survive the repack.
     pub fn reset(&mut self) {
+        self.generation += 1;
         self.cache.clear();
         self.cursor_x = 2;
         self.cursor_y = 0;
         self.shelf_h = 2;
         self.wants_reset = false;
+    }
+
+    /// Which `reset` the cached entries belong to — see `generation`.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// A bake found no room during the frame being built, so some quads of it
+    /// came out blank. Quads built while this holds must not be kept past the
+    /// frame — the repack at the next frame boundary is what fills them.
+    pub fn ran_out_this_frame(&self) -> bool {
+        self.full_this_frame
     }
 
     /// Live glyph count — diagnostics for the atlas-pressure log.
