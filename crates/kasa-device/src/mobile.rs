@@ -37,7 +37,7 @@ pub struct MobileUser {
     pub owner: bool,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct FileBody {
     #[serde(default)]
     users: Vec<MobileUser>,
@@ -71,11 +71,16 @@ fn users_path() -> Option<PathBuf> {
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/mobile-users.json"))
 }
 
+/// 관문 주소를 장마다 묻는 자리라 파일이 바뀔 때만 다시 읽는다(`file_memo`). `save_body` 가 쓰면 바로 버린다.
+static FILE: crate::file_memo::FileMemo<FileBody> = crate::file_memo::FileMemo::new();
+
 fn load_body(path: &std::path::Path) -> FileBody {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<FileBody>(&s).ok())
-        .unwrap_or_default()
+    FILE.get(path, |path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<FileBody>(&s).ok())
+            .unwrap_or_default()
+    })
 }
 
 fn load_from(path: &std::path::Path) -> Vec<MobileUser> {
@@ -94,7 +99,9 @@ fn save_body(path: &std::path::Path, body: &FileBody) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let body = serde_json::to_string_pretty(body).map_err(|e| std::io::Error::other(e.to_string()))?;
-    std::fs::write(path, body)?;
+    let written = std::fs::write(path, body);
+    FILE.forget();
+    written?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
