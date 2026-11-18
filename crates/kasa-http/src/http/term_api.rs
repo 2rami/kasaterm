@@ -154,6 +154,13 @@ fn pane_session_name(p: &kasa_socket::backend::PaneActivity) -> Option<String> {
 }
 
 async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    // 다른 기기가 몇 초마다 묻는 창구다. `collab_board` 는 칸마다 기록 꼬리를 읽고 프로세스를 뒤져(macOS 는 칸마다
+    // `ps`) 수십~수백 ms 걸리는데, 워커에서 기다리면 그동안 이 런타임의 입출력이 서서 거울·카사넷 입구가 같이 멈춘다.
+    let rows = tokio::task::spawn_blocking(move || term_panes_rows(backend.as_ref())).await.unwrap_or_default();
+    Json(rows)
+}
+
+fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
     let board = backend.collab_board().unwrap_or_default();
     // 방별 그룹핑(폰 목록을 사이드바처럼) — board 는 claude 바인딩 pane 만 담아
     // 순수 셸이 빠지므로, 트리 전체를 아는 pane_windows 가 정본이다.
@@ -342,7 +349,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             })
         })
         .collect();
-    Json(rows)
+    rows
 }
 
 /// `GET /term/tunnel` — 바깥주소 상태 `{on, host}`. `POST` body `{"on":bool}` —

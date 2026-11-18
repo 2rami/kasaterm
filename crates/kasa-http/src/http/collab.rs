@@ -6,6 +6,15 @@ use kasa_students::messages::{mode_slug, persist_sensei_msg, submit_payload};
 /// `GET /board` — JSON snapshot of every pane's activity (`collab.board`) for
 /// the board panel to poll: `{ board: [{surface_id, intent, status, files}] }`.
 async fn board_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    // 다른 기기들이 3초마다 묻는다(`remoteboard`) — `collab_board` 를 워커에서 기다리면 이 런타임의 입출력이 같이 선다.
+    let rows = tokio::task::spawn_blocking(move || board_rows(backend.as_ref())).await.unwrap_or_default();
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "board": rows })),
+    )
+}
+
+fn board_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
     let board = backend.collab_board().unwrap_or_default();
     // 다른 기계의 학생도 같은 목록에 섞는다 — 「어느 기계에 띄울까」를 매번 생각하지
     // 않으려면 한 화면에 있어야 한다(2026-08-26 지시). 캐시를 읽을 뿐이라 원격이
@@ -15,10 +24,7 @@ async fn board_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
     rows.extend(kasa_remote::remoteboard::board_rows());
-    (
-        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(serde_json::json!({ "board": rows })),
-    )
+    rows
 }
 
 
