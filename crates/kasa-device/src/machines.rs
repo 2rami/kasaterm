@@ -1006,9 +1006,10 @@ pub fn stop_tunnels() {
 
 /// GUI 는 거울 칸마다·바퀴마다 목록을 묻는다. 부를 때마다 명부 파일을 읽어 풀고 기기·칸 줄을 다시 지으면
 /// 메인 스레드가 한 코어를 다 썼다(2026-11-17 집 PC, 거울 14칸에 91%). 목록에 드는 것(폴링 갱신 번호·손님
-/// 번호·명부 파일·명부 env)이 같고 이 시간 안이면 지난 답을 준다. 손님 만료·온라인 판정처럼 시간이 흐르며
-/// 바뀌는 것은 이만큼 늦는다.
-const ROSTER_MEMO_TTL: Duration = Duration::from_millis(250);
+/// 번호·명부 자리)이 같고 이 시간 안이면 지난 답을 준다. 손님 만료·온라인 판정·「몇 초 전」처럼 시간이 흐르며
+/// 바뀌는 것은 이만큼 늦는데, 모두 초 단위로 보이는 값이다. 250ms 일 때는 바뀐 게 없어도 초당 네 번 기기·칸
+/// 줄 전체를 다시 지어, 0.2.246 메인 스레드 표본에서 about_to_wait 의 14%가 명부 경로였다(2026-11-18).
+const ROSTER_MEMO_TTL: Duration = Duration::from_secs(1);
 
 /// 손님이 알려 올 때 오른다 — `GENERATION` 은 폴링 바퀴만 센다.
 static GUESTS_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -1028,8 +1029,7 @@ struct RosterKey {
     generation: u64,
     guests: u64,
     writes: u64,
-    path: Option<std::path::PathBuf>,
-    env: Option<std::ffi::OsString>,
+    place: u64,
 }
 
 fn roster_key() -> RosterKey {
@@ -1037,9 +1037,26 @@ fn roster_key() -> RosterKey {
         generation: generation(),
         guests: GUESTS_VERSION.load(Ordering::Relaxed),
         writes: ROSTER_WRITES.load(Ordering::Relaxed),
-        path: machines_path(),
-        env: std::env::var_os("KASATERM_MACHINES"),
+        place: roster_place(),
     }
+}
+
+/// 명부가 어디서 오는지(파일 자리·명부 env). 앱이 사는 동안 그대로라 한 번만 읽는다 — 열쇠는 거울 칸마다
+/// 바퀴마다 재는데, 맞는 답을 줄 때도 env 를 네댓 번 읽었고 Windows 는 그때마다 env 잠금을 잡는다.
+/// 시험은 env 를 바꿔 가며 돌아 매번 읽는다.
+fn roster_place() -> u64 {
+    fn read() -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        machines_path().hash(&mut hasher);
+        std::env::var_os("KASATERM_MACHINES").hash(&mut hasher);
+        hasher.finish()
+    }
+    if cfg!(test) {
+        return read();
+    }
+    static PLACE: OnceLock<u64> = OnceLock::new();
+    *PLACE.get_or_init(read)
 }
 
 struct Memo<T> {
@@ -1706,9 +1723,13 @@ pub async fn poll_loop() {
             }
         }
         drop(jobs);
-        link::settle(&list, &failures);
+        // 답한 기기는 위에서 이미 번호를 올렸다. 바퀴 끝엔 붙음·끊김 기록이 바뀐 때만 — 바퀴마다 올리면
+        // 번호로 「바뀐 게 없으면 건너뛰는」 자리(명부 공유·거울 맞추기·기기 열)가 모두 바퀴마다 다시 일했다.
+        let links_changed = link::settle(&list, &failures);
         futures_util::future::join_all(announce.iter().map(|base| announce_to(&client, base))).await;
-        GENERATION.fetch_add(1, Ordering::Relaxed);
+        if links_changed {
+            GENERATION.fetch_add(1, Ordering::Relaxed);
+        }
         sync_watchers(&client, &list, &mut watchers);
         tokio::select! {
             _ = tokio::time::sleep(POLL_EVERY) => {}
@@ -2056,7 +2077,7 @@ mod roster_memo_tests {
     use super::*;
 
     fn key(generation: u64) -> RosterKey {
-        RosterKey { generation, guests: 0, writes: 0, path: None, env: None }
+        RosterKey { generation, guests: 0, writes: 0, place: 0 }
     }
 
     /// 거울 14칸이 한 바퀴(수 ms) 안에 물어도 목록은 한 번만 짓는다. 폴링이 새로 채우거나 잠깐이 지나면 다시 짓는다.
@@ -2082,8 +2103,7 @@ mod roster_memo_tests {
         let base = key(1);
         assert_ne!(base, RosterKey { writes: 1, ..base.clone() });
         assert_ne!(base, RosterKey { guests: 1, ..base.clone() });
-        assert_ne!(base, RosterKey { path: Some("other.json".into()), ..base.clone() });
-        assert_ne!(base, RosterKey { env: Some("[]".into()), ..base.clone() });
+        assert_ne!(base, RosterKey { place: 1, ..base.clone() });
         let before = roster_key();
         roster_written();
         assert_ne!(roster_key().writes, before.writes);

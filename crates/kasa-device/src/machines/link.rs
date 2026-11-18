@@ -253,10 +253,11 @@ fn unresolved(entry: &Value) -> bool {
 }
 
 /// 폴링 한 바퀴가 끝난 뒤 — 기기마다 화면과 같은 판정으로 붙음·끊김이 바뀌었으면 적고, 명부에서
-/// 빠진 기기는 이유를 달아 남긴다. `failures` 는 이번 바퀴 실패(라벨 → 사유).
-pub(super) fn settle(list: &[Machine], failures: &HashMap<String, Failure>) {
+/// 빠진 기기는 이유를 달아 남긴다. `failures` 는 이번 바퀴 실패(라벨 → 사유). 화면에 보이는 기록이
+/// 바뀌었으면 `true`.
+pub(super) fn settle(list: &[Machine], failures: &HashMap<String, Failure>) -> bool {
     let observed = {
-        let Ok(cache) = super::cache().lock() else { return };
+        let Ok(cache) = super::cache().lock() else { return false };
         observe(list, &cache)
     };
     // 길 사정은 캐시 잠금 밖에서 — 보드 길 조회가 명부를 다시 읽으며 같은 캐시를 잠근다.
@@ -271,9 +272,27 @@ pub(super) fn settle(list: &[Machine], failures: &HashMap<String, Failure>) {
         .filter(|e| unresolved(e))
         .filter_map(|e| entry_label(e).map(str::to_string))
         .collect();
-    let Ok(mut table) = table().lock() else { return };
+    let Ok(mut table) = table().lock() else { return false };
+    let before = shown(&table);
     drop_merged(&mut table, list, &observed);
     apply(&mut table, &observed, failures, &routes, &unresolved_labels, boot().elapsed() >= STALE_AFTER);
+    shown(&table) != before
+}
+
+/// 화면이 연결 기록에서 읽는 것. 붙어 있는 동안 바퀴마다 오르는 마지막 응답 시각은 빼고 견준다 — 넣으면
+/// 바퀴마다 「바뀜」이다.
+fn shown(table: &Table) -> Vec<(String, Value)> {
+    let mut rows: Vec<(String, Value)> = table
+        .links
+        .iter()
+        .map(|(label, link)| {
+            let mut row = view(link);
+            row["last_ok_ms"] = Value::Null;
+            (label.clone(), row)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
 }
 
 /// 명부엔 그대로 있는데 화면 목록에서만 빠진 이름 — 같은 기기 id 로 다른 항목에 합쳐진 별칭이다
