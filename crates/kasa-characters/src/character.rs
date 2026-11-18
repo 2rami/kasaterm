@@ -2696,4 +2696,36 @@ mod read_json_tests {
         assert!(read_json(&path).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 이 기기의 실제 명부로 한 번 묻는 값 — 손으로 돌린다
+    /// (`cargo test -p kasa-characters --lib roster_lookup_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn roster_lookup_cost() {
+        let n = 200u32;
+        let parse_all = || {
+            let mut paths = candidate_paths();
+            if let Some(root) = themes_root() {
+                paths.extend(theme_roster_paths(&root));
+            }
+            paths
+                .iter()
+                .filter_map(|p| std::fs::read_to_string(p).ok())
+                .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
+                .count()
+        };
+        let rosters = parse_all();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(parse_all());
+        }
+        let read = t.elapsed() / n;
+        all_rosters();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(header_color_any("kasatest-없는-이름"));
+        }
+        let memo = t.elapsed() / n;
+        eprintln!("rosters {rosters}: read+parse every call {read:?} · header_color_any with memo {memo:?}");
+    }
 }
