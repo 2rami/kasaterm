@@ -139,29 +139,30 @@ pub(crate) fn process_table() -> Option<Vec<(u32, u32, String)>> {
         if got != size {
             continue;
         }
-        let mine = info.pbsi_uid == me;
-        let prev = known
-            .remove(&(pid as u32))
-            .filter(|k: &Named| k.ppid == info.pbsi_ppid && k.comm == info.pbsi_comm && k.mine == mine);
-        let first_seen = prev.as_ref().map_or(now, |k| k.first_seen);
-        let settled = |k: &Named| {
-            !mine || (now.duration_since(k.first_seen) >= ARGV0_YOUNG && now.duration_since(k.read_at) < ARGV0_RECHECK)
-        };
-        let (name, read_at) = match prev.filter(settled) {
-            Some(k) => (k.name, k.read_at),
-            None => {
-                let argv0 = if mine { with_procargs(pid as u32, parse_argv0) } else { None };
-                let name = argv0.or_else(|| {
-                    let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
-                    (n > 0).then(|| String::from_utf8_lossy(&path[..n as usize]).into_owned())
-                });
-                (name, now)
-            }
-        };
-        kept.insert(
-            pid as u32,
-            Named { ppid: info.pbsi_ppid, comm: info.pbsi_comm, mine, first_seen, read_at, name: name.clone() },
-        );
+        let own = (info.pbsi_uid == me)
+            .then(|| {
+                let prev = known
+                    .remove(&(pid as u32))
+                    .filter(|k: &Argv0| k.ppid == info.pbsi_ppid && k.comm == info.pbsi_comm);
+                let first_seen = prev.as_ref().map_or(now, |k| k.first_seen);
+                let settled = |k: &Argv0| {
+                    now.duration_since(k.first_seen) >= ARGV0_YOUNG && now.duration_since(k.read_at) < ARGV0_RECHECK
+                };
+                let (name, read_at) = match prev.filter(settled) {
+                    Some(k) => (k.name, k.read_at),
+                    None => (with_procargs(pid as u32, parse_argv0), now),
+                };
+                kept.insert(
+                    pid as u32,
+                    Argv0 { ppid: info.pbsi_ppid, comm: info.pbsi_comm, first_seen, read_at, name: name.clone() },
+                );
+                name
+            })
+            .flatten();
+        let name = own.or_else(|| {
+            let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+            (n > 0).then(|| String::from_utf8_lossy(&path[..n as usize]).into_owned())
+        });
         let name = match name {
             Some(name) => comm_name(&name),
             None => {
@@ -175,19 +176,16 @@ pub(crate) fn process_table() -> Option<Vec<(u32, u32, String)>> {
     Some(out)
 }
 
-/// 표 이름의 재료(내 것은 argv[0], 남의 것은 실행 경로)를 pid 마다 기억한다. 표는 렌더가 300ms 마다, 다른
-/// 기기의 기기 스냅샷은 요청마다 새로 뜨는데, 그때마다 내 프로세스 전부(실측 800여 개)의 argv·환경을
-/// `KERN_PROCARGS2` 로 복사해 왔다 — 맥북 표본(2026-11-18, 칸 13)에서 표 갱신 스레드·tokio 일꾼의 `__sysctl` 이
-/// 그것이었다(프로세스 935개 맥에서 표 한 장 17.5ms, argv 만 기억하면 9.2ms).
+/// 내 프로세스의 argv[0] 을 pid 마다 기억한다. 표는 렌더가 300ms 마다, 다른 기기의 기기 스냅샷은 요청마다
+/// 새로 뜨는데, 그때마다 내 프로세스 전부(실측 800여 개)의 argv·환경을 `KERN_PROCARGS2` 로 복사해 왔다 — 맥북
+/// 표본(2026-11-18, 칸 13)에서 표 갱신 스레드·tokio 일꾼의 `__sysctl` 이 그것이었다.
 ///
-/// `node` 처럼 뜬 직후 제목을 바꾸는 것이 있어 내 프로세스는 처음 본 지 [`ARGV0_YOUNG`] 안에는 매번 읽고, 그
-/// 뒤로는 [`ARGV0_RECHECK`] 마다 읽는다. 실행 경로는 exec 전에는 안 바뀌어 남의 것은 그대로 쓴다. 실행
-/// 파일(comm)·부모·주인이 바뀌면(exec·pid 재사용) 그 자리에서 다시 읽는다.
+/// `node` 처럼 뜬 직후 제목을 바꾸는 것이 있어 처음 본 지 [`ARGV0_YOUNG`] 안에는 매번 읽고, 그 뒤로는
+/// [`ARGV0_RECHECK`] 마다 읽는다. 실행 파일(comm)이나 부모가 바뀌면(exec·pid 재사용) 그 자리에서 다시 읽는다.
 #[cfg(target_os = "macos")]
-struct Named {
+struct Argv0 {
     ppid: u32,
     comm: [libc::c_char; libc::MAXCOMLEN],
-    mine: bool,
     first_seen: std::time::Instant,
     read_at: std::time::Instant,
     name: Option<String>,
@@ -200,7 +198,7 @@ const ARGV0_YOUNG: std::time::Duration = std::time::Duration::from_secs(2);
 const ARGV0_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(target_os = "macos")]
-static ARGV0: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u32, Named>>> =
+static ARGV0: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u32, Argv0>>> =
     std::sync::LazyLock::new(Default::default);
 
 /// pid 의 명령줄(argv 를 공백으로 이은 것, `ps -o args=` 와 같은 모양).
@@ -624,6 +622,6 @@ mod tests {
             std::hint::black_box(process_table());
         }
         let remembered = started.elapsed() / 10;
-        eprintln!("processes {count}: every name read {cold:?} · remembered {remembered:?}");
+        eprintln!("processes {count}: every argv read {cold:?} · remembered {remembered:?}");
     }
 }
