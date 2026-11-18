@@ -231,6 +231,8 @@ pub struct PtySession {
     /// 키보드·paste·소켓 send·하네스 autosend 모든 쓰기 경로가 `send_bytes`
     /// 하나로 모이므로 여기가 정본이다.
     last_submit: Mutex<Option<Instant>>,
+    /// 이 PTY 를 띄운 시각. 갓 뜬 셸에 글을 넣을 때만 본다(`shell_starting`).
+    born: Instant,
     /// 출력 박동 — 리더가 백엔드에서 **실제 바이트를 읽은** 시각들(≥250ms 간격만,
     /// 최근 8개). scroll()·resize 재스냅샷은 리더 read 가 아니라 안 찍힌다.
     /// 「이 pane 에 출력이 흐르는가」의 글리프-독립 정본: 에이전트는 작업 중이면

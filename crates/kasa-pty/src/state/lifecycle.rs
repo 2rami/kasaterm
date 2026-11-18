@@ -224,6 +224,7 @@ impl Wiring {
             draft_marked_at: Mutex::new(None),
             input_hold: Mutex::new(None),
             last_submit: Mutex::new(None),
+            born: Instant::now(),
             output_beats,
             last_input: Mutex::new(None),
             last_key: Mutex::new(None),

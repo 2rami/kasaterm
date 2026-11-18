@@ -2530,6 +2530,12 @@ impl Backend for PtyBackend {
             if kasa_pty::lookup_session(&pid).is_some_and(|p| p.input_closed()) {
                 anyhow::bail!("surface {sid} is closed — reopen it before assigning work");
             }
+            // 막 나눈 칸에 띄우는 줄(launch·학생 부팅)은 셸이 첫 프롬프트를 그린 뒤에 친다 — `shell_starting` 머리말.
+            if let Some(session) = kasa_pty::lookup_session(&pid) {
+                while session.shell_starting() {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
         }
         let _ = self.proxy.send_event(UserEvent::SocketBytes(
             surface_id.map(|s| s.to_string()),

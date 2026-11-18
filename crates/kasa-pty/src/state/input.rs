@@ -182,6 +182,17 @@ impl PtySession {
         *self.last_submit.lock().unwrap()
     }
 
+    /// 갓 뜬 셸이 아직 첫 프롬프트(OSC 133 표지)를 안 그렸나. 그 전에 들어온 글은 Windows ConPTY 의 Git bash 가 뜨는
+    /// 동안 첫 글자를 잃었다(2026-11-18 리그: `bash …` 가 `ash …` 로). 줄을 넣은 적이 있거나, 셸 통합이 없어 표지가
+    /// 끝내 안 오는 셸이면 `SHELL_START` 뒤로는 기다리지 않는다.
+    pub fn shell_starting(&self) -> bool {
+        const SHELL_START: std::time::Duration = std::time::Duration::from_secs(3);
+        self.blocks_rev() == 0
+            && self.last_submit().is_none()
+            && self.born.elapsed() < SHELL_START
+            && !self.output_closed()
+    }
+
     pub fn last_key(&self) -> Option<Instant> {
         *self.last_key.lock().unwrap()
     }
