@@ -192,8 +192,8 @@ impl App {
     }
 
     /// 살아 있는 바인딩을 몇 초마다 한 번씩 이어 보낸다. 칸의 대화가 바뀐 것은 여기서 멈춘다.
-    pub(super) fn tick_shared_publisher(&mut self, epoch: u64) {
-        let scope = self.shared_rooms.client.as_ref().filter(|c| c.is_current()).map(|c| c.scope().to_string());
+    pub(super) fn tick_shared_publisher(&mut self, epoch: u64, current: bool) {
+        let scope = self.shared_rooms.client.as_ref().filter(|_| current).map(|c| c.scope().to_string());
         let publisher = &mut self.shared_rooms.runtime.publisher;
         publisher.change_scope(scope.clone());
         if publisher.syncing || publisher.next_due().is_none_or(|due| due > Instant::now()) {

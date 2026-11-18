@@ -80,6 +80,26 @@ pub(crate) struct Runtime {
     pub(super) launches: Vec<fork::Launch>,
     pub(super) publisher: publisher::Publisher,
     host_requests: HashMap<(String, String), serde_json::Value>,
+    account: Option<AccountCheck>,
+}
+
+/// 루프 박자의 계정 확인 결과. `Client::is_current` 는 device.json·관문 파일을 연다 — 이벤트 루프가 돌 때마다 두 번씩
+/// 부르던 것이 Windows 메인 스레드 일의 1할이었다(2026-11-18 0.2.246 표본). 이 앱 안의 로그인·로그아웃·거절은
+/// `change_epoch` 를 올려 바로 다시 보고, 다른 프로세스가 파일을 바꾼 것은 `ACCOUNT_RECHECK` 안에 본다. 요청은 보내기
+/// 직전에 `Client::request` 가 다시 확인한다.
+struct AccountCheck {
+    epoch: u64,
+    auth_scope: String,
+    at: Instant,
+    current: bool,
+}
+
+const ACCOUNT_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl AccountCheck {
+    fn answers(&self, epoch: u64, auth_scope: &str, now: Instant) -> bool {
+        self.epoch == epoch && self.auth_scope == auth_scope && now.saturating_duration_since(self.at) < ACCOUNT_RECHECK
+    }
 }
 
 /// 배경 일의 결과는 시작할 때의 계정 신원(`epoch`·`scope`=auth scope)을 싣는다. 그 사이 계정이 바뀌었으면 버린다.
@@ -251,10 +271,12 @@ impl App {
         }
     }
 
-    /// 계정 확인·포크 탭 진행·게시 증분을 한 박자 굴린다. 이벤트 루프가 `shared_local_tick` 시각마다 부른다.
+    /// 계정 확인·포크 탭 진행·게시 증분을 한 박자 굴린다. 이벤트 루프가 바퀴마다 부르고, 쉬는 동안은
+    /// `shared_local_tick` 시각에 깨운다.
     pub(crate) fn tick_shared_local(&mut self) {
         let epoch = kasa_device::device_auth::change_epoch();
-        let scope = self.shared_rooms.client.as_ref().filter(|c| c.is_current()).map(Client::auth_scope);
+        let current = self.shared_client_current(epoch);
+        let scope = self.shared_rooms.client.as_ref().filter(|_| current).map(Client::auth_scope);
         let stale: Vec<String> = self.shared_rooms.runtime.operations.iter()
             .filter(|op| !op.status.finished() && (op.epoch != epoch || scope != Some(op.auth_scope.as_str())))
             .map(|op| op.id.clone()).collect();
@@ -263,7 +285,18 @@ impl App {
             self.shared_finish(&id, Status::Failed, Some("계정이 바뀌었어요. 다시 시도해 주세요.".into()));
         }
         self.tick_shared_launches();
-        self.tick_shared_publisher(epoch);
+        self.tick_shared_publisher(epoch, current);
+    }
+
+    fn shared_client_current(&mut self, epoch: u64) -> bool {
+        let Some(client) = self.shared_rooms.client.as_ref() else { return false };
+        let now = Instant::now();
+        if let Some(check) = self.shared_rooms.runtime.account.as_ref().filter(|c| c.answers(epoch, client.auth_scope(), now)) {
+            return check.current;
+        }
+        let current = client.is_current();
+        self.shared_rooms.runtime.account = Some(AccountCheck { epoch, auth_scope: client.auth_scope().to_string(), at: now, current });
+        current
     }
 
     pub(crate) fn shared_local_tick(&self) -> Option<Instant> {
@@ -359,5 +392,15 @@ mod tests {
         guard.deadline = Instant::now();
         assert!(!guard.valid("fork"));
         assert!(!guard.valid("status"));
+    }
+
+    #[test]
+    fn the_loop_rereads_the_account_on_login_changes_and_at_least_every_second() {
+        let at = Instant::now();
+        let check = AccountCheck { epoch: 3, auth_scope: "a".into(), at, current: true };
+        assert!(check.answers(3, "a", at + std::time::Duration::from_millis(900)), "같은 바퀴들은 파일을 다시 안 연다");
+        assert!(!check.answers(4, "a", at), "이 앱의 로그인·로그아웃·거절");
+        assert!(!check.answers(3, "b", at), "다른 계정으로 잡은 클라이언트");
+        assert!(!check.answers(3, "a", at + ACCOUNT_RECHECK), "다른 프로세스가 바꾼 파일");
     }
 }
