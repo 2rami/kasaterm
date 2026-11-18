@@ -4,6 +4,7 @@ use crate::{gpu, theme, AccountProvider};
 pub(crate) enum Brand {
     Gmail,
     Naver,
+    Icloud,
     Sionic,
     Generic,
 }
@@ -20,6 +21,8 @@ impl Brand {
         match domain.to_ascii_lowercase().as_str() {
             "gmail.com" | "googlemail.com" => Self::Gmail,
             "naver.com" => Self::Naver,
+            // me.com·mac.com 은 iCloud Mail 의 옛 주소로, 지금도 같은 우편함에 닿는다.
+            "icloud.com" | "me.com" | "mac.com" => Self::Icloud,
             "sionic.ai" => Self::Sionic,
             _ => Self::Generic,
         }
@@ -44,6 +47,7 @@ impl Brand {
         match self {
             Self::Gmail => g.queue_icon_colored("gmail", x, y, size, 1.0),
             Self::Sionic => g.queue_icon_colored("sionic", x, y, size, 1.0),
+            Self::Icloud => g.queue_icon_colored("icloud", x, y, size, 1.0),
             Self::Naver => {
                 // The official wordmark is wide; squeezing it into a square destroys its lettering.
                 let height = size * 8.0 / 14.0;
@@ -73,6 +77,12 @@ mod tests {
             ("sionic@gmail.com", Brand::Gmail),
             ("naver@gmail.com", Brand::Gmail),
             ("me@naver.com", Brand::Naver),
+            ("me@icloud.com", Brand::Icloud),
+            (" Me@ICLOUD.COM ", Brand::Icloud),
+            ("me@me.com", Brand::Icloud),
+            ("me@mac.com", Brand::Icloud),
+            ("me@privaterelay.appleid.com", Brand::Generic),
+            ("me@icloud.com.example.com", Brand::Generic),
             ("me@sionic.ai", Brand::Sionic),
             (" ME@SIONIC.AI ", Brand::Sionic),
             ("me@example.com", Brand::Generic),
@@ -97,6 +107,7 @@ mod tests {
         for size in [12.0, 14.0, 28.0] {
             assert_eq!(Brand::Gmail.width(size), size);
             assert_eq!(Brand::Sionic.width(size), size);
+            assert_eq!(Brand::Icloud.width(size), size);
             assert_eq!(Brand::Generic.width(size), size);
             assert!(
                 (Brand::Naver.width(size) / (size * 8.0 / 14.0) - 2315.0 / 444.0).abs() < 0.001

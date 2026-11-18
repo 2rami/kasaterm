@@ -3469,6 +3469,7 @@ impl GpuRenderer {
             "gmail" => include_str!("../assets/icons/gmail.svg"),
             "google" => include_str!("../assets/icons/google.svg"),
             "naver" => include_str!("../assets/icons/naver.svg"),
+            "icloud" => include_str!("../assets/icons/icloud.svg"),
             "sionic" => include_str!("../assets/icons/sionic.svg"),
             "mail" => include_str!("../assets/icons/mail.svg"),
             "antigravity" => include_str!("../assets/icons/antigravity.svg"),
