@@ -15,6 +15,7 @@ pub mod relayconf;
 pub mod push;
 pub mod workspace_assistant;
 pub mod feedback_client;
+mod file_memo;
 pub mod op_approval;
 pub mod login_vault;
 pub mod browser_sync;

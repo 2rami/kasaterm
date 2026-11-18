@@ -158,9 +158,11 @@ fn path() -> Option<PathBuf> {
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/device.json"))
 }
 
+/// 장마다 불리는 자리라 파일이 바뀔 때만 다시 읽는다(`file_memo`). 이 모듈이 쓰거나 지우면 바로 버린다.
+static DEVICE_FILE: crate::file_memo::FileMemo<Option<DeviceCred>> = crate::file_memo::FileMemo::new();
+
 pub fn current() -> Option<DeviceCred> {
-    let raw = std::fs::read_to_string(path()?).ok()?;
-    serde_json::from_str(&raw).ok()
+    DEVICE_FILE.get(&path()?, |p| std::fs::read_to_string(p).ok().and_then(|raw| serde_json::from_str(&raw).ok()))
 }
 
 /// 지금 관문에 쓸 수 있는 로그인 — 다른 관문에서 받은 토큰은 안 낸다.
@@ -171,13 +173,17 @@ pub fn for_gateway(gateway: &str) -> Option<DeviceCred> {
 fn save(c: &DeviceCred) -> anyhow::Result<()> {
     let p = path().ok_or_else(|| anyhow::anyhow!("설정 폴더를 못 찾았어요"))?;
     let body = serde_json::to_string_pretty(c)?;
-    kasa_identity::relay_auth::write_private(&p, &body)?;
+    let written = kasa_identity::relay_auth::write_private(&p, &body);
+    DEVICE_FILE.forget();
+    written?;
     Ok(())
 }
 
 fn clear() -> std::io::Result<()> {
     if let Some(p) = path() {
-        match std::fs::remove_file(p) {
+        let removed = std::fs::remove_file(p);
+        DEVICE_FILE.forget();
+        match removed {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
