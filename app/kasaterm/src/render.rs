@@ -885,12 +885,18 @@ impl App {
         } else {
             0.0
         };
-        let git_view = self
-            .git
-            .col_data
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        // 폴러가 내용을 바꿨을 때만 사본을 뜬다 — 커밋 그래프 200개와 파일 목록을 장마다 복사·해제했다(2026-11-18 표본).
+        let git_view = match self.git.col_data.lock() {
+            Ok(data) => match self.git.col_frame.as_ref().filter(|seen| ***seen == *data) {
+                Some(seen) => seen.clone(),
+                None => {
+                    let fresh = std::sync::Arc::new(data.clone());
+                    self.git.col_frame = Some(fresh.clone());
+                    fresh
+                }
+            },
+            Err(_) => std::sync::Arc::default(),
+        };
         let git_repo_choice = self.git_active_pane().and_then(|id| self.git.col_repo_choice.get(&id).cloned());
         // Remote paths must never become local repository picker targets.
         let git_repo_list: Vec<std::path::PathBuf> = {

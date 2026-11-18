@@ -9,9 +9,9 @@ fn row_height(commit: &GitGraphCommit) -> f32 {
     }
 }
 
-fn commits(view: &GitColView) -> Vec<GitGraphCommit> {
+fn commits(view: &GitColView) -> std::borrow::Cow<'_, [GitGraphCommit]> {
     if view.graph_supported {
-        return view.commit_graph.clone();
+        return std::borrow::Cow::Borrowed(&view.commit_graph);
     }
     view.recent_commits
         .iter()
@@ -21,6 +21,30 @@ fn commits(view: &GitColView) -> Vec<GitGraphCommit> {
             ..Default::default()
         })
         .collect()
+}
+
+/// 열린 Git 칸은 그릴 때마다 커밋 200개의 레인을 다시 짓고 그 안의 해시를 복사했다 — 집 PC 메인 스레드 그리기 일의
+/// 1할 가까이가 이 칸이었다(2026-11-18 0.2.246 표본). 레인은 해시와 부모만 보므로 그 둘이 같으면 지난 배치를 쓴다.
+fn graph_layout(commits: &[GitGraphCommit]) -> std::rc::Rc<graph::Layout> {
+    use std::hash::{Hash, Hasher};
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(u64, std::rc::Rc<graph::Layout>)>> = const { std::cell::RefCell::new(None) };
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    commits.len().hash(&mut hasher);
+    for commit in commits {
+        (&commit.oid, &commit.parents).hash(&mut hasher);
+    }
+    let key = hasher.finish();
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Some((_, layout)) = last.as_ref().filter(|(seen, _)| *seen == key) {
+            return layout.clone();
+        }
+        let layout = std::rc::Rc::new(graph::layout(commits));
+        *last = Some((key, layout.clone()));
+        layout
+    })
 }
 
 fn expanded_height(git: &state::GitState, oid: &str) -> f32 {
@@ -414,7 +438,7 @@ pub(crate) fn history(
     let top = (y + 34.0).min(bottom);
     let visible = (bottom - top).max(0.0);
     let commits = commits(view);
-    let graph = graph::layout(&commits);
+    let graph = graph_layout(&commits);
     let heights = commits
         .iter()
         .map(|commit| row_height(commit) + expanded_height(git, &commit.oid))
@@ -596,6 +620,23 @@ mod tests {
         assert!(commits(&view)
             .iter()
             .all(|commit| commit.parents.is_empty()));
+    }
+    #[test]
+    fn the_lane_layout_is_rebuilt_only_when_hashes_or_parents_change() {
+        let commit = |oid: &str, parents: &[&str], subject: &str| GitGraphCommit {
+            oid: oid.into(),
+            parents: parents.iter().map(|p| p.to_string()).collect(),
+            subject: subject.into(),
+            ..Default::default()
+        };
+        let first = vec![commit("b", &["a"], "two"), commit("a", &[], "one")];
+        let laid = graph_layout(&first);
+        let renamed = vec![commit("b", &["a"], "다시 쓴 제목"), commit("a", &[], "one")];
+        assert!(std::rc::Rc::ptr_eq(&laid, &graph_layout(&renamed)), "제목만 바뀌면 레인은 그대로");
+        let merged = vec![commit("c", &["b", "a"], "merge"), commit("b", &["a"], "two"), commit("a", &[], "one")];
+        let relaid = graph_layout(&merged);
+        assert!(!std::rc::Rc::ptr_eq(&laid, &relaid));
+        assert_eq!(*relaid, graph::layout(&merged));
     }
     #[test]
     fn history_height_respects_pinned_size_and_zero_room() {

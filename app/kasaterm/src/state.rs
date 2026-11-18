@@ -274,6 +274,8 @@ pub(crate) struct GitState {
     pub(crate) commit_focused: bool,
     pub(crate) commit_input_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) col_data: std::sync::Arc<std::sync::Mutex<GitColView>>,
+    /// 그리기가 보는 `col_data` 사본. 폴러가 내용을 바꿨을 때만 새로 뜬다.
+    pub(crate) col_frame: Option<std::sync::Arc<GitColView>>,
     /// 지금 패널이 보는 레포가 다른 기기 것이면 (기기 이름, base). 일꾼이 그쪽 창구로 읽고,
     /// 배경은 기기색을 문다. 고치는 단추는 막는다(여기서 git 을 돌리면 남의 경로다).
     pub(crate) col_remote: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
