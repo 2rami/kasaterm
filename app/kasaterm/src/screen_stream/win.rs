@@ -625,7 +625,7 @@ pub(super) fn start_local(config: &Config, out: Box<dyn Fn(Frame) + Send + Sync>
         Err(e) => return Err(unavailable(e)),
     };
     let info = json!({
-        "width": w, "height": h, "codec": if kind == Nal::Hevc { "hevc" } else { "h264" }, "fps": fps,
+        "os": "windows", "width": w, "height": h, "codec": if kind == Nal::Hevc { "hevc" } else { "h264" }, "fps": fps,
         "bitrate": config.bitrate, "refine": config.refine, "rejected": encoder.rejected,
     });
     let (tx, rx) = mpsc::channel::<Msg>();

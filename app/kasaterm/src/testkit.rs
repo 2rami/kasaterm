@@ -7013,6 +7013,7 @@ impl App {
     /// `KASATERM_TEST_SCREEN_POPOUT=<초>` 면 첫 장이 온 뒤 화면 탭을 별도 창으로 꺼냈다가 그만큼 뒤 칸으로 되돌린다.
     /// `KASATERM_TEST_SCREEN_ANYPATH=1` 이면 직통을 기다리지 않고 바로 연다 — 못 붙는 칸의 상태 글을 본다.
     /// `KASATERM_TEST_SCREEN_ZOOM=<배율>` 이면 첫 장 뒤 칸 왼쪽 위 1/4 자리를 축으로 그만큼 확대한다.
+    /// `KASATERM_TEST_SCREEN_KEYMENU=1` 이면 첫 장 뒤 조작을 켜고 키 메뉴를 연다.
     pub(crate) fn run_pending_screen_view_test(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
         use std::sync::{Mutex, OnceLock};
@@ -7073,6 +7074,14 @@ impl App {
                     ZOOMED.store(true, Ordering::Relaxed);
                     eprintln!("[screen-view-test] zoom={} focus={:?}", view.zoom, view.focus);
                 }
+            }
+        }
+        // 첫 장 뒤 조작을 켜고 키 메뉴를 연 채로 둔다 — 메뉴 모양을 캡처로 본다.
+        if std::env::var_os("KASATERM_TEST_SCREEN_KEYMENU").is_some() {
+            if let Some(view) = self.screen_views.values_mut().find(|v| v.layout.is_some() && !v.control) {
+                view.set_control(true);
+                view.key_menu = Some(Vec::new());
+                eprintln!("[screen-view-test] key menu open windows={}", view.remote_windows());
             }
         }
         let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());

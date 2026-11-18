@@ -50,10 +50,25 @@ impl App {
                     _ => return false,
                 };
                 let pressed = *state == ElementState::Pressed;
+                // 열린 키 메뉴가 먼저다 — 줄을 누르면 그 키를 보내고, 어디를 누르든 닫는다. 그 누름은 그 기기로 안 간다.
+                if held.is_none() {
+                    if let Some(view) = self.screen_views.values_mut().find(|v| v.surface == on && v.key_menu.is_some()) {
+                        if pressed && bit == 1 {
+                            if let Some(i) = view.key_row_at(p) {
+                                let (_, code, keys) = view.special_keys()[i];
+                                view.key(code, keys);
+                            }
+                            view.key_menu = None;
+                        }
+                        return true;
+                    }
+                }
                 let target = held.or_else(|| {
                     self.screen_views
                         .iter()
-                        .find(|(_, v)| v.surface == on && (v.on_toggle(p) || v.on_zoom_chip(p) || (v.control && v.on_image(p))))
+                        .find(|(_, v)| {
+                            v.surface == on && (v.on_toggle(p) || v.on_zoom_chip(p) || v.on_key_button(p) || (v.control && v.on_image(p)))
+                        })
                         .map(|(id, _)| *id)
                 });
                 let Some(id) = target else { return false };
@@ -61,6 +76,12 @@ impl App {
                 if held.is_none() && view.on_zoom_chip(p) {
                     if pressed && bit == 1 {
                         view.zoom_reset();
+                    }
+                    return true;
+                }
+                if held.is_none() && view.on_key_button(p) {
+                    if pressed && bit == 1 {
+                        view.key_menu = Some(Vec::new());
                     }
                     return true;
                 }
@@ -74,6 +95,7 @@ impl App {
                     return true;
                 }
                 let buttons = if pressed { view.buttons | bit } else { view.buttons & !bit };
+                let mods = view.remote_mods(mods);
                 view.pointer(p, buttons, mods);
                 if pressed {
                     self.focus_screen_view(id, on);
@@ -81,9 +103,14 @@ impl App {
                 true
             }
             WindowEvent::CursorMoved { .. } => {
+                // 키 메뉴를 고르는 동안은 그 기기 포인터를 안 움직인다 — 메뉴가 장 위에 떠 있다.
+                if self.screen_views.values().any(|v| v.surface == on && v.key_menu.is_some()) {
+                    return true;
+                }
                 let target = held.or_else(|| self.screen_views.iter().find(|(_, v)| v.surface == on && v.control && v.on_image(p)).map(|(id, _)| *id));
                 let Some(view) = target.and_then(|id| self.screen_views.get_mut(&id)) else { return false };
                 let buttons = view.buttons;
+                let mods = view.remote_mods(mods);
                 view.pointer(p, buttons, mods);
                 true
             }
@@ -169,7 +196,13 @@ impl App {
         let PhysicalKey::Code(code) = event.physical_key else { return true };
         // winit 의 키 이름은 웹 `KeyboardEvent.code` 를 따른다(KeyA·Digit1·Enter·ArrowLeft…).
         let code = format!("{code:?}");
-        let Some(view) = self.screen_views.get(&id) else { return true };
+        let Some(view) = self.screen_views.get_mut(&id) else { return true };
+        if view.key_menu.is_some() && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            view.key_menu = None;
+            self.chrome_dirty = true;
+            return true;
+        }
+        let mods = view.remote_mods(mods);
         match &event.logical_key {
             _ if chord => view.key(&code, mods),
             Key::Named(NamedKey::Space) => view.text(" "),

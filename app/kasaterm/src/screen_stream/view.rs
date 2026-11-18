@@ -2,7 +2,7 @@
 //! 칸 하나에 `ScreenView` 하나. 버리면 연결과 일꾼이 함께 닫힌다.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -36,6 +36,8 @@ struct Shared {
     stats: Mutex<Stats>,
     /// 조작을 못 넣는 까닭 — 넣을 수 있으면 None.
     input_note: Mutex<Option<String>>,
+    /// 그 기기가 Windows 다 — 압축 정보의 `os`, 그것을 안 싣는 판은 Windows 도우미 표시(`agent`)로 안다.
+    windows: AtomicBool,
 }
 
 
@@ -50,6 +52,8 @@ pub(crate) struct ScreenView {
     /// 확대 배율(1 = 칸에 맞춤)과 칸 가운데에 둘 장 안 자리(비율).
     pub zoom: f32,
     pub focus: (f64, f64),
+    /// 키 메뉴가 열려 있다 — 줄마다 그린 자리와 그 줄(`special_keys` 차례). 칠할 때 채운다.
+    pub key_menu: Option<Vec<((f32, f32, f32, f32), usize)>>,
     /// 지금 그 기기에 눌려 있는 단추 — 칸 밖으로 끌어 나가도 뗄 때까지 이어 보낸다.
     pub buttons: u8,
     /// 조합 중인 한글 — 그 기기에는 다 된 글자만 가니 칸 위에 보여 준다.
@@ -83,6 +87,7 @@ impl ScreenView {
             status: Mutex::new("카사넷으로 붙는 중".into()),
             stats: Mutex::new(Stats::default()),
             input_note: Mutex::new(None),
+            windows: AtomicBool::new(false),
         });
         let config = Config { codec: VideoDecoder::CODEC.into(), max_w: fit.0, max_h: fit.1, ..Config::default() };
         let (tx, rx) = mpsc::channel::<Incoming>();
@@ -95,7 +100,10 @@ impl ScreenView {
                     shared.stats.lock().unwrap_or_else(|e| e.into_inner()).path = path;
                     set_status(&shared, &wake, "화면을 받는 중");
                 }
-                Event::Info(_) => {}
+                Event::Info(info) => {
+                    let windows = info.get("os").and_then(|v| v.as_str()) == Some("windows") || info.get("agent").is_some();
+                    shared.windows.store(windows, Ordering::Relaxed);
+                }
                 Event::Frame { frame, offset, .. } => {
                     let _ = tx.lock().unwrap_or_else(|e| e.into_inner()).send(Incoming { frame, offset });
                 }
@@ -148,6 +156,7 @@ impl ScreenView {
             layout: None,
             zoom: 1.0,
             focus: (0.5, 0.5),
+            key_menu: None,
             buttons: 0,
             preedit: String::new(),
             frame: (0, 0),
@@ -247,6 +256,43 @@ impl ScreenView {
 
     pub(crate) fn on_image(&self, p: (f64, f64)) -> bool {
         self.layout.is_some_and(|l| contains(l.image, p))
+    }
+
+    pub(crate) fn on_key_button(&self, p: (f64, f64)) -> bool {
+        self.layout.and_then(|l| l.key_button).is_some_and(|r| contains(r, p))
+    }
+
+    /// 열린 키 메뉴에서 `p` 의 줄.
+    pub(crate) fn key_row_at(&self, p: (f64, f64)) -> Option<usize> {
+        self.key_menu.as_ref()?.iter().find(|(r, _)| contains(*r, p)).map(|(_, i)| *i)
+    }
+
+    pub(crate) fn remote_windows(&self) -> bool {
+        self.shared.windows.load(Ordering::Relaxed)
+    }
+
+    /// 이 기기 키보드로 못 보내는 키 — (메뉴 글, 키, 손가락). 손가락은 그 기기 것 그대로다(⌘→Ctrl 바꾸기를 안 거친다).
+    pub(crate) fn special_keys(&self) -> &'static [(&'static str, &'static str, u8)] {
+        if self.remote_windows() {
+            &[
+                ("Ctrl+Alt+Del", "Delete", 2 | 4),
+                ("시작 메뉴 (Windows 키)", "MetaLeft", 0),
+                ("창 전환 (Alt+Tab)", "Tab", 4),
+                ("작업 관리자 (Ctrl+Shift+Esc)", "Escape", 2 | 1),
+            ]
+        } else {
+            &[("Spotlight (⌘ Space)", "Space", 8), ("앱 전환 (⌘ Tab)", "Tab", 8), ("강제 종료 (⌥⌘ Esc)", "Escape", 4 | 8)]
+        }
+    }
+
+    /// 이 기기 손가락(1 shift·2 control·4 option·8 command)을 그 기기 것으로 — 맥에서 Windows 를 볼 때 ⌘ 는 Ctrl 이다.
+    /// 그대로 넘기면 ⌘C 가 Win+C(Copilot)로 들어갔다. 맥의 Ctrl 은 그대로 Ctrl 이다.
+    pub(crate) fn remote_mods(&self, mods: u8) -> u8 {
+        if cfg!(target_os = "macos") && self.remote_windows() && mods & 8 != 0 {
+            (mods & !8) | 2
+        } else {
+            mods
+        }
     }
 
     pub(crate) fn on_zoom_chip(&self, p: (f64, f64)) -> bool {

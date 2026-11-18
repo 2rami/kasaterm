@@ -90,6 +90,8 @@ pub(crate) struct Layout {
     pub toggle: Rect,
     /// 확대 배율 표시(누르면 맞춤으로). 맞춤이면 없다.
     pub zoom_chip: Option<Rect>,
+    /// 「키」 단추(조작 중에만) — 이 기기 키보드로 못 보내는 키 메뉴를 연다.
+    pub key_button: Option<Rect>,
 }
 
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]

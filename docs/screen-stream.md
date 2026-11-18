@@ -390,6 +390,10 @@ UAC 확인 창·잠금 화면은 Windows 가 보안 데스크톱(Winlogon)에 �
   일부(`Layout.uv`)를 칸에 펴는 `queue_image_region` 이고, 누름 자리 셈(`view.rs at`)이 같은 범위를 쓴다(`mod.rs zoomed`).
   리그 `KASATERM_TEST_SCREEN_ZOOM=<배율>` 이 첫 장 뒤 확대해 그 범위를 로그에 적는다 — 같은 맥 리그 둘에서 2.5배로 칸을 채우고
   51–55fps·복사 없음 그대로였다.
+- **키 메뉴·⌘→Ctrl**(2026-11-18): 그 기기 OS 는 압축 정보 `os`(옛 판은 Windows 도우미 표시 `agent`)로 안다. 맥에서 Windows 를
+  볼 때 손가락 ⌘ 를 Ctrl 로 바꿔 보낸다(`view.rs remote_mods`) — 그대로면 ⌘C 가 Win+C 로 들어갔다. 이 기기 키보드로 못 보내는 키는
+  조작 중 「키」 메뉴로 보낸다(`special_keys`). Ctrl+Alt+Del 은 넣은 키로는 SAS 가 안 가서 Windows 쪽이 `SendSAS` 를 부른다 —
+  SYSTEM 도우미에서만 먹고 정책 `SoftwareSASGeneration=1` 이 있어야 해서 설치기가 그 값을 건다(`main.wxs`).
 - ⋮ 「별도 창으로」가 화면 탭을 별도 OS 창(`window.rs ScreenWindow`)으로 꺼낸다. 탭만 칸에서 빠지고 보기·연결은 `screen_views` 에
   그대로라 끊기지 않는다. 보기는 그려진 창(`Surface`)을 기억해 누름은 그 창 것만 받고, 창을 옮긴 직후 그 창 렌더러에 장이 없으면
   멈춘 화면이라도 마지막 장을 다시 올린다. 본창은 본창 보기의 새 장에만 다시 그리고, 꺼낸 창은 제 보기의 새 장에만 다시 그린다.

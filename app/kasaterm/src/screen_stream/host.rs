@@ -177,7 +177,7 @@ impl Capture for Host {
             Denied::Unavailable
         })?;
         let info = json!({
-            "width": width, "height": height, "codec": config.codec, "fps": config.fps,
+            "os": "macos", "width": width, "height": height, "codec": config.codec, "fps": config.fps,
             "bitrate": config.bitrate, "refine": config.refine, "rejected": encoder.rejected,
         });
         *shared.encoder.lock().unwrap_or_else(|e| e.into_inner()) = Some(encoder);

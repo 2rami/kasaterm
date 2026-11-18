@@ -10,6 +10,7 @@ const STATUS_FONT: f32 = 13.0;
 const HUD_FONT: f32 = 11.0;
 const HUD_PAD: f32 = 6.0;
 const EDGE: f32 = 2.0;
+const KEY_LABEL: &str = "키";
 /// 안 보인 지 이만큼이면 연결을 닫는다 — 탭을 잠깐 넘겨 보는 동안 다시 붙느라 키프레임을 기다리지 않게.
 const HIDDEN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// 보이는 칸의 연결이 닫히면 이만큼 뒤 다시 붙는다 — 그 기기 재시작·직통이 늦게 서는 경우.
@@ -23,7 +24,13 @@ fn texture_key(view: u64) -> String {
 /// 위에 「조작」 단추와 `fps · 지연 · 길` 을 작게 얹고, 확대했으면 그 왼쪽에 배율(누르면 맞춤으로)을 둔다. 장은 그 기기의 기기색 테로 두른다 — 이 기기 화면과 다른 기기
 /// 화면이 한눈에 갈리게(사이드바 기기 묶음 둘레선과 같은 색). 조작 중이면 강조색 테가 그 자리를 대신하고, 조작을 못
 /// 넣으면 그 까닭을 아래에 띄운다. 그린 자리는 누름 판정에 쓰도록 보기에 적어 둔다.
-pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenView>, slots: &[(u64, (f32, f32, f32, f32))], on: Surface) {
+pub(crate) fn paint(
+    g: &mut gpu::GpuRenderer,
+    views: &mut HashMap<u64, ScreenView>,
+    slots: &[(u64, (f32, f32, f32, f32))],
+    on: Surface,
+    cursor: (f32, f32),
+) {
     let white = [255, 255, 255, 235];
     let dim = [0, 0, 0, 150];
     let opts = |font_size, color| gpu::DrawOpts { font_size, color, bold: false, italic: false };
@@ -76,10 +83,21 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
         let tw = g.measure_chrome_text(label, HUD_FONT, false) + HUD_PAD * 2.0;
         let toggle = (hud_box.0 - HUD_PAD - tw, y + HUD_PAD, tw, box_h);
         g.round_rect_stroke(image.0, image.1, image.2, image.3, 0.0, EDGE, if view.control { theme::accent() } else { edge });
+        let key_button = view.control.then(|| {
+            let kw = g.measure_chrome_text(KEY_LABEL, HUD_FONT, false) + HUD_PAD * 2.0;
+            let b = (toggle.0 - HUD_PAD - kw, y + HUD_PAD, kw, box_h);
+            g.round_rect_fill(b.0, b.1, b.2, b.3, 4.0, if view.key_menu.is_some() { theme::accent() } else { dim });
+            g.draw_text(b.0 + HUD_PAD, b.1 + HUD_PAD * 0.75, KEY_LABEL, opts(HUD_FONT, white));
+            b
+        });
+        if !view.control {
+            view.key_menu = None;
+        }
+        let left_of = key_button.unwrap_or(toggle).0;
         let zoom_chip = (view.zoom > 1.001).then(|| {
             let text = format!("{:.0}%", view.zoom * 100.0);
             let cw = g.measure_chrome_text(&text, HUD_FONT, false) + HUD_PAD * 2.0;
-            let chip = (toggle.0 - HUD_PAD - cw, y + HUD_PAD, cw, box_h);
+            let chip = (left_of - HUD_PAD - cw, y + HUD_PAD, cw, box_h);
             g.round_rect_fill(chip.0, chip.1, chip.2, chip.3, 4.0, dim);
             g.draw_text(chip.0 + HUD_PAD, chip.1 + HUD_PAD * 0.75, &text, opts(HUD_FONT, white));
             chip
@@ -102,7 +120,24 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
             g.round_rect_fill(nx, ny, nw, box_h, 4.0, dim);
             g.draw_text(nx + HUD_PAD, ny + HUD_PAD * 0.75, &note, opts(HUD_FONT, white));
         }
-        view.layout = Some(Layout { image, uv, slot, frame, toggle, zoom_chip });
+        if let (Some(b), Some(_)) = (key_button, view.key_menu.as_ref()) {
+            let keys = view.special_keys();
+            let row_h = STATUS_FONT + HUD_PAD * 2.0;
+            let mw = keys.iter().map(|(t, _, _)| g.measure_chrome_text(t, STATUS_FONT, false)).fold(0.0, f32::max) + HUD_PAD * 4.0;
+            let (mx, my) = ((b.0 + b.2 - mw).max(*x + HUD_PAD), b.1 + b.3 + 4.0);
+            g.round_rect_fill(mx, my, mw, row_h * keys.len() as f32 + HUD_PAD, 6.0, [0, 0, 0, 210]);
+            let mut rows = Vec::with_capacity(keys.len());
+            for (i, (text, _, _)) in keys.iter().enumerate() {
+                let r = (mx, my + HUD_PAD / 2.0 + row_h * i as f32, mw, row_h);
+                if super::contains(r, (f64::from(cursor.0), f64::from(cursor.1))) {
+                    g.round_rect_fill(r.0 + 3.0, r.1, r.2 - 6.0, r.3, 4.0, theme::accent());
+                }
+                g.draw_text(r.0 + HUD_PAD * 2.0, r.1 + HUD_PAD, text, opts(STATUS_FONT, white));
+                rows.push((r, i));
+            }
+            view.key_menu = Some(rows);
+        }
+        view.layout = Some(Layout { image, uv, slot, frame, toggle, zoom_chip, key_button });
     }
 }
 

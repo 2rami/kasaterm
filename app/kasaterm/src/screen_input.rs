@@ -44,6 +44,7 @@ fn key_of(code: &str) -> Option<(u16, u16, bool)> {
         "Escape" => (53, 0x1B, false),
         "Space" => (49, 0x20, false),
         "Delete" => (117, 0x2E, true),
+        "MetaLeft" | "MetaRight" => (55, 0x5B, true),
         "Home" => (115, 0x24, true),
         "End" => (119, 0x23, true),
         "PageUp" => (116, 0x21, true),
@@ -385,6 +386,9 @@ mod os {
                 send(&out);
             }
             Input::Key { code, down, mods } => {
+                if code == "Delete" && mods & (2 | 4) == (2 | 4) && *down != Some(false) && send_sas() {
+                    return Ok(());
+                }
                 let Some((_, vk, extended)) = key_of(code) else { return Ok(()) };
                 let ext = if extended { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) };
                 let held = modifiers(*mods);
@@ -411,6 +415,19 @@ mod os {
     }
 
     pub(super) fn request_permission() {}
+
+    /// Ctrl+Alt+Del — Windows 는 넣은 키로는 보안 주의 시퀀스(SAS)를 안 받아 `SendSAS` 로 청한다. SYSTEM 화면 도우미에서만
+    /// 먹고, 정책 `SoftwareSASGeneration`(설치기가 1 = 서비스로 건다)이 있어야 한다. 못 하면 false — 키를 그대로 넣는다.
+    fn send_sas() -> bool {
+        use windows::core::{s, w};
+        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+        let Ok(lib) = (unsafe { LoadLibraryW(w!("sas.dll")) }) else { return false };
+        let Some(proc) = (unsafe { GetProcAddress(lib, s!("SendSAS")) }) else { return false };
+        // SAFETY: sas.dll 의 `VOID WINAPI SendSAS(BOOL AsUser)` 꼴.
+        let send: unsafe extern "system" fn(i32) = unsafe { std::mem::transmute(proc) };
+        unsafe { send(0) };
+        true
+    }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -437,6 +454,7 @@ mod tests {
         assert_eq!(key_of("Digit5"), Some((23, 0x35, false)));
         assert_eq!(key_of("F12"), Some((111, 0x7B, false)));
         assert_eq!(key_of("Enter"), Some((36, 0x0D, false)));
+        assert_eq!(key_of("MetaLeft"), Some((55, 0x5B, true)), "키 메뉴의 Windows 키·⌘ 혼자 누르기");
         assert_eq!(key_of("ArrowUp"), Some((126, 0x26, true)));
         for unknown in ["", "Key", "KeyAA", "Keya", "F13", "F0", "Digit10", "Lang1"] {
             assert_eq!(key_of(unknown), None, "{unknown}");

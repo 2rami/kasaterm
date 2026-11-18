@@ -134,6 +134,14 @@
                                 Account='LocalSystem'
                                 Arguments='--screen-service'
                                 Vital='no'/>
+                            <!-- 화면 칸의 Ctrl+Alt+Del — 넣은 키로는 SAS 가 안 가서 도우미가 SendSAS 를 부른다. 서비스에게
+                                 SAS 를 허락하는 정책(1 = 서비스)이 있어야 먹는다. VNC 서버들이 거는 값과 같고 지우면 함께 걷힌다. -->
+                            <RegistryValue
+                                Root='HKLM'
+                                Key='SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+                                Name='SoftwareSASGeneration'
+                                Type='integer'
+                                Value='1'/>
                             <ServiceControl
                                 Id='ScreenServiceControl'
                                 Name='KasatermScreen'

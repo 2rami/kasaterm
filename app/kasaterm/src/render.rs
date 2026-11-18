@@ -2541,7 +2541,7 @@ impl App {
                 );
                 g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
             }
-            crate::screen_stream::paint(g, &mut self.screen_views, &screen_slots, crate::screen_stream::Surface::Main);
+            crate::screen_stream::paint(g, &mut self.screen_views, &screen_slots, crate::screen_stream::Surface::Main, self.cursor_px);
             paint_inline_images(g, &inline_slots);
             crate::inline_result::verify_frame(g, &inline_slots);
             self.image_preview.collect(preview_window_id, self.active_window, g, &inline_slots);

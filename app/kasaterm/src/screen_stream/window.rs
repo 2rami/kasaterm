@@ -276,7 +276,7 @@ impl App {
         w.gpu.queue_icon("undo-2", bx + (BTN - ICON) / 2.0, by + (BTN - ICON) / 2.0, ICON, if hover { theme::text() } else { theme::text_mute() });
         w.dock_btn = (bx, by, BTN, BTN);
         let body = (PAD, HEADER_H + PAD, (ww - PAD * 2.0).max(0.0), (wh - HEADER_H - PAD * 2.0).max(0.0));
-        super::paint(&mut w.gpu, &mut self.screen_views, &[(w.view_id, body)], on);
+        super::paint(&mut w.gpu, &mut self.screen_views, &[(w.view_id, body)], on, w.cursor_px);
         let _ = w.gpu.render(&[], scale, 0.0, true);
     }
 }
