@@ -15,6 +15,7 @@
 //! 앵커를 따로 들고 다니지 않으니 어긋날 일이 없다. Claude Code 의 mod `Image`
 //! 가 이 방식이다.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -117,7 +118,13 @@ pub(crate) struct Command {
     delete: Option<u8>,
     z: i32,
     parent: u32,
+    /// [`SAME_KEY`] — 내용 없이 「이미 받은 그 id 의 그림과 같다」.
+    same: u32,
 }
+
+/// 카사텀 거울 전용 키. kitty 키는 한 글자라 겹치지 않고, 옛 판 파서는 모르는 키로 건너뛴다 — 그래서
+/// 이 키는 거울이 `images=same` 으로 받겠다고 한 연결에만 싣는다(옛 판이 받으면 빈 그림이 된다).
+const SAME_KEY: &[u8] = b"kasa_same";
 
 impl Command {
     pub(crate) fn parse(control: &[u8]) -> Self {
@@ -125,6 +132,10 @@ impl Command {
         for kv in control.split(|&b| b == b',') {
             let Some(eq) = kv.iter().position(|&b| b == b'=') else { continue };
             let (k, v) = (&kv[..eq], &kv[eq + 1..]);
+            if k == SAME_KEY {
+                cmd.same = std::str::from_utf8(v).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+                continue;
+            }
             if k.len() != 1 {
                 continue;
             }
@@ -180,6 +191,15 @@ pub(crate) struct KittyImage {
     pub(crate) bytes: usize,
     width: u32,
     height: u32,
+    /// PNG 내용의 해시 — 같은 그림이 id 만 바꿔 다시 오는 일이 잦다(학생 얼굴이 답마다 새 id).
+    pub(crate) digest: u64,
+}
+
+fn digest(png: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    png.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// 그림 하나를 놓은 자리. 자리표시(`U=1`)는 상자 크기만 쥐고 위치는 글자가
@@ -351,9 +371,18 @@ impl KittyStore {
                 reply(&cmd, cmd.id, cmd.number, 0, &msg)
             }
             b't' | b'T' => {
-                let loaded = match load(&cmd, &data, env) {
-                    Ok(l) => l,
-                    Err(e) => return reply(&cmd, cmd.id, cmd.number, 0, &e),
+                let loaded = if cmd.same != 0 && data.is_empty() {
+                    let same = self.image(cmd.same)
+                        .and_then(|im| std::fs::read(&im.path).ok().map(|png| Loaded { png, width: im.width, height: im.height }));
+                    match same {
+                        Some(l) => l,
+                        None => return reply(&cmd, cmd.id, cmd.number, 0, "ENOENT:same image not found"),
+                    }
+                } else {
+                    match load(&cmd, &data, env) {
+                        Ok(l) => l,
+                        Err(e) => return reply(&cmd, cmd.id, cmd.number, 0, &e),
+                    }
                 };
                 data.clear();
                 let id = if cmd.id != 0 { cmd.id } else { self.fresh_id() };
@@ -371,6 +400,7 @@ impl KittyStore {
                     bytes: loaded.png.len(),
                     width: loaded.width,
                     height: loaded.height,
+                    digest: digest(&loaded.png),
                 };
                 // 같은 id 로 다시 보내면 그림만 갈아 끼운다 — 자리표시·놓기는 id 로
                 // 그림을 찾으므로 그대로 새 그림을 보여 준다.
@@ -427,7 +457,11 @@ impl KittyStore {
     /// 같은 그림이 id 만 바꿔 수십 벌 쌓이기도 한다(2026-10-28 다른 기기 거울: 1.06MB 중
     /// 98% 가 31KB 아바타 33벌). 그림을 글자 앞에 실으면 느린 길에서 칸이 십수 초 빈 채라,
     /// 글자 뒤에 와도 되는 그림은 뒤로 미룬다.
-    pub(crate) fn snapshot_images(&self, phase: SnapshotPhase) -> Vec<u8> {
+    ///
+    /// `sent` 가 있으면(거울이 `images=same` 으로 붙었으면) 이 스냅샷에서 이미 실은 것과 같은 내용의 그림은
+    /// 내용 없이 [`SAME_KEY`] 로만 보낸다 — 2026-11-18 맥북 거울 첫 화면에서 6칸 그림 104장 3.3MB 가
+    /// 서로 다른 그림으로는 6장 187KB 였다. 두 단계(`phase`)가 같은 표를 나눠 쓴다.
+    pub(crate) fn snapshot_images(&self, phase: SnapshotPhase, mut sent: Option<&mut HashMap<(u64, usize), u32>>) -> Vec<u8> {
         let mut out = Vec::new();
         let mut images: Vec<_> = self
             .images
@@ -439,6 +473,14 @@ impl KittyStore {
             .collect();
         images.sort_by_key(|image| image.uid);
         for image in images {
+            if let Some(sent) = sent.as_deref_mut() {
+                let content = (image.digest, image.bytes);
+                if let Some(&first) = sent.get(&content) {
+                    out.extend(same_wire(image.id, first));
+                    continue;
+                }
+                sent.insert(content, image.id);
+            }
             if let Ok(bytes) = std::fs::read(&image.path) {
                 if bytes.len() <= MAX_IMAGE_BYTES {
                     out.extend(image_wire(image.id, &bytes, None));
@@ -735,6 +777,10 @@ fn decode(cmd: &Command, data: Vec<u8>) -> Result<Loaded, String> {
 fn placement_wire(p: &Placement, no_move: bool) -> Vec<u8> {
     format!("\x1b_Ga=p,i={},p={},c={},r={},U={},C={},z={},q=2;\x1b\\",
         p.image, p.id, p.cols, p.rows, u8::from(p.virtual_), u8::from(no_move), p.z).into_bytes()
+}
+
+fn same_wire(id: u32, first: u32) -> Vec<u8> {
+    format!("\x1b_Ga=t,i={id},q=2,{}={first};\x1b\\", std::str::from_utf8(SAME_KEY).unwrap_or_default()).into_bytes()
 }
 
 fn image_wire(id: u32, png: &[u8], placement: Option<(&Placement, bool)>) -> Vec<u8> {
@@ -1074,6 +1120,54 @@ pub(crate) mod tests {
 
     fn reply_text(o: &Outcome) -> Option<String> {
         o.reply.as_ref().map(|r| String::from_utf8_lossy(r).into_owned())
+    }
+
+    /// `ESC _ G … ESC \` 덩어리마다 본문(`G` 뒤부터 ST 앞까지).
+    fn apc_bodies(wire: &[u8]) -> Vec<Vec<u8>> {
+        let text = String::from_utf8_lossy(wire);
+        text.split("\x1b_G").skip(1).filter_map(|part| part.split_once("\x1b\\").map(|(body, _)| body.as_bytes().to_vec())).collect()
+    }
+
+    #[test]
+    fn a_same_alias_copies_an_image_already_received() {
+        let mut s = KittyStore::default();
+        run(&mut s, &format!("a=t,f=100,i=5,q=2;{}", b64(&png(4, 4))));
+        let alias = run(&mut s, "a=t,i=6,q=2,kasa_same=5");
+        assert_eq!(reply_text(&alias), None);
+        let (first, copy) = (s.image(5).unwrap(), s.image(6).unwrap());
+        assert_eq!(std::fs::read(&first.path).unwrap(), std::fs::read(&copy.path).unwrap());
+        assert_eq!((first.digest, first.width, first.height), (copy.digest, copy.width, copy.height));
+        let missing = run(&mut s, "a=t,i=7,kasa_same=99");
+        assert!(reply_text(&missing).unwrap().contains("ENOENT"), "없는 그림을 가리키면 거절");
+        assert!(s.image(7).is_none());
+    }
+
+    #[test]
+    fn a_shared_snapshot_carries_each_picture_once_and_the_mirror_gets_every_id() {
+        let face = png(6, 6);
+        let other = png(3, 3);
+        let mut source = KittyStore::default();
+        for id in [11, 12, 13] {
+            run(&mut source, &format!("a=t,f=100,i={id},q=2;{}", b64(&face)));
+        }
+        run(&mut source, &format!("a=t,f=100,i=14,q=2;{}", b64(&other)));
+        let full = source.snapshot_images(SnapshotPhase::AfterText, None);
+        let mut sent = HashMap::new();
+        let shared = source.snapshot_images(SnapshotPhase::AfterText, Some(&mut sent));
+        let aliases = apc_bodies(&shared).iter().filter(|body| body.windows(SAME_KEY.len()).any(|w| w == SAME_KEY)).count();
+        assert_eq!(aliases, 2, "같은 얼굴 셋 중 둘은 내용 없이 간다");
+        assert!(shared.len() < full.len());
+        assert!(!apc_bodies(&full).iter().any(|body| body.windows(SAME_KEY.len()).any(|w| w == SAME_KEY)), "청하지 않은 거울엔 별칭이 없다");
+        let mut mirror = KittyStore::default();
+        let remote = Env { local_media: false, export: false, grid_cols: 80, hist: 0 };
+        let mut uid = 1;
+        for body in apc_bodies(&shared) {
+            mirror.handle(&body, None, &remote, &mut uid);
+        }
+        for id in [11, 12, 13] {
+            assert_eq!(std::fs::read(&mirror.image(id).unwrap().path).unwrap(), face, "id {id}");
+        }
+        assert_eq!(std::fs::read(&mirror.image(14).unwrap().path).unwrap(), other);
     }
 
     #[test]

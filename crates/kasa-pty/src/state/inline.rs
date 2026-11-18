@@ -592,8 +592,11 @@ fn sync_inline_coordinates(term: &Term<PtyEventForwarder>, lock: &mut InlineImgs
     lock.last_alt = alt;
 }
 
-pub(super) fn kitty_snapshot_images(imgs: &Mutex<InlineImgs>, phase: crate::kitty::SnapshotPhase) -> Vec<u8> {
-    imgs.lock().unwrap().kitty.snapshot_images(phase)
+pub(super) fn kitty_snapshot_images(
+    imgs: &Mutex<InlineImgs>, phase: crate::kitty::SnapshotPhase,
+    sent: Option<&mut std::collections::HashMap<(u64, usize), u32>>,
+) -> Vec<u8> {
+    imgs.lock().unwrap().kitty.snapshot_images(phase, sent)
 }
 
 pub(super) fn kitty_anchored_screen(imgs: &Mutex<InlineImgs>, history: i64, rows: u16) -> Vec<u8> {
@@ -987,7 +990,7 @@ mod kitty_graphics_tests {
         }
         fn wire_snapshot(&self) -> Vec<u8> {
             super::super::screen::snapshot_bytes_with_images(&self.term, &self.imgs,
-                "wire-test", &Arc::new(Mutex::new(None))).0
+                "wire-test", &Arc::new(Mutex::new(None)), false).0
         }
         fn views_at(&self, offset: usize) -> Vec<InlineImageView> {
             let mut u = ScreenUpdate::default();
@@ -1114,6 +1117,23 @@ mod kitty_graphics_tests {
         source.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(3));
         mirror.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(3));
         same_pictures(&source, &mirror, 3);
+    }
+
+    /// 학생 얼굴처럼 같은 그림이 id 만 바꿔 여러 번 온 칸 — 묶은 첫 화면으로도 거울이 얼굴마다 같은 그림을 그린다.
+    #[test]
+    fn a_shared_snapshot_still_shows_every_repeated_face_on_the_mirror() {
+        let mut source = rig(40, 8, true);
+        for (id, line) in [(7u32, 1u32), (9, 4)] {
+            transmit_virtual(&mut source, id, 4, 2);
+            source.feed(placeholders(&format!("38;5;{id}"), 4, 2, (line, 1)).as_bytes());
+        }
+        let shared = super::super::screen::snapshot_bytes_with_images(&source.term, &source.imgs,
+            "wire-test", &Arc::new(Mutex::new(None)), true).0;
+        assert!(shared.len() < source.wire_snapshot().len(), "같은 얼굴은 한 번만 싣는다");
+        let mut mirror = rig(40, 8, false);
+        for part in shared.chunks(29) { mirror.feed(part); }
+        same_pictures(&source, &mirror, 0);
+        assert_eq!(mirror.views().len(), 2);
     }
 
     #[test]

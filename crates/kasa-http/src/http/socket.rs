@@ -370,6 +370,9 @@ async fn term_ws_handler(
         (!grid).then(|| q.get("compression").map(String::as_str)).flatten(),
     );
     let glyphs = grid && q.get("glyphs").is_some_and(|v| v == "1" || v == "true");
+    // images=same — 받는 쪽 파서가 카사텀 그림 별칭(`kitty::SAME_KEY`)을 안다. 첫 화면에서 같은 내용의 그림을
+    // 한 번만 싣는다(학생 얼굴이 답마다 새 id 라 칸마다 수십 벌 쌓였다).
+    let same_images = !grid && q.get("images").is_some_and(|v| v == "same");
     // own=1 — 이 연결이 pane 의 **소유자**(원격 kasaterm GUI)다. 미러 규칙 셋이
     // 뒤집힌다: resize 를 force 없이 받고, 끊겨도 격자를 되돌리지 않으며(소유자가
     // 정한 크기가 곧 원본), kill 제어 메시지를 받는다.
@@ -378,7 +381,7 @@ async fn term_ws_handler(
     // from=phone|<기기 이름> — 폰·다른 기기 미러가 친 Enter 에 출처 꼬리표를 붙인다(`enter_tag`).
     let origin = q.get("from").and_then(|f| kasa_socket::tell::origin_tag(f))
         .zip(drafts.map(|axum::Extension(b)| b));
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs, expected_surface_key, codec, origin))
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs, expected_surface_key, codec, origin, same_images))
         .into_response()
 }
 
@@ -393,6 +396,7 @@ async fn term_ws_run(
     expected_surface_key: Option<String>,
     codec: kasa_wire::terminal_wire::Codec,
     origin: Option<(String, Arc<dyn Backend>)>,
+    same_images: bool,
 ) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
@@ -475,7 +479,7 @@ async fn term_ws_run(
         let snap = if sess.view_state().0 > 0 { sess.live_screen() } else { snap };
         Tap::Grid(rx, Box::new(snap))
     } else {
-        let (rx, bytes, size) = sess.tap_bytes_with_sized_snapshot();
+        let (rx, bytes, size) = sess.tap_bytes_with_sized_snapshot_images(same_images);
         Tap::Bytes(rx, bytes, size)
     };
     // kill 제어가 놓아 줄 대상 — self_id 는 아래 size 메시지에 실려 move 된다.
@@ -917,7 +921,7 @@ async fn term_ws_run(
                         let now = sess_in.size();
                         if !want_grid && now != before {
                             *self_sized_in.lock().unwrap() = SelfSized::At(now);
-                            let (bytes, (cols, rows)) = sess_in.sized_snapshot_bytes();
+                            let (bytes, (cols, rows)) = sess_in.sized_snapshot_bytes_images(same_images);
                             let size = serde_json::json!({
                                 "t": "size", "cols": cols, "rows": rows, "mirror": mirrored,
                                 "id": input_session_id,

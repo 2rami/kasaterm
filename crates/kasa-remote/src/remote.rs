@@ -754,6 +754,8 @@ async fn manager(
         let mut url = build_url(&spec, remote_id.as_deref(), view);
         url.push_str("&compression=");
         url.push_str(kasa_wire::terminal_wire::ZLIB_V1);
+        // 이 거울의 파서(kasa-pty)는 같은 그림 별칭을 안다 — 원본이 첫 화면의 같은 얼굴 수십 벌을 한 번만 싣는다.
+        url.push_str("&images=same");
         if let Some(key) = hint.as_ref().and_then(|hint| hint.surface_key.as_deref()) {
             url.push_str("&surface_key=");
             url.push_str(&urlencode(key));

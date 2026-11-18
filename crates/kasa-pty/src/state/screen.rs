@@ -353,8 +353,14 @@ impl PtySession {
     /// `size()` read. A resize between capture and WS handshake otherwise
     /// replays narrow rows at a wide margin, destroying their soft-wrap flags.
     pub fn tap_bytes_with_sized_snapshot(&self) -> (crate::TapReceiver<Vec<u8>>, Vec<u8>, (u16, u16)) {
+        self.tap_bytes_with_sized_snapshot_images(false)
+    }
+
+    /// `same_images` 면 첫 화면에서 같은 내용의 그림을 한 번만 싣고 나머지는 카사텀 전용 별칭으로 보낸다
+    /// (`kitty::SAME_KEY`) — 받는 쪽 파서가 그 키를 알아야 하므로 거울이 `images=same` 으로 청할 때만.
+    pub fn tap_bytes_with_sized_snapshot_images(&self, same_images: bool) -> (crate::TapReceiver<Vec<u8>>, Vec<u8>, (u16, u16)) {
         let t = self.term.lock().unwrap();
-        let (bytes, size) = self.sized_snapshot_locked(&t);
+        let (bytes, size) = self.sized_snapshot_locked(&t, same_images);
         // 탭 등록은 스냅샷과 같은 락 안이어야 한다 — 둘 사이에 들어온 프레임은
         // 스냅샷에도 탭에도 없이 사라진다.
         let (tx, rx) = std::sync::mpsc::sync_channel(64);
@@ -365,19 +371,25 @@ impl PtySession {
     /// 지금 화면(스크롤백 포함)을 ANSI 바이트로 — 탭을 새로 열지 않는다. 이미 붙어
     /// 있는 raw 구독자에게 격자 변경 뒤 화면을 다시 세워 줄 때 쓴다(재접속 대신).
     pub fn sized_snapshot_bytes(&self) -> (Vec<u8>, (u16, u16)) {
-        let t = self.term.lock().unwrap();
-        self.sized_snapshot_locked(&t)
+        self.sized_snapshot_bytes_images(false)
     }
 
-    fn sized_snapshot_locked(&self, t: &Term<PtyEventForwarder>) -> (Vec<u8>, (u16, u16)) {
-        snapshot_bytes_with_images(t, &self.inline_imgs, &self.pane_id, &self.title_handle)
+    /// [`Self::sized_snapshot_bytes`] 에 [`Self::tap_bytes_with_sized_snapshot_images`] 의 `same_images`.
+    pub fn sized_snapshot_bytes_images(&self, same_images: bool) -> (Vec<u8>, (u16, u16)) {
+        let t = self.term.lock().unwrap();
+        self.sized_snapshot_locked(&t, same_images)
+    }
+
+    fn sized_snapshot_locked(&self, t: &Term<PtyEventForwarder>, same_images: bool) -> (Vec<u8>, (u16, u16)) {
+        snapshot_bytes_with_images(t, &self.inline_imgs, &self.pane_id, &self.title_handle, same_images)
     }
 }
 
 pub(super) fn snapshot_bytes_with_images(
     t: &Term<PtyEventForwarder>, images: &Mutex<InlineImgs>, pane_id: &str,
-    title: &Arc<Mutex<Option<String>>>,
+    title: &Arc<Mutex<Option<String>>>, same_images: bool,
 ) -> (Vec<u8>, (u16, u16)) {
+    let mut sent = same_images.then(std::collections::HashMap::new);
     // resize_effective reshapes the parser before publishing self.size.
     // The parser is canonical while holding its lock.
     let (cols, rows) = (t.grid().columns() as u16, t.grid().screen_lines() as u16);
@@ -388,7 +400,7 @@ pub(super) fn snapshot_bytes_with_images(
     // 스크롤백은 primary 화면의 것이다 — alt 화면(vim 등)에 붙는 미러에
     // 실으면 ?1049h 앞에 찍혀 primary 를 더럽힌다.
     let mut bytes = b"\x1b_Ga=d,d=R,x=0,y=4294967295,q=2;\x1b\\".to_vec();
-    bytes.extend(super::inline::kitty_snapshot_images(images, crate::kitty::SnapshotPhase::BeforeText));
+    bytes.extend(super::inline::kitty_snapshot_images(images, crate::kitty::SnapshotPhase::BeforeText, sent.as_mut()));
     if !snap.alt_screen { bytes.extend(hist); }
     bytes.extend(raw_screen_ansi_with_images(t, &snap));
     let placements = super::inline::kitty_anchored_screen(images, t.grid().history_size() as i64, rows);
@@ -397,7 +409,7 @@ pub(super) fn snapshot_bytes_with_images(
         bytes.extend(format!("\x1b[{};{}H", snap.cursor_row + 1, snap.cursor_col + 1).as_bytes());
     }
     // 그림 전송과 자리표시 놓기는 커서를 옮기지 않아 화면 뒤에 붙여도 된다.
-    bytes.extend(super::inline::kitty_snapshot_images(images, crate::kitty::SnapshotPhase::AfterText));
+    bytes.extend(super::inline::kitty_snapshot_images(images, crate::kitty::SnapshotPhase::AfterText, sent.as_mut()));
     (bytes, (cols, rows))
 }
 
