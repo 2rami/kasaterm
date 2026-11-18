@@ -125,6 +125,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
     bar.port_rect = None;
     bar.schedule_rect = None;
     bar.clip_rect = None;
+    bar.notes_rect = None;
     bar.sleep_rect = None;
     // 다른 기기와 어떻게·얼마나 가깝게 붙어 있나. 직통(그 기계에 바로)과
     // 중계(공용 관문 경유)는 체감이 딴판이라, 숫자와 함께 한눈에 보여야 한다.
@@ -497,7 +498,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
         // 본다 — 값이 아직 없는 칩은 이제 자리를 안 먹으므로 설정만 보면 빈
         // 자리 옆에 선만 남는다.
         let has_device = rx < device_right;
-        let has_work = ["ports", "clipboard"]
+        let has_work = ["ports", "clipboard", "notes"]
             .iter()
             .any(|id| status_prefs.visible(id));
         if status_prefs.separators && has_device && has_work {
@@ -564,6 +565,51 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
                 }
                 bar.clip_rect = Some(cr);
             }
+        }
+            }};
+        }
+        // 학생 쪽지 — 폰 허브의 종과 같은 목록. 안 읽은 것이 있으면 그 수를 주의 색으로 세우고,
+        // 없으면 종만 흐리게 둔다(폰도 종은 늘 서 있다).
+        macro_rules! draw_notes_widget {
+            () => {{
+        bar.notes_rect = None;
+        if status_prefs.visible("notes") {
+            let n = crate::statusbar::notes::count();
+            let label = if n == 0 || compact_tools { String::new() } else { n.to_string() };
+            let label = crate::info::fit_text(g, &label, (slot_w - chip - 24.0).max(0.0), fs, false);
+            let icon = tool_icon;
+            let gap = if label.is_empty() { 0.0 } else { 4.0_f32 };
+            let lw = g.measure_chrome_text(&label, fs, false);
+            let seg = icon + gap + lw;
+            rx -= seg + chip;
+            let open = matches!(
+                bar.popover,
+                Some((state::StatusbarPopover::Notes, _))
+            );
+            let col = if n > 0 && !open {
+                status_prefs.color("notes", theme::attention())
+            } else {
+                chip_ink(&status_prefs, "notes", open)
+            };
+            g.queue_icon("bell", rx, sy + (status_h - icon) / 2.0, icon, col);
+            g.draw_text(
+                rx + icon + gap,
+                ty,
+                &label,
+                gpu::DrawOpts {
+                    font_size: fs,
+                    color: col,
+                    bold: false,
+                    italic: false,
+                },
+            );
+            let nr = (rx - chip / 2.0, sy, seg + chip, status_h);
+            {
+                let (hx, hy) = f.cursor;
+                g.hover_pointer |=
+                    hx >= nr.0 && hx <= nr.0 + nr.2 && hy >= nr.1 && hy <= nr.1 + nr.3;
+            }
+            bar.notes_rect = Some(nr);
         }
             }};
         }
@@ -662,7 +708,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             .iter()
             .rev()
             .filter(|id| {
-                matches!(id.as_str(), "ports" | "schedules" | "clipboard")
+                matches!(id.as_str(), "ports" | "schedules" | "clipboard" | "notes")
             })
             .filter(|id| status_prefs.visible(id))
         {
@@ -678,11 +724,13 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
                 "ports" => draw_ports_widget!(),
                 "schedules" => draw_schedules_widget!(),
                 "clipboard" => draw_clipboard_widget!(),
+                "notes" => draw_notes_widget!(),
                 _ => {}
             }
             bar.port_rect = bar.port_rect.and_then(|r| if id == "ports" { g.clip_hit(r) } else { Some(r) });
             bar.schedule_rect = bar.schedule_rect.and_then(|r| if id == "schedules" { g.clip_hit(r) } else { Some(r) });
             bar.clip_rect = bar.clip_rect.and_then(|r| if id == "clipboard" { g.clip_hit(r) } else { Some(r) });
+            bar.notes_rect = bar.notes_rect.and_then(|r| if id == "notes" { g.clip_hit(r) } else { Some(r) });
             g.pop_clip();
             rx = statusbar_next_right(slot_right, rx, slot_w);
             bar.tool_used.insert(id.clone(), slot_right - rx);

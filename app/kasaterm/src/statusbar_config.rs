@@ -7,12 +7,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-pub(crate) const WIDGETS: [&str; 9] = [
+pub(crate) const WIDGETS: [&str; 10] = [
     "claude",
     "codex",
     "ports",
     "schedules",
     "clipboard",
+    "notes",
     "resources",
     "sleep",
     "devices",
@@ -243,7 +244,7 @@ fn valid_usage_field(field: &str) -> bool {
 pub(crate) fn group(id: &str) -> u8 {
     match id {
         "claude" | "codex" => 0,
-        "ports" | "schedules" | "clipboard" => 1,
+        "ports" | "schedules" | "clipboard" | "notes" => 1,
         _ => 2,
     }
 }
@@ -306,7 +307,7 @@ mod tests {
         let p = Prefs::from_settings(&serde_json::json!({
             "statusbar_order": ["claude", "codex", "ports", "schedules", "clipboard", "resources", "devices", "tunnel"],
         }));
-        assert_eq!(&p.order[5..], ["resources", "sleep", "devices", "tunnel"]);
+        assert_eq!(&p.order[5..], ["notes", "resources", "sleep", "devices", "tunnel"]);
         assert!(p.visible("sleep"));
         let old = Prefs::from_settings(&serde_json::json!({ "statusbar_order": ["resources", "tunnel"] }));
         assert_eq!(&old.order[old.order.len() - 4..], ["resources", "sleep", "devices", "tunnel"]);

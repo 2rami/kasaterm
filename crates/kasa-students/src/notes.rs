@@ -3,8 +3,9 @@
 //! (`chrome.rs ring_phone`)에서 한 줄 남겨 알림과 목록이 어긋나지 않는다. 다른 입구는 없다 — 나쵸가 넣던
 //! `POST /term/notes` 는 나쵸 오케스트레이션과 함께 끊겨 걷었다.
 //!
-//! 폰 허브의 종 목록이 `GET /term/notes` 로 읽는다. 저장은 `~/.config/kasaterm/notes.json` — 앱을 껐다 켜도
-//! 남고, 최근 200건만 둔다. 검증용 앱은 `KASATERM_NOTES_FILE` 로 다른 파일을 가리켜 사람 것을 안 건드린다.
+//! 폰 허브의 종 목록이 `GET /term/notes` 로, PC 하단바 「학생 쪽지」가 [`list`] 로 바로 읽는다. 저장은
+//! `~/.config/kasaterm/notes.json` — 앱을 껐다 켜도 남고, 최근 200건만 둔다. 검증용 앱은 `KASATERM_NOTES_FILE` 로
+//! 다른 파일을 가리켜 사람 것을 안 건드린다.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

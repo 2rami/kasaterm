@@ -7,6 +7,7 @@
 
 use crate::gpu;
 mod devices;
+pub(crate) mod notes;
 #[cfg(target_os = "macos")]
 mod sleep;
 mod usage;
@@ -66,6 +67,7 @@ pub(crate) fn paint_popover(
         state::StatusbarPopover::Clipboard => {
             paint_clipboard_popover(g, sb, cursor, anchor, win_w, win_h)
         }
+        state::StatusbarPopover::Notes => notes::paint(g, sb, cursor, anchor, (win_w, win_h)),
         #[cfg(target_os = "macos")]
         state::StatusbarPopover::Sleep => sleep::paint(g, sb, cursor, anchor, win_w),
         #[cfg(not(target_os = "macos"))]
@@ -1584,6 +1586,28 @@ impl crate::App {
                 crate::clipboard::remove(id);
                 self.statusbar.clip_menu = None;
                 self.set_toast("복사 목록에서 삭제했어요".to_string());
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::OpenNote(id, pane)) => {
+                kasa_students::notes::mark_read(&[id], false);
+                notes::forget();
+                self.statusbar.popover = None;
+                if !self.focus_surface(&pane) {
+                    self.set_toast("그 칸은 이제 없어요".to_string());
+                }
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::DeleteNote(id)) => {
+                kasa_students::notes::remove(&[id], false);
+                notes::forget();
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::ReadAllNotes) => {
+                kasa_students::notes::mark_read(&[], true);
+                notes::forget();
                 self.chrome_dirty = true;
                 return true;
             }

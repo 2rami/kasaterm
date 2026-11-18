@@ -1055,7 +1055,9 @@ impl App {
         // 종 목록은 폰 알림과 같은 자리에서 한 줄 — 둘이 어긋나지 않게(kasa_students::notes 머리말). 격리 실행은
         // 쪽지 파일을 따로 준 때만 남긴다(사람 것을 안 건드린다).
         if !crate::verification_run() || std::env::var_os("KASATERM_NOTES_FILE").is_some() {
-            let _ = kasa_students::notes::add(id, character.unwrap_or(""), kind.strip_prefix("waiting:").unwrap_or(kind), body);
+            if kasa_students::notes::add(id, character.unwrap_or(""), kind.strip_prefix("waiting:").unwrap_or(kind), body).is_some() {
+                crate::statusbar::notes::forget();
+            }
         }
         // 격리 실행은 사람의 폰을 울리지 않는다 — 시험이 볼 수 있게 탐침 파일에만 남긴다.
         if crate::verification_run() {

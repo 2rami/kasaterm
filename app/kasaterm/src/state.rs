@@ -76,6 +76,8 @@ pub(crate) struct StatusbarState {
     pub(crate) res_rect: Option<(f32, f32, f32, f32)>,
     /// 클립보드 칩(하단바 오른쪽 그룹) — 누르면 최근 복사 목록이 펼쳐진다.
     pub(crate) clip_rect: Option<(f32, f32, f32, f32)>,
+    /// 학생 쪽지 칩 — 폰 허브의 종과 같은 목록이 펼쳐진다.
+    pub(crate) notes_rect: Option<(f32, f32, f32, f32)>,
     /// 덮어도 마저 하기 칩 — 누르면 켜고 끄는 팝오버.
     pub(crate) sleep_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) clip_expanded: Option<u64>,
@@ -145,6 +147,8 @@ pub(crate) enum StatusbarPopover {
     /// 최근 복사한 것들. 클립보드는 한 칸짜리 그릇이라 다음 복사가 앞의 것을 지우는데,
     /// 그 사고는 붙여넣어 봐야 안다 — 지나간 것을 여기서 골라 되찾는다.
     Clipboard,
+    /// 학생 쪽지 — 폰 허브의 종 목록과 같은 기록(`kasa_students::notes`).
+    Notes,
     /// 판 번호(「빌드 다름」) — 새 판 굽기 · 다른 기계로 보내기 · 기계 설정.
     /// 미니는 굽지 못해 맥북이 구운 것을 부쳐야 하는데, 그때마다 학생에게 말로 시키던
     /// 것을 단추로(2026-09-08 지시 「빌드 다름 누르면 메뉴 열려서 빌드 버튼」).
@@ -183,6 +187,11 @@ pub(crate) enum StatusbarHit {
     PickClip(u64),
     CopyClip(u64),
     RemoveClip(u64),
+    /// 쪽지 줄 — 읽음으로 두고 그 칸으로 간다.
+    OpenNote(u64, String),
+    /// 쪽지 줄에 올리면 서는 ×.
+    DeleteNote(u64),
+    ReadAllNotes,
     /// 주소 줄 클릭 — 완성 주소(토큰 포함)를 기본 브라우저로 연다. 복사와 열기
     /// 둘 다 있다(2026-08-17 「누르면 바로 열리게, 복사버튼도 괜찮은데 둘다」).
     OpenTunnelUrl,

@@ -3719,6 +3719,82 @@ impl App {
         }
         self.chrome_dirty = true;
     }
+    /// `KASATERM_NOTES_PROBE=1` + `KASATERM_NOTES_FILE` — 하단바 학생 쪽지를 진짜 클릭으로 연다 → × 로 하나 지운다 →
+    /// 줄을 눌러 그 칸으로 간다 → 다시 열어 「모두 읽음」. 쪽지는 첫 칸 앞으로 심고 칸을 하나 나눠 초점을 옮겨 둔다 —
+    /// 줄을 눌러 첫 칸으로 돌아와야 「그 칸으로」가 선 것이다.
+    pub(crate) fn run_notes_probe(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::{Mutex, OnceLock, atomic::{AtomicUsize, Ordering}};
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        if !crate::verification_run()
+            || std::env::var_os("KASATERM_NOTES_FILE").is_none()
+            || std::env::var("KASATERM_NOTES_PROBE").as_deref() != Ok("1") { return; }
+        static START: OnceLock<Instant> = OnceLock::new();
+        static STEP: AtomicUsize = AtomicUsize::new(0);
+        static SEED: Mutex<Option<(String, [u64; 3])>> = Mutex::new(None);
+        let step = STEP.load(Ordering::Relaxed);
+        if step > 5 || START.get_or_init(Instant::now).elapsed().as_millis() < 3000 + step as u128 * 1400 { return; }
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return; };
+        let active = |app: &Self| {
+            let ws = app.ws.lock().unwrap();
+            ws.active_pane.clone().map(|outer| ws.active_tab_pid(&outer))
+        };
+        let seed = SEED.lock().unwrap().clone();
+        let Some((first, ids)) = seed else {
+            let Some(first) = active(self).filter(|pid| pid.starts_with('%')) else { return; };
+            let add = |pane: &str, who: &str, kind: &str, text: &str| kasa_students::notes::add(pane, who, kind, text).map_or(0, |n| n.id);
+            let ids = [
+                add(&first, "유우카", "done", "하단바에 학생 쪽지 칩을 붙였어요."),
+                add("%999", "미치루", "permission", "이 쪽지는 × 로 지워져야 해요"),
+                add(&first, "코하루", "question", "두 줄을 넘는 본문은 둘째 줄 끝이 줄임표로 잘려야 해요. 길게 이어 쓴 문장이라 폭을 넘깁니다."),
+            ];
+            crate::statusbar::notes::forget();
+            let split = self.split_active_pane_focused(kasa_pty::SplitDir::Horizontal).is_ok();
+            eprintln!("[notes-probe] seeded={} split_moved_focus={}", ids.iter().all(|id| *id > 0), split && active(self).as_deref() != Some(first.as_str()));
+            *SEED.lock().unwrap() = Some((first, ids));
+            self.chrome_dirty = true;
+            return;
+        };
+        let find = |want: &dyn Fn(&state::StatusbarHit) -> bool| {
+            self.statusbar.popover_hits.iter().find_map(|(hit, rect)| want(hit).then_some(*rect))
+        };
+        let rect = match step {
+            0 => self.statusbar.notes_rect,
+            1 => {
+                let rows = self.statusbar.popover_hits.iter().filter(|(hit, _)| matches!(hit, state::StatusbarHit::OpenNote(..))).count();
+                eprintln!("[notes-probe] open={} rows={rows}", matches!(self.statusbar.popover, Some((state::StatusbarPopover::Notes, _))));
+                find(&|hit| *hit == state::StatusbarHit::DeleteNote(ids[1]))
+            }
+            2 => {
+                let gone = kasa_students::notes::list().iter().all(|n| n.id != ids[1]);
+                eprintln!("[notes-probe] deleted={gone} count={}", crate::statusbar::notes::count());
+                find(&|hit| matches!(hit, state::StatusbarHit::OpenNote(id, _) if *id == ids[0]))
+            }
+            3 => {
+                let read = kasa_students::notes::list().iter().any(|n| n.id == ids[0] && n.read);
+                eprintln!("[notes-probe] focused_first={} read={read} closed={}", active(self).as_deref() == Some(first.as_str()), self.statusbar.popover.is_none());
+                self.statusbar.notes_rect
+            }
+            4 => find(&|hit| *hit == state::StatusbarHit::ReadAllNotes),
+            _ => {
+                eprintln!("[notes-probe] read_all={} still_open={} completed=true", crate::statusbar::notes::count() == 0, self.statusbar.popover.is_some());
+                STEP.store(6, Ordering::Relaxed);
+                return;
+            }
+        };
+        let Some(r) = rect else {
+            eprintln!("[notes-probe] FAILED missing_rendered_target step={step}");
+            STEP.store(6, Ordering::Relaxed);
+            return;
+        };
+        STEP.store(step + 1, Ordering::Relaxed);
+        self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+        for state in [ElementState::Pressed, ElementState::Released] {
+            self.window_event(event_loop, wid, WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button: MouseButton::Left });
+        }
+        self.chrome_dirty = true;
+        if let Some(window) = &self.window { window.request_redraw(); }
+    }
+
     /// `KASATERM_AUTOHDRMENU_MS` — 헤더 우클릭 → ⋮ 메뉴 경로를 통째로 검증한다.
     /// 0: 활성 pane 헤더 켜기 → 1: 헤더 띠 중앙 **진짜 우클릭**(winit MouseInput
     /// 을 window_event 로) → 메뉴가 열렸는지 → 2: 메뉴의 상단바 토글 항목 좌클릭

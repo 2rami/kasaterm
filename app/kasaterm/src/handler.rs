@@ -4758,6 +4758,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.statusbar.chrome_rect,
                         self.statusbar.res_rect,
                         self.statusbar.clip_rect,
+                        self.statusbar.notes_rect,
                         self.statusbar.sleep_rect,
                     ]
                     .into_iter()
@@ -6339,6 +6340,13 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(r) = self.statusbar.clip_rect {
                         if sb_hit(&r) {
                             self.toggle_statusbar_popover(state::StatusbarPopover::Clipboard, r);
+                            window.request_redraw();
+                            return;
+                        }
+                    }
+                    if let Some(r) = self.statusbar.notes_rect {
+                        if sb_hit(&r) {
+                            self.toggle_statusbar_popover(state::StatusbarPopover::Notes, r);
                             window.request_redraw();
                             return;
                         }
@@ -8107,6 +8115,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_layergeom();
         self.run_pending_automenuclick(event_loop);
         self.run_clipboard_probe(event_loop);
+        self.run_notes_probe(event_loop);
         self.run_pending_autohdrmenu(event_loop);
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autoclicks(event_loop);

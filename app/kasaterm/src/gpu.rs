@@ -3401,6 +3401,7 @@ impl GpuRenderer {
             "square" => include_str!("../assets/icons/square.svg"),
             "square-check" => include_str!("../assets/icons/square-check.svg"),
             "x" => include_str!("../assets/icons/x.svg"),
+            "bell" => include_str!("../assets/icons/bell.svg"),
             "clipboard" => include_str!("../assets/icons/clipboard.svg"),
             "pencil" => include_str!("../assets/icons/pencil.svg"),
             "trash-2" => include_str!("../assets/icons/trash-2.svg"),
