@@ -173,9 +173,14 @@ impl VaultKey {
     }
 
     pub fn open(&self, account: &str, id: &str, blob: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        self.open_padded(account, id, blob, PAD)
+    }
+
+    /// [`Self::open`] 을 [`Self::seal_padded`] 의 채움 단위로. 채운 길이가 그 단위의 배수가 아니면 받지 않는다.
+    pub fn open_padded(&self, account: &str, id: &str, blob: &str, pad: usize) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let sealed = b64().decode(blob).map_err(|_| anyhow!("bad_blob"))?;
         let padded = aead_open(&self.derive("enc"), &Self::item_aad(account, id), &sealed)?;
-        ensure!(padded.len() >= 4, "bad_padding");
+        ensure!(padded.len() >= 4 && padded.len() % pad == 0, "bad_padding");
         let len = u32::from_le_bytes(padded[..4].try_into().expect("4 bytes")) as usize;
         ensure!(len <= padded.len() - 4, "bad_padding");
         Ok(Zeroizing::new(padded[4..4 + len].to_vec()))
@@ -325,7 +330,8 @@ mod tests {
 c
 m1");
         let blob = sub.seal_padded("acct", &id, &[b'x'; 3000], 4096, 8192).unwrap();
-        assert_eq!(sub.open("acct", &id, &blob).unwrap().len(), 3000);
+        assert_eq!(sub.open_padded("acct", &id, &blob, 4096).unwrap().len(), 3000);
+        assert!(sub.open_padded("acct", &id, &blob, 8192).is_err(), "채움 단위가 다르면 받지 않는다");
         assert!(key.open("acct", &id, &blob).is_err(), "금고 열쇠로는 갈래의 덩어리가 안 풀린다");
         assert!(!signature_ok(&key.sign_pub(), b"m", &sub.sign(b"m")), "갈래의 서명은 금고 쓰기로 못 쓴다");
         assert!(sub.seal_padded("acct", &id, &[0u8; 9000], 4096, 8192).is_err());
