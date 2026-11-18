@@ -73,13 +73,57 @@ pub(crate) fn can_view(base: &str) -> bool {
         && kasa_device::kasanet::path(base).is_some_and(|(p, _)| p != "ssh")
 }
 
+type Rect = (f32, f32, f32, f32);
+
 /// 칸 위에 그린 자리(LOGICAL px) — 누름이 어디에 떨어졌는지 가른다.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(crate) struct Layout {
-    /// 장이 그려진 사각형(비율 맞춤 뒤).
-    pub image: (f32, f32, f32, f32),
+    /// 장이 그려진 사각형(비율 맞춤·확대 뒤).
+    pub image: Rect,
+    /// `image` 에 담긴 장의 범위(u0·v0·u1·v1, 장 안 비율) — 확대하면 일부다.
+    pub uv: Rect,
+    /// 칸 본문 — 확대한 장이 펴지는 자리.
+    pub slot: Rect,
+    /// 장 크기(px).
+    pub frame: (u32, u32),
     /// 「조작」 단추.
-    pub toggle: (f32, f32, f32, f32),
+    pub toggle: Rect,
+    /// 확대 배율 표시(누르면 맞춤으로). 맞춤이면 없다.
+    pub zoom_chip: Option<Rect>,
+}
+
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+/// 확대 상한 — 4K 화면의 한 글자가 칸에서 손톱만 해지는 정도.
+pub(crate) const MAX_ZOOM: f32 = 8.0;
+
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+/// 확대한 장을 칸에 펴는 자리 — (그릴 사각형, 거기 담길 장의 범위). `zoom` 1 은 비율 맞춤이고, 크면 그 축에서 칸을 채우며
+/// `focus`(장 안 비율)를 가운데에 둔다. 장 끝을 넘어 비지 않게 가장자리에서 멈춘다.
+pub(crate) fn zoomed(slot: Rect, frame: (u32, u32), zoom: f32, focus: (f64, f64)) -> (Rect, Rect) {
+    let (fw, fh) = (frame.0.max(1) as f32, frame.1.max(1) as f32);
+    let scale = (slot.2 / fw).min(slot.3 / fh) * zoom.clamp(1.0, MAX_ZOOM);
+    let (x, w, u0, u1) = zoom_axis(slot.0, slot.2, fw, scale, focus.0 as f32);
+    let (y, h, v0, v1) = zoom_axis(slot.1, slot.3, fh, scale, focus.1 as f32);
+    ((x, y, w, h), (u0, v0, u1, v1))
+}
+
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+/// 한 축 — (그릴 자리, 길이, 범위 시작, 끝).
+fn zoom_axis(pos: f32, len: f32, frame: f32, scale: f32, focus: f32) -> (f32, f32, f32, f32) {
+    let shown = len / scale;
+    if shown >= frame {
+        let drawn = frame * scale;
+        return (pos + (len - drawn) / 2.0, drawn, 0.0, 1.0);
+    }
+    let center = (focus * frame).clamp(shown / 2.0, frame - shown / 2.0);
+    (pos, len, (center - shown / 2.0) / frame, (center + shown / 2.0) / frame)
+}
+
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+/// `focus` 를 그 배율에서 실제로 보이는 가운데로 붙인다 — 끝에 붙은 채 더 민 만큼이 쌓여 되돌릴 때 헛돌지 않게.
+pub(crate) fn clamp_focus(slot: Rect, frame: (u32, u32), zoom: f32, focus: (f64, f64)) -> (f64, f64) {
+    let (_, uv) = zoomed(slot, frame, zoom, focus);
+    (f64::from(uv.0 + uv.2) / 2.0, f64::from(uv.1 + uv.3) / 2.0)
 }
 
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
@@ -149,4 +193,40 @@ impl ScreenView {
     pub(crate) fn scroll(&self, _p: (f64, f64), _dx: f64, _dy: f64) {}
     pub(crate) fn key(&self, _code: &str, _mods: u8) {}
     pub(crate) fn text(&self, _s: &str) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SLOT: Rect = (10.0, 20.0, 800.0, 600.0);
+    const ULTRAWIDE: (u32, u32) = (3840, 1600);
+
+    #[test]
+    fn zoom_one_is_the_contain_fit_and_shows_the_whole_frame() {
+        let (rect, uv) = zoomed(SLOT, ULTRAWIDE, 1.0, (0.9, 0.1));
+        assert_eq!(uv, (0.0, 0.0, 1.0, 1.0));
+        assert_eq!(rect.2, 800.0);
+        assert!((rect.3 - 333.333).abs() < 0.01);
+        assert!((rect.1 - (20.0 + (600.0 - rect.3) / 2.0)).abs() < 0.01, "세로는 가운데");
+    }
+
+    #[test]
+    fn zooming_fills_the_overflowing_axis_around_the_focus() {
+        let (rect, uv) = zoomed(SLOT, ULTRAWIDE, 2.0, (0.5, 0.5));
+        assert_eq!((rect.0, rect.2), (10.0, 800.0));
+        assert!((uv.0 - 0.25).abs() < 1e-4 && (uv.2 - 0.75).abs() < 1e-4);
+        // 세로도 2배면 667 로 칸(600)을 넘쳐 칸을 채운다.
+        assert_eq!((rect.1, rect.3), (20.0, 600.0));
+    }
+
+    #[test]
+    fn focus_stops_at_the_frame_edge() {
+        let (_, uv) = zoomed(SLOT, ULTRAWIDE, 4.0, (0.0, 1.0));
+        assert_eq!(uv.0, 0.0);
+        assert!((uv.3 - 1.0).abs() < 1e-6);
+        let back = clamp_focus(SLOT, ULTRAWIDE, 4.0, (-3.0, 9.0));
+        assert!((back.0 - 0.125).abs() < 1e-4, "{back:?}");
+        assert!(zoomed(SLOT, ULTRAWIDE, 99.0, (0.5, 0.5)).1 == zoomed(SLOT, ULTRAWIDE, MAX_ZOOM, (0.5, 0.5)).1);
+    }
 }

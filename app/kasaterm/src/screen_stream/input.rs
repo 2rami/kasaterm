@@ -18,6 +18,14 @@ fn mods_of(m: ModifiersState) -> u8 {
 /// 휠 한 줄을 화면 포인트로 — 화면 거울 웹 보기와 같은 값.
 const LINE_PX: f64 = 40.0;
 
+/// 확대 휠 — 휠 한 줄(40pt)에 약 1.5배.
+const WHEEL_ZOOM: f64 = 0.01;
+
+/// 확대 휠·키의 손가락 — 맥 ⌘, Windows Ctrl(그 OS 의 확대 손가락). 조작 중에도 이 손가락이면 그 기기로 안 보내고 확대한다.
+fn zoom_chord(m: ModifiersState) -> bool {
+    if cfg!(target_os = "macos") { m.super_key() } else { m.control_key() }
+}
+
 impl App {
     /// 본창 화면 칸 위의 마우스. 쓴 이벤트면 true — 뒤의 칸 누름 처리(초점·선택)로 흘리지 않는다.
     pub(crate) fn screen_pointer_event(&mut self, event: &WindowEvent) -> bool {
@@ -45,11 +53,17 @@ impl App {
                 let target = held.or_else(|| {
                     self.screen_views
                         .iter()
-                        .find(|(_, v)| v.surface == on && (v.on_toggle(p) || (v.control && v.on_image(p))))
+                        .find(|(_, v)| v.surface == on && (v.on_toggle(p) || v.on_zoom_chip(p) || (v.control && v.on_image(p))))
                         .map(|(id, _)| *id)
                 });
                 let Some(id) = target else { return false };
                 let Some(view) = self.screen_views.get_mut(&id) else { return false };
+                if held.is_none() && view.on_zoom_chip(p) {
+                    if pressed && bit == 1 {
+                        view.zoom_reset();
+                    }
+                    return true;
+                }
                 if held.is_none() && view.on_toggle(p) {
                     if pressed && bit == 1 {
                         let control = !view.control;
@@ -74,12 +88,25 @@ impl App {
                 true
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let Some(view) = self.screen_views.values().find(|v| v.surface == on && v.control && v.on_image(p)) else { return false };
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (f64::from(*x) * LINE_PX, f64::from(*y) * LINE_PX),
                     MouseScrollDelta::PixelDelta(d) => (d.x, d.y),
                 };
-                view.scroll(p, dx, dy);
+                let Some(view) = self.screen_views.values_mut().find(|v| v.surface == on && v.on_image(p)) else { return false };
+                if zoom_chord(self.modifiers) {
+                    view.zoom_by(Some(p), (dy * WHEEL_ZOOM).exp() as f32);
+                } else if view.control {
+                    view.scroll(p, dx, dy);
+                } else if view.zoom > 1.0 {
+                    view.pan_by(dx, dy);
+                } else {
+                    return false;
+                }
+                true
+            }
+            WindowEvent::PinchGesture { delta, .. } => {
+                let Some(view) = self.screen_views.values_mut().find(|v| v.surface == on && v.on_image(p)) else { return false };
+                view.zoom_by(Some(p), (1.0 + *delta as f32).max(0.1));
                 true
             }
             _ => false,
@@ -100,7 +127,23 @@ impl App {
 
     /// 그 보기에 키 하나 — 꺼낸 화면 창은 늘 이 보기 하나가 앞이다.
     pub(crate) fn screen_key_for(&mut self, id: u64, event: &KeyEvent) -> bool {
-        if !self.screen_views.get(&id).is_some_and(|v| v.control) || event.state != ElementState::Pressed {
+        if event.state != ElementState::Pressed {
+            return true;
+        }
+        // 확대 키(⌘ = · ⌘ - · ⌘ 0)는 조작을 켜지 않은 보기에서만 — 조작 중이면 그 기기 단축키다.
+        if let Some(view) = self.screen_views.get_mut(&id).filter(|v| !v.control) {
+            if zoom_chord(self.modifiers) {
+                match event.logical_key.as_ref() {
+                    Key::Character("=" | "+") => view.zoom_by(None, 1.25),
+                    Key::Character("-") => view.zoom_by(None, 0.8),
+                    Key::Character("0") => view.zoom_reset(),
+                    _ => {}
+                }
+                self.chrome_dirty = true;
+            }
+            return true;
+        }
+        if !self.screen_views.get(&id).is_some_and(|v| v.control) {
             return true;
         }
         let mods = mods_of(self.modifiers);

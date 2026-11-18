@@ -3390,7 +3390,7 @@ impl ApplicationHandler<UserEvent> for App {
             };
             if used { window.request_redraw(); return; }
         }
-        if matches!(event, WindowEvent::MouseInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseWheel { .. })
+        if matches!(event, WindowEvent::MouseInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. })
             && !self.main_pointer_modal()
             && self.screen_pointer_event(&event)
         {

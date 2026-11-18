@@ -1366,6 +1366,32 @@ impl GridRenderer {
         ));
     }
 
+    /// 그림의 한 부분(`uv` = u0·v0·u1·v1, 0–1)을 상자에 그대로 편다 — 자리·자르기를 부르는 쪽이 정한다(화면 칸 확대처럼
+    /// 누름 판정이 같은 셈을 써야 할 때). LOGICAL px.
+    pub fn queue_image_region(&mut self, id: &str, rect: (f32, f32, f32, f32), uv: (f32, f32, f32, f32)) {
+        if !self.images.contains_key(id) {
+            return;
+        }
+        let s = self.scale;
+        let (x, y, w, h) = rect;
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        self.image_quads.push((
+            id.to_string(),
+            CellInstance {
+                cell_px: [x * s, y * s, w * s, h * s],
+                uv_min: [uv.0, uv.1],
+                uv_max: [uv.2, uv.3],
+                fg_rgba: [1.0, 1.0, 1.0, 1.0],
+                flags: CellInstance::FLAG_COLOR,
+                ..Default::default()
+            },
+            self.chrome.len() as u32,
+            self.cur_clip_phys(),
+        ));
+    }
+
     /// 상자에 비율을 지켜 꽉 맞춘다 — 작은 그림은 키우고 가운데 놓는다. kitty 그림
     /// 프로토콜의 놓기 규칙이다(`c`×`r` 칸 상자). `queue_image` 는 원본 크기를 넘겨
     /// 키우지 않아 레티나 칸 상자를 못 채운다. LOGICAL px.

@@ -20,7 +20,7 @@ fn texture_key(view: u64) -> String {
 }
 
 /// 새로 풀린 장을 올리고 칸 본문 안에 비율을 지켜 그린다. 아직 장이 없으면 상태 글을 가운데에, 장이 흐르면 오른쪽
-/// 위에 「조작」 단추와 `fps · 지연 · 길` 을 작게 얹는다. 장은 그 기기의 기기색 테로 두른다 — 이 기기 화면과 다른 기기
+/// 위에 「조작」 단추와 `fps · 지연 · 길` 을 작게 얹고, 확대했으면 그 왼쪽에 배율(누르면 맞춤으로)을 둔다. 장은 그 기기의 기기색 테로 두른다 — 이 기기 화면과 다른 기기
 /// 화면이 한눈에 갈리게(사이드바 기기 묶음 둘레선과 같은 색). 조작 중이면 강조색 테가 그 자리를 대신하고, 조작을 못
 /// 넣으면 그 까닭을 아래에 띄운다. 그린 자리는 누름 판정에 쓰도록 보기에 적어 둔다.
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenView>, slots: &[(u64, (f32, f32, f32, f32))], on: Surface) {
@@ -62,11 +62,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
             g.draw_text(x + (w - tw) / 2.0, y + (h - STATUS_FONT) / 2.0, &text, opts(STATUS_FONT, theme::text_mute()));
             continue;
         }
-        g.queue_image_contain(&key, *x, *y, *w, *h);
-        let (fw, fh) = view.frame_size();
-        let fit = (w / fw.max(1) as f32).min(h / fh.max(1) as f32);
-        let (dw, dh) = (fw as f32 * fit, fh as f32 * fit);
-        let image = (x + (w - dw) / 2.0, y + (h - dh) / 2.0, dw, dh);
+        let slot = (*x, *y, *w, *h);
+        let frame = view.frame_size();
+        let (image, uv) = super::zoomed(slot, frame, view.zoom, view.focus);
+        g.push_clip(*x, *y, *w, *h);
+        g.queue_image_region(&key, image, uv);
+        g.pop_clip();
         let box_h = HUD_FONT + HUD_PAD * 1.5;
         let hud = view.hud();
         let hw = g.measure_chrome_text(&hud, HUD_FONT, false) + HUD_PAD * 2.0;
@@ -75,6 +76,14 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
         let tw = g.measure_chrome_text(label, HUD_FONT, false) + HUD_PAD * 2.0;
         let toggle = (hud_box.0 - HUD_PAD - tw, y + HUD_PAD, tw, box_h);
         g.round_rect_stroke(image.0, image.1, image.2, image.3, 0.0, EDGE, if view.control { theme::accent() } else { edge });
+        let zoom_chip = (view.zoom > 1.001).then(|| {
+            let text = format!("{:.0}%", view.zoom * 100.0);
+            let cw = g.measure_chrome_text(&text, HUD_FONT, false) + HUD_PAD * 2.0;
+            let chip = (toggle.0 - HUD_PAD - cw, y + HUD_PAD, cw, box_h);
+            g.round_rect_fill(chip.0, chip.1, chip.2, chip.3, 4.0, dim);
+            g.draw_text(chip.0 + HUD_PAD, chip.1 + HUD_PAD * 0.75, &text, opts(HUD_FONT, white));
+            chip
+        });
         g.round_rect_fill(toggle.0, toggle.1, toggle.2, toggle.3, 4.0, if view.control { theme::accent() } else { dim });
         g.draw_text(toggle.0 + HUD_PAD, toggle.1 + HUD_PAD * 0.75, label, opts(HUD_FONT, white));
         g.round_rect_fill(hud_box.0, hud_box.1, hud_box.2, hud_box.3, 4.0, dim);
@@ -93,7 +102,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
             g.round_rect_fill(nx, ny, nw, box_h, 4.0, dim);
             g.draw_text(nx + HUD_PAD, ny + HUD_PAD * 0.75, &note, opts(HUD_FONT, white));
         }
-        view.layout = Some(Layout { image, toggle });
+        view.layout = Some(Layout { image, uv, slot, frame, toggle, zoom_chip });
     }
 }
 

@@ -7012,6 +7012,7 @@ impl App {
     /// 배워 직통이 설 때까지 기다렸다 열고, 2초마다 칸 위 표시(fps·지연·길)를 로그에 적는다.
     /// `KASATERM_TEST_SCREEN_POPOUT=<초>` 면 첫 장이 온 뒤 화면 탭을 별도 창으로 꺼냈다가 그만큼 뒤 칸으로 되돌린다.
     /// `KASATERM_TEST_SCREEN_ANYPATH=1` 이면 직통을 기다리지 않고 바로 연다 — 못 붙는 칸의 상태 글을 본다.
+    /// `KASATERM_TEST_SCREEN_ZOOM=<배율>` 이면 첫 장 뒤 칸 왼쪽 위 1/4 자리를 축으로 그만큼 확대한다.
     pub(crate) fn run_pending_screen_view_test(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
         use std::sync::{Mutex, OnceLock};
@@ -7061,6 +7062,19 @@ impl App {
                 _ => {}
             }
         }
+        // 첫 장 뒤 한 번 그 배율로, 칸 왼쪽 위 1/4 자리를 축으로 확대한다(누름 자리 셈이 확대 범위를 따르는지 본다).
+        static ZOOMED: AtomicBool = AtomicBool::new(false);
+        if let Some(z) = std::env::var("KASATERM_TEST_SCREEN_ZOOM").ok().and_then(|s| s.parse::<f32>().ok()) {
+            if !ZOOMED.load(Ordering::Relaxed) {
+                if let Some(view) = self.screen_views.values_mut().find(|v| v.layout.is_some()) {
+                    let slot = view.layout.map(|l| l.slot).unwrap_or_default();
+                    let p = (f64::from(slot.0 + slot.2 / 4.0), f64::from(slot.1 + slot.3 / 4.0));
+                    view.zoom_by(Some(p), z);
+                    ZOOMED.store(true, Ordering::Relaxed);
+                    eprintln!("[screen-view-test] zoom={} focus={:?}", view.zoom, view.focus);
+                }
+            }
+        }
         let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
         if logged.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
             return;
@@ -7078,7 +7092,7 @@ impl App {
                 view.uploads,
                 view.control,
                 view.layout.map(|l| l.toggle),
-                view.layout.map(|l| l.image),
+                view.layout.map(|l| (l.image, l.uv)),
                 view.status()
             );
         }

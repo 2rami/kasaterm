@@ -47,6 +47,9 @@ pub(crate) struct ScreenView {
     /// 조작 중 — 칸 위 누름·휠·키를 그 기기에 넣는다. 처음엔 보기만 한다(보다가 잘못 누르면 그 기기에서 일이 일어난다).
     pub control: bool,
     pub layout: Option<Layout>,
+    /// 확대 배율(1 = 칸에 맞춤)과 칸 가운데에 둘 장 안 자리(비율).
+    pub zoom: f32,
+    pub focus: (f64, f64),
     /// 지금 그 기기에 눌려 있는 단추 — 칸 밖으로 끌어 나가도 뗄 때까지 이어 보낸다.
     pub buttons: u8,
     /// 조합 중인 한글 — 그 기기에는 다 된 글자만 가니 칸 위에 보여 준다.
@@ -143,6 +146,8 @@ impl ScreenView {
             uploads: 0,
             control: false,
             layout: None,
+            zoom: 1.0,
+            focus: (0.5, 0.5),
             buttons: 0,
             preedit: String::new(),
             frame: (0, 0),
@@ -244,12 +249,50 @@ impl ScreenView {
         self.layout.is_some_and(|l| contains(l.image, p))
     }
 
-    /// 칸 위 자리 → 그 화면 안의 비율(0–1). 끌어 나간 자리는 가장자리로 붙인다.
+    pub(crate) fn on_zoom_chip(&self, p: (f64, f64)) -> bool {
+        self.layout.and_then(|l| l.zoom_chip).is_some_and(|r| contains(r, p))
+    }
+
+    /// 칸 위 자리 → 그 화면 안의 비율(0–1). 확대했으면 보이는 범위 안에서 센다. 끌어 나간 자리는 가장자리로 붙인다.
     fn at(&self, (px, py): (f64, f64)) -> Option<(f64, f64)> {
-        let (x, y, w, h) = self.layout?.image;
+        let l = self.layout?;
+        let (x, y, w, h) = l.image;
+        let (u0, v0, u1, v1) = l.uv;
         (w > 0.0 && h > 0.0).then(|| {
-            (((px - f64::from(x)) / f64::from(w)).clamp(0.0, 1.0), ((py - f64::from(y)) / f64::from(h)).clamp(0.0, 1.0))
+            let fx = ((px - f64::from(x)) / f64::from(w)).clamp(0.0, 1.0);
+            let fy = ((py - f64::from(y)) / f64::from(h)).clamp(0.0, 1.0);
+            (f64::from(u0) + fx * f64::from(u1 - u0), f64::from(v0) + fy * f64::from(v1 - v0))
         })
+    }
+
+    /// `p` 아래 장 자리를 그대로 둔 채 배율을 `factor` 배로. 칸 밖이면 가운데를 축으로.
+    pub(crate) fn zoom_by(&mut self, p: Option<(f64, f64)>, factor: f32) {
+        let Some(l) = self.layout else { return };
+        let zoom = (self.zoom * factor).clamp(1.0, super::MAX_ZOOM);
+        let center = (f64::from(l.slot.0 + l.slot.2 / 2.0), f64::from(l.slot.1 + l.slot.3 / 2.0));
+        let p = p.filter(|p| contains(l.slot, *p)).unwrap_or(center);
+        let Some(under) = self.at(p) else { return };
+        let (fw, fh) = (f64::from(l.frame.0.max(1)), f64::from(l.frame.1.max(1)));
+        let scale = f64::from((l.slot.2 / l.frame.0.max(1) as f32).min(l.slot.3 / l.frame.1.max(1) as f32) * zoom);
+        let focus = (under.0 - (p.0 - center.0) / scale / fw, under.1 - (p.1 - center.1) / scale / fh);
+        self.zoom = zoom;
+        self.focus = super::clamp_focus(l.slot, l.frame, zoom, focus);
+    }
+
+    /// 확대한 장을 칸 위 px 만큼 민다(휠·끌기와 같은 쪽 — 내용이 손가락을 따라온다).
+    pub(crate) fn pan_by(&mut self, dx: f64, dy: f64) {
+        let Some(l) = self.layout else { return };
+        let scale = f64::from((l.slot.2 / l.frame.0.max(1) as f32).min(l.slot.3 / l.frame.1.max(1) as f32) * self.zoom);
+        let focus = (
+            self.focus.0 - dx / scale / f64::from(l.frame.0.max(1)),
+            self.focus.1 - dy / scale / f64::from(l.frame.1.max(1)),
+        );
+        self.focus = super::clamp_focus(l.slot, l.frame, self.zoom, focus);
+    }
+
+    pub(crate) fn zoom_reset(&mut self) {
+        self.zoom = 1.0;
+        self.focus = (0.5, 0.5);
     }
 
     fn send(&self, event: serde_json::Value) {
