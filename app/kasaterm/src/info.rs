@@ -1552,7 +1552,7 @@ mod tests {
         };
         let mut machine = state::MachinesColMachine {
             label: "원본 기기".into(), online: true, ago_secs: Some(0), outdated: false,
-            host: String::new(), kvm: None, closed: 0, web_shells: Vec::new(), link: Default::default(),
+            closed: 0, web_shells: Vec::new(), link: Default::default(),
             remote: vec![row("", "%12"), row("", "%2")],
             mirrored: vec![row("%99", "%7")],
         };
@@ -4021,23 +4021,8 @@ pub(crate) fn draw_machine_menu(
     if m.online && !m.remote.is_empty() {
         items.push((Some(B::Unfold { label: m.label.clone() }), MenuRow::new("방 펼치기").sep().icon("columns-2")));
     }
-    // 문이 둘이면 둘 다 세운다 — 「화면 보기」는 화면공유(host), 「KVM 보기」는 IP KVM
-    // 웹(kvm). 한 항목이 KVM 을 먼저 열던 것을 갈랐다(2026-09-07 지시 「화면보기는
-    // 화면공유 열리게」). 연결이 끊겨도 세운다: 둘 다 카사텀 창구와 다른 문이고,
-    // KVM 은 오히려 기계가 죽었을 때 보라고 있는 문이다.
-    if !m.host.is_empty() {
-        let row = MenuRow::new("화면 보기").icon("external-link");
-        let row = if items.len() == 1 { row.sep() } else { row };
-        items.push((Some(B::Screen { host: m.host.clone(), kvm: None }), row));
-    }
-    if let Some(kvm) = m.kvm.clone() {
-        let row = MenuRow::new("KVM 보기").icon("external-link");
-        let row = if items.len() == 1 { row.sep() } else { row };
-        items.push((Some(B::Screen { host: String::new(), kvm: Some(kvm) }), row));
-    }
-    // 화면공유와 따로 둔다 — 화면공유는 같은 망의 맥끼리만 되고, 거울은 카사텀이 닿는 기기면 어디서든 된다.
     if m.online {
-        let row = MenuRow::new("화면 거울").icon("monitor");
+        let row = MenuRow::new("화면 보기").icon("monitor");
         let row = if items.len() == 1 { row.sep() } else { row };
         items.push((Some(B::ScreenMirror { label: m.label.clone() }), row));
     }

@@ -1447,7 +1447,7 @@ mod tests {
         };
         state::MachinesColMachine {
             label: "test".into(), online: true, ago_secs: None, outdated: false,
-            host: String::new(), kvm: None, closed: 2, web_shells: Vec::new(), link: Default::default(),
+            closed: 2, web_shells: Vec::new(), link: Default::default(),
             remote: vec![row("", "%12", "A"), row("", "%2", "A"), row("", "%8", "B")],
             mirrored: vec![row("%99", "%7", "A")],
         }

@@ -218,7 +218,7 @@ mod tests {
 
     fn machine(online: bool, remote: Vec<state::MachinesColRow>) -> state::MachinesColMachine {
         state::MachinesColMachine {
-            label: "미니".into(), online, ago_secs: None, outdated: false, host: String::new(), kvm: None,
+            label: "미니".into(), online, ago_secs: None, outdated: false,
             mirrored: Vec::new(), remote, closed: 0, web_shells: Vec::new(), link: Default::default(),
         }
     }

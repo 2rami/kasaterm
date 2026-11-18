@@ -113,7 +113,7 @@
   `kasa-http`는 이 표면들을 같은 HTTP 경로로 합친다. 학생 디스패처 정본은 `crates/kasa-students/src/dispatch.rs`다.
 - 기기 화면 거울 — `kasa-remote/src/screen_mirror.rs`(소켓·ack 창 2장·뜨는 박자, 앱이 꽂는 `Source`)·`http/screen.rs`(`/screen/ws` — 폰.
   PC 는 화면 칸), 앱 `screen_capture.rs`(macOS `CGDisplayCreateImage`·
-  Windows `StretchBlt` 줄여 뜨기·JPEG)·`screen_input.rs`(조작 넣기 — macOS CGEvent·손쉬운 사용 권한, Windows `SendInput`). PC 입구는 Info 「다른 기계」 메뉴 「화면 거울」(`machinescol.rs open_screen_mirror`),
+  Windows `StretchBlt` 줄여 뜨기·JPEG)·`screen_input.rs`(조작 넣기 — macOS CGEvent·손쉬운 사용 권한, Windows `SendInput`). PC 입구는 Info 「다른 기계」 메뉴 「화면 보기」(`machinescol.rs open_screen_mirror`),
   폰은 `mobile/lib/screen_session.dart`·`screens/screen_mirror.dart`(허브 기기 머리글 모니터 단추). 계약 [screen-mirror.md](screen-mirror.md)
 - 화면 스트림(하드웨어 영상) — `kasa-remote/src/screen_stream.rs`(카사넷 `kasa/screen/1` 틀·보내기·보기, 앱이 꽂는 `Capture`)·
   `kasa-device/src/kasanet.rs`(입구 `SCREEN_ALPN`·`connect`·`screen_capable`), 앱 `screen_stream/`(macOS: `capture.rs` SCK·`codec.rs`

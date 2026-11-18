@@ -9,6 +9,7 @@ use crate::{gpu, theme, App, PaneContent, PaneTab, ScreenPane, UserEvent};
 const STATUS_FONT: f32 = 13.0;
 const HUD_FONT: f32 = 11.0;
 const HUD_PAD: f32 = 6.0;
+const EDGE: f32 = 2.0;
 /// 안 보인 지 이만큼이면 연결을 닫는다 — 탭을 잠깐 넘겨 보는 동안 다시 붙느라 키프레임을 기다리지 않게.
 const HIDDEN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// 보이는 칸의 연결이 닫히면 이만큼 뒤 다시 붙는다 — 그 기기 재시작·직통이 늦게 서는 경우.
@@ -19,8 +20,9 @@ fn texture_key(view: u64) -> String {
 }
 
 /// 새로 풀린 장을 올리고 칸 본문 안에 비율을 지켜 그린다. 아직 장이 없으면 상태 글을 가운데에, 장이 흐르면 오른쪽
-/// 위에 「조작」 단추와 `fps · 지연 · 길` 을 작게 얹는다. 조작 중이면 장을 강조색 테로 두르고, 조작을 못 넣으면 그 까닭을
-/// 아래에 띄운다. 그린 자리는 누름 판정에 쓰도록 보기에 적어 둔다.
+/// 위에 「조작」 단추와 `fps · 지연 · 길` 을 작게 얹는다. 장은 그 기기의 기기색 테로 두른다 — 이 기기 화면과 다른 기기
+/// 화면이 한눈에 갈리게(사이드바 기기 묶음 둘레선과 같은 색). 조작 중이면 강조색 테가 그 자리를 대신하고, 조작을 못
+/// 넣으면 그 까닭을 아래에 띄운다. 그린 자리는 누름 판정에 쓰도록 보기에 적어 둔다.
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenView>, slots: &[(u64, (f32, f32, f32, f32))], on: Surface) {
     let white = [255, 255, 255, 235];
     let dim = [0, 0, 0, 150];
@@ -51,8 +53,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
             }
             view.note_upload(started.elapsed(), zero_copy);
         }
+        let edge = crate::render::pane_identity::device_section_border(theme::panel_bg(), &view.label);
         if !view.has_frame() {
             view.layout = None;
+            g.round_rect_stroke(*x, *y, *w, *h, 0.0, EDGE, edge);
             let text = view.status();
             let tw = g.measure_chrome_text(&text, STATUS_FONT, false);
             g.draw_text(x + (w - tw) / 2.0, y + (h - STATUS_FONT) / 2.0, &text, opts(STATUS_FONT, theme::text_mute()));
@@ -70,9 +74,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, views: &mut HashMap<u64, ScreenVie
         let label = if view.control { "조작 중" } else { "조작" };
         let tw = g.measure_chrome_text(label, HUD_FONT, false) + HUD_PAD * 2.0;
         let toggle = (hud_box.0 - HUD_PAD - tw, y + HUD_PAD, tw, box_h);
-        if view.control {
-            g.round_rect_stroke(image.0, image.1, image.2, image.3, 0.0, 2.0, theme::accent());
-        }
+        g.round_rect_stroke(image.0, image.1, image.2, image.3, 0.0, EDGE, if view.control { theme::accent() } else { edge });
         g.round_rect_fill(toggle.0, toggle.1, toggle.2, toggle.3, 4.0, if view.control { theme::accent() } else { dim });
         g.draw_text(toggle.0 + HUD_PAD, toggle.1 + HUD_PAD * 0.75, label, opts(HUD_FONT, white));
         g.round_rect_fill(hud_box.0, hud_box.1, hud_box.2, hud_box.3, 4.0, dim);

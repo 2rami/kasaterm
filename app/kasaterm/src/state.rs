@@ -425,11 +425,6 @@ pub(crate) struct MachinesColMachine {
     pub(crate) ago_secs: Option<u64>,
     /// 그 기계 프로그램이 낡았나(repo-sync 창구 없음) — 변경 실은 이사가 선다.
     pub(crate) outdated: bool,
-    /// 화면공유 등 HTTP 밖 문에 쓰는 진짜 주소(명부 host). kvm 도 없고 이것도
-    /// 빈값이면 「화면 보기」 버튼을 안 그린다.
-    pub(crate) host: String,
-    /// IP KVM 웹 주소(명부 kvm) — 있으면 「화면 보기」가 화면공유 대신 이걸 연다.
-    pub(crate) kvm: Option<String>,
     /// 이 기계로 이사 간 학생(로컬에 원격 링크 pane 이 있는 것) — 데려오기 가능.
     pub(crate) mirrored: Vec<MachinesColRow>,
     /// 그 기계 자체의 pane — 이 맥북에 자리가 없어 버튼이 안 붙는다. 그 기계에서
@@ -524,15 +519,8 @@ pub(crate) enum MachinesColBtn {
     Bring {
         pane: String,
     },
-    /// 그 기계 화면 보기 — host(명부의 진짜 주소, `user@ip` 허용)가 있으면 macOS
-    /// 화면공유를 열고, 없을 때만 kvm(IP KVM 웹 주소)을 연다. 메뉴는 둘을 따로
-    /// 세운다(「화면 보기」= host 만, 「KVM 보기」= kvm 만).
-    Screen {
-        host: String,
-        kvm: Option<String>,
-    },
-    /// 그 기기 화면 거울 — 그 기기 카사텀이 뜬 화면을 이 창의 웹 칸으로 본다(`docs/screen-mirror.md`).
-    /// 화면공유와 달리 카사텀 길(터널·카사넷)로 가서 Windows 와 폰에서도 같다. 보기만 한다.
+    /// 그 기기 화면 보기 — 이 창의 화면 칸(`docs/screen-stream.md`). 바깥 화면공유(vnc)·KVM 웹 문은 걷었다 —
+    /// 칸 밖으로 새 창·웹이 떠서 느렸고 칸 하나로 보자고 했다(2026-11-16 · 11-18).
     ScreenMirror {
         label: String,
     },

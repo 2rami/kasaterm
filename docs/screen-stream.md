@@ -121,7 +121,7 @@ screen-stream view <ADDR> --key PATH [--secs N] [--codec hevc|h264] [--mbps N] [
 ### 흐름
 
 ```
-보는 앱  Info 「화면 거울」 ─ machinescol.rs open_screen_mirror
+보는 앱  Info 「화면 보기」 ─ machinescol.rs open_screen_mirror
   └ screen_stream::can_view(base)?  (이 판 macOS · 그 기기 /version kasanet.screen · 카사넷 직통·믿는 중계)
        ├ 아니면 → 지금 JPEG 웹 칸
        └ 맞으면 → open_screen_pane → ScreenView::open → kasa_remote::screen_stream::watch
@@ -372,10 +372,18 @@ UAC 확인 창·잠금 화면은 Windows 가 보안 데스크톱(Winlogon)에 �
 - 리그 웹소켓으로 받는 중에 `Start-Process cmd -Verb RunAs` 로 UAC 창을 띄우자 장에 UAC 창이 그대로 실렸고(`info.agent=true`),
   웹소켓으로 보낸 `Escape` 가 그 창을 닫았다(consent.exe 1 → 0). 돌아온 뒤에도 끊기지 않고 60fps 로 이어졌다.
 - 잠금 화면은 사람 화면을 잠그게 되어 재지 않았다 — 같은 Winlogon 데스크톱이라 같은 길을 탄다.
+- **멈춘 화면에서는 데스크톱이 바뀐 것을 복제가 늦게 안다**(2026-11-18 집 PC 설치판). 보는 중에 UAC 창이 뜨면 복제는
+  `ACCESS_LOST` 를 다음 화면 변화(마우스 움직임)에야 알려, 보는 쪽은 그 전 데스크톱을 계속 봤다 — 실측: UAC 가 뜬 뒤 8초 넘게
+  옛 화면, 첫 조작이 들어간 순간(11.7초) 그제야 UAC 화면. 누름 자체는 그때도 들어갔다(「아니요」 누름으로 consent.exe 1 → 0)
+  — 사람은 안 보이는 창을 누르던 셈이다. 그래서 뜨기 스레드가 250ms 마다 입력 데스크톱 이름을 자기 데스크톱과 견주고
+  (`win.rs input_desktop_moved`), 다르면 그 데스크톱에서 다시 뜬다. Winlogon 을 못 여는 사용자 앱은 연 적이 있을 때만 떠난 것으로
+  본다(못 여는 채로 다시 뜨면 헛돈다).
+- 집 PC 재현은 앱의 `/screen/ws?codec=h264` 를 ssh 포워드(루프백)로 받아 장을 ffmpeg 로 풀고, 같은 소켓에 조작 JSON 을 보낸다 —
+  도우미 파이프는 같은 kasaterm.exe 만 받아 다른 시험 프로그램으로는 못 붙는다.
 
 ## 화면 칸만 · 별도 창 (2026-11-16)
 
-- PC 의 「화면 거울」은 화면 칸으로만 연다. 그 기기가 옛 판이거나 직통이 아닐 때 JPEG 웹 칸으로 물러나던 길과 그 보기 페이지
+- PC 의 「화면 보기」(옛 「화면 거울」)는 화면 칸으로만 연다. 그 기기가 옛 판이거나 직통이 아닐 때 JPEG 웹 칸으로 물러나던 길과 그 보기 페이지
   (`/screen`, `assets/screen/index.html`)는 느려 걷어냈다(`/screen/ws` 는 폰이 쓴다). 대신 칸이 까닭(「카사넷 직통을 기다리는 중」·
   「그 기기 카사텀이 화면 스트림을 모르는 판」)을 띄우고, 보이는 동안 연결이 닫혀 있으면 3초마다 다시 붙는다(`pane.rs RETRY_AFTER`).
 - ⋮ 「별도 창으로」가 화면 탭을 별도 OS 창(`window.rs ScreenWindow`)으로 꺼낸다. 탭만 칸에서 빠지고 보기·연결은 `screen_views` 에

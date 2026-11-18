@@ -6,7 +6,7 @@ const B: &str = "검증 B";
 pub(super) fn fixture(label: &str, count: usize) -> state::MachinesColMachine {
     state::MachinesColMachine {
         label: label.into(), online: true, ago_secs: Some(0), outdated: false,
-        host: String::new(), kvm: None, mirrored: Vec::new(), closed: 0, web_shells: Vec::new(), link: Default::default(),
+        mirrored: Vec::new(), closed: 0, web_shells: Vec::new(), link: Default::default(),
         remote: (0..count).map(|n| state::MachinesColRow {
             pane: String::new(), remote_id: format!("%device-probe-{n}"), remote_cwd: "/workspace/probe".into(),
             name: String::new(), title: format!("작업 {}", n + 1), status: "idle".into(),

@@ -35,8 +35,8 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::StationsAndDesktops::{
-    CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, HDESK,
-    UOI_NAME,
+    CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
+    DESKTOP_READOBJECTS, HDESK, UOI_NAME,
 };
 use windows::Win32::System::Variant::VARIANT;
 
@@ -82,6 +82,23 @@ pub(super) fn follow_input_desktop(current: &mut Option<HDESK>) {
         let _ = unsafe { CloseDesktop(desk) };
     }
 }
+
+/// 입력 데스크톱이 이 스레드가 뜨는 데스크톱(`on`)에서 떠났나. 멈춘 화면에서는 복제가 `ACCESS_LOST` 를 다음 변화(마우스
+/// 움직임)에야 알려, UAC 창이 떠도 보는 쪽이 그 전 화면을 8초 넘게 봤다(2026-11-18 집 PC 실측 — 첫 조작에 그제야 바뀌었다).
+/// 입력 데스크톱을 못 열면(Winlogon 을 못 여는 사용자 앱) 연 적이 있을 때만 떠난 것으로 본다 — 못 여는 채로 다시 뜨면 헛돈다.
+fn input_desktop_moved(on: Option<HDESK>) -> bool {
+    match unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) } {
+        Ok(input) => {
+            let moved = desktop_name(input) != on.map(desktop_name).unwrap_or_default();
+            let _ = unsafe { CloseDesktop(input) };
+            moved
+        }
+        Err(_) => on.is_some(),
+    }
+}
+
+/// 멈춘 화면에서 입력 데스크톱이 바뀌었는지 묻는 간격.
+const DESKTOP_CHECK: Duration = Duration::from_millis(250);
 
 pub(super) fn com() {
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
@@ -443,9 +460,16 @@ fn capture_desktop(parts: &Parts, size: (u32, u32), feed: &Feed, p: &mut Progres
     // 새 복제의 첫 장은 그 데스크톱 전체 그림인데 멈춘 화면(UAC 창)이면 마우스 변화만 있는 장(`LastPresentTime` 0)으로
     // 온다. 그것을 버리면 다음 변화가 없어 보는 쪽이 그 화면을 영영 못 본다.
     let mut first = true;
+    let mut checked = Instant::now();
     let turn = loop {
         if feed.stop.load(Ordering::Relaxed) {
             break Turn::Done;
+        }
+        if checked.elapsed() >= DESKTOP_CHECK {
+            checked = Instant::now();
+            if input_desktop_moved(desk) {
+                break Turn::Again;
+            }
         }
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut res: Option<IDXGIResource> = None;

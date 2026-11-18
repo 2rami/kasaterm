@@ -192,196 +192,6 @@ pub(crate) fn link_history(name: &str, link: &state::MachineLink) -> String {
     out
 }
 
-/// 화면공유를 연다 — 응답 못 하는 앱을 먼저 걷어내고.
-///
-/// `open vnc://` 하나로는 모자란다. 화면공유 앱이 이미 떠 있으면 macOS 는 「그 앱
-/// 실행 중」으로 보고 이벤트만 넘기는데, 런루프가 멈춘 앱은 그걸 처리하지 못해
-/// **아무 일도 일어나지 않는다**. 2026-08-30 에 이틀 묵은 창 하나 때문에 미니가
-/// 멀쩡한데도 「연결이 안 된다」였다 — 주소·서비스·로그인 세션 전부 정상이었다.
-///
-/// 소켓으로는 못 가른다. 멈춘 앱도 **옛 연결을 그대로 들고 있어** `lsof` 로는
-/// 붙어 있는 것처럼 보인다(실측). 반대로 연결이 하나도 없는 앱은 `open` 이 알아서
-/// 새로 붙이므로 손댈 필요가 없다(실측). 그래서 프로세스 상태만 본다.
-///
-/// fork 를 여러 번 하므로 호출자는 GUI 스레드 밖에서 부른다.
-fn open_screen_share(host: &str, anchor: Option<(f64, f64, f64, f64)>) {
-    clear_ghost_vnc(host);
-    let hung = hung_screen_share_pids();
-    for pid in &hung {
-        let _ = crate::proc::command("kill").arg(pid).status();
-    }
-    if !hung.is_empty() {
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        // 멈춘 프로세스는 TERM 을 받고도 서 있을 수 있다 — 남아 있으면 KILL 로 올린다.
-        for pid in &hung {
-            if pid_alive(pid) {
-                let _ = crate::proc::command("kill").args(["-9", pid]).status();
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    let _ = crate::proc::command("open")
-        .arg(format!("vnc://{host}"))
-        .spawn();
-    pull_screen_share_into(anchor);
-}
-
-/// 저쪽이 아직 살아 있다고 믿는 **나와의** 5900 연결 중 이쪽에 짝이 없는 것 — 유령.
-/// 하나라도 있으면 저쪽 화면공유 서비스를 되살린다.
-///
-/// 노트북이 잠들거나 자리를 옮기면 「이 연결 끊는다」가 저쪽에 닿지 못한다. 그러면
-/// 저쪽 screensharingd 는 죽은 연결을 살아 있다고 믿고 화면을 계속 밀어넣다 송신 큐가
-/// 막히고(2026-09-09 실측 2.4MB), **그 뒤로 새 연결이 「연결 중…」에서 영영 선다**.
-/// 저쪽 keepalive 는 꺼져 있어(`always_keepalive=0`) 스스로 못 알아채고, 재전송이
-/// 포기하기까지 10분 남짓 걸린다 — 그 사이 화면 보기는 눌러도 헛돈다.
-///
-/// 끊는 것은 root 소켓이라 서비스를 되살리는 수밖에 없다. 그래서 저쪽 sudoers 에
-/// **그 명령 하나만** 암호 없이 받는 줄을 둔다(`/etc/sudoers.d/kasaterm-screenshare`).
-/// 줄이 없거나 ssh 가 안 되면 조용히 접는다 — 열기 자체는 그대로 시도한다.
-fn clear_ghost_vnc(host: &str) {
-    let Some(target) = ssh_target_for_host(host) else { return };
-    // `SSH_CLIENT` 의 첫 칸이 **저쪽이 보는 내 주소**다. 터널을 거치면 루프백이 와서
-    // 내 연결을 못 가려내므로 그때는 판정을 접는다 — 남의 세션을 끊지 않기 위해서다.
-    let probe = "ip=${SSH_CLIENT%% *}; case \"$ip\" in 127.*|::1|\"\") exit 0;; esac; \
-                 netstat -an | awk -v me=\"$ip.\" '$4 ~ /\\.5900$/ && $6 == \"ESTABLISHED\" && index($5, me) == 1 { print $5 }'";
-    let Some(out) = ssh_capture(&target, probe) else { return };
-    let remote: Vec<&str> = out
-        .lines()
-        .filter_map(|l| l.trim().rsplit('.').next())
-        .filter(|p| !p.is_empty())
-        .collect();
-    if remote.is_empty() {
-        return;
-    }
-    let local = local_vnc_ports();
-    if !remote.iter().any(|p| !local.iter().any(|l| l == p)) {
-        return;
-    }
-    let _ = ssh_capture(
-        &target,
-        "sudo -n /bin/launchctl kickstart -k system/com.apple.screensharing",
-    );
-    // 되살아난 서비스가 포트를 다시 물 때까지 잠깐 — 바로 열면 그 틈에 걸린다.
-    std::thread::sleep(std::time::Duration::from_millis(1200));
-}
-
-/// 이 기계가 지금 들고 있는 5900 연결의 **내 쪽 포트**들.
-fn local_vnc_ports() -> Vec<String> {
-    let Ok(out) = crate::proc::command("lsof")
-        .args(["-nP", "-iTCP:5900", "-sTCP:ESTABLISHED"])
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.split_whitespace().find(|f| f.contains("->")))
-        .filter_map(|f| f.split("->").next())
-        .filter_map(|near| near.rsplit(':').next().map(str::to_string))
-        .collect()
-}
-
-/// 명부에서 이 host 의 ssh 대상. 명부에 ssh 가 없으면 host 자체를 쓴다 —
-/// `user@ip` 꼴이면 그대로 붙는다.
-fn ssh_target_for_host(host: &str) -> Option<String> {
-    let listed = kasa_device::machines::snapshot().into_iter().find_map(|m| {
-        (m.get("host").and_then(|v| v.as_str()) == Some(host))
-            .then(|| m.get("ssh").and_then(|v| v.as_str()).map(str::to_string))
-            .flatten()
-    });
-    listed.or_else(|| host.contains('@').then(|| host.to_string()))
-}
-
-fn ssh_capture(target: &str, script: &str) -> Option<String> {
-    let out = crate::proc::command("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            target,
-            script,
-        ])
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// 화면공유 창을 **카사텀이 떠 있는 화면**으로 끌어온다.
-///
-/// macOS 화면공유는 창 자리를 자기가 저장해 복원한다 — 바깥 모니터에서 한 번 쓰면
-/// 그 뒤로 늘 거기서 열린다. 그 모니터를 안 보고 있으면 창은 멀쩡히 열렸는데도
-/// 「눌러도 아무 일이 없다」로 보인다(2026-09-09: 저장된 자리가 바깥 5K 였고, 그것이
-/// 「화면공유가 안 된다」의 절반이었다). anchor 밖에 뜬 창만 옮긴다 — 이미 보이는
-/// 자리에 있으면 건드리지 않는다.
-///
-/// 창은 「연결 중」 작은 창으로 떴다가 화면이 들어오면 커지는데, 그때 자리가 다시
-/// 저장값으로 튄다. 그래서 한 번 보고 마는 대신 잠시 되묻는다.
-fn pull_screen_share_into(anchor: Option<(f64, f64, f64, f64)>) {
-    let Some((ax, ay, aw, ah)) = anchor else { return };
-    let script = format!(
-        r#"set ax to {ax:.0}
-set ay to {ay:.0}
-set aw to {aw:.0}
-set ah to {ah:.0}
-repeat 30 times
-  try
-    tell application "System Events" to tell process "Screen Sharing"
-      repeat with w in windows
-        set nm to name of w
-        if nm is not "모든 연결" and nm is not "All Connections" then
-          set {{wx, wy}} to position of w
-          if wx < ax or wy < ay or wx > (ax + aw) or wy > (ay + ah) then
-            set position of w to {{ax + 60, ay + 60}}
-          end if
-        end if
-      end repeat
-    end tell
-  end try
-  delay 0.5
-end repeat"#
-    );
-    let _ = crate::proc::command("osascript")
-        .args(["-e", &script])
-        .output();
-}
-
-fn pid_alive(pid: &str) -> bool {
-    crate::proc::command("kill")
-        .args(["-0", pid])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// 응답 못 하는 화면공유 앱의 PID 들. 멀쩡하면 빈 벡터 — 걷어내는 건 창을 잃는
-/// 조작이라 확실할 때만 한다.
-///
-/// `T`(멈춤)·`U`(인터럽트 불가 대기)만 잡는다. 이 둘은 런루프가 돌 수 없는 상태다.
-/// 그 밖의 형태로 굳은 앱은 `ps` 에 `S` 로 보여 여기서 못 거른다 — 그건 사람이 앱을
-/// 끄는 수밖에 없다.
-fn hung_screen_share_pids() -> Vec<String> {
-    let Ok(out) = crate::proc::command("ps")
-        .args(["-Ao", "pid=,stat=,command="])
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| l.contains("Screen Sharing.app"))
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let pid = it.next()?;
-            let stat = it.next()?;
-            let hung = stat.starts_with('T') || stat.starts_with('U');
-            hung.then(|| pid.to_string())
-        })
-        .collect()
-}
-
 /// `#RRGGBB` → RGBA. 원격 창구가 주는 학생색(header_color)과 같은 표기만 받는다.
 /// 원격 거울 pane 의 **저쪽 사실** — (기계 라벨, 폴링 캐시의 그 pane 행). 이름·제목·
 /// 상태가 로컬엔 없어(프로세스가 저쪽에서 돈다) 여기서 온다. 링크가 없거나 캐시에
@@ -658,16 +468,11 @@ impl App {
         locals.sort_by_key(|(w, _)| *w);
         let locals: Vec<state::MachinesColRow> = locals.into_iter().map(|(_, r)| r).collect();
 
-        // 기계 섹션 — 폴링 캐시 스냅샷을 그대로 편다. host(화면공유 주소)는
-        // 캐시에 없어 명부에서 라벨로 찾는다 — 한 번만 읽어 루프에 물린다.
-        let registry = kasa_device::machines::machines();
+        // 기계 섹션 — 폴링 캐시 스냅샷을 그대로 편다.
         let mut machines: Vec<state::MachinesColMachine> = kasa_device::machines::snapshot_shared()
             .iter()
             .filter_map(|m| {
                 let label = m.get("label")?.as_str()?.to_string();
-                let reg = registry.iter().find(|r| r.label == label);
-                let host = reg.map(|r| r.host.clone()).unwrap_or_default();
-                let kvm = reg.and_then(|r| r.kvm.clone());
                 let (mirror_ids, mirror_rows) = mirrored.remove(&label).unwrap_or_default();
                 // 같은 원본 pane 을 비추는 거울이 둘이면(보기 창 둘·재시작 뒤 번호 재사용) 한 줄만
                 // 세운다 — 둘 다 세우면 카드가 같은 사람을 탭으로 접는다. 원본을 아는 쪽이 대표.
@@ -772,8 +577,6 @@ impl App {
                     online: m.get("online").and_then(|v| v.as_bool()).unwrap_or(false),
                     ago_secs: m.get("ago_secs").and_then(|v| v.as_u64()),
                     outdated: m.get("sync_capable").and_then(|v| v.as_bool()) == Some(false),
-                    host,
-                    kvm,
                     mirrored: mirror_rows,
                     remote,
                     closed,
@@ -853,29 +656,6 @@ impl App {
             self.open_screen_mirror(label);
             return true;
         }
-        if let state::MachinesColBtn::Screen { host, kvm } = &btn {
-            // 「화면 보기」는 화면공유다(2026-09-07 지시 — 2026-09-01 의 KVM 우선을
-            // 뒤집었다: 평소 보는 것은 그 기계의 OS 화면이라서). KVM 은 host 가 없을
-            // 때, 또는 메뉴의 「KVM 보기」(host 빈값으로 온다)로만 연다 — OS 밖 물리
-            // 콘솔이라 로그인 전·부팅 화면·OS 죽음까지 보이는 문은 따로 둔다.
-            if host.is_empty() {
-                if let Some(url) = kvm {
-                    self.set_toast("KVM 화면 여는 중".to_string());
-                    let _ = crate::proc::command("open").arg(url).spawn();
-                }
-                return true;
-            }
-            // 화면공유는 OS 에 맡긴다 — macOS 화면공유 앱이 vnc:// 를 연다.
-            // 이사와 달리 즉시 끝나는 조작이라 busy 대열에 안 세운다. 다만 굳은
-            // 앱을 먼저 걷어내야 해서(open_screen_share) fork 가 몇 번 돌고,
-            // 기다릴 결과가 없으니 스레드로 뺀다 — 이 자리에서 기다리면 그
-            // 프레임이 통째로 멈춘다.
-            self.set_toast(format!("화면공유 여는 중 — {host}"));
-            let host = host.clone();
-            let anchor = self.visible_monitor_rect();
-            std::thread::spawn(move || open_screen_share(&host, anchor));
-            return true;
-        }
         if self.info.machines_col.busy.is_some() {
             return true; // 한 번에 하나 — 이사 중 클릭은 삼킨다.
         }
@@ -940,8 +720,7 @@ impl App {
                 (pane.clone(), format!("{label}(으)로 보내는 중…"))
             }
             state::MachinesColBtn::Bring { pane } => (pane.clone(), "데려오는 중…".to_string()),
-            state::MachinesColBtn::Screen { .. }
-            | state::MachinesColBtn::ScreenMirror { .. }
+            state::MachinesColBtn::ScreenMirror { .. }
             | state::MachinesColBtn::Unfold { .. }
             | state::MachinesColBtn::Mirror { .. }
             | state::MachinesColBtn::Fetch { .. } => {
@@ -954,8 +733,7 @@ impl App {
         self.chrome_dirty = true;
         self.render_frame();
         let outcome = match btn {
-            state::MachinesColBtn::Screen { .. }
-            | state::MachinesColBtn::ScreenMirror { .. }
+            state::MachinesColBtn::ScreenMirror { .. }
             | state::MachinesColBtn::Unfold { .. }
             | state::MachinesColBtn::Mirror { .. }
             | state::MachinesColBtn::Fetch { .. } => {
