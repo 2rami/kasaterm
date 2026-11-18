@@ -85,6 +85,12 @@ impl Session for HostSession {
             c.show_cursor(!hidden);
         }
     }
+
+    fn set_bitrate(&self, bps: u32) {
+        if let Some(e) = self.shared.encoder.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            e.set_bitrate(i64::from(bps));
+        }
+    }
 }
 
 impl Drop for HostSession {
@@ -139,6 +145,7 @@ impl Capture for Host {
             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             f64::from(config.scale),
             (config.max_w, config.max_h),
+            config.display,
             move |f| {
                 if sink.scroll_mode {
                     *sink.base.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pixels(f.pixels));
@@ -177,7 +184,8 @@ impl Capture for Host {
             Denied::Unavailable
         })?;
         let info = json!({
-            "os": "macos", "width": width, "height": height, "codec": config.codec, "fps": config.fps,
+            "os": "macos", "display": cap.display, "displays": super::displays_json(),
+            "width": width, "height": height, "codec": config.codec, "fps": config.fps,
             "bitrate": config.bitrate, "refine": config.refine, "rejected": encoder.rejected,
         });
         *shared.encoder.lock().unwrap_or_else(|e| e.into_inner()) = Some(encoder);

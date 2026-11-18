@@ -390,6 +390,20 @@ UAC 확인 창·잠금 화면은 Windows 가 보안 데스크톱(Winlogon)에 �
   일부(`Layout.uv`)를 칸에 펴는 `queue_image_region` 이고, 누름 자리 셈(`view.rs at`)이 같은 범위를 쓴다(`mod.rs zoomed`).
   리그 `KASATERM_TEST_SCREEN_ZOOM=<배율>` 이 첫 장 뒤 확대해 그 범위를 로그에 적는다 — 같은 맥 리그 둘에서 2.5배로 칸을 채우고
   51–55fps·복사 없음 그대로였다.
+- **화면 고르기**(2026-11-18): 보내는 쪽 압축 정보에 `displays`(번호·크기·주 화면)와 지금 `display` 를 싣는다 — 맥은 CG 화면
+  번호, Windows 는 모니터 차례(EnumDisplayMonitors, 조작과 같은 번호). 둘 이상이면 HUD 에 「화면 2/3」 알약이 서고 누르면 다음
+  화면으로 연결을 다시 연다(`Config.display`, 칸마다 `App.screen_display`). Windows 는 그 모니터가 붙은 어댑터의 DXGI 출력을
+  골라 화면마다 복제 하나를 나눠 쓰고(`Desktop::shared(display)`), 도우미도 같은 번호로 뜬다. 맥에 화면이 하나뿐이라 리그로는
+  알약이 안 서는 것(`displays=None`)까지만 봤다.
+- **자동 압축률**(2026-11-18): 보내는 쪽 장 줄에 3장 넘게 쌓이면 압축률을 30% 내리고(바닥 2Mbps, 내린 값이 닿도록 0.7초
+  뒤에 다시 판정), 3초 조용하면 15%씩 처음 값까지 올린다(`screen_stream.rs Rate` → `Session::set_bitrate`: 맥 VT
+  `AverageBitRate`, Windows MF `MeanBitRate`, 도우미는 제어 연결 `R`). 망이 좁을 때 장을 버리고 키프레임부터 다시 하는 일
+  (`BACKLOG_MAX`)이 드물어진다.
+- **주사율은 60 그대로**(2026-11-18 실측): 보는 맥의 프로모션 주사율대로 120 을 청해 보니 같은 맥 리그(3024×1964, 부하 평균
+  20–33)에서 60 은 61fps·23–25ms, 120 은 66fps·81–82ms 였다 — 보내는 쪽이 원래 해상도 120장을 못 눌러 줄이 쌓였다. 그래서
+  자동으로 올리지 않는다. 올리려면 해상도를 같이 낮추는 길이 먼저다.
+- **클립보드**: 따로 화면 칸 길을 만들지 않았다 — 카사텀끼리 이미 글 클립보드를 나눈다(`clipboard.rs share` →
+  `clipboard_set_from_peer`). 화면 칸에서 그 기기에 Ctrl+C 하면 이 기기 클립보드에도 담기고 「<기기>에서 복사됨」 토스트가 뜬다.
 - **키 메뉴·⌘→Ctrl**(2026-11-18): 그 기기 OS 는 압축 정보 `os`(옛 판은 Windows 도우미 표시 `agent`)로 안다. 맥에서 Windows 를
   볼 때 손가락 ⌘ 를 Ctrl 로 바꿔 보낸다(`view.rs remote_mods`) — 그대로면 ⌘C 가 Win+C 로 들어갔다. 이 기기 키보드로 못 보내는 키는
   조작 중 「키」 메뉴로 보낸다(`special_keys`). Ctrl+Alt+Del 은 넣은 키로는 SAS 가 안 가서 Windows 쪽이 `SendSAS` 를 부른다 —

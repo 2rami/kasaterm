@@ -308,7 +308,10 @@ fn frame_round_trips_and_refuses_truncation() {
 #[test]
 fn viewer_config_is_clamped_on_the_sending_side() {
     let c = Config::from_json(&json!({ "codec": "vp9", "bitrate": 1u64 << 40, "fps": 0, "scale": 4.0, "refine": 100000, "max_w": 3, "max_h": 1u64 << 40 }));
-    assert_eq!(c, Config { codec: "hevc".into(), bitrate: 200_000_000, fps: 1, scale: 1.0, refine: 240, max_w: 160, max_h: 16384 });
+    assert_eq!(c, Config { codec: "hevc".into(), bitrate: 200_000_000, fps: 1, scale: 1.0, refine: 240, max_w: 160, max_h: 16384, display: None });
+    let second = Config { display: Some(2), ..Config::default() };
+    assert_eq!(Config::from_json(&second.to_json()), second, "고른 화면이 건너간다");
+    assert_eq!(Config::from_json(&json!({ "display": -1 })).display, None);
     let fit = Config { max_w: 2560, max_h: 1440, ..Config::default() };
     assert_eq!(Config::from_json(&fit.to_json()), fit, "보는 쪽 모니터 크기는 그대로 건너간다");
     assert_eq!(Config::from_json(&Value::Null), Config::default());
@@ -396,4 +399,33 @@ mod ws {
         assert_eq!(serde_json::from_str::<Value>(&t).unwrap(), json!({ "t": "denied", "reason": "permission" }));
         assert_eq!(counts.prompts.load(Ordering::Relaxed), 1);
     }
+}
+
+#[test]
+fn rate_drops_when_frames_pile_up_and_climbs_back_when_calm() {
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let mut r = Rate::new(30_000_000);
+    assert_eq!(r.observe(0, t0), None, "처음엔 그대로");
+    assert_eq!(r.observe(4, t0 + Duration::from_secs(1)), Some(21_000_000), "쌓이면 30% 내린다");
+    assert_eq!(r.observe(5, t0 + Duration::from_millis(1200)), None, "내린 값이 닿을 때까지 한 번 더 내리지 않는다");
+    assert_eq!(r.observe(5, t0 + Duration::from_millis(1800)), Some(14_700_000));
+    assert_eq!(r.observe(0, t0 + Duration::from_secs(3)), None, "조용해도 3초는 기다린다");
+    assert_eq!(r.observe(0, t0 + Duration::from_secs(5)), Some(16_905_000), "조용하면 15%씩 올린다");
+    let mut low = Rate::new(30_000_000);
+    let mut at = t0;
+    for _ in 0..40 {
+        at += Duration::from_secs(1);
+        low.observe(8, at);
+    }
+    assert_eq!(low.observe(8, at + Duration::from_secs(1)), None, "바닥(2Mbps) 아래로는 안 내린다");
+    let mut back = Rate::new(4_000_000);
+    back.observe(9, t0 + Duration::from_secs(1));
+    let mut up = 0;
+    for i in 0..40 {
+        if let Some(b) = back.observe(0, t0 + Duration::from_secs(5 + i * 4)) {
+            up = b;
+        }
+    }
+    assert_eq!(up, 4_000_000, "처음 값까지만 올린다");
 }

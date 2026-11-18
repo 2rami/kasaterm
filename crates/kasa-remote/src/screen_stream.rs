@@ -58,12 +58,14 @@ pub struct Config {
     /// Windows 복제는 원래 크기 그대로 보낸다.
     pub max_w: u32,
     pub max_h: u32,
+    /// 볼 화면 — 그 기기가 압축 정보 `displays` 로 알린 번호(맥은 CG 화면 번호, Windows 는 모니터 차례). 없으면 주 화면.
+    pub display: Option<u32>,
 }
 
 impl Default for Config {
     /// S0 실측으로 정한 기본값 — HEVC 30Mbps 60fps 원래 해상도, 멈추면 30장(0.5초) 다듬기.
     fn default() -> Self {
-        Self { codec: "hevc".into(), bitrate: 30_000_000, fps: 60, scale: 1.0, refine: 30, max_w: 0, max_h: 0 }
+        Self { codec: "hevc".into(), bitrate: 30_000_000, fps: 60, scale: 1.0, refine: 30, max_w: 0, max_h: 0, display: None }
     }
 }
 
@@ -71,7 +73,7 @@ impl Config {
     pub fn to_json(&self) -> Value {
         json!({
             "codec": self.codec, "bitrate": self.bitrate, "fps": self.fps, "scale": self.scale, "refine": self.refine,
-            "max_w": self.max_w, "max_h": self.max_h,
+            "max_w": self.max_w, "max_h": self.max_h, "display": self.display,
         })
     }
 
@@ -89,6 +91,7 @@ impl Config {
             refine: v.get("refine").and_then(Value::as_u64).map_or(d.refine, |r| r.min(240) as u32),
             max_w: v.get("max_w").and_then(Value::as_u64).map_or(0, |w| if w == 0 { 0 } else { w.clamp(160, 16384) as u32 }),
             max_h: v.get("max_h").and_then(Value::as_u64).map_or(0, |h| if h == 0 { 0 } else { h.clamp(120, 16384) as u32 }),
+            display: v.get("display").and_then(Value::as_u64).and_then(|d| u32::try_from(d).ok()),
         }
     }
 }
@@ -198,6 +201,8 @@ pub trait Session: Send {
     fn info(&self) -> Value;
     /// 커서를 장에서 뺀다(보는 쪽이 조작 중). 커서를 따로 안 뜨는 판(Windows 복제)은 할 일이 없다.
     fn set_cursor_hidden(&self, _hidden: bool) {}
+    /// 압축률을 바꾼다(bps) — 길이 막히면 내리고 풀리면 올린다(`Rate`). 못 바꾸는 판은 그대로 둔다.
+    fn set_bitrate(&self, _bps: u32) {}
 }
 
 static CAPTURE: OnceLock<Arc<dyn Capture>> = OnceLock::new();
@@ -303,7 +308,7 @@ async fn serve_with(
     write_msg(send, ctl::INFO, session.info().to_string().as_bytes()).await?;
     let display = session.display();
     let session: Arc<Mutex<Box<dyn Session>>> = Arc::new(Mutex::new(session));
-    let sender = tokio::spawn(send_frames(conn.clone(), rx, session.clone()));
+    let sender = tokio::spawn(send_frames(conn.clone(), rx, session.clone(), config.bitrate));
     let mut input = Inputs::default();
     let result = loop {
         let (kind, body) = match read_msg(recv).await {
@@ -487,10 +492,15 @@ pub(crate) async fn serve_ws_with(socket: axum::extract::ws::WebSocket, capture:
 
 /// 장마다 단방향 스트림. 보내지 못한 장이 쌓이면 다 버리고 키프레임부터 다시 — 압축은 앞 장을 참조해 장을 골라
 /// 버릴 수 없다.
-async fn send_frames(conn: Connection, mut rx: mpsc::UnboundedReceiver<Frame>, session: Arc<Mutex<Box<dyn Session>>>) {
+async fn send_frames(conn: Connection, mut rx: mpsc::UnboundedReceiver<Frame>, session: Arc<Mutex<Box<dyn Session>>>, bitrate: u32) {
     let mut waiting_key = false;
+    let mut rate = Rate::new(bitrate);
     while let Some(frame) = rx.recv().await {
-        if rx.len() >= BACKLOG_MAX {
+        let queued = rx.len();
+        if let Some(bps) = rate.observe(queued, Instant::now()) {
+            session.lock().unwrap_or_else(|e| e.into_inner()).set_bitrate(bps);
+        }
+        if queued >= BACKLOG_MAX {
             while rx.try_recv().is_ok() {}
             session.lock().unwrap_or_else(|e| e.into_inner()).keyframe();
             waiting_key = true;
@@ -506,6 +516,48 @@ async fn send_frames(conn: Connection, mut rx: mpsc::UnboundedReceiver<Frame>, s
             return;
         }
         let _ = s.finish();
+    }
+}
+
+/// 자동 압축률 — 보내지 못한 장이 쌓이면(길이 압축률보다 좁다) 30% 내리고, 3초 조용하면 15%씩 처음 값까지 올린다.
+/// 망이 나빠도 장을 버리고 키프레임부터 다시 하는 일(`BACKLOG_MAX`)이 드물어진다 — Parsec 의 자동 비트레이트처럼.
+pub(crate) struct Rate {
+    max: u32,
+    now: u32,
+    last_change: Instant,
+}
+
+impl Rate {
+    /// 쌓였다고 볼 줄 길이 — 한두 장은 큰 키프레임 하나로도 잠깐 선다.
+    const CROWDED: usize = 3;
+    const FLOOR: u32 = 2_000_000;
+    const DOWN: f64 = 0.7;
+    const UP: f64 = 1.15;
+    /// 내린 뒤 다음 판정까지 — 내린 압축률이 실제 장에 닿을 시간.
+    const SETTLE: Duration = Duration::from_millis(700);
+    const CALM: Duration = Duration::from_secs(3);
+
+    pub(crate) fn new(max: u32) -> Self {
+        Self { max, now: max, last_change: Instant::now() }
+    }
+
+    /// 장 하나를 꺼낼 때 — 줄에 남은 장 수를 보고 바꿀 압축률을 돌려준다.
+    pub(crate) fn observe(&mut self, queued: usize, at: Instant) -> Option<u32> {
+        let since = at.saturating_duration_since(self.last_change);
+        let next = if queued >= Self::CROWDED && since >= Self::SETTLE {
+            ((f64::from(self.now) * Self::DOWN).round() as u32).max(Self::FLOOR.min(self.max))
+        } else if queued == 0 && since >= Self::CALM && self.now < self.max {
+            ((f64::from(self.now) * Self::UP).round() as u32).min(self.max)
+        } else {
+            return None;
+        };
+        if queued > 0 || next != self.now {
+            self.last_change = at;
+        }
+        (next != self.now).then(|| {
+            self.now = next;
+            next
+        })
     }
 }
 

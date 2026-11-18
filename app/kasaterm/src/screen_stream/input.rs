@@ -67,12 +67,22 @@ impl App {
                     self.screen_views
                         .iter()
                         .find(|(_, v)| {
-                            v.surface == on && (v.on_toggle(p) || v.on_zoom_chip(p) || v.on_key_button(p) || (v.control && v.on_image(p)))
+                            v.surface == on
+                                && (v.on_toggle(p) || v.on_zoom_chip(p) || v.on_key_button(p) || v.on_display_chip(p) || (v.control && v.on_image(p)))
                         })
                         .map(|(id, _)| *id)
                 });
                 let Some(id) = target else { return false };
                 let Some(view) = self.screen_views.get_mut(&id) else { return false };
+                if held.is_none() && view.on_display_chip(p) {
+                    // 다른 화면은 그 기기에서 새 복제·압축이라 연결을 닫고 그 화면으로 다시 붙는다(`sync_screen_views`).
+                    if let Some((_, _, next)) = view.display_cycle().filter(|_| pressed && bit == 1) {
+                        self.screen_display.insert(id, next);
+                        self.screen_views.remove(&id);
+                        self.chrome_dirty = true;
+                    }
+                    return true;
+                }
                 if held.is_none() && view.on_zoom_chip(p) {
                     if pressed && bit == 1 {
                         view.zoom_reset();

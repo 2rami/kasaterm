@@ -7083,7 +7083,7 @@ impl App {
         *logged = Some(Instant::now());
         for view in self.screen_views.values() {
             eprintln!(
-                "[screen-view-test] {} surface={:?} frame={} hud={} upload={:.2}ms zero_copy={} uploads={} control={} toggle={:?} image={:?} status={}",
+                "[screen-view-test] {} surface={:?} frame={} hud={} upload={:.2}ms zero_copy={} uploads={} control={} toggle={:?} image={:?} displays={:?} status={}",
                 view.label,
                 view.surface,
                 view.has_frame(),
@@ -7094,6 +7094,7 @@ impl App {
                 view.control,
                 view.layout.map(|l| l.toggle),
                 view.layout.map(|l| (l.image, l.uv)),
+                view.display_cycle(),
                 view.status()
             );
         }

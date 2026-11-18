@@ -239,6 +239,12 @@ impl Session for AgentSession {
     fn info(&self) -> Value {
         self.info.clone()
     }
+
+    fn set_bitrate(&self, bps: u32) {
+        let mut body = self.id.to_le_bytes().to_vec();
+        body.extend_from_slice(&bps.to_le_bytes());
+        control(b'R', &body);
+    }
 }
 
 impl Drop for AgentSession {
@@ -416,6 +422,13 @@ fn serve(mut pipe: File, sessions: &Sessions, input_tx: &mpsc::Sender<(u32, Inpu
                             let _ = input_tx.send(x);
                         }
                     }
+                    b'R' if body.len() == 12 => {
+                        let id = u64::from_le_bytes(body[..8].try_into().unwrap_or([0; 8]));
+                        let bps = u32::from_le_bytes(body[8..].try_into().unwrap_or([0; 4]));
+                        if let Some(s) = sessions.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+                            s.set_bitrate(bps);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -431,7 +444,7 @@ fn serve_frames(mut pipe: File, body: &[u8], sessions: &Sessions) {
     let out: Box<dyn Fn(Frame) + Send + Sync> = Box::new(move |f| {
         let _ = tx.send(f);
     });
-    let session = match super::win::start_local(&config, out, 0) {
+    let session = match super::win::start_local(&config, out, super::win::chosen_display(config.display)) {
         Ok(s) => s,
         Err(d) => {
             let reason: &[u8] = if d == Denied::Permission { b"permission" } else { b"unavailable" };

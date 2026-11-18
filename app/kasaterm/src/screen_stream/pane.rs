@@ -93,15 +93,17 @@ pub(crate) fn paint(
         if !view.control {
             view.key_menu = None;
         }
-        let left_of = key_button.unwrap_or(toggle).0;
-        let zoom_chip = (view.zoom > 1.001).then(|| {
-            let text = format!("{:.0}%", view.zoom * 100.0);
-            let cw = g.measure_chrome_text(&text, HUD_FONT, false) + HUD_PAD * 2.0;
-            let chip = (left_of - HUD_PAD - cw, y + HUD_PAD, cw, box_h);
-            g.round_rect_fill(chip.0, chip.1, chip.2, chip.3, 4.0, dim);
-            g.draw_text(chip.0 + HUD_PAD, chip.1 + HUD_PAD * 0.75, &text, opts(HUD_FONT, white));
-            chip
-        });
+        let mut left_of = key_button.unwrap_or(toggle).0;
+        let mut chip = |g: &mut gpu::GpuRenderer, text: &str| {
+            let cw = g.measure_chrome_text(text, HUD_FONT, false) + HUD_PAD * 2.0;
+            let r = (left_of - HUD_PAD - cw, y + HUD_PAD, cw, box_h);
+            g.round_rect_fill(r.0, r.1, r.2, r.3, 4.0, dim);
+            g.draw_text(r.0 + HUD_PAD, r.1 + HUD_PAD * 0.75, text, opts(HUD_FONT, white));
+            left_of = r.0;
+            r
+        };
+        let display_chip = view.display_cycle().map(|(at, n, _)| chip(g, &format!("화면 {at}/{n}")));
+        let zoom_chip = (view.zoom > 1.001).then(|| chip(g, &format!("{:.0}%", view.zoom * 100.0)));
         g.round_rect_fill(toggle.0, toggle.1, toggle.2, toggle.3, 4.0, if view.control { theme::accent() } else { dim });
         g.draw_text(toggle.0 + HUD_PAD, toggle.1 + HUD_PAD * 0.75, label, opts(HUD_FONT, white));
         g.round_rect_fill(hud_box.0, hud_box.1, hud_box.2, hud_box.3, 4.0, dim);
@@ -137,7 +139,7 @@ pub(crate) fn paint(
             }
             view.key_menu = Some(rows);
         }
-        view.layout = Some(Layout { image, uv, slot, frame, toggle, zoom_chip, key_button });
+        view.layout = Some(Layout { image, uv, slot, frame, toggle, zoom_chip, key_button, display_chip });
     }
 }
 
@@ -170,7 +172,7 @@ impl App {
         };
         let proxy = self.proxy.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || drop(proxy.send_event(UserEvent::Redraw)));
-        let Some(view) = ScreenView::open(label, base, self.screen_fit(), wake) else {
+        let Some(view) = ScreenView::open(label, base, self.screen_fit(), None, wake) else {
             return false;
         };
         let view_id = self.screen_view_seq;
@@ -226,6 +228,7 @@ impl App {
             .collect();
         // 꺼낸 화면 창은 늘 보인다.
         live.extend(self.screen_windows.iter().map(|w| (w.view_id, w.label.clone(), true)));
+        self.screen_display.retain(|id, _| live.iter().any(|(v, ..)| v == id));
         let now = std::time::Instant::now();
         let mut retry: Vec<(u64, String)> = Vec::new();
         let gone: Vec<u64> = self
@@ -263,7 +266,8 @@ impl App {
             let Some(machine) = kasa_device::machines::find(&label) else { continue };
             let proxy = self.proxy.clone();
             let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || drop(proxy.send_event(UserEvent::Redraw)));
-            if let Some(view) = ScreenView::open(&label, &machine.base, self.screen_fit(), wake) {
+            let display = self.screen_display.get(&view_id).copied();
+            if let Some(view) = ScreenView::open(&label, &machine.base, self.screen_fit(), display, wake) {
                 if let Some((_, previous)) = retry.iter().find(|(v, _)| *v == view_id) {
                     view.carry_status(previous);
                 }

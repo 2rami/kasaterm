@@ -132,6 +132,11 @@ impl Encoder {
         Ok(Self { session, ctx, rejected })
     }
 
+    /// 압축률을 바꾼다 — 저지연 율 제어는 다음 장부터 따른다.
+    pub fn set_bitrate(&self, bps: i64) {
+        unsafe { VTSessionSetProperty(&self.session, kVTCompressionPropertyKey_AverageBitRate, Some(&CFNumber::new_i64(bps))) };
+    }
+
     /// `pts` 는 보낼 때마다 늘어야 한다 — 같은 그림을 다시 보낼 때도 새 시각을 준다.
     pub fn encode(&self, pixels: &CVPixelBuffer, meta: FrameMeta, force_key: bool, pts: f64) {
         let pts = unsafe { CMTime::with_seconds(pts, 1_000_000) };

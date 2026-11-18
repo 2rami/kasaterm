@@ -19,7 +19,8 @@ use kasa_remote::screen_mirror::{Denied, Input};
 use kasa_remote::screen_stream::{Capture, Config, Frame, Session};
 use serde_json::{json, Value};
 use windows::core::{Interface, GUID};
-use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE};
+use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, LPARAM, RECT};
+use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
@@ -116,11 +117,62 @@ struct SendCom<T>(T);
 unsafe impl<T> Send for SendCom<T> {}
 unsafe impl<T> Sync for SendCom<T> {}
 
-/// 주 화면이 붙은 어댑터의 장치와 그 화면(복제는 뜨기 스레드가 그 스레드의 데스크톱에서 연다).
-fn open_output() -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext, IDXGIOutput1, u32, u32)> {
+/// 모니터 — (손잡이, 데스크톱 좌표, 주 화면인가). 화면 거울·조작(`screen_input`)과 같은 차례(EnumDisplayMonitors)라
+/// 그 차례가 곧 화면 번호다.
+fn monitors() -> Vec<(HMONITOR, RECT, bool)> {
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> windows::core::BOOL {
+        let list = unsafe { &mut *(data.0 as *mut Vec<(HMONITOR, RECT, bool)>) };
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if unsafe { GetMonitorInfoW(m, &mut info) }.as_bool() {
+            // MONITORINFOF_PRIMARY
+            list.push((m, info.rcMonitor, info.dwFlags & 1 != 0));
+        }
+        true.into()
+    }
+    let mut list: Vec<(HMONITOR, RECT, bool)> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut list as *mut _ as isize));
+    }
+    list
+}
+
+/// 고른 화면 번호 — 없거나 지금 없는 번호면 주 화면.
+pub(super) fn chosen_display(want: Option<u32>) -> u32 {
+    let list = monitors();
+    want.filter(|d| (*d as usize) < list.len()).unwrap_or_else(|| list.iter().position(|m| m.2).unwrap_or(0) as u32)
+}
+
+/// 압축 정보 `displays` — 보는 쪽이 화면 고르기를 세운다.
+fn displays_json() -> Value {
+    Value::Array(
+        monitors()
+            .iter()
+            .enumerate()
+            .map(|(i, (_, r, main))| json!({ "id": i, "width": r.right - r.left, "height": r.bottom - r.top, "main": main }))
+            .collect(),
+    )
+}
+
+/// 그 화면이 붙은 어댑터의 장치와 그 화면(복제는 뜨기 스레드가 그 스레드의 데스크톱에서 연다). 못 찾으면 첫 어댑터의 첫
+/// 화면 — 예전 길.
+fn open_output(display: u32) -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext, IDXGIOutput1, u32, u32)> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
-    let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapters1(0)? };
-    let output: IDXGIOutput1 = unsafe { adapter.EnumOutputs(0)? }.cast()?;
+    let target = monitors().get(display as usize).map(|m| m.0);
+    let mut chosen: Option<(IDXGIAdapter1, IDXGIOutput1)> = None;
+    'adapters: for a in 0.. {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(a) }) else { break };
+        for o in 0.. {
+            let Ok(out) = (unsafe { adapter.EnumOutputs(o) }) else { break };
+            let hit = target.is_some_and(|t| unsafe { out.GetDesc() }.is_ok_and(|d| d.Monitor == t));
+            if hit || chosen.is_none() {
+                chosen = Some((adapter.clone(), out.cast()?));
+            }
+            if hit {
+                break 'adapters;
+            }
+        }
+    }
+    let (adapter, output) = chosen.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
     let (mut device, mut context) = (None, None);
     unsafe {
         D3D11CreateDevice(
@@ -268,6 +320,11 @@ impl Encoder {
     }
 
     /// 다 된 장 하나(Annex-B 바이트와 시각).
+    /// 압축률을 바꾼다 — 저지연 VBR 은 흐르는 중에 바꾼 평균값을 따른다. 못 받는 인코더면 그대로 둔다.
+    fn set_bitrate(&self, bps: u32) {
+        let _ = unsafe { self.codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bps)) };
+    }
+
     fn take(&self) -> Option<(Vec<u8>, i64)> {
         unsafe {
             let mut out = [MFT_OUTPUT_DATA_BUFFER {
@@ -307,6 +364,8 @@ enum Msg {
     HaveOutput,
     Frame(SendCom<ID3D11Texture2D>, f64, u64),
     Keyframe,
+    /// 압축률(bps) — 길이 막혀 내리거나 풀려 올린다.
+    Bitrate(u32),
     Stop,
 }
 
@@ -338,19 +397,21 @@ struct Sub {
 }
 
 impl Desktop {
-    fn shared() -> windows::core::Result<Arc<Desktop>> {
-        static CURRENT: OnceLock<Mutex<Weak<Desktop>>> = OnceLock::new();
-        let mut current = CURRENT.get_or_init(|| Mutex::new(Weak::new())).lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(d) = current.upgrade().filter(|d| !d.feed.dead.load(Ordering::Acquire)) {
+    /// 화면마다 복제 하나를 보기들이 나눠 쓴다.
+    fn shared(display: u32) -> windows::core::Result<Arc<Desktop>> {
+        static CURRENT: OnceLock<Mutex<std::collections::HashMap<u32, Weak<Desktop>>>> = OnceLock::new();
+        let mut current = CURRENT.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(d) = current.get(&display).and_then(Weak::upgrade).filter(|d| !d.feed.dead.load(Ordering::Acquire)) {
             return Ok(d);
         }
-        let d = Arc::new(Self::open()?);
-        *current = Arc::downgrade(&d);
+        let d = Arc::new(Self::open(display)?);
+        current.retain(|_, w| w.strong_count() > 0);
+        current.insert(display, Arc::downgrade(&d));
         Ok(d)
     }
 
-    fn open() -> windows::core::Result<Self> {
-        let (device, context, output, w, h) = open_output()?;
+    fn open(display: u32) -> windows::core::Result<Self> {
+        let (device, context, output, w, h) = open_output(display)?;
         let ring: Vec<ID3D11Texture2D> = (0..RING).map(|_| texture(&device, w, h)).collect::<windows::core::Result<_>>()?;
         let feed = Arc::new(Feed { stop: AtomicBool::new(false), dead: AtomicBool::new(false), subs: Mutex::new(Vec::new()) });
         let cap: Parts = SendCom((output, device.clone(), context, ring));
@@ -550,6 +611,10 @@ impl Session for WinSession {
     fn display(&self) -> u32 {
         self.display
     }
+
+    fn set_bitrate(&self, bps: u32) {
+        let _ = self.tx.lock().unwrap_or_else(|e| e.into_inner()).send(Msg::Bitrate(bps));
+    }
 }
 
 impl Drop for WinSession {
@@ -565,16 +630,9 @@ impl Drop for WinSession {
     }
 }
 
-/// 조작은 화면 거울과 같은 화면 번호(EnumDisplayMonitors 차례)로 넣는다. DXGI 첫 출력이 주 화면이다.
-fn main_display() -> u32 {
-    kasa_remote::screen_mirror::installed()
-        .and_then(|s| s.displays().into_iter().find(|d| d.main).map(|d| d.id))
-        .unwrap_or(0)
-}
-
 impl Capture for Host {
     fn start(&self, config: &Config, out: Box<dyn Fn(Frame) + Send + Sync>) -> Result<Box<dyn Session>, Denied> {
-        let display = main_display();
+        let display = chosen_display(config.display);
         match super::win_agent::connect() {
             Some(pipe) => super::win_agent::start(pipe, config, out, display),
             None => start_local(config, out, display),
@@ -604,7 +662,7 @@ pub(super) fn start_local(config: &Config, out: Box<dyn Fn(Frame) + Send + Sync>
         eprintln!("[screen-stream] Media Foundation 을 못 연다: {e}");
         Denied::Unavailable
     })?;
-    let desktop = Desktop::shared().map_err(|e| {
+    let desktop = Desktop::shared(display).map_err(|e| {
         eprintln!("[screen-stream] 화면 복제를 못 연다: {e}");
         Denied::Unavailable
     })?;
@@ -625,7 +683,7 @@ pub(super) fn start_local(config: &Config, out: Box<dyn Fn(Frame) + Send + Sync>
         Err(e) => return Err(unavailable(e)),
     };
     let info = json!({
-        "os": "windows", "width": w, "height": h, "codec": if kind == Nal::Hevc { "hevc" } else { "h264" }, "fps": fps,
+        "os": "windows", "display": display, "displays": displays_json(), "width": w, "height": h, "codec": if kind == Nal::Hevc { "hevc" } else { "h264" }, "fps": fps,
         "bitrate": config.bitrate, "refine": config.refine, "rejected": encoder.rejected,
     });
     let (tx, rx) = mpsc::channel::<Msg>();
@@ -668,6 +726,7 @@ pub(super) fn start_local(config: &Config, out: Box<dyn Fn(Frame) + Send + Sync>
                     Msg::NeedInput => need += 1,
                     Msg::Frame(tex, t, cap) => pending = Some((tex, t, cap)),
                     Msg::Keyframe => force = true,
+                    Msg::Bitrate(bps) => enc.set_bitrate(bps),
                     Msg::HaveOutput => {
                         if let Some((bytes, time)) = enc.take() {
                             let (t_cap, cap_id) = meta.remove(&time).unwrap_or((now(), 0));

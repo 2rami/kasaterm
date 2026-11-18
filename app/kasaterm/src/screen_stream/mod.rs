@@ -75,6 +75,15 @@ pub(crate) fn can_view(base: &str) -> bool {
 
 type Rect = (f32, f32, f32, f32);
 
+/// 그 기기 화면 목록(압축 정보 `displays`) — 보는 쪽이 화면 고르기를 세운다. 화면 거울과 같은 번호다.
+#[cfg(target_os = "macos")]
+fn displays_json() -> serde_json::Value {
+    let list = kasa_remote::screen_mirror::installed().map(|s| s.displays()).unwrap_or_default();
+    serde_json::Value::Array(
+        list.iter().map(|d| serde_json::json!({ "id": d.id, "width": d.width, "height": d.height, "main": d.main })).collect(),
+    )
+}
+
 /// 칸 위에 그린 자리(LOGICAL px) — 누름이 어디에 떨어졌는지 가른다.
 #[derive(Clone, Copy)]
 pub(crate) struct Layout {
@@ -92,6 +101,8 @@ pub(crate) struct Layout {
     pub zoom_chip: Option<Rect>,
     /// 「키」 단추(조작 중에만) — 이 기기 키보드로 못 보내는 키 메뉴를 연다.
     pub key_button: Option<Rect>,
+    /// 「화면 2/3」 — 그 기기 화면이 둘 이상이면. 누르면 다음 화면으로.
+    pub display_chip: Option<Rect>,
 }
 
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]

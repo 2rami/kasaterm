@@ -96,8 +96,16 @@ pub struct Capture {
 unsafe impl Send for Capture {}
 
 impl Capture {
-    /// `fit` 은 장이 들어야 할 픽셀 상자(0 이면 제한 없음) — `scale_by` 와 둘 중 더 작게 줄인다.
-    pub fn start(fps: u32, pixel_format: u32, scale_by: f64, fit: (u32, u32), sink: impl Fn(Frame) + Send + Sync + 'static) -> Result<Self> {
+    /// `fit` 은 장이 들어야 할 픽셀 상자(0 이면 제한 없음) — `scale_by` 와 둘 중 더 작게 줄인다. `display` 는 CG 화면 번호 —
+    /// 없거나 지금 없는 화면이면 주 화면.
+    pub fn start(
+        fps: u32,
+        pixel_format: u32,
+        scale_by: f64,
+        fit: (u32, u32),
+        display: Option<u32>,
+        sink: impl Fn(Frame) + Send + Sync + 'static,
+    ) -> Result<Self> {
         let content = shareable_content()?;
         extern "C" {
             fn CGMainDisplayID() -> u32;
@@ -105,9 +113,11 @@ impl Capture {
         // 주 화면(메뉴 막대가 있는 화면) — 화면 거울의 기본 화면과 같다. SCK 목록의 첫째가 주 화면이라는 보장은 없다.
         let main = unsafe { CGMainDisplayID() };
         let displays = unsafe { content.displays() };
+        let want = display.unwrap_or(main);
         let display = displays
             .iter()
-            .find(|d| unsafe { d.displayID() } == main)
+            .find(|d| unsafe { d.displayID() } == want)
+            .or_else(|| displays.iter().find(|d| unsafe { d.displayID() } == main))
             .or_else(|| displays.firstObject())
             .context("화면이 없다")?;
         let display_id = unsafe { display.displayID() };

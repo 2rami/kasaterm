@@ -38,6 +38,8 @@ struct Shared {
     input_note: Mutex<Option<String>>,
     /// 그 기기가 Windows 다 — 압축 정보의 `os`, 그것을 안 싣는 판은 Windows 도우미 표시(`agent`)로 안다.
     windows: AtomicBool,
+    /// 그 기기 화면 번호들(압축 정보 `displays` 차례)과 지금 보는 번호 — 하나뿐이거나 모르는 판이면 빈다.
+    displays: Mutex<(Vec<u32>, Option<u32>)>,
 }
 
 
@@ -80,7 +82,7 @@ impl ScreenView {
     /// 그 기기가 화면 스트림을 모르는 판이거나 카사넷 직통이 아니면 연결 없이 까닭만 들고 연다 — 칸은 그대로 두고
     /// 길이 서면 다시 붙는다.
     /// `fit` 은 이 기기가 그릴 수 있는 가장 큰 픽셀 크기 — 그 기기는 이 안에 들도록 줄여 보낸다.
-    pub(crate) fn open(label: &str, base: &str, fit: (u32, u32), wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
+    pub(crate) fn open(label: &str, base: &str, fit: (u32, u32), display: Option<u32>, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
         let shared = Arc::new(Shared {
             latest: Mutex::new(None),
             serial: AtomicU64::new(0),
@@ -88,8 +90,9 @@ impl ScreenView {
             stats: Mutex::new(Stats::default()),
             input_note: Mutex::new(None),
             windows: AtomicBool::new(false),
+            displays: Mutex::new((Vec::new(), None)),
         });
-        let config = Config { codec: VideoDecoder::CODEC.into(), max_w: fit.0, max_h: fit.1, ..Config::default() };
+        let config = Config { codec: VideoDecoder::CODEC.into(), max_w: fit.0, max_h: fit.1, display, ..Config::default() };
         let (tx, rx) = mpsc::channel::<Incoming>();
         let keyframes: Arc<Mutex<Option<Keyframes>>> = Arc::new(Mutex::new(None));
         let on = {
@@ -103,6 +106,14 @@ impl ScreenView {
                 Event::Info(info) => {
                     let windows = info.get("os").and_then(|v| v.as_str()) == Some("windows") || info.get("agent").is_some();
                     shared.windows.store(windows, Ordering::Relaxed);
+                    let ids: Vec<u32> = info
+                        .get("displays")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|d| d.get("id")?.as_u64().and_then(|i| u32::try_from(i).ok())).collect())
+                        .unwrap_or_default();
+                    let now = info.get("display").and_then(|v| v.as_u64()).and_then(|i| u32::try_from(i).ok());
+                    *shared.displays.lock().unwrap_or_else(|e| e.into_inner()) = (ids, now);
+                    wake();
                 }
                 Event::Frame { frame, offset, .. } => {
                     let _ = tx.lock().unwrap_or_else(|e| e.into_inner()).send(Incoming { frame, offset });
@@ -265,6 +276,20 @@ impl ScreenView {
     /// 열린 키 메뉴에서 `p` 의 줄.
     pub(crate) fn key_row_at(&self, p: (f64, f64)) -> Option<usize> {
         self.key_menu.as_ref()?.iter().find(|(r, _)| contains(*r, p)).map(|(_, i)| *i)
+    }
+
+    /// 화면 고르기 — (지금 몇 번째, 모두 몇 개, 다음 화면 번호). 하나뿐이면 없다.
+    pub(crate) fn display_cycle(&self) -> Option<(usize, usize, u32)> {
+        let (ids, now) = self.shared.displays.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if ids.len() < 2 {
+            return None;
+        }
+        let at = now.and_then(|n| ids.iter().position(|i| *i == n)).unwrap_or(0);
+        Some((at + 1, ids.len(), ids[(at + 1) % ids.len()]))
+    }
+
+    pub(crate) fn on_display_chip(&self, p: (f64, f64)) -> bool {
+        self.layout.and_then(|l| l.display_chip).is_some_and(|r| contains(r, p))
     }
 
     pub(crate) fn remote_windows(&self) -> bool {
