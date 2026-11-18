@@ -180,5 +180,14 @@ void main() {
           reason: '「… +2 models」 줄은 설명이 아니다');
       expect((scrolled.hiddenAbove, scrolled.hiddenBelow), (0, 3));
     });
+
+    test('일하는 중 /model 의 확인 창도 카드다 — 폰이 바꾸기를 보낸 뒤 그 자리에서 답한다', () {
+      final m = parsePromptMenu(claudeSwitchModelBusy)!;
+      expect(m.title,
+          'This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets re-read.');
+      expect([for (final o in m.options) o.label], ['Yes, switch to Sonnet 5.5', 'No, go back']);
+      expect(m.cursor, 0);
+      expect(menuStep(m, 1), (moves: 1, text: '', enter: true));
+    });
   });
 }

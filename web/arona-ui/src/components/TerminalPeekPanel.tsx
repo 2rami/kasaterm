@@ -2319,8 +2319,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               ${(agent.costUsd ?? 0).toFixed(2)}
             </span>
             {/* 모델·effort·권한·브랜치·경로 */}
-            {(convModel || agent.model) && <MetaChip label={shortModel(agent.model || convModel)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
-            {(convModel || agent.model) && <MetaChip label={displayEffort ? `effort: ${shortEffort(displayEffort)}` : 'effort'} dot={effortColor(displayEffort)} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
+            {/* 일하는 중에도 보낸다 — Claude Code·Codex 가 /model·/effort 를 쌓지 않고 바로 받는다. 고르기 창이
+                떠 있으면 보내는 Enter 가 그 창의 지금 선택지를 골라 버려 막는다(폰 engineBlockedReason 과 같은 규칙). */}
+            {(convModel || agent.model) && <MetaChip label={shortModel(agent.model || convModel)} title={menu ? '고르기 창에 먼저 답해 주세요' : undefined} onClick={menu ? undefined : () => void sendToPane(surfaceId, '/model', true, false)} />}
+            {(convModel || agent.model) && <MetaChip label={displayEffort ? `effort: ${shortEffort(displayEffort)}` : 'effort'} dot={effortColor(displayEffort)} title={menu ? '고르기 창에 먼저 답해 주세요' : undefined} onClick={menu ? undefined : () => void sendToPane(surfaceId, '/effort', true, false)} />}
             {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
               msg: '변경사항을 볼까요?',
               sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 캐릭터에게 띄워요.`,

@@ -23,8 +23,19 @@ String engineCommand({required String harness, String? model, String? effort}) {
   return '/effort $effort';
 }
 
+/// 바꾸기를 못 보내는 까닭. 일하는 중은 막지 않는다 — [showEngineSheet] 참고.
+String? engineBlockedReason(Pane pane) {
+  if (pane.needsYou) return '승인·질문 창에 먼저 답해 주세요.';
+  if (pane.isCompacting) return '대화를 정리하는 중이라 끝나면 바꿀 수 있어요.';
+  return null;
+}
+
 /// 대화 맥락 줄의 모델 칸을 눌렀을 때 — 모델과 effort 를 고르면 그 학생 칸에 슬래시 명령으로 보낸다.
-/// 일하는 중에 보내면 명령이 다음 입력으로 쌓여 지금 턴과 섞이므로 끝난 뒤에만 연다.
+///
+/// 일하는 중에도 보낸다. Claude Code 2.1.327·Codex 0.169 실측에서 일하는 중 친 `/model`·`/effort` 는 다음 입력으로
+/// 쌓이지 않고 바로 처리됐고 대화 기록에도 남지 않았다. Claude 는 캐시가 살아 있으면 「Switch model?」 확인 창을 띄우고,
+/// 고르면 같은 턴의 다음 요청부터 새 모델이 받는다 — 그 창은 대화 보기의 선택지 카드로 답한다.
+/// 승인·질문 창이 떠 있으면 막는다: 보내는 Enter 가 그 창의 지금 선택지를 고른다. 대화 정리 중은 확인하지 않았다.
 Future<void> showEngineSheet(
   BuildContext context, {
   required Server server,
@@ -37,8 +48,9 @@ Future<void> showEngineSheet(
       ..showSnackBar(SnackBar(content: Text(text)));
   }
 
-  if (pane.isBusy) {
-    say('일하는 중이라 끝나면 바꿀 수 있어요.');
+  final blocked = engineBlockedReason(pane);
+  if (blocked != null) {
+    say(blocked);
     return;
   }
   final harness = pane.harness == 'codex' ? 'codex' : 'claude';

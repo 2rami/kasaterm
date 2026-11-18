@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/screens/controls.dart';
 import 'package:kasaterm_mobile/screens/engine_sheet.dart';
+import 'package:kasaterm_mobile/server.dart' show Pane;
 
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
@@ -47,6 +48,17 @@ void main() {
     expect(engineCommand(harness: 'claude', model: 'opus'), '/model opus');
     expect(engineCommand(harness: 'claude', effort: 'xhigh'), '/effort xhigh');
     expect(engineCommand(harness: 'codex', model: 'gpt-5.6'), '/model');
+  });
+
+  test('일하는 중에도 바꾸고, 승인 창이 떠 있으면 막는다', () {
+    Pane pane(String status, {String? kind}) =>
+        Pane(id: '%6', name: '', title: '', status: status, window: 0, cwd: '/w', kind: kind);
+    expect(engineBlockedReason(pane('working')), isNull,
+        reason: 'Claude Code·Codex 는 일하는 중 친 /model 을 쌓지 않고 바로 받는다');
+    expect(engineBlockedReason(pane('idle')), isNull);
+    expect(engineBlockedReason(pane('waiting', kind: 'permission')), isNotNull,
+        reason: '보내는 Enter 가 승인 창의 지금 선택지를 고른다');
+    expect(engineBlockedReason(pane('compacting')), isNotNull);
   });
 
   testWidgets('모델 정보가 없으면 그 자리를 비운다', (tester) async {

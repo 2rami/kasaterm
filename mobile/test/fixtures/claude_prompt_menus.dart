@@ -813,3 +813,27 @@ const claudeModelMenuScrolled = [
   '',
   '   Enter to set as default · s to use this session only · Esc to cancel',
 ];
+
+/// 120×40 claude 2.1.327(haiku) — 일하는 중 넣은 `/model sonnet` 이 대화로 쌓이지 않고 바로 띄운 확인 창. 캐시가 살아
+/// 있으면 쉬는 중에도 같은 창이 뜬다. 가운데 빈 줄 열여섯은 줄였다.
+const claudeSwitchModelBusy = [
+  '❯ Run this exact command in the foreground and wait for it: perl -e \'for(1..20){print "\$_\\n";',
+  '  select(undef,undef,undef,1)}\' . Then reply with the single word done.',
+  '',
+  '  Running the 20-second countdown loop in the foreground · 4s',
+  '  ⎿  \$ perl -e \'for(1..20){print "\$_\\n"; select(undef,undef,undef,1)}\' (17s)',
+  '     (ctrl+b ctrl+b (twice) to run in background)',
+  '',
+  '',
+  '· Effecting… (19s · ↓ 284 tokens)',
+  '▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔',
+  '  Switch model?',
+  '  Your next response will be slower and use more tokens',
+  '',
+  '  This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets re-read.',
+  '',
+  '  ❯ 1. Yes, switch to Sonnet 5.5',
+  '    2. No, go back',
+  '',
+  '  Enter to confirm · Esc to cancel',
+];
