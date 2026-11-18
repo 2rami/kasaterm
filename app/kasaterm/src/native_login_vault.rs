@@ -335,6 +335,10 @@ fn paint_browser(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         _ if !message.is_empty() => row(g, s, hits, x, y, w, message, "이 기기의 북마크와 탭은 그대로예요", true, None),
         _ => {}
     }
+    let too_large = b["too_large"].as_u64().unwrap_or(0);
+    if too_large > 0 {
+        note(g, x, y, w, &format!("너무 커서 못 보낸 북마크 {too_large}개 — 아주 긴 북마클릿·data: 주소는 이 기기에만 남아요"));
+    }
     info_slab(g, x, y, w, "북마크와 탭은 이 기기에서 잠근 뒤에만 계정에 올라가요. 관문은 주소·제목을 볼 수 없고, 에이전트 작업공간과 에이전트가 연 탭은 보내지 않아요.");
     *y += 24.0;
 }

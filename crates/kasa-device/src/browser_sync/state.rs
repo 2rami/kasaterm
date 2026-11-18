@@ -24,6 +24,10 @@ pub struct KnownMark {
     pub place: Stamp,
     #[serde(default)]
     pub deleted: Option<Stamp>,
+    /// 이 판을 아직 관문에 못 올렸다(올리다 끊김·부딪힘·너무 큼). 올리기가 `Ok` 를 받을 때만 내린다 — 내리기 전에는
+    /// 바퀴마다 다시 올린다.
+    #[serde(default)]
+    pub dirty: bool,
 }
 
 impl KnownMark {
@@ -77,6 +81,13 @@ pub struct State {
     /// 둘 다 끈 뒤 뒷정리까지 끝났다 — 다시 켤 때까지 관문에 묻지 않는다.
     #[serde(default)]
     pub idle: bool,
+    /// 「북마크 맞추기」를 다시 켠 뒤 첫 바퀴다. 꺼 둔 사이 이 기기에서 사라진 것은 지운 때가 아니라 알아챈 때라
+    /// 다른 기기의 나중 고침을 이길 수 있으니, 그 바퀴의 지우기는 사람 확인까지 보류한다.
+    #[serde(default)]
+    pub rejoin: bool,
+    /// 사람 확인을 기다리는 지우기(동기화 id). 「지우기 확인」은 이 목록만 지운다.
+    #[serde(default)]
+    pub pending_deletions: BTreeSet<String>,
 }
 
 impl State {

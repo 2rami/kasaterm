@@ -1,6 +1,7 @@
 //! 앱 안에서 도는 북마크·탭 동기화 스레드와 설정 화면이 부르는 동작. 로그인 금고 열쇠가 있고 사람이 지문을 확인한
 //! 기기에서, 사람이 「북마크 맞추기」나 「탭 보내기」를 켰을 때만 일한다. 둘 다 기본은 꺼짐이다.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -82,6 +83,7 @@ pub fn set(bookmarks: Option<bool>, tabs: Option<bool>) -> Result<Settings, Stri
             for known in state.marks.values_mut() {
                 known.rev = 0;
             }
+            state.rejoin = true;
             let _ = state.save(&path);
         }
     }
@@ -89,11 +91,16 @@ pub fn set(bookmarks: Option<bool>, tabs: Option<bool>) -> Result<Settings, Stri
     Ok(settings)
 }
 
-static ALLOW_BULK_DELETE: AtomicBool = AtomicBool::new(false);
+/// 사람이 확인한 보류 지우기 — 누른 때 화면에 보인 그 목록이다. 그 목록을 다 처리한 바퀴가 끝날 때까지 남는다.
+static CONFIRMED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-/// 사람이 「지우기 N개 — 확인」을 눌렀다.
+/// 사람이 「지우기 N개 — 확인」을 눌렀다. 그때 보류 중이던 것만 지운다 — 그 뒤 더 사라진 것은 다시 묻는다.
 pub fn allow_deletions() {
-    ALLOW_BULK_DELETE.store(true, Ordering::Release);
+    let Some(path) = current_account().and_then(|a| state_path(&a)) else { return };
+    let pending = State::load(&path).pending_deletions;
+    if let Ok(mut confirmed) = CONFIRMED.lock() {
+        confirmed.extend(pending);
+    }
     poke();
 }
 
@@ -172,6 +179,7 @@ fn round() -> Duration {
     let Ok(http) = Http::at(&credential, "/relay/browser-sync") else { return INTERVAL };
     let browser = Bridge::new(dir);
     let device_name = DEVICE_NAME.get().and_then(|name| name()).unwrap_or_else(|| "이름 없는 기기".into());
+    let confirmed = CONFIRMED.lock().map(|c| c.clone()).unwrap_or_default();
     let engine = Engine {
         account: &credential.account,
         device: &credential.device_id,
@@ -180,7 +188,7 @@ fn round() -> Duration {
         browser: &browser,
         remote: &http,
         now_ms: now_ms(),
-        allow_bulk_delete: ALLOW_BULK_DELETE.swap(false, Ordering::AcqRel),
+        allowed_deletions: &confirmed,
         sync_bookmarks: settings.bookmarks,
         send_tabs: settings.tabs,
     };
@@ -189,7 +197,15 @@ fn round() -> Duration {
         return INTERVAL;
     }
     if let Ok(counts) = &result {
-        state.idle = !settings.bookmarks && !settings.tabs && !counts.browser_away && counts.failed == 0;
+        let clean = !counts.browser_away && counts.failed == 0 && counts.stale == 0;
+        // 내 탭 묘비가 관문에 올라간 뒤에만 쉰다 — 아니면 다른 기기에 끈 탭이 계속 보인다.
+        let retracted = state.tabs_sent == "off" || state.tabs_item_rev == 0;
+        state.idle = !settings.bookmarks && !settings.tabs && clean && retracted;
+        if clean {
+            if let Ok(mut done) = CONFIRMED.lock() {
+                done.retain(|id| !confirmed.contains(id));
+            }
+        }
     }
     let _ = state.save(&path);
     match result {
@@ -208,6 +224,7 @@ fn round() -> Duration {
                 "bookmarks": bookmarks,
                 "devices": devices,
                 "deletions": counts.deletions_held,
+                "too_large": counts.too_large,
                 "at_ms": now_ms(),
             }));
             INTERVAL

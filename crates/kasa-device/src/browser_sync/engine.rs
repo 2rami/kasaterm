@@ -27,7 +27,8 @@ const TABS_PAD: usize = 4096;
 pub const TABS_MAX: usize = 64 * 1024;
 /// 탭은 바뀔 때마다가 아니라 이만큼 묶어서 올린다 — 관문이 활동을 덜 엿보게.
 const TABS_EVERY_MS: u64 = 30_000;
-/// 한 바퀴에 이만큼 넘게, 그리고 아는 북마크의 절반 넘게 사라지면 올리지 않고 사람 확인을 기다린다.
+/// 한 바퀴에 이만큼 또는 아는 북마크의 4분의 1 중 큰 쪽을 넘게 사라지면, 또는 모음의 살아 있는 것이 전부 사라지면
+/// 올리지 않고 사람 확인을 기다린다 — 프로필을 다시 깔거나 북마크 파일을 못 읽어 빈 트리가 되면 모든 기기에서 지워진다.
 const BULK_DELETE: usize = 20;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -59,6 +60,8 @@ pub struct Counts {
     pub stale: usize,
     pub failed: usize,
     pub undecryptable: usize,
+    /// 봉인 한도를 넘어(긴 북마클릿·data: 주소) 못 올린 북마크.
+    pub too_large: usize,
     pub tabs_sent: bool,
     pub devices_shown: usize,
     /// 브라우저가 꺼져 있어 북마크·탭을 건너뛰었다.
@@ -74,7 +77,8 @@ pub struct Engine<'a> {
     pub browser: &'a dyn Browser,
     pub remote: &'a dyn Remote,
     pub now_ms: u64,
-    pub allow_bulk_delete: bool,
+    /// 사람이 「지우기 확인」으로 허락한 보류 지우기(동기화 id). 화면에 보인 그것만 지운다.
+    pub allowed_deletions: &'a BTreeSet<String>,
     /// 사람이 「북마크 맞추기」를 켰다. 끄면 모음은 건드리지 않고 탭만 다룬다.
     pub sync_bookmarks: bool,
     /// 사람이 「탭 보내기」를 켰다 — 내 탭을 보내고 다른 기기의 탭을 받는다. 끄면 내 것에 묘비를 달고 받은 것도 지운다.
@@ -179,7 +183,7 @@ impl Engine<'_> {
     }
 
     fn open(&self, item: &RemoteItem) -> Option<Opened> {
-        let plain = self.key.open(self.account, &item.id, &item.blob).ok()?;
+        let plain = self.key.open_padded(self.account, &item.id, &item.blob, MARK_PAD).ok()?;
         if let Ok(mut r) = serde_json::from_slice::<MarkRecord>(&plain) {
             if valid_sync_id(&r.sync_id) && self.key.name_id(&mark_name(&r.collection, &r.sync_id)) == item.id {
                 if !valid_pos(&r.pos) {
@@ -227,15 +231,18 @@ impl Engine<'_> {
         if relay_now == 0 || relay_now.saturating_add(MAX_SKEW_MS) < self.now_ms {
             return Err(SyncError::ClockSkew);
         }
-        let read = match self.browser.read() {
-            Ok(read) => read,
+        // 브라우저가 꺼져 있어도 끈 탭의 묘비만은 올린다 — 그 밖의 일은 브라우저가 있어야 한다.
+        let retract = !self.send_tabs && state.tabs_item_rev > 0 && state.tabs_sent != "off";
+        let (read, away) = match self.browser.read() {
+            Ok(read) => (read, false),
+            Err(BrowserError::NotRunning) if retract => (Read::default(), true),
             Err(BrowserError::NotRunning) => return Ok(Counts { browser_away: true, ..Counts::default() }),
             Err(error) => return Err(SyncError::Browser(format!("{error:?}"))),
         };
         if self.sync_bookmarks && state.revision > 0 && read.collections.iter().any(|c| !state.collections.contains(&c.key)) {
             fetched = self.remote.fetch(0)?;
         }
-        let mut counts = Counts::default();
+        let mut counts = Counts { browser_away: away, ..Counts::default() };
         let mut marks: BTreeMap<String, BTreeMap<String, (RemoteItem, MarkRecord)>> = BTreeMap::new();
         let mut tabs: Vec<(RemoteItem, TabsRecord)> = Vec::new();
         let total = fetched.items.len();
@@ -254,10 +261,11 @@ impl Engine<'_> {
 
         let mut outgoing = Vec::new();
         let empty = BTreeMap::new();
-        let mut complete = true;
+        let mut complete = !(away && self.sync_bookmarks);
+        let mut pending = BTreeSet::new();
         for c in read.collections.iter().filter(|_| self.sync_bookmarks) {
             let remote = marks.get(&c.key).unwrap_or(&empty);
-            match self.collection(state, c, remote, relay_now, &mut counts, &mut outgoing) {
+            match self.collection(state, c, remote, relay_now, &mut counts, &mut outgoing, &mut pending) {
                 Ok(()) => {
                     state.collections.insert(c.key.clone());
                 }
@@ -279,6 +287,12 @@ impl Engine<'_> {
         // 미룬 모음의 관문 항목은 다음 바퀴에 다시 받아야 하니 차례를 앞당기지 않는다.
         if complete {
             state.revision = fetched.revision;
+            if self.sync_bookmarks {
+                state.rejoin = false;
+                state.pending_deletions = pending;
+            }
+        } else {
+            state.pending_deletions.extend(pending);
         }
         self.upload(state, outgoing, &key_id, &mut counts)?;
         self.sweep(state, &key_id);
@@ -294,6 +308,7 @@ impl Engine<'_> {
         relay_now: u64,
         counts: &mut Counts,
         outgoing: &mut Vec<Outgoing>,
+        pending: &mut BTreeSet<String>,
     ) -> Result<(), BrowserError> {
         let mut locals = Vec::new();
         flatten(&c.marks, "", &[], &mut locals);
@@ -377,18 +392,19 @@ impl Engine<'_> {
             }
         }
         // 로컬에 없는 아는 것: 사람이 지운 것이다. 너무 많이 사라졌으면 이번엔 손대지 않는다.
+        // 다시 켠 첫 바퀴의 지우기도 보류한다(state.rejoin). 확인은 화면에 보인 그 지우기에만 쓴다.
         let gone: Vec<&KnownMark> = known.values().filter(|k| k.alive() && !local_of_sync.contains_key(k.sync_id.as_str())).collect();
         let live = known.values().filter(|k| k.alive()).count();
+        let hold = !gone.is_empty() && (gone.len() == live || gone.len() > BULK_DELETE.max(live / 4) || state.rejoin);
         let mut held: BTreeSet<String> = BTreeSet::new();
-        if gone.len() > BULK_DELETE && gone.len() * 2 > live && !self.allow_bulk_delete {
-            counts.deletions_held += gone.len();
-            held.extend(gone.iter().map(|k| k.sync_id.clone()));
-        } else {
-            for k in &gone {
-                let mut r = k.record(String::new(), String::new());
-                r.deleted = Some(stamp_now(r.latest() + 1));
-                records.insert(k.sync_id.clone(), r);
+        for k in &gone {
+            if hold && !self.allowed_deletions.contains(&k.sync_id) {
+                held.insert(k.sync_id.clone());
+                continue;
             }
+            let mut r = k.record(String::new(), String::new());
+            r.deleted = Some(stamp_now(r.latest() + 1));
+            records.insert(k.sync_id.clone(), r);
         }
         // 지운 채 아는 것(묘비)과 관문에서 온 것을 합친다.
         for k in known.values() {
@@ -398,6 +414,12 @@ impl Engine<'_> {
         }
         for (sid, (_, theirs)) in remote {
             if held.contains(sid) {
+                // 보류한 지우기는 아직 정한 것이 아니다 — 그사이 다른 기기가 고쳤으면 그 고침을 따라 되살린다.
+                let Some(k) = known.get(sid).filter(|k| k.content != theirs.content || k.place != theirs.place || k.deleted != theirs.deleted) else {
+                    continue;
+                };
+                held.remove(sid);
+                records.insert(sid.clone(), k.record(String::new(), String::new()).merge(theirs));
                 continue;
             }
             let merged = match records.get(sid) {
@@ -406,6 +428,8 @@ impl Engine<'_> {
             };
             records.insert(sid.clone(), merged);
         }
+        counts.deletions_held += held.len();
+        pending.extend(held.iter().cloned());
         let ops = self.ops(&locals, &records, &sync_of);
         if !ops.is_empty() {
             self.browser.apply(&c.key, &c.rev, &ops)?;
@@ -417,15 +441,18 @@ impl Engine<'_> {
             let previous = state.marks.get(&item_id);
             let remote_item = remote.get(sid).map(|(item, theirs)| (item.rev, theirs));
             let rev = remote_item.as_ref().map_or_else(|| previous.map_or(0, |k| k.rev), |(rev, _)| *rev);
-            // 관문 판과 다르거나, 관문에서 온 것 없이 아는 판이 바뀌었으면 올린다.
+            // 관문 판과 다르면 올린다. 관문에서 온 것이 없으면, 아는 판을 아직 못 올렸거나(dirty) 관문에 없거나(rev 0 —
+            // 관문이 비거나 되돌아간 뒤) 판이 바뀌었을 때 올린다.
             let upload = match &remote_item {
                 Some((_, theirs)) => *theirs != r,
-                None => !previous.is_some_and(|k| k.content == r.content && k.place == r.place && k.deleted == r.deleted),
+                None => !previous.is_some_and(|k| {
+                    !k.dirty && k.rev > 0 && k.content == r.content && k.place == r.place && k.deleted == r.deleted
+                }),
             };
             if upload {
                 match serde_json::to_vec(r).map_err(anyhow::Error::from).and_then(|plain| self.seal(&item_id, &plain, MARK_PAD, MARK_MAX)) {
                     Ok(blob) => outgoing.push(Outgoing { id: item_id.clone(), expected_rev: rev, blob, kind: Pending::Mark }),
-                    Err(_) => counts.failed += 1,
+                    Err(_) => counts.too_large += 1,
                 }
             }
             let local_id = local_of_sync.get(sid.as_str()).map_or_else(|| sid.clone(), |l| l.mark.id.clone());
@@ -442,6 +469,7 @@ impl Engine<'_> {
                 pos: r.pos.clone(),
                 place: r.place.clone(),
                 deleted: r.deleted.clone(),
+                dirty: upload,
             });
         }
         Ok(())
@@ -456,7 +484,18 @@ impl Engine<'_> {
         sync_of: &mut HashMap<String, String>,
         adopted: &mut BTreeSet<String>,
     ) {
-        let records: BTreeMap<String, MarkRecord> = remote.iter().map(|(sid, (_, r))| (sid.clone(), r.clone())).collect();
+        // 이 기기가 전에 올린 것(로컬 id 가 곧 동기화 id)은 제목이 그사이 바뀌었어도 그대로 짝짓는다 — 상태를 잃은 뒤
+        // 같은 북마크가 새 id 를 받아 두 기록이 한 로컬 항목을 나눠 갖지 않게.
+        let mut matched: BTreeSet<&str> = BTreeSet::new();
+        for l in locals {
+            if remote.contains_key(&l.mark.id) {
+                sync_of.insert(l.mark.id.clone(), l.mark.id.clone());
+                adopted.insert(l.mark.id.clone());
+                matched.insert(&l.mark.id);
+            }
+        }
+        let records: BTreeMap<String, MarkRecord> =
+            remote.iter().filter(|(sid, _)| !matched.contains(sid.as_str())).map(|(sid, (_, r))| (sid.clone(), r.clone())).collect();
         let layout = tree::layout(&records);
         let mut free: HashMap<(Vec<String>, bool, String, String), Vec<String>> = HashMap::new();
         let mut walk = vec![(String::new(), Vec::<String>::new())];
@@ -471,7 +510,7 @@ impl Engine<'_> {
                 }
             }
         }
-        for l in locals {
+        for l in locals.iter().filter(|l| !matched.contains(l.mark.id.as_str())) {
             let key = (l.path.clone(), l.mark.folder(), l.mark.title.clone(), l.mark.url.clone());
             if let Some(sid) = free.get_mut(&key).and_then(|ids| (!ids.is_empty()).then(|| ids.remove(0))) {
                 sync_of.insert(l.mark.id.clone(), sid.clone());
@@ -564,7 +603,8 @@ impl Engine<'_> {
                 state.remote_tabs.insert(item.id.clone(), (item.rev, record));
             }
         }
-        let due = self.now_ms.saturating_sub(state.tabs_sent_ms) >= TABS_EVERY_MS || state.tabs_sent.is_empty();
+        // 끄는 것은 묶지 않는다 — 끈 뒤 곧바로 둘 다 꺼져 바퀴가 멈추면 묘비가 영영 안 간다.
+        let due = self.now_ms.saturating_sub(state.tabs_sent_ms) >= TABS_EVERY_MS || state.tabs_sent.is_empty() || !self.send_tabs;
         let wanted = if self.send_tabs { read.tabs_rev.clone() } else { "off".to_string() };
         if wanted != state.tabs_sent && due && (self.send_tabs || state.tabs_item_rev > 0) {
             let mut record = TabsRecord {
@@ -635,6 +675,7 @@ impl Engine<'_> {
                             Pending::Mark => {
                                 if let Some(k) = state.marks.get_mut(&id) {
                                     k.rev = rev;
+                                    k.dirty = false;
                                 }
                             }
                             Pending::Tabs { rev: browser_rev } => {
@@ -645,8 +686,21 @@ impl Engine<'_> {
                             }
                         }
                     }
-                    // 그사이 다른 기기가 썼다 — 다음 바퀴가 그것을 받아 다시 합친다.
-                    PutOutcome::Conflict { .. } => counts.failed += 1,
+                    // 그사이 다른 기기가 썼다 — 다음 바퀴가 그것을 받아 다시 합친다(dirty 는 남는다). 관문에 없어졌으면(걷힘)
+                    // 「아직 없다」로 다시 올린다. 내 탭 항목은 내 것이라 그 차례 위에 다시 쓴다.
+                    PutOutcome::Conflict { id, current } => {
+                        counts.failed += 1;
+                        let Some(o) = chunk.iter().find(|o| o.id == id) else { continue };
+                        match (&o.kind, current) {
+                            (Pending::Mark, None) => {
+                                if let Some(k) = state.marks.get_mut(&id) {
+                                    k.rev = 0;
+                                }
+                            }
+                            (Pending::Mark, Some(_)) => {}
+                            (Pending::Tabs { .. }, current) => state.tabs_item_rev = current.map_or(0, |item| item.rev),
+                        }
+                    }
                 }
             }
         }
@@ -655,6 +709,11 @@ impl Engine<'_> {
 
     /// 180일 지난 묘비를 관문에서 걷는다.
     fn sweep(&self, state: &mut State, key_id: &str) {
+        // 관문에 없는(rev 0) 오래된 묘비는 올릴 까닭이 없다 — 그냥 잊는다.
+        state.marks.retain(|_, k| {
+            let r = k.record(String::new(), String::new());
+            r.alive() || k.rev > 0 || r.latest().saturating_add(TOMBSTONE_KEEP_MS) >= self.now_ms
+        });
         let old: Vec<Put> = state
             .marks
             .iter()

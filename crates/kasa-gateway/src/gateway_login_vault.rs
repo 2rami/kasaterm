@@ -301,9 +301,10 @@ mod tests {
     /// 금고 서명으로는 쓰지 못한다.
     #[tokio::test]
     async fn browser_sync_is_its_own_store_beside_the_login_vault() {
-        let dir = std::env::temp_dir().join(format!("kasa-browser-sync-http-{}", uuid::Uuid::new_v4()));
+        // 계정 이름(tester)은 시험 관문 account_gate 가 정한 것이다.
+        let dir = std::env::temp_dir().join(format!("kasatest-browser-sync-http-{}", uuid::Uuid::new_v4()));
         let addr = spawn_relay(account_gate(&dir)).await;
-        let mac = post(addr, "/relay/login", None, json!({"account":"tester","password":"correct horse","machine_id":"sync-mac","kind":"desktop"})).await.1;
+        let mac = post(addr, "/relay/login", None, json!({"account":"tester","password":"correct horse","machine_id":"kasatest-sync-mac","kind":"desktop"})).await.1;
         let phone = post(addr, "/relay/login", None, json!({"account":"tester","password":"correct horse","kind":"phone"})).await.1;
         let (token, phone_token) = (mac["token"].as_str().unwrap(), phone["token"].as_str().unwrap());
         let vault = VaultKey::generate().unwrap();

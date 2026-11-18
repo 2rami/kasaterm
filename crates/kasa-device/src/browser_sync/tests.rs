@@ -2,15 +2,16 @@
 //! 모음 이름·주소는 시험용(`kasatest-…`, `kasa-test.example`)만 쓴다.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 
 use super::browser::{Browser, BrowserError, Collection, Device, Mark, Op, Read, Status, Tab, Workspace};
-use super::engine::{Counts, Engine};
+use super::engine::{Counts, Engine, SyncError};
 use super::state::State;
 use crate::login_vault::crypto::VaultKey;
 use crate::login_vault::engine::{Remote, RemoteError};
 use crate::login_vault::server::{self, Fetched, Limits, Put, PutOutcome};
 
-const ACCOUNT: &str = "acct";
+const ACCOUNT: &str = "kasatest-acct";
 const KEY: &str = "kasatest-sync@example.test";
 
 struct Relay {
@@ -186,11 +187,13 @@ struct Side {
 
 impl Side {
     fn new(id: &'static str, vault: &VaultKey) -> Self {
+        VAULTS.with(|v| v.borrow_mut().insert(id, vault.to_base64().to_string()));
         let key = VaultKey::from_base64(&vault.to_base64()).unwrap().subkey("browser-sync");
         Self { id, key, browser: FakeBrowser::default(), state: State::default(), now: 1_000_000, send_tabs: true }
     }
 
-    fn round_with(&mut self, relay: &Relay, allow_bulk_delete: bool) -> Counts {
+    /// 한 바퀴. 기기 시계는 1분씩 간다. `remote` 는 시험 관문이나 그것을 감싼 고장 난 관문이다.
+    fn try_round(&mut self, remote: &dyn Remote, relay: &Relay, allowed: &BTreeSet<String>) -> Result<Counts, SyncError> {
         self.now += 60_000;
         relay.now.set(self.now);
         let engine = Engine {
@@ -199,13 +202,19 @@ impl Side {
             device_name: self.id,
             key: &self.key,
             browser: &self.browser,
-            remote: relay,
+            remote,
             now_ms: self.now,
-            allow_bulk_delete,
+            allowed_deletions: allowed,
             sync_bookmarks: true,
             send_tabs: self.send_tabs,
         };
-        engine.round(&mut self.state).unwrap()
+        engine.round(&mut self.state)
+    }
+
+    /// `allow` 면 보류 중인 지우기를 사람이 확인한 것으로 돈다.
+    fn round_with(&mut self, relay: &Relay, allow: bool) -> Counts {
+        let allowed = if allow { self.state.pending_deletions.clone() } else { BTreeSet::new() };
+        self.try_round(relay, relay, &allowed).unwrap()
     }
 
     fn round(&mut self, relay: &Relay) -> Counts {
@@ -443,7 +452,7 @@ fn a_blob_from_another_vault_is_not_taken() {
         browser: &stranger.browser,
         remote: &relay,
         now_ms: a.now,
-        allow_bulk_delete: false,
+        allowed_deletions: &BTreeSet::new(),
         sync_bookmarks: true,
         send_tabs: false,
     };
@@ -459,4 +468,144 @@ fn many_bookmarks_go_up_in_batches_the_relay_takes() {
     assert_eq!(counts.uploaded, 451, "북마크 450개와 내 탭 한 항목을 200개씩 나눠 올린다");
     b.round(&relay);
     assert_eq!(b.marks(), a.marks());
+}
+
+
+/// 쓰기만 끊기는 관문 — 받기는 되고 올리기가 시간 초과로 실패한 바퀴를 흉내 낸다.
+struct Flaky<'a> {
+    inner: &'a Relay,
+    fail: Cell<bool>,
+}
+
+impl Remote for Flaky<'_> {
+    fn init(&self, key_id: &str, sign_pub: &str) -> Result<(), RemoteError> {
+        self.inner.init(key_id, sign_pub)
+    }
+    fn fetch(&self, since: u64) -> Result<Fetched, RemoteError> {
+        self.inner.fetch(since)
+    }
+    fn put(&self, key_id: &str, puts: &[Put], sig: &str) -> Result<Vec<PutOutcome>, RemoteError> {
+        if self.fail.get() {
+            return Err(RemoteError::Failed);
+        }
+        self.inner.put(key_id, puts, sig)
+    }
+}
+
+/// 이즈나 검수 1: 올리기가 끊긴 바퀴에 생긴 변경도 다음 바퀴에 올라간다.
+#[test]
+fn a_change_whose_upload_failed_goes_up_on_a_later_round() {
+    let (mut a, mut b, relay) = pair();
+    a.browser.edit(|m| *m = vec![mark("m1", "하나")]);
+    settle(&mut a, &mut b, &relay);
+    a.browser.edit(|m| m.push(mark("m2", "둘")));
+    let flaky = Flaky { inner: &relay, fail: Cell::new(true) };
+    assert!(a.try_round(&flaky, &relay, &BTreeSet::new()).is_err());
+    settle(&mut a, &mut b, &relay);
+    assert_eq!(titles(&b.marks()), vec!["하나", "둘"]);
+    // 모음을 비우면 먼저 보류되고, 사람이 확인한 바퀴의 올리기가 끊겨도 그 묘비는 다음 바퀴에 올라간다.
+    a.browser.edit(|m| m.clear());
+    assert_eq!(a.round(&relay).deletions_held, 2);
+    let allowed = a.state.pending_deletions.clone();
+    flaky.fail.set(true);
+    assert!(a.try_round(&flaky, &relay, &allowed).is_err());
+    a.round(&relay);
+    b.round(&relay);
+    assert!(b.marks().is_empty(), "끊긴 바퀴의 지우기(묘비)도 다음에 올라간다");
+}
+
+/// 이즈나 검수 3: 관문 기록이 비면 아는 것을 다시 올려, 새 기기가 받는다.
+#[test]
+fn an_emptied_relay_is_filled_again_for_a_new_device() {
+    let (mut a, mut b, relay) = pair();
+    a.browser.edit(|m| *m = vec![mark("m1", "하나"), mark("m2", "둘")]);
+    settle(&mut a, &mut b, &relay);
+    let fresh = Relay::new();
+    settle(&mut a, &mut b, &fresh);
+    let mut c = Side::new("kasatest-c", &VaultKey::from_base64(&a_vault_of(&a)).unwrap());
+    c.round(&fresh);
+    assert_eq!(titles(&c.marks()), vec!["하나", "둘"]);
+}
+
+/// 시험 쪽 Side 는 갈래 열쇠만 든다 — 새 기기도 같은 갈래를 쓰도록 금고 열쇠를 함께 둔다.
+fn a_vault_of(side: &Side) -> String {
+    VAULTS.with(|v| v.borrow().get(side.id).cloned().unwrap())
+}
+
+thread_local! {
+    static VAULTS: RefCell<std::collections::HashMap<&'static str, String>> = RefCell::new(Default::default());
+}
+
+#[test]
+fn turning_tabs_off_takes_them_away_at_once() {
+    let (mut a, mut b, relay) = pair();
+    *a.browser.tabs.borrow_mut() = vec![Workspace {
+        id: "w".into(),
+        tabs: vec![Tab { url: "https://tab.kasa-test.example/".into(), ..Tab::default() }],
+        ..Workspace::default()
+    }];
+    a.round(&relay);
+    b.round(&relay);
+    assert_eq!(b.browser.shown.borrow().len(), 1);
+    a.send_tabs = false;
+    a.now -= 59_000; // 마지막 올림 1초 뒤에 끈다 — 30초 묶음을 기다리지 않는다.
+    a.round(&relay);
+    assert_eq!(a.state.tabs_sent, "off");
+    b.round(&relay);
+    assert!(b.browser.shown.borrow().is_empty());
+}
+
+#[test]
+fn a_small_collection_emptied_at_once_waits_for_the_person() {
+    let (mut a, mut b, relay) = pair();
+    a.browser.edit(|m| *m = vec![mark("m1", "하나"), mark("m2", "둘"), mark("m3", "셋")]);
+    settle(&mut a, &mut b, &relay);
+    a.browser.edit(|m| m.clear());
+    assert_eq!(a.round(&relay).deletions_held, 3, "모음이 통째로 비면 개수와 상관없이 보류");
+    b.round(&relay);
+    assert_eq!(b.marks().len(), 3);
+    // 확인한 뒤 더 사라진 것은 다시 묻는다 — 여기선 확인한 세 개만 지운다.
+    a.round_with(&relay, true);
+    b.round(&relay);
+    assert!(b.marks().is_empty());
+    assert!(a.state.pending_deletions.is_empty());
+}
+
+#[test]
+fn deletions_noticed_right_after_turning_back_on_wait_for_the_person() {
+    let (mut a, mut b, relay) = pair();
+    a.browser.edit(|m| *m = vec![mark("m1", "하나"), mark("m2", "둘"), mark("m3", "셋"), mark("m4", "넷")]);
+    settle(&mut a, &mut b, &relay);
+    a.browser.edit(|m| {
+        m.remove(0);
+    });
+    a.state.rejoin = true;
+    assert_eq!(a.round(&relay).deletions_held, 1, "다시 켠 첫 바퀴의 지우기는 하나라도 보류");
+    assert!(!a.state.rejoin);
+    b.round(&relay);
+    assert_eq!(b.marks().len(), 4);
+}
+
+#[test]
+fn a_device_that_lost_its_state_keeps_its_bookmarks_identity() {
+    let (mut a, mut b, relay) = pair();
+    a.browser.edit(|m| *m = vec![mark("m1", "하나")]);
+    settle(&mut a, &mut b, &relay);
+    a.state = State::default();
+    a.browser.edit(|m| m[0].title = "상태 잃은 사이 고침".into());
+    settle(&mut a, &mut b, &relay);
+    assert_eq!(a.marks().len(), 1);
+    assert_eq!(b.marks().len(), 1, "같은 북마크가 새 id 로 두 벌이 되지 않는다");
+    assert_eq!(a.marks()[0].id, b.marks()[0].id);
+}
+
+#[test]
+fn a_bookmark_too_large_to_seal_is_counted_and_the_rest_go() {
+    let (mut a, mut b, relay) = pair();
+    let huge = Mark { id: "big".into(), title: "큰 것".into(), url: format!("https://kasa-test.example/{}", "x".repeat(8000)), ..Mark::default() };
+    a.browser.edit(|m| *m = vec![huge, mark("m1", "하나")]);
+    assert_eq!(a.round(&relay).too_large, 1);
+    assert_eq!(a.round(&relay).too_large, 1, "바퀴마다 다시 세어 화면에 남는다");
+    b.round(&relay);
+    assert_eq!(titles(&b.marks()), vec!["하나"]);
 }
