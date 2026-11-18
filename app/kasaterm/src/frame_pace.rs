@@ -6,9 +6,13 @@
 //! 창 26개 리그에서 메인 스레드 시간의 31%가 그 대기였고, 그동안 클릭은 줄 서서 기다렸다
 //! (2026-10-07 실측, 「창이 많으면 누를 때 멈칫한다」).
 //!
-//! 그래서 직전 그림이 한 주기 안이면 이번 것은 주기 끝으로 미뤄 한 장으로 합친다. 첫 변화는
-//! 여전히 그 자리에서 그려지므로 타자 메아리는 늦지 않는다. 미룬 그림은 따로 깨워 반드시
-//! 그린다 — 출력이 거기서 끊겨도 마지막 화면이 낡은 채 남지 않게.
+//! 그래서 직전 그림이 한 주기 안이면 이번 것은 주기 끝으로 미뤄 한 장으로 합친다. 미룬 그림은
+//! 따로 깨워 반드시 그린다 — 출력이 거기서 끊겨도 마지막 화면이 낡은 채 남지 않게.
+//!
+//! 사람이 기다리는 그림(방금 키를 보낸 칸의 새 화면·조합 중 글자)은 미루지 않는다. 바쁜 거울이
+//! 여럿이면 직전 그림이 거의 늘 한 주기 안이라 메아리가 담긴 그림의 절반쯤이 미뤄졌다 — 거울 15칸 중
+//! 3칸이 바쁜 리그에서 받음→그림 시작 p90 4.4→0.8ms, 조합 글자 이벤트→그림 p90 4→0.2ms(2026-11-18).
+//! 키 몇 번 몫의 그림을 더 그리는 값은 작다.
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use winit::event_loop::EventLoopProxy;
@@ -19,6 +23,7 @@ struct Pace {
     due: Option<Instant>,
     interval: Duration,
     measured: Option<Instant>,
+    urgent: Option<Instant>,
 }
 
 static PACE: Mutex<Pace> = Mutex::new(Pace {
@@ -26,7 +31,10 @@ static PACE: Mutex<Pace> = Mutex::new(Pace {
     due: None,
     interval: Duration::from_micros(16_667),
     measured: None,
+    urgent: None,
 });
+/// 사람이 키를 보낸 칸과 그 시각.
+static TYPED: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 static WAKE: Condvar = Condvar::new();
 static WAKER: OnceLock<()> = OnceLock::new();
 
@@ -38,6 +46,10 @@ const REMEASURE: Duration = Duration::from_secs(2);
 /// (2026-11-13 집 PC). 그 뒤 기기 목록·거울 투영·쉬는 칸 합성을 다시 쓰게 되어 3840x1600 한 장이 3~5ms 라,
 /// 144Hz 화면에서 거울이 60장에 묶여 끊겨 보이던 것을 푼다.
 const MAX_HZ: f64 = 240.0;
+
+/// 키를 보낸 뒤 이만큼은 그 칸의 새 화면을 메아리로 본다. 첫 갱신 하나만 보면 일하는 Claude 칸의
+/// 스피너 갱신이 먼저 와 정작 메아리는 미뤄진다. 카사넷 왕복 p90(30ms 안팎)을 넉넉히 덮는다.
+const ECHO_WINDOW: Duration = Duration::from_millis(250);
 
 fn refresh_interval(window: &Window) -> Duration {
     let hz = window
@@ -56,6 +68,9 @@ pub(crate) fn hold(window: &Window, proxy: &EventLoopProxy<crate::UserEvent>) ->
     if p.measured.is_none_or(|at| now.duration_since(at) >= REMEASURE) {
         p.interval = refresh_interval(window);
         p.measured = Some(now);
+    }
+    if p.urgent.is_some() {
+        return false;
     }
     let Some(last) = p.last else { return false };
     let due = last + p.interval;
@@ -76,6 +91,32 @@ pub(crate) fn drew(started: Instant) {
     let mut p = PACE.lock().unwrap();
     p.last = Some(started);
     p.due = None;
+    // 그리는 도중에 생긴 급한 그림은 이 장에 안 실렸다 — 다음 장도 미루지 않게 남긴다.
+    if p.urgent.is_some_and(|at| at <= started) {
+        p.urgent = None;
+    }
+}
+
+/// 다음 한 장은 미루지 않는다 — 사람이 그 그림을 기다린다.
+pub(crate) fn urgent() {
+    PACE.lock().unwrap().urgent = Some(Instant::now());
+}
+
+/// 칸에 키를 보냈다. 그 칸의 다음 화면들은 메아리다.
+pub(crate) fn typed(pane: &str) {
+    *TYPED.lock().unwrap() = Some((pane.to_owned(), Instant::now()));
+}
+
+/// 칸의 화면이 바뀌었다. 방금 키를 보낸 칸이면 그 그림은 미루지 않는다.
+pub(crate) fn screen_changed(pane: &str) {
+    let echo = TYPED
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|(typed, at)| typed == pane && at.elapsed() < ECHO_WINDOW);
+    if echo {
+        urgent();
+    }
 }
 
 fn spawn_waker(proxy: EventLoopProxy<crate::UserEvent>) {

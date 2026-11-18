@@ -838,6 +838,9 @@ impl App {
         if let Some(pid) = surface {
             if let Some(pty) = self.pty.get(pid) {
                 let result = pty.send_bytes(bytes);
+                if result.is_ok() {
+                    crate::frame_pace::typed(pid);
+                }
                 let step = if kasa_remote::remote::is_remote_pane(pid) { "mirror" } else { "pty" };
                 note(step, pid, match &result {
                     Ok(()) => format!("{}B ok", bytes.len()),

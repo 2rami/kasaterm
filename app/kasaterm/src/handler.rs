@@ -7328,6 +7328,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // Preedit is chrome, not PTY grid — flag it so the damage
                 // gate actually paints the composing text this frame.
                 self.chrome_dirty = true;
+                crate::frame_pace::urgent();
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {

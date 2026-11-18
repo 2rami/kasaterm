@@ -300,6 +300,7 @@ impl App {
                 if trust_hint {
                     crate::trust_prompt::note(&pane_for_marker);
                 }
+                crate::frame_pace::screen_changed(&pane_for_marker);
                 // Also wakes a loop parked on WaitUntil, which request_redraw
                 // didn't do reliably on macOS.
                 let _ = proxy.send_event(UserEvent::Redraw);
