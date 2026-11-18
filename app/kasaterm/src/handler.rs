@@ -3224,6 +3224,19 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::Ime(_)
+                | WindowEvent::Touch(_)
+                | WindowEvent::PinchGesture { .. }
+                | WindowEvent::PanGesture { .. }
+        ) {
+            crate::frame_pace::touched();
+        }
         let _input_trace = self.window.as_ref().is_some_and(|window| window.id() == id)
             .then(|| crate::input_trace::begin(&event, || self.input_trace_state())).flatten();
         if let WindowEvent::KeyboardInput { event, .. } = &event {

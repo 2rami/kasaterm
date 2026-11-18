@@ -13,6 +13,11 @@
 //! 여럿이면 직전 그림이 거의 늘 한 주기 안이라 메아리가 담긴 그림의 절반쯤이 미뤄졌다 — 거울 15칸 중
 //! 3칸이 바쁜 리그에서 받음→그림 시작 p90 4.4→0.8ms, 조합 글자 이벤트→그림 p90 4→0.2ms(2026-11-18).
 //! 키 몇 번 몫의 그림을 더 그리는 값은 작다.
+//!
+//! 사람이 1초 넘게 손을 대지 않으면(키·마우스·휠·IME) 배경 애니(일하는 칸 스피너·흐르는 출력)는 두 주기에
+//! 한 장으로 그린다 — 144Hz 화면이면 72장. 바쁜 학생 칸이 여럿이면 그 장들이 손 뗀 동안 메인 스레드의 가장 큰
+//! 몫이었다(0.2.246 표본의 29%가 그리기). 예전 60장 상한은 144/60=2.4 라 한 장이 화면에 두 번·세 번 번갈아 머물러
+//! 끊겨 보였다 — 정확히 두 주기로, Windows 는 DWM 의 vblank 눈금에 붙여 늘 두 번씩 머물게 한다.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -27,6 +32,10 @@ struct Pace {
     urgent: Option<Instant>,
     /// 루프를 깨우지 않고 넘긴 화면 갱신의 가장 늦은 시각 — 잡아 둔 장이 실어 간다.
     unwoken: Option<Instant>,
+    /// 사람이 마지막으로 손을 댄 시각.
+    touched: Option<Instant>,
+    /// 최근 vblank 시각과 화면 주기. 창이 있는 화면의 주기와 맞을 때만.
+    vblank: Option<(Instant, Duration)>,
 }
 
 static PACE: Mutex<Pace> = Mutex::new(Pace {
@@ -36,6 +45,8 @@ static PACE: Mutex<Pace> = Mutex::new(Pace {
     measured: None,
     urgent: None,
     unwoken: None,
+    touched: None,
+    vblank: None,
 });
 /// 사람이 키를 보낸 칸과 그 시각.
 static TYPED: Mutex<Option<(String, Instant)>> = Mutex::new(None);
@@ -53,6 +64,12 @@ const REMEASURE: Duration = Duration::from_secs(2);
 /// 144Hz 화면에서 거울이 60장에 묶여 끊겨 보이던 것을 푼다.
 const MAX_HZ: f64 = 240.0;
 
+/// 사람이 손을 뗀 지 이만큼이 지나면 배경 애니를 두 주기에 한 장으로 그린다.
+const CALM_AFTER: Duration = Duration::from_secs(1);
+
+/// 눈금 장은 vblank 바로 뒤에 시작한다 — 한 장(2~5ms)이 다음 vblank 전에 끝나 그 vblank 부터 두 번 머문다.
+const AFTER_VBLANK: Duration = Duration::from_micros(500);
+
 /// 키를 보낸 뒤 이만큼은 그 칸의 새 화면을 메아리로 본다. 첫 갱신 하나만 보면 일하는 Claude 칸의
 /// 스피너 갱신이 먼저 와 정작 메아리는 미뤄진다. 카사넷 왕복 p90(30ms 안팎)을 넉넉히 덮는다.
 const ECHO_WINDOW: Duration = Duration::from_millis(250);
@@ -66,6 +83,53 @@ fn refresh_interval(window: &Window) -> Duration {
     Duration::from_secs_f64(1.0 / hz)
 }
 
+/// DWM 의 최근 vblank 와 주기. 창이 있는 화면의 주기와 5% 넘게 다르면(DWM 이 다른 화면 기준) 눈금을 쓰지 않는다.
+#[cfg(windows)]
+fn vblank_grid(interval: Duration) -> Option<(Instant, Duration)> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+    let mut info = DWM_TIMING_INFO { cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
+    let (mut qpc, mut freq) = (0i64, 0i64);
+    unsafe {
+        DwmGetCompositionTimingInfo(HWND::default(), &mut info).ok()?;
+        QueryPerformanceCounter(&mut qpc).ok()?;
+        QueryPerformanceFrequency(&mut freq).ok()?;
+    }
+    let now = Instant::now();
+    if info.qpcRefreshPeriod == 0 || freq <= 0 {
+        return None;
+    }
+    let period = Duration::from_secs_f64(info.qpcRefreshPeriod as f64 / freq as f64);
+    if (period.as_secs_f64() / interval.as_secs_f64() - 1.0).abs() > 0.05 {
+        return None;
+    }
+    // DWM 이 알려 주는 vblank 는 지난 것이 아니라 겨누는 다음 것일 때가 많다 — 지금보다 앞일 수도 있다.
+    let ticks = |n: u64| Duration::from_secs_f64(n as f64 / freq as f64);
+    let (qpc, vblank) = (qpc as u64, info.qpcVBlank);
+    let anchor = if vblank >= qpc { now + ticks(vblank - qpc) } else { now.checked_sub(ticks(qpc - vblank))? };
+    Some((anchor, period))
+}
+
+#[cfg(not(windows))]
+fn vblank_grid(_interval: Duration) -> Option<(Instant, Duration)> {
+    None
+}
+
+/// 직전 장 다음에 그릴 수 있는 가장 이른 시각.
+fn next_due(p: &Pace, last: Instant, now: Instant) -> Instant {
+    if p.touched.is_some_and(|at| now.duration_since(at) < CALM_AFTER) {
+        return last + p.interval;
+    }
+    let Some((vblank, period)) = p.vblank else {
+        return last + p.interval * 2;
+    };
+    // 직전 장에서 한 주기 반 뒤의 첫 눈금 — 직전 장이 눈금 위였으면 정확히 두 주기 뒤다.
+    let earliest = (last + period * 3 / 2).max(vblank);
+    let periods = ((earliest - vblank).as_secs_f64() / period.as_secs_f64()).ceil();
+    vblank + period.mul_f64(periods) + AFTER_VBLANK
+}
+
 /// 이번 그림을 미룰까. `true` 면 부른 쪽은 아무것도 그리지 않고 돌아간다 — 미룬 그림은
 /// 주기 끝에 `UserEvent::Redraw` 로 다시 온다.
 pub(crate) fn hold(window: &Window, proxy: &EventLoopProxy<crate::UserEvent>) -> bool {
@@ -73,13 +137,14 @@ pub(crate) fn hold(window: &Window, proxy: &EventLoopProxy<crate::UserEvent>) ->
     let mut p = PACE.lock().unwrap();
     if p.measured.is_none_or(|at| now.duration_since(at) >= REMEASURE) {
         p.interval = refresh_interval(window);
+        p.vblank = vblank_grid(p.interval);
         p.measured = Some(now);
     }
     if p.urgent.is_some() {
         return false;
     }
     let Some(last) = p.last else { return false };
-    let due = last + p.interval;
+    let due = next_due(&p, last, now);
     if now >= due {
         return false;
     }
@@ -103,9 +168,14 @@ pub(crate) fn drew(started: Instant) {
     }
     // 그리는 도중에 깨우지 않고 넘긴 갱신도 이 장에 안 실렸을 수 있다 — 다음 주기 끝에 한 장 더 잡는다.
     if p.unwoken.take().is_some_and(|at| at > started) {
-        p.due = Some(started + p.interval);
+        p.due = Some(next_due(&p, started, Instant::now()));
         WAKE.notify_one();
     }
+}
+
+/// 사람이 손을 댔다(키·마우스·휠·IME) — 1초 동안은 화면 주사율로 그린다.
+pub(crate) fn touched() {
+    PACE.lock().unwrap().touched = Some(Instant::now());
 }
 
 /// 다음 한 장은 미루지 않는다 — 사람이 그 그림을 기다린다.
