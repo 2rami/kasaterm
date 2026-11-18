@@ -340,7 +340,8 @@ async fn events_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let n = params.get("n").and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
-    let events = collab_events(&resolve_cwd(&backend), n);
+    // `git log` 을 띄우고 기다리는 동안 워커를 잡지 않는다 — 잡으면 이 런타임의 입출력(거울·카사넷 입구)이 같이 선다.
+    let events = tokio::task::spawn_blocking(move || collab_events(&resolve_cwd(&backend), n)).await.unwrap_or_default();
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
         Json(serde_json::json!({ "ok": true, "events": events })),

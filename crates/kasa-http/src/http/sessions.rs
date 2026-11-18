@@ -270,7 +270,18 @@ async fn background_agents_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let body = match cached_agents_output(params.get("cwd").map(String::as_str).filter(|s| !s.is_empty())) {
+    let cwd = params.get("cwd").filter(|s| !s.is_empty()).cloned();
+    // `claude agents` 는 Windows 에서 뜨는 데 0.4~1.2초다. 워커가 그 자리에서 기다리면 나머지 워커는 잠든 채 아무도
+    // 입출력을 안 봐서, 캐시가 식을 때마다(10~13초) 이 런타임의 모든 연결 — 거울·카사넷 입구·`/version` — 이 같이
+    // 멈췄다(2026-11-18, 왕복 200~1200ms 튐).
+    let body = tokio::task::spawn_blocking(move || background_agents_body(backend.as_ref(), cwd.as_deref()))
+        .await
+        .unwrap_or_else(|e| serde_json::json!({ "ok": false, "error": e.to_string() }));
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+fn background_agents_body(backend: &dyn Backend, cwd: Option<&str>) -> serde_json::Value {
+    match cached_agents_output(cwd) {
         Ok(out) if out.status.success() => {
             match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
                 Ok(mut agents) => {
@@ -342,8 +353,7 @@ async fn background_agents_handler(
             "error": String::from_utf8_lossy(&out.stderr).trim().to_string(),
         }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    };
-    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+    }
 }
 
 /// `POST /background-kill?pid=<pid>` — claude agents background 세션을 종료(SIGTERM).
