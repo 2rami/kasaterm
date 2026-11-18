@@ -202,6 +202,7 @@ impl Side {
             remote: relay,
             now_ms: self.now,
             allow_bulk_delete,
+            sync_bookmarks: true,
             send_tabs: self.send_tabs,
         };
         engine.round(&mut self.state).unwrap()
@@ -443,6 +444,7 @@ fn a_blob_from_another_vault_is_not_taken() {
         remote: &relay,
         now_ms: a.now,
         allow_bulk_delete: false,
+        sync_bookmarks: true,
         send_tabs: false,
     };
     assert!(engine.round(&mut stranger.state).is_err(), "다른 열쇠는 이 관문 기록을 쓰지 못한다");

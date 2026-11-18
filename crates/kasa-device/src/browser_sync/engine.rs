@@ -75,6 +75,9 @@ pub struct Engine<'a> {
     pub remote: &'a dyn Remote,
     pub now_ms: u64,
     pub allow_bulk_delete: bool,
+    /// 사람이 「북마크 맞추기」를 켰다. 끄면 모음은 건드리지 않고 탭만 다룬다.
+    pub sync_bookmarks: bool,
+    /// 사람이 「탭 보내기」를 켰다 — 내 탭을 보내고 다른 기기의 탭을 받는다. 끄면 내 것에 묘비를 달고 받은 것도 지운다.
     pub send_tabs: bool,
 }
 
@@ -229,7 +232,7 @@ impl Engine<'_> {
             Err(BrowserError::NotRunning) => return Ok(Counts { browser_away: true, ..Counts::default() }),
             Err(error) => return Err(SyncError::Browser(format!("{error:?}"))),
         };
-        if state.revision > 0 && read.collections.iter().any(|c| !state.collections.contains(&c.key)) {
+        if self.sync_bookmarks && state.revision > 0 && read.collections.iter().any(|c| !state.collections.contains(&c.key)) {
             fetched = self.remote.fetch(0)?;
         }
         let mut counts = Counts::default();
@@ -252,7 +255,7 @@ impl Engine<'_> {
         let mut outgoing = Vec::new();
         let empty = BTreeMap::new();
         let mut complete = true;
-        for c in &read.collections {
+        for c in read.collections.iter().filter(|_| self.sync_bookmarks) {
             let remote = marks.get(&c.key).unwrap_or(&empty);
             match self.collection(state, c, remote, relay_now, &mut counts, &mut outgoing) {
                 Ok(()) => {
@@ -596,7 +599,7 @@ impl Engine<'_> {
         let mut devices: Vec<Device> = state
             .remote_tabs
             .values()
-            .filter(|(_, r)| !r.gone && r.device != self.device)
+            .filter(|(_, r)| self.send_tabs && !r.gone && r.device != self.device)
             .map(|(_, r)| Device { id: r.device.clone(), name: r.name.clone(), at: r.at, workspaces: r.workspaces.clone() })
             .collect();
         devices.sort_by(|a, b| a.id.cmp(&b.id));
