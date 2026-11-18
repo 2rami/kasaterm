@@ -74,6 +74,9 @@ pub struct State {
     /// 관문 항목 이름 → 다른 기기의 탭(차례, 기록). 브라우저의 `remote-tabs.json` 과 같은 것을 든다.
     #[serde(default)]
     pub remote_tabs: BTreeMap<String, (u64, TabsRecord)>,
+    /// 둘 다 끈 뒤 뒷정리까지 끝났다 — 다시 켤 때까지 관문에 묻지 않는다.
+    #[serde(default)]
+    pub idle: bool,
 }
 
 impl State {

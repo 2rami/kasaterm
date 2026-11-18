@@ -411,6 +411,11 @@ pub fn confirm_fingerprint() -> Result<(), String> {
     Ok(())
 }
 
+/// 이 기기의 금고 열쇠를 사람이 지문으로 확인했나 — 북마크·탭 동기화도 그 뒤에만 열쇠의 갈래로 일한다.
+pub(crate) fn key_confirmed(account: &str) -> bool {
+    unconfirmed_path(account).is_some_and(|flag| !flag.exists())
+}
+
 /// 사람이 「지우기 N개 — 확인」을 눌렀다.
 pub fn allow_deletions() {
     ALLOW_BULK_DELETE.store(true, Ordering::Release);

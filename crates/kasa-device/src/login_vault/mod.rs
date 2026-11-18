@@ -20,6 +20,7 @@ pub mod macos_store;
 pub mod windows_store;
 
 pub use service::{allow_deletions, confirm_fingerprint, confirm_phone, create_vault, poke, spawn, start_join, status};
+pub(crate) use service::key_confirmed;
 
 #[cfg(test)]
 mod tests;

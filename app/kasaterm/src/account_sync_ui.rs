@@ -17,6 +17,8 @@ impl App {
         }));
         // 금고 열쇠가 있는 기기에서만 일한다 — 사람이 설정에서 금고를 만들거나 등록해야 생긴다.
         kasa_device::login_vault::spawn();
+        // 북마크·탭 동기화도 같은 금고 열쇠의 갈래로, 사람이 설정에서 켠 것만 한다.
+        kasa_device::browser_sync::spawn(crate::render::pane_identity::local_device_name);
     }
 
     pub(crate) fn apply_account_sync(&mut self, request: kasa_device::account_sync::PendingApply) -> Result<(), String> {

@@ -15,6 +15,11 @@ pub(crate) enum Act {
     AllowDeletions,
     /// 그 폰 열쇠를 금고 승인에 믿기(지문 확인 창을 연다).
     ConfirmPhone(usize),
+    /// 북마크·탭 동기화 켜고 끄기(kasa-device browser_sync). 금고 열쇠의 갈래로 잠근다.
+    Bookmarks(bool),
+    Tabs(bool),
+    /// 한 번에 많이 사라진 북마크를 정말 지운다.
+    AllowBookmarkDeletions,
 }
 
 /// 확인 창의 답 — 완료 처리기는 App 을 못 잡으니 여기 두고 다음 poll 이 꺼내 간다.
@@ -23,6 +28,7 @@ static PHONE_ANSWER: Mutex<Option<String>> = Mutex::new(None);
 #[derive(Default)]
 pub(crate) struct State {
     status: serde_json::Value,
+    browser: serde_json::Value,
     busy: Option<Receiver<Result<String, String>>>,
     message: Option<(String, bool)>,
     fixture: bool,
@@ -32,6 +38,7 @@ pub(crate) struct State {
 pub(crate) struct View {
     signed_in: bool,
     status: serde_json::Value,
+    browser: serde_json::Value,
     busy: bool,
     message: Option<(String, bool)>,
     /// 금고 승인에 아직 직접 믿지 않은 폰 — 직접 믿은 폰이 하나도 없을 때만 찬다.
@@ -43,6 +50,7 @@ impl State {
         View {
             signed_in: signed_in || self.fixture,
             status: self.status.clone(),
+            browser: self.browser.clone(),
             busy: self.busy.is_some(),
             message: self.message.clone(),
             phones: self.unconfirmed_phones(),
@@ -56,6 +64,11 @@ impl State {
             let status = kasa_device::login_vault::status();
             if status != self.status {
                 self.status = status;
+                changed = true;
+            }
+            let browser = kasa_device::browser_sync::status();
+            if browser != self.browser {
+                self.browser = browser;
                 changed = true;
             }
         }
@@ -99,6 +112,7 @@ impl State {
     pub(crate) fn fixture(&mut self, state: &str) {
         self.fixture = true;
         let phones = serde_json::json!([{"id": "a1", "label": "내 iPhone", "fingerprint": "3F2A-91C0-7D4E-55B1", "manual": false}]);
+        self.browser = serde_json::json!({"state": "synced", "settings": {"bookmarks": true, "tabs": false}, "bookmarks": 128, "devices": 1});
         self.status = match state {
             "joining" => serde_json::json!({"state": "joining", "step": "phone", "code": "7F3A-91C2-0B5D-E44A"}),
             "holder" => serde_json::json!({"state": "joining", "step": "holder", "code": "7F3A-91C2-0B5D-E44A"}),
@@ -146,6 +160,16 @@ impl App {
             Act::ConfirmFingerprint => vault.run(|| kasa_device::login_vault::confirm_fingerprint().map(|()| "맞추기 시작해요".to_string())),
             Act::AllowDeletions => {
                 kasa_device::login_vault::allow_deletions();
+                vault.message = Some(("다음 맞추기에서 지워요".into(), false));
+            }
+            Act::Bookmarks(on) => vault.run(move || {
+                kasa_device::browser_sync::set(Some(on), None).map(|_| if on { "북마크를 맞추기 시작해요" } else { "북마크 맞추기를 껐어요" }.to_string())
+            }),
+            Act::Tabs(on) => vault.run(move || {
+                kasa_device::browser_sync::set(None, Some(on)).map(|_| if on { "열린 탭을 보내기 시작해요" } else { "탭 보내기를 껐어요 · 다른 기기에서도 사라져요" }.to_string())
+            }),
+            Act::AllowBookmarkDeletions => {
+                kasa_device::browser_sync::allow_deletions();
                 vault.message = Some(("다음 맞추기에서 지워요".into(), false));
             }
             Act::ConfirmPhone(index) => {
@@ -266,5 +290,51 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
             *y += 18.0;
         }
     }
+    *y += 24.0;
+    paint_browser(g, s, hits, x, y, w);
+}
+
+/// 「북마크·탭 동기화」 — 카사브라우저의 북마크를 맞추고 열린 탭을 보낸다. 금고 열쇠가 있고 지문을 확인한 기기에서만.
+fn paint_browser(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
+    let v = &s.device_account.vault;
+    if !v.signed_in {
+        return;
+    }
+    g.queue_icon("lock", x, *y - 1.0, 17.0, theme::text());
+    draw_text(g, x + 24.0, *y, "북마크·탭 동기화", 14.5, theme::text(), true);
+    *y += 26.0;
+    let b = &v.browser;
+    let ready = matches!(v.status["state"].as_str(), Some("synced"));
+    if !ready || b["state"] == "needs_vault" {
+        info_slab(g, x, y, w, "위의 로그인 동기화를 켜고 지문을 확인한 기기에서 쓸 수 있어요. 같은 금고 열쇠에서 가른 열쇠로 잠가서 따로 등록하지 않아요.");
+        *y += 24.0;
+        return;
+    }
+    let bookmarks_on = b["settings"]["bookmarks"] == true;
+    let tabs_on = b["settings"]["tabs"] == true;
+    let idle = !v.busy;
+    let state = b["state"].as_str().unwrap_or("checking");
+    let count = b["bookmarks"].as_u64().unwrap_or(0);
+    let marks_dim = match state {
+        _ if !bookmarks_on => "같은 계정 프로필의 북마크를 기기끼리 합쳐요".to_string(),
+        "browser_closed" => "카사브라우저가 켜지면 맞춰요".to_string(),
+        "synced" | "deletions_pending" => format!("북마크 {count}개를 맞추고 있어요"),
+        _ => "확인하는 중…".to_string(),
+    };
+    let toggle = |on: bool| if on { "끄기" } else { "켜기" };
+    row(g, s, hits, x, y, w, "북마크 맞추기", &marks_dim, false, idle.then_some((toggle(bookmarks_on), Act::Bookmarks(!bookmarks_on))));
+    let devices = b["devices"].as_u64().unwrap_or(0);
+    let tabs_dim = if tabs_on { format!("다른 기기 {devices}대의 탭을 방문 기록 패널에서 봐요") } else { "열린 탭을 보내고 다른 기기의 탭을 받아요".to_string() };
+    row(g, s, hits, x, y, w, "탭 보내기·받기", &tabs_dim, false, idle.then_some((toggle(tabs_on), Act::Tabs(!tabs_on))));
+    let message = b["message"].as_str().unwrap_or_default();
+    match state {
+        "deletions_pending" => {
+            let n = b["deletions"].as_u64().unwrap_or(0);
+            row(g, s, hits, x, y, w, &format!("북마크 지우기 {n}개 보류 중"), "이 기기에서 북마크가 한꺼번에 사라졌어요 — 정말 지운 것인지 확인해 주세요", true, idle.then_some(("지우기 확인", Act::AllowBookmarkDeletions)));
+        }
+        _ if !message.is_empty() => row(g, s, hits, x, y, w, message, "이 기기의 북마크와 탭은 그대로예요", true, None),
+        _ => {}
+    }
+    info_slab(g, x, y, w, "북마크와 탭은 이 기기에서 잠근 뒤에만 계정에 올라가요. 관문은 주소·제목을 볼 수 없고, 에이전트 작업공간과 에이전트가 연 탭은 보내지 않아요.");
     *y += 24.0;
 }
