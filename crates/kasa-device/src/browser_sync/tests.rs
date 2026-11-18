@@ -448,3 +448,13 @@ fn a_blob_from_another_vault_is_not_taken() {
     assert!(engine.round(&mut stranger.state).is_err(), "다른 열쇠는 이 관문 기록을 쓰지 못한다");
     assert!(stranger.marks().is_empty());
 }
+
+#[test]
+fn many_bookmarks_go_up_in_batches_the_relay_takes() {
+    let (mut a, mut b, relay) = pair();
+    a.browser.edit(|m| *m = (0..450).map(|i| mark(&format!("m{i}"), &format!("{i}"))).collect());
+    let counts = a.round(&relay);
+    assert_eq!(counts.uploaded, 451, "북마크 450개와 내 탭 한 항목을 200개씩 나눠 올린다");
+    b.round(&relay);
+    assert_eq!(b.marks(), a.marks());
+}

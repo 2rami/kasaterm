@@ -33,6 +33,14 @@ fn midpoint(a: &[usize], b: Option<&[usize]>) -> Vec<usize> {
     }
     let low = a.first().copied().unwrap_or(0);
     let high = b.map_or(BASE, |b| b[0]);
+    // 끝에 붙이거나 맨 앞에 끼울 때는 반으로 가르지 않고 한 칸씩 간다 — 반씩 가르면 몇 번 만에 끝 글자에 닿아
+    // 붙일 때마다 자리가 길어진다.
+    if b.is_none() && !a.is_empty() && low + 1 < BASE {
+        return vec![low + 1];
+    }
+    if a.is_empty() && b.is_some() && high > 1 {
+        return vec![high - 1];
+    }
     if high - low > 1 {
         return vec![(low + high) / 2];
     }
@@ -56,18 +64,45 @@ pub fn place(siblings: &[Sibling]) -> Vec<(String, bool)> {
     let keep = longest_increasing(siblings);
     let mut out: Vec<(String, bool)> = Vec::with_capacity(siblings.len());
     let mut previous = String::new();
-    for (i, s) in siblings.iter().enumerate() {
+    let mut i = 0;
+    while i < siblings.len() {
         if keep[i] {
-            let pos = s.pos.unwrap_or_default().to_string();
+            let pos = siblings[i].pos.unwrap_or_default().to_string();
             previous = pos.clone();
             out.push((pos, false));
+            i += 1;
             continue;
         }
-        let next = (i + 1..siblings.len()).find(|j| keep[*j]).and_then(|j| siblings[j].pos).unwrap_or("");
-        let pos = between(&previous, next);
-        previous = pos.clone();
-        out.push((pos, true));
+        let end = (i..siblings.len()).find(|j| keep[*j]).unwrap_or(siblings.len());
+        let next = siblings.get(end).and_then(|s| s.pos).unwrap_or("");
+        for pos in spread(&previous, next, end - i) {
+            out.push((pos, true));
+        }
+        previous = out.last().map(|p| p.0.clone()).unwrap_or_default();
+        i = end;
     }
+    out
+}
+
+/// `a` 와 `b` 사이에 `n` 개의 자리를 순서대로. 위가 막혀 있으면 가운데부터 반씩 갈라 자리가 `log n` 만큼만 길어진다.
+fn spread(a: &str, b: &str, n: usize) -> Vec<String> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if b.is_empty() {
+        let mut out = Vec::with_capacity(n);
+        let mut previous = a.to_string();
+        for _ in 0..n {
+            previous = between(&previous, "");
+            out.push(previous.clone());
+        }
+        return out;
+    }
+    let middle = between(a, b);
+    let left = (n - 1) / 2;
+    let mut out = spread(a, &middle, left);
+    out.push(middle.clone());
+    out.extend(spread(&middle, b, n - 1 - left));
     out
 }
 
@@ -118,6 +153,24 @@ mod tests {
         assert!(keys.windows(2).all(|w| w[0] < w[1]));
         assert!(keys.iter().all(|k| k.len() < 40), "자리가 끝없이 길어지지 않는다");
         assert!(between("b", "a").as_str() > "b", "거꾸로 주면 a 뒤");
+    }
+
+    #[test]
+    fn places_stay_short_when_marks_pile_up_at_one_end_or_in_one_gap() {
+        let mut last = String::new();
+        let mut first = String::new();
+        for _ in 0..1000 {
+            let next = between(&last, "");
+            assert!(next > last);
+            last = next;
+            let before = between("", &first);
+            assert!(first.is_empty() || before < first);
+            first = before;
+        }
+        assert!(last.len() <= 40 && first.len() <= 40, "끝에 1000번 붙여도 짧다: {} {}", last.len(), first.len());
+        let gap = spread("F", "G", 1000);
+        assert!(gap.windows(2).all(|w| w[0] < w[1]) && gap[0].as_str() > "F" && gap[999].as_str() < "G");
+        assert!(gap.iter().all(|k| k.len() <= 8), "한 틈에 1000개도 반씩 갈라 짧다");
     }
 
     #[test]

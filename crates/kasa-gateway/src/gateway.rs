@@ -248,6 +248,8 @@ pub struct Gate {
     account_sync: Arc<kasa_device::account_sync::server::Store>,
     /// 웹 로그인 동기화의 잠긴 사본(`gateway_login_vault.rs`). 관문은 풀 열쇠가 없다.
     login_vault: Arc<kasa_device::login_vault::server::Store>,
+    /// 북마크·탭 동기화의 잠긴 사본 — 창구는 금고와 같고(`login_vault::store_routes`) 보관소·한도만 다르다.
+    browser_sync: Arc<kasa_device::login_vault::server::Store>,
     conversations: Option<Arc<conversations::Service>>,
     /// 계정 간 공유방(`gateway_shared_rooms.rs`). 상태 폴더가 없으면 `None`.
     shared_rooms: Option<Arc<shared_rooms::Service>>,
@@ -362,6 +364,10 @@ impl Gate {
             )),
             login_vault: Arc::new(kasa_device::login_vault::server::Store::new(
                 state_path.as_ref().map(|p| p.with_file_name("login-vault")),
+            )),
+            browser_sync: Arc::new(kasa_device::login_vault::server::Store::with_limits(
+                state_path.as_ref().map(|p| p.with_file_name("browser-sync")),
+                kasa_device::browser_sync::engine::RELAY_LIMITS,
             )),
             conversations: conversations::Service::open(state_path.as_deref()),
             shared_rooms: shared_rooms::Service::open(state_path.as_deref()),
@@ -526,6 +532,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(conversations::routes())
         .merge(shared_rooms::routes())
         .merge(login_vault::routes())
+        .merge(login_vault::store_routes("/relay/browser-sync", |gate| &gate.browser_sync))
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))

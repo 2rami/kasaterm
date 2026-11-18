@@ -4,17 +4,14 @@
 
 use super::*;
 use kasa_device::login_vault::crypto::SealedKey;
-use kasa_device::login_vault::server::{Approval, Error, Put};
+use kasa_device::login_vault::server::{Approval, Error, Put, Store};
 use serde::Deserialize;
 use serde_json::json;
 
 const MAX_BODY: usize = 1024 * 1024;
 
 pub(super) fn routes() -> Router<Gate> {
-    Router::new()
-        .route("/relay/login-vault", get(fetch))
-        .route("/relay/login-vault/init", axum::routing::post(init))
-        .route("/relay/login-vault/items", axum::routing::put(put))
+    store_routes("/relay/login-vault", |gate| &gate.login_vault)
         .route("/relay/login-vault/joins", get(pending).post(open_join))
         .route("/relay/login-vault/joins/{id}", get(take_sealed))
         .route("/relay/login-vault/joins/{id}/approval", axum::routing::post(attach_approval))
@@ -81,12 +78,32 @@ struct Since {
     since: u64,
 }
 
-async fn fetch(State(gate): State<Gate>, headers: axum::http::HeaderMap, query: axum::extract::Query<Since>) -> axum::response::Response {
-    let (_, account) = match desktop(&gate, &headers) {
+/// 잠긴 사본의 받기·만들기·쓰기 창구. 로그인 금고와 북마크·탭 동기화(`/relay/browser-sync`)가 저마다의 보관소로 쓴다 —
+/// 열쇠 표식·서명 공개키·한도가 보관소마다 따로라 한쪽의 서명이나 덩어리로 다른 쪽에 쓰지 못한다.
+pub(super) fn store_routes(base: &'static str, pick: fn(&Gate) -> &Store) -> Router<Gate> {
+    Router::new()
+        .route(
+            base,
+            get(move |State(gate): State<Gate>, headers: axum::http::HeaderMap, query: axum::extract::Query<Since>| async move {
+                fetch(pick(&gate), &gate, headers, query).await
+            }),
+        )
+        .route(
+            &format!("{base}/init"),
+            axum::routing::post(move |State(gate): State<Gate>, req: axum::extract::Request| async move { init(pick(&gate), &gate, req).await }),
+        )
+        .route(
+            &format!("{base}/items"),
+            axum::routing::put(move |State(gate): State<Gate>, req: axum::extract::Request| async move { put(pick(&gate), &gate, req).await }),
+        )
+}
+
+async fn fetch(store: &Store, gate: &Gate, headers: axum::http::HeaderMap, query: axum::extract::Query<Since>) -> axum::response::Response {
+    let (_, account) = match desktop(gate, &headers) {
         Ok(who) => who,
         Err(response) => return response,
     };
-    match gate.login_vault.fetch(&account, query.since, now_ms()) {
+    match store.fetch(&account, query.since, now_ms()) {
         Ok(fetched) => ok(serde_json::to_value(fetched).unwrap_or_default()),
         Err(error) => refuse(error),
     }
@@ -98,13 +115,13 @@ struct Init {
     sign_pub: String,
 }
 
-async fn init(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
-    let (device, account, init) = match body::<Init>(&gate, req).await {
+async fn init(store: &Store, gate: &Gate, req: axum::extract::Request) -> axum::response::Response {
+    let (device, account, init) = match body::<Init>(gate, req).await {
         Ok(parts) => parts,
         Err(response) => return response,
     };
     let label = gate.devices.lock().unwrap().get(&device).map(|d| d.label.clone()).unwrap_or_default();
-    match gate.login_vault.init(&account, &init.key_id, &init.sign_pub, &label, now_ms()) {
+    match store.init(&account, &init.key_id, &init.sign_pub, &label, now_ms()) {
         Ok(()) => ok(json!({"ok": true})),
         Err(error) => refuse(error),
     }
@@ -117,12 +134,12 @@ struct Items {
     sig: String,
 }
 
-async fn put(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
-    let (_, account, items) = match body::<Items>(&gate, req).await {
+async fn put(store: &Store, gate: &Gate, req: axum::extract::Request) -> axum::response::Response {
+    let (_, account, items) = match body::<Items>(gate, req).await {
         Ok(parts) => parts,
         Err(response) => return response,
     };
-    match gate.login_vault.put(&account, &items.key_id, &items.puts, &items.sig, now_ms()) {
+    match store.put(&account, &items.key_id, &items.puts, &items.sig, now_ms()) {
         Ok(outcomes) => ok(json!({"outcomes": outcomes})),
         Err(error) => refuse(error),
     }
@@ -277,6 +294,40 @@ mod tests {
 
         let saved = std::fs::read_to_string(dir.join("login-vault").join("tester.json")).unwrap();
         assert!(saved.contains("c2VhbGVk") && !saved.contains(&secret.public_base64()), "등록 요청은 디스크에 남기지 않는다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 북마크·탭 동기화는 같은 창구 꼴의 다른 보관소다 — 금고 열쇠의 갈래로 만들고, 금고보다 큰 덩어리(탭 목록)를 받으며,
+    /// 금고 서명으로는 쓰지 못한다.
+    #[tokio::test]
+    async fn browser_sync_is_its_own_store_beside_the_login_vault() {
+        let dir = std::env::temp_dir().join(format!("kasa-browser-sync-http-{}", uuid::Uuid::new_v4()));
+        let addr = spawn_relay(account_gate(&dir)).await;
+        let mac = post(addr, "/relay/login", None, json!({"account":"tester","password":"correct horse","machine_id":"sync-mac","kind":"desktop"})).await.1;
+        let phone = post(addr, "/relay/login", None, json!({"account":"tester","password":"correct horse","kind":"phone"})).await.1;
+        let (token, phone_token) = (mac["token"].as_str().unwrap(), phone["token"].as_str().unwrap());
+        let vault = VaultKey::generate().unwrap();
+        let sync = vault.subkey("browser-sync");
+        assert_eq!(get_json(addr, "/relay/browser-sync", phone_token).await.0, 403, "폰은 쓰지 않는다");
+        assert_eq!(post(addr, "/relay/login-vault/init", Some(token), json!({"key_id": vault.key_id(), "sign_pub": vault.sign_pub()})).await.0, 200);
+        assert_eq!(get_json(addr, "/relay/browser-sync", token).await.1["key_id"], "", "금고를 만들어도 동기화 기록은 따로다");
+        assert_eq!(post(addr, "/relay/browser-sync/init", Some(token), json!({"key_id": sync.key_id(), "sign_pub": sync.sign_pub()})).await.0, 200);
+
+        let big = "QUFB".repeat(12 * 1024);
+        let id = "cd".repeat(32);
+        let puts = [Put { id: id.clone(), expected_rev: 0, blob: Some(big.clone()) }];
+        let body = |key: &VaultKey| json!({"key_id": sync.key_id(), "puts": puts, "sig": key.sign(&put_message("tester", &sync.key_id(), &puts))});
+        let send = |body: serde_json::Value| async move {
+            let reply = reqwest::Client::new().put(format!("http://{addr}/relay/browser-sync/items")).bearer_auth(token).json(&body).send().await.unwrap();
+            (reply.status().as_u16(), reply.json::<serde_json::Value>().await.unwrap_or_default())
+        };
+        let (status, refused) = send(body(&vault)).await;
+        assert_eq!((status, refused["error"].as_str()), (403, Some("bad_signature")), "금고 서명으로는 못 쓴다");
+        let (status, out) = send(body(&sync)).await;
+        assert_eq!((status, out["outcomes"][0]["result"].as_str()), (200, Some("ok")), "탭 목록만 한 덩어리를 받는다");
+        let (status, _) = put(addr, token, signed(&vault, &[Put { id, expected_rev: 0, blob: Some(big) }])).await;
+        assert_eq!(status, 400, "금고는 그대로 4KB 까지");
+        assert!(dir.join("browser-sync").join("tester.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
