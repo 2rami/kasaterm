@@ -586,17 +586,6 @@ fn keep(key: &Value, event: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 사람이 맥·PC 화면에서 지문을 보고 「금고 승인에 믿기」를 눌렀다 — 이미 믿은 열쇠를 직접 믿은 것으로 올린다.
-pub fn confirm(id: &str) -> anyhow::Result<()> {
-    let mut list = trusted()?;
-    let Some(t) = list.iter_mut().find(|t| t.id == id) else { bail!("not_trusted") };
-    t.manual = true;
-    store_set(TRUSTED, &serde_json::to_string(&list)?)?;
-    CHANGED.store(true, Ordering::Relaxed);
-    audit(json!({"event": "key_confirmed", "key": id}));
-    Ok(())
-}
-
 pub fn untrust(id: &str) -> anyhow::Result<()> {
     let mut list = trusted()?;
     list.retain(|t| t.id != id);

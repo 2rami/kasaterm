@@ -1,10 +1,10 @@
-//! `/relay/login-vault` — 웹 로그인 동기화의 잠긴 사본과 새 기기 등록 자리(docs/login-vault-sync.md).
-//! 관문은 덩어리를 풀 열쇠가 없다. 계정은 기기 토큰이 정하고, 데스크톱만 쓴다 — 폰은 승인만 한다.
+//! `/relay/login-vault` — 웹 로그인 동기화의 잠긴 사본과 맡긴 금고 열쇠(docs/login-vault-sync.md).
+//! 열쇠를 가진 데스크톱이 금고 열쇠를 맡기고, 같은 계정으로 로그인한 데스크톱은 그것을 받아 간다 — 그래서 관문은
+//! 덩어리를 열 수 있다(사람이 고른 대가). 계정은 기기 토큰이 정하고, 데스크톱만 쓴다.
 //! 로그에 남기는 것은 없다(항목 이름조차 HMAC 이지만 남길 까닭이 없다).
 
 use super::*;
-use kasa_device::login_vault::crypto::SealedKey;
-use kasa_device::login_vault::server::{Approval, Error, Put, Store};
+use kasa_device::login_vault::server::{Error, Put, Store};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -12,10 +12,7 @@ const MAX_BODY: usize = 1024 * 1024;
 
 pub(super) fn routes() -> Router<Gate> {
     store_routes("/relay/login-vault", |gate| &gate.login_vault)
-        .route("/relay/login-vault/joins", get(pending).post(open_join))
-        .route("/relay/login-vault/joins/{id}", get(take_sealed))
-        .route("/relay/login-vault/joins/{id}/approval", axum::routing::post(attach_approval))
-        .route("/relay/login-vault/joins/{id}/sealed", axum::routing::post(post_sealed))
+        .route("/relay/login-vault/escrow", get(escrow).put(put_escrow))
 }
 
 fn now_ms() -> u64 {
@@ -43,9 +40,7 @@ fn refuse(error: Error) -> axum::response::Response {
         Error::KeyMismatch => json_err(StatusCode::CONFLICT, "key_mismatch"),
         Error::Exists(key_id) => (StatusCode::CONFLICT, axum::Json(json!({"ok": false, "error": "vault_exists", "key_id": key_id}))).into_response(),
         Error::NotFound => json_err(StatusCode::NOT_FOUND, "not_found"),
-        Error::Forbidden => json_err(StatusCode::FORBIDDEN, "forbidden"),
         Error::BadSignature => json_err(StatusCode::FORBIDDEN, "bad_signature"),
-        Error::AlreadySealed => json_err(StatusCode::CONFLICT, "already_sealed"),
         Error::TooMany => json_err(StatusCode::TOO_MANY_REQUESTS, "too_many"),
         Error::Storage => json_err(StatusCode::INTERNAL_SERVER_ERROR, "storage_unavailable"),
     }
@@ -146,71 +141,37 @@ async fn put(store: &Store, gate: &Gate, req: axum::extract::Request) -> axum::r
 }
 
 #[derive(Deserialize)]
-struct OpenJoin {
-    label: String,
-    join_pub: String,
+struct Escrow {
+    key: String,
 }
 
-async fn open_join(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
-    let (device, account, open) = match body::<OpenJoin>(&gate, req).await {
+async fn put_escrow(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let (_, account, escrow) = match body::<Escrow>(&gate, req).await {
         Ok(parts) => parts,
         Err(response) => return response,
     };
-    match gate.login_vault.open_join(&account, &device, &open.label, &open.join_pub, now_ms()) {
-        Ok(id) => ok(json!({"id": id})),
-        Err(error) => refuse(error),
-    }
-}
-
-async fn pending(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
-    let (device, account) = match desktop(&gate, &headers) {
-        Ok(who) => who,
-        Err(response) => return response,
-    };
-    match gate.login_vault.pending_joins(&account, &device, now_ms()) {
-        Ok(joins) => ok(json!({"joins": joins})),
-        Err(error) => refuse(error),
-    }
-}
-
-async fn attach_approval(State(gate): State<Gate>, AxPath(id): AxPath<String>, req: axum::extract::Request) -> axum::response::Response {
-    let (device, account, approval) = match body::<Approval>(&gate, req).await {
-        Ok(parts) => parts,
-        Err(response) => return response,
-    };
-    match gate.login_vault.attach_approval(&account, &device, &id, approval, now_ms()) {
+    match gate.login_vault.put_escrow(&account, &escrow.key) {
         Ok(()) => ok(json!({"ok": true})),
         Err(error) => refuse(error),
     }
 }
 
-async fn post_sealed(State(gate): State<Gate>, AxPath(id): AxPath<String>, req: axum::extract::Request) -> axum::response::Response {
-    let (device, account, sealed) = match body::<SealedKey>(&gate, req).await {
-        Ok(parts) => parts,
-        Err(response) => return response,
-    };
-    match gate.login_vault.post_sealed(&account, &device, &id, sealed, now_ms()) {
-        Ok(()) => ok(json!({"ok": true})),
-        Err(error) => refuse(error),
-    }
-}
-
-async fn take_sealed(State(gate): State<Gate>, AxPath(id): AxPath<String>, headers: axum::http::HeaderMap) -> axum::response::Response {
-    let (device, account) = match desktop(&gate, &headers) {
+async fn escrow(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let (_, account) = match desktop(&gate, &headers) {
         Ok(who) => who,
         Err(response) => return response,
     };
-    match gate.login_vault.take_sealed(&account, &device, &id, now_ms()) {
-        Ok(sealed) => ok(json!({"sealed": sealed})),
+    match gate.login_vault.escrow(&account) {
+        Ok(Some(key)) => ok(json!({"key": key})),
+        Ok(None) => refuse(Error::NotFound),
         Err(error) => refuse(error),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::super::tests::{account_gate, get_json, post, spawn_relay};
-    use kasa_device::login_vault::crypto::{seal_for, JoinSecret, VaultKey};
+    use kasa_device::login_vault::crypto::VaultKey;
     use kasa_device::login_vault::server::{put_message, Put};
     use serde_json::json;
 
@@ -219,12 +180,28 @@ mod tests {
         (reply.status().as_u16(), reply.json().await.unwrap_or_default())
     }
 
+    async fn escrow(addr: std::net::SocketAddr, token: &str) -> (u16, serde_json::Value) {
+        let reply = reqwest::Client::new().get(format!("http://{addr}/relay/login-vault/escrow")).bearer_auth(token).send().await.unwrap();
+        (reply.status().as_u16(), reply.json().await.unwrap_or_default())
+    }
+
+    async fn leave(addr: std::net::SocketAddr, token: &str, key: String) -> (u16, serde_json::Value) {
+        let reply = reqwest::Client::new()
+            .put(format!("http://{addr}/relay/login-vault/escrow"))
+            .bearer_auth(token)
+            .json(&json!({"key": key}))
+            .send()
+            .await
+            .unwrap();
+        (reply.status().as_u16(), reply.json().await.unwrap_or_default())
+    }
+
     fn signed(key: &VaultKey, puts: &[Put]) -> serde_json::Value {
         let key_id = key.key_id();
         json!({"key_id": key_id, "puts": puts, "sig": key.sign(&put_message("tester", &key_id, puts))})
     }
 
-    /// 데스크톱 둘·폰 하나로 창구 그대로 — 금고 만들기·서명된 쓰기·등록 요청 나르기, 폰과 열쇠 없는 기기는 못 쓴다.
+    /// 데스크톱 둘·폰 하나로 창구 그대로 — 금고 만들기·서명된 쓰기·열쇠 맡기고 받기, 폰과 열쇠 없는 기기는 못 쓴다.
     #[tokio::test]
     async fn login_vault_over_http_for_two_desktops() {
         let dir = std::env::temp_dir().join(format!("kasa-login-vault-http-{}", uuid::Uuid::new_v4()));
@@ -262,38 +239,19 @@ mod tests {
         assert!(fetched["now_ms"].as_u64().is_some_and(|n| n > 0), "관문 시계를 함께 준다");
         assert_eq!(get_json(addr, "/relay/login-vault?since=1", pc_token).await.1["items"], json!([]));
 
-        // 새 기기(pc)가 등록을 열고 승인을 붙이면, 열쇠를 가진 기기(mac)만 그 요청을 보고 봉인을 올린다.
-        let secret = JoinSecret::new().unwrap();
-        let (_, opened) = post(addr, "/relay/login-vault/joins", Some(pc_token), json!({"label": "집 PC", "join_pub": secret.public_base64()})).await;
-        let join = opened["id"].as_str().unwrap().to_string();
-        assert_eq!(get_json(addr, "/relay/login-vault/joins", mac_token).await.1["joins"], json!([]));
-        let approval = json!({"challenge": "{}", "key": "k", "sig": "s", "by_device": "phone"});
-        assert_eq!(post(addr, &format!("/relay/login-vault/joins/{join}/approval"), Some(mac_token), approval.clone()).await.0, 403);
-        assert_eq!(post(addr, &format!("/relay/login-vault/joins/{join}/approval"), Some(pc_token), approval).await.0, 200);
-        assert_eq!(get_json(addr, "/relay/login-vault/joins", mac_token).await.1["joins"].as_array().map(Vec::len), Some(1));
-        assert_eq!(get_json(addr, "/relay/login-vault/joins", pc_token).await.1["joins"], json!([]));
-        assert_eq!(get_json(addr, &format!("/relay/login-vault/joins/{join}"), pc_token).await.1["sealed"], json!(null));
-        let pc_id = pc["device_id"].as_str().unwrap();
-        let sealed = serde_json::to_value(seal_for(&key, "tester", pc_id, &join, &secret.public_base64()).unwrap()).unwrap();
-        let stranger = serde_json::to_value(seal_for(&other, "tester", pc_id, &join, &secret.public_base64()).unwrap()).unwrap();
-        assert_eq!(post(addr, &format!("/relay/login-vault/joins/{join}/sealed"), Some(pc_token), sealed.clone()).await.0, 403);
-        assert_eq!(post(addr, &format!("/relay/login-vault/joins/{join}/sealed"), Some(mac_token), stranger).await.0, 403, "금고 열쇠 없는 봉인");
-        assert_eq!(post(addr, &format!("/relay/login-vault/joins/{join}/sealed"), Some(mac_token), sealed.clone()).await.0, 200);
-        let (status, again) = post(addr, &format!("/relay/login-vault/joins/{join}/sealed"), Some(mac_token), sealed.clone()).await;
-        assert_eq!((status, again["error"].as_str()), (409, Some("already_sealed")));
-        assert_eq!(get_json(addr, &format!("/relay/login-vault/joins/{join}"), mac_token).await.0, 403);
-        assert_eq!(get_json(addr, &format!("/relay/login-vault/joins/{join}"), pc_token).await.1["sealed"], sealed);
-        assert_eq!(get_json(addr, &format!("/relay/login-vault/joins/{join}"), pc_token).await.0, 404, "봉인은 한 번만 내준다");
-
-        // 폰 승인 창구가 등록 도전문을 받는다 — 폰에는 「로그인 금고」로 보인다.
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        let text = kasa_device::login_vault::join::challenge("tester", pc_id, &"0f".repeat(16), now + 60_000, "집 PC", &[7u8; 32]);
-        let (status, created) = post(addr, "/relay/approvals", Some(pc_token), json!({"kind": "secret", "challenge": text})).await;
-        assert_eq!(status, 200, "{created}");
-        assert_eq!(created["approval"]["tool"], "로그인 금고");
+        // 열쇠를 가진 기기(mac)가 맡기면 같은 계정으로 로그인한 새 기기(pc)가 받는다. 다른 열쇠는 못 끼우고 폰은 못 받는다.
+        assert_eq!(escrow(addr, pc_token).await.0, 404, "아직 아무도 맡기지 않았다");
+        let (status, refused) = leave(addr, pc_token, other.to_base64().to_string()).await;
+        assert_eq!((status, refused["error"].as_str()), (409, Some("key_mismatch")), "열쇠 없는 기기는 다른 열쇠를 못 끼운다");
+        assert_eq!(leave(addr, mac_token, key.to_base64().to_string()).await.0, 200);
+        let (status, taken) = escrow(addr, pc_token).await;
+        assert_eq!(status, 200);
+        assert_eq!(VaultKey::from_base64(taken["key"].as_str().unwrap()).unwrap().key_id(), key.key_id());
+        assert_eq!(escrow(addr, phone_token).await.0, 403, "폰은 받지 않는다");
+        assert_eq!(escrow(addr, "invalid").await.0, 401);
 
         let saved = std::fs::read_to_string(dir.join("login-vault").join("tester.json")).unwrap();
-        assert!(saved.contains("c2VhbGVk") && !saved.contains(&secret.public_base64()), "등록 요청은 디스크에 남기지 않는다");
+        assert!(saved.contains("c2VhbGVk"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

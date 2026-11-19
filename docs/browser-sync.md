@@ -25,12 +25,11 @@ kasabrowser `docs/browser-sync.md`, 금고 열쇠와 관문 규칙은 [웹 로�
   넘긴다(`browser_sync::display`). 금고와 북마크·탭 상태를 묶고, 글은 여기서 다 쓴다 — 브라우저는 그대로 그린다.
   `{at_ms, phase(on·starting·needs_you·off·error), headline, detail, rows[{label,value,detail?}], note, asks[{id,title,detail,button,tone}]}`.
   개수·지문·기기 이름만 있고 주소·사이트·아이디는 없다.
-- `asks` 는 사람이 정해야 하는 일: `create_vault`·`join`·`confirm_fingerprint`·`confirm_login_deletions`·`confirm_bookmark_deletions`·
-  `trust_phone`. 브라우저 단추는 `POST 127.0.0.1:<~/.config/kasaterm/mcp_port>/browser-sync/ask {"id"}` 를 부른다. 바깥 peer 와
+- `asks` 는 사람이 정해야 하는 일: `create_vault`·`confirm_login_deletions`·`confirm_bookmark_deletions`. 새 기기는 누를 것 없이
+  관문에 맡긴 금고 열쇠를 받는다(`waiting_for_key` → `joined`, [login-vault-sync.md](login-vault-sync.md)). 브라우저 단추는 `POST 127.0.0.1:<~/.config/kasaterm/mcp_port>/browser-sync/ask {"id"}` 를 부른다. 바깥 peer 와
   `Origin` 이 붙은 요청(웹 페이지의 fetch)은 거절한다.
 - 그 부름은 아무것도 확정하지 않는다. 카사텀이 지금 상태에서 물을 수 있는 일인지 다시 보고, 카사텀 창에 확인 시트를 띄워
-  사람이 거기서 누를 때만 지문 확인·지우기·금고 만들기를 한다(`native_login_vault.rs`). `join` 은 폰 Face ID 가 확인이라 바로
-  시작하고, `trust_phone` 은 카사텀 설정 「연결 기기」를 연다. 소켓·CLI 에는 이 길을 두지 않는다.
+  사람이 거기서 누를 때만 지우기·금고 만들기를 한다(`native_login_vault.rs`). 소켓·CLI 에는 이 길을 두지 않는다.
 
 ## 한 바퀴 (15초, 켜기·끄기는 앞당김)
 

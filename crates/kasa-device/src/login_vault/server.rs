@@ -8,16 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::account_sync::server::{read_account_file, write_account_file};
 
-use super::crypto::{seal_message, signature_ok, SealedKey};
+use super::crypto::{signature_ok, VaultKey};
 
 pub const MAX_ITEMS: usize = 2000;
 pub const MAX_BLOB: usize = 4096;
 pub const MAX_PUT: usize = 200;
 const MAX_FILE: usize = MAX_ITEMS * (MAX_BLOB + 256);
-/// 등록 요청은 이만큼만 산다 — 켜진 기기가 없으면 버리고 다시 한다.
-pub const JOIN_TTL_MS: u64 = 10 * 60 * 1000;
-const MAX_JOINS: usize = 8;
-const MAX_CHALLENGE: usize = 8192;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
@@ -40,6 +36,10 @@ pub struct Vault {
     pub created_ms: u64,
     pub revision: u64,
     pub items: BTreeMap<String, Item>,
+    /// 맡긴 금고 열쇠(base64). 같은 계정으로 로그인한 데스크톱이면 받아 간다 — 관문이 금고를 열 수 있는 대신 새 기기는
+    /// 로그인만으로 맞추기 시작한다(docs/login-vault-sync.md 「위협 모델」).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub escrow: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,14 +85,11 @@ pub enum Error {
     Invalid(&'static str),
     /// 다른 열쇠로 쓰려 했다 — 잘못 등록된 기기다.
     KeyMismatch,
-    /// 이미 금고가 있다. 만들려던 기기는 등록으로 간다.
+    /// 이미 금고가 있다. 만들려던 기기는 맡긴 열쇠를 받는다.
     Exists(String),
     NotFound,
-    Forbidden,
-    /// 쓰기·봉인 서명이 금고 열쇠의 것이 아니다.
+    /// 쓰기 서명이 금고 열쇠의 것이 아니다.
     BadSignature,
-    /// 그 등록에는 이미 봉인이 있다 — 먼저 온 것을 덮지 않고 알린다.
-    AlreadySealed,
     TooMany,
     Storage,
 }
@@ -124,27 +121,6 @@ fn valid_b64(text: &str, max: usize) -> bool {
     !text.is_empty() && text.len() <= max && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
 }
 
-/// 새 기기가 폰 승인을 받아 붙인 것. 관문은 서명을 믿지 않고 그대로 나른다 — 확인은 열쇠를 가진 기기가 한다.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Approval {
-    pub challenge: String,
-    pub key: String,
-    pub sig: String,
-    pub by_device: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Join {
-    pub id: String,
-    pub device_id: String,
-    pub label: String,
-    pub join_pub: String,
-    pub approval: Option<Approval>,
-    #[serde(skip)]
-    sealed: Option<SealedKey>,
-    pub created_ms: u64,
-}
-
 /// 한 금고의 한도. 로그인 금고는 [`Limits::LOGINS`], 북마크·탭 동기화는 제 것을 쓴다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -162,7 +138,6 @@ pub struct Store {
     dir: Option<PathBuf>,
     limits: Limits,
     vaults: Mutex<HashMap<String, Vault>>,
-    joins: Mutex<HashMap<String, Vec<Join>>>,
 }
 
 impl Store {
@@ -171,7 +146,7 @@ impl Store {
     }
 
     pub fn with_limits(dir: Option<PathBuf>, limits: Limits) -> Self {
-        Self { dir, limits, vaults: Mutex::new(HashMap::new()), joins: Mutex::new(HashMap::new()) }
+        Self { dir, limits, vaults: Mutex::new(HashMap::new()) }
     }
 
     fn load(&self, account: &str, cache: &mut HashMap<String, Vault>) -> Result<Vault, Error> {
@@ -281,101 +256,39 @@ impl Store {
         Ok(outcomes)
     }
 
-    fn live_joins<'a>(joins: &'a mut HashMap<String, Vec<Join>>, account: &str, now_ms: u64) -> &'a mut Vec<Join> {
-        let list = joins.entry(account.into()).or_default();
-        list.retain(|join| now_ms < join.created_ms + JOIN_TTL_MS);
-        list
+    /// 열쇠를 가진 기기가 금고 열쇠를 맡긴다. 관문이 열쇠에서 표식·서명 공개키를 다시 만들어 금고와 같을 때만 받는다 —
+    /// 열쇠 없는 기기가 다른 열쇠를 끼워 새 기기들을 엉뚱한 열쇠로 돌게 하지 못하게.
+    pub fn put_escrow(&self, account: &str, key: &str) -> Result<(), Error> {
+        if !valid_b64(key, 64) {
+            return Err(Error::Invalid("bad_key"));
+        }
+        let vault_key = VaultKey::from_base64(key).map_err(|_| Error::Invalid("bad_key"))?;
+        let mut cache = self.vaults.lock().map_err(|_| Error::Storage)?;
+        let vault = self.load(account, &mut cache)?;
+        if vault.key_id.is_empty() {
+            return Err(Error::NotFound);
+        }
+        if vault_key.key_id() != vault.key_id || vault_key.sign_pub() != vault.sign_pub {
+            return Err(Error::KeyMismatch);
+        }
+        if vault.escrow == key {
+            return Ok(());
+        }
+        self.save(account, Vault { escrow: key.into(), ..vault }, &mut cache)
     }
 
-    /// 새 기기(`device_id` 는 관문이 토큰에서 정한다)가 등록을 연다. 같은 기기의 앞 요청은 대신한다.
-    pub fn open_join(&self, account: &str, device_id: &str, label: &str, join_pub: &str, now_ms: u64) -> Result<String, Error> {
-        if label.chars().count() > 64 || !valid_b64(join_pub, 64) || device_id.is_empty() {
-            return Err(Error::Invalid("bad_join"));
-        }
-        let mut joins = self.joins.lock().map_err(|_| Error::Storage)?;
-        let list = Self::live_joins(&mut joins, account, now_ms);
-        list.retain(|join| join.device_id != device_id);
-        if list.len() >= MAX_JOINS {
-            return Err(Error::TooMany);
-        }
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        list.push(Join {
-            id: id.clone(),
-            device_id: device_id.into(),
-            label: label.into(),
-            join_pub: join_pub.into(),
-            approval: None,
-            sealed: None,
-            created_ms: now_ms,
-        });
-        Ok(id)
-    }
-
-    pub fn attach_approval(&self, account: &str, device_id: &str, join_id: &str, approval: Approval, now_ms: u64) -> Result<(), Error> {
-        if approval.challenge.len() > MAX_CHALLENGE || approval.key.len() > 128 || approval.sig.len() > 512 || approval.by_device.len() > 128 {
-            return Err(Error::Invalid("bad_approval"));
-        }
-        let mut joins = self.joins.lock().map_err(|_| Error::Storage)?;
-        let join = Self::live_joins(&mut joins, account, now_ms).iter_mut().find(|join| join.id == join_id).ok_or(Error::NotFound)?;
-        if join.device_id != device_id {
-            return Err(Error::Forbidden);
-        }
-        join.approval = Some(approval);
-        Ok(())
-    }
-
-    /// 열쇠를 가진 기기가 볼 것 — 승인이 붙었고 아직 봉인이 없는 남의 등록.
-    pub fn pending_joins(&self, account: &str, device_id: &str, now_ms: u64) -> Result<Vec<Join>, Error> {
-        let mut joins = self.joins.lock().map_err(|_| Error::Storage)?;
-        Ok(Self::live_joins(&mut joins, account, now_ms)
-            .iter()
-            .filter(|join| join.device_id != device_id && join.approval.is_some() && join.sealed.is_none())
-            .cloned()
-            .collect())
-    }
-
-    pub fn post_sealed(&self, account: &str, device_id: &str, join_id: &str, sealed: SealedKey, now_ms: u64) -> Result<(), Error> {
-        if !valid_b64(&sealed.eph_pub, 64) || !valid_b64(&sealed.blob, 256) || !valid_b64(&sealed.sig, 128) {
-            return Err(Error::Invalid("bad_sealed"));
-        }
-        let sign_pub = {
-            let mut cache = self.vaults.lock().map_err(|_| Error::Storage)?;
-            self.load(account, &mut cache)?.sign_pub
-        };
-        if !signature_ok(&sign_pub, &seal_message(account, join_id, &sealed.eph_pub, &sealed.blob), &sealed.sig) {
-            return Err(Error::BadSignature);
-        }
-        let mut joins = self.joins.lock().map_err(|_| Error::Storage)?;
-        let join = Self::live_joins(&mut joins, account, now_ms).iter_mut().find(|join| join.id == join_id).ok_or(Error::NotFound)?;
-        if join.device_id == device_id || join.approval.is_none() {
-            return Err(Error::Forbidden);
-        }
-        if join.sealed.is_some() {
-            return Err(Error::AlreadySealed);
-        }
-        join.sealed = Some(sealed);
-        Ok(())
-    }
-
-    /// 새 기기가 봉인을 받는다. 한 번 내주면 그 등록은 지운다.
-    pub fn take_sealed(&self, account: &str, device_id: &str, join_id: &str, now_ms: u64) -> Result<Option<SealedKey>, Error> {
-        let mut joins = self.joins.lock().map_err(|_| Error::Storage)?;
-        let list = Self::live_joins(&mut joins, account, now_ms);
-        let at = list.iter().position(|join| join.id == join_id).ok_or(Error::NotFound)?;
-        if list[at].device_id != device_id {
-            return Err(Error::Forbidden);
-        }
-        if list[at].sealed.is_none() {
-            return Ok(None);
-        }
-        Ok(list.remove(at).sealed)
+    /// 맡긴 금고 열쇠. 금고가 없거나 아직 아무도 맡기지 않았으면 None.
+    pub fn escrow(&self, account: &str) -> Result<Option<String>, Error> {
+        let mut cache = self.vaults.lock().map_err(|_| Error::Storage)?;
+        let vault = self.load(account, &mut cache)?;
+        Ok(Some(vault.escrow).filter(|key| !key.is_empty()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::login_vault::crypto::{seal_for, JoinSecret, VaultKey};
+    use crate::login_vault::crypto::VaultKey;
 
     fn id(n: u8) -> String {
         format!("{n:02x}").repeat(32)
@@ -462,28 +375,21 @@ mod tests {
     }
 
     #[test]
-    fn joins_flow_between_the_new_device_and_a_holder_once() {
+    fn only_the_vaults_own_key_can_be_left_and_any_desktop_takes_it_back() {
         let store = Store::new(None);
         let w = Writer::new();
+        let key = w.key.to_base64().to_string();
+        assert_eq!(store.put_escrow("alice", &key), Err(Error::NotFound), "금고가 없으면 맡길 곳이 없다");
         w.init(&store, "alice").unwrap();
-        let secret = JoinSecret::new().unwrap();
-        let join = store.open_join("alice", "new", "새 PC", &secret.public_base64(), 0).unwrap();
-        assert!(store.pending_joins("alice", "old", 1).unwrap().is_empty(), "승인 전에는 안 보인다");
-        let approval = Approval { challenge: "{}".into(), key: "k".into(), sig: "s".into(), by_device: "phone".into() };
-        assert_eq!(store.attach_approval("alice", "old", &join, approval.clone(), 1), Err(Error::Forbidden));
-        store.attach_approval("alice", "new", &join, approval, 1).unwrap();
-        assert!(store.pending_joins("alice", "new", 2).unwrap().is_empty(), "제 요청은 제가 봉인하지 않는다");
-        assert_eq!(store.pending_joins("alice", "old", 2).unwrap().len(), 1);
-        let sealed = seal_for(&w.key, "alice", "new", &join, &secret.public_base64()).unwrap();
-        assert_eq!(store.post_sealed("alice", "new", &join, sealed.clone(), 3), Err(Error::Forbidden));
-        let stranger = seal_for(&VaultKey::generate().unwrap(), "alice", "new", &join, &secret.public_base64()).unwrap();
-        assert_eq!(store.post_sealed("alice", "old", &join, stranger, 3), Err(Error::BadSignature), "열쇠 없는 기기는 봉인을 못 올린다");
-        store.post_sealed("alice", "old", &join, sealed.clone(), 3).unwrap();
-        assert_eq!(store.post_sealed("alice", "old", &join, sealed.clone(), 3), Err(Error::AlreadySealed));
-        assert_eq!(store.take_sealed("alice", "old", &join, 4), Err(Error::Forbidden));
-        assert_eq!(store.take_sealed("alice", "new", &join, 4).unwrap(), Some(sealed));
-        assert_eq!(store.take_sealed("alice", "new", &join, 5), Err(Error::NotFound), "한 번만 내준다");
-        let late = store.open_join("alice", "new", "새 PC", &secret.public_base64(), 10).unwrap();
-        assert_eq!(store.take_sealed("alice", "new", &late, 10 + JOIN_TTL_MS), Err(Error::NotFound), "10분 지나면 버린다");
+        assert_eq!(store.escrow("alice").unwrap(), None);
+        let stranger = VaultKey::generate().unwrap().to_base64().to_string();
+        assert_eq!(store.put_escrow("alice", &stranger), Err(Error::KeyMismatch), "열쇠 없는 기기는 다른 열쇠를 못 끼운다");
+        assert_eq!(store.put_escrow("alice", "not a key"), Err(Error::Invalid("bad_key")));
+        store.put_escrow("alice", &key).unwrap();
+        store.put_escrow("alice", &key).unwrap();
+        assert_eq!(store.escrow("alice").unwrap(), Some(key.clone()));
+        assert_eq!(store.escrow("bob").unwrap(), None, "다른 계정의 것은 없다");
+        let fetched = store.fetch("alice", 0, 1).unwrap();
+        assert!(!serde_json::to_string(&fetched).unwrap().contains(&key), "항목 받기에는 열쇠가 섞이지 않는다");
     }
 }

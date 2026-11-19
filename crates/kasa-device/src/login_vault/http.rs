@@ -4,10 +4,9 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::crypto::SealedKey;
+use super::crypto::VaultKey;
 use super::engine::{Remote, RemoteError};
-use super::join::Joins;
-use super::server::{Approval, Fetched, Join, Put, PutOutcome};
+use super::server::{Fetched, Put, PutOutcome};
 use crate::device_auth::DeviceCred;
 
 pub struct Http {
@@ -82,27 +81,21 @@ impl Remote for Http {
     }
 }
 
-impl Joins for Http {
-    fn open_join(&self, label: &str, join_pub: &str) -> Result<String, RemoteError> {
-        let value = self.call(reqwest::Method::POST, "/joins", Some(json!({"label": label, "join_pub": join_pub})))?;
-        value["id"].as_str().map(str::to_string).ok_or(RemoteError::Failed)
+impl Http {
+    /// 이 기기의 금고 열쇠를 관문에 맡긴다. 관문은 열쇠가 금고의 것일 때만 받는다(`key_mismatch`).
+    pub fn put_escrow(&self, key: &VaultKey) -> Result<(), RemoteError> {
+        self.call(reqwest::Method::PUT, "/escrow", Some(json!({"key": key.to_base64().as_str()}))).map(|_| ())
     }
 
-    fn attach_approval(&self, join_id: &str, approval: &Approval) -> Result<(), RemoteError> {
-        self.call(reqwest::Method::POST, &format!("/joins/{join_id}/approval"), Some(serde_json::to_value(approval).map_err(|_| RemoteError::Failed)?))
-            .map(|_| ())
-    }
-
-    fn pending_joins(&self) -> Result<Vec<Join>, RemoteError> {
-        Self::parse(self.call(reqwest::Method::GET, "/joins", None)?["joins"].clone())
-    }
-
-    fn post_sealed(&self, join_id: &str, sealed: &SealedKey) -> Result<(), RemoteError> {
-        self.call(reqwest::Method::POST, &format!("/joins/{join_id}/sealed"), Some(serde_json::to_value(sealed).map_err(|_| RemoteError::Failed)?))
-            .map(|_| ())
-    }
-
-    fn take_sealed(&self, join_id: &str) -> Result<Option<SealedKey>, RemoteError> {
-        Self::parse(self.call(reqwest::Method::GET, &format!("/joins/{join_id}"), None)?["sealed"].clone())
+    /// 맡긴 금고 열쇠. 아직 아무도 맡기지 않았으면 None.
+    pub fn escrow(&self) -> Result<Option<VaultKey>, RemoteError> {
+        match self.call(reqwest::Method::GET, "/escrow", None) {
+            Ok(value) => {
+                let key = value["key"].as_str().ok_or(RemoteError::Failed)?;
+                VaultKey::from_base64(key).map(Some).map_err(|_| RemoteError::Failed)
+            }
+            Err(RemoteError::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }

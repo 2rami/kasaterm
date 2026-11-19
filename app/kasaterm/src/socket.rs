@@ -4316,10 +4316,6 @@ impl Backend for PtyBackend {
         match action {
             "status" => Ok(vault::status()),
             "create" => vault::create_vault().map(|fingerprint| serde_json::json!({"fingerprint": fingerprint})).map_err(anyhow::Error::msg),
-            "join" => {
-                let label = crate::render::pane_identity::local_device_name().unwrap_or_else(|| "새 기기".into());
-                vault::start_join(&label).map(|()| serde_json::json!({"started": true})).map_err(anyhow::Error::msg)
-            }
             other => anyhow::bail!("login_vault.{other} 은 없다"),
         }
     }

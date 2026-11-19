@@ -16,8 +16,8 @@ String approvalFingerprint(String id) {
   return [head.substring(0, 4), head.substring(4, 8), head.substring(8, 12)].join('-');
 }
 
-/// 사람이 맥·PC 화면과 맞춰 보는 64비트 지문 — 앞 12자는 [approvalFingerprint] 와 같다. 로그인 금고 승인에 믿을 때
-/// 데스크톱은 이 길이로 보인다(데스크톱 `approval_text::key_fingerprint_long`).
+/// 사람이 맥·PC 화면과 맞춰 보는 64비트 지문 — 앞 12자는 [approvalFingerprint] 와 같다. 데스크톱 「연결 기기」의
+/// 폰 줄도 이 길이로 보인다(데스크톱 `approval_text::key_fingerprint_long`).
 String approvalFingerprintLong(String id) {
   final head = id.toUpperCase().padRight(16).substring(0, 16);
   return [for (var i = 0; i < 16; i += 4) head.substring(i, i + 4)].join('-');

@@ -1,14 +1,11 @@
-//! 금고 열쇠와 거기서 가른 키들, 항목 봉인, 쓰기 서명, 새 기기에 열쇠를 넘기는 봉인. 관문은 여기서 나온 것만 본다.
+//! 금고 열쇠와 거기서 가른 키들, 항목 봉인, 쓰기 서명. 관문은 여기서 나온 것과 맡긴 금고 열쇠를 본다.
 
-use anyhow::{anyhow, bail, ensure};
+use anyhow::{anyhow, ensure};
 use base64::Engine as _;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
-use ring::agreement::{self, EphemeralPrivateKey, UnparsedPublicKey, X25519};
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair as _, ED25519};
 use ring::{hkdf, hmac};
-use serde::{Deserialize, Serialize};
-use sha2::Digest as _;
 use zeroize::{Zeroize, Zeroizing};
 
 const SALT: &[u8] = b"kasa.login-vault.v1";
@@ -193,95 +190,6 @@ pub fn signature_ok(sign_pub: &str, message: &[u8], sig: &str) -> bool {
     ring::signature::UnparsedPublicKey::new(&ED25519, public).verify(message, &sig).is_ok()
 }
 
-/// 새 기기가 등록하는 동안 쥐는 일회용 X25519 열쇠. 봉인을 한 번 풀면 사라진다.
-pub struct JoinSecret {
-    private: EphemeralPrivateKey,
-    public: [u8; 32],
-}
-
-/// 열쇠를 가진 기기가 새 기기의 공개키로 봉인한 금고 열쇠.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SealedKey {
-    pub eph_pub: String,
-    pub blob: String,
-    /// 금고 쓰기 서명 — 관문은 열쇠를 가진 기기의 봉인만 받는다.
-    #[serde(default)]
-    pub sig: String,
-}
-
-fn join_aad(account: &str, device_id: &str) -> String {
-    format!("kasa.login-vault.join.v1:{account}:{device_id}")
-}
-
-fn join_key(shared: &[u8], eph_pub: &[u8], join_pub: &[u8]) -> Zeroizing<[u8; 32]> {
-    let mut info = b"join".to_vec();
-    info.extend_from_slice(eph_pub);
-    info.extend_from_slice(join_pub);
-    hkdf32(shared, &info)
-}
-
-/// 폰 도전문에 싣는 새 기기 공개키 해시. 관문이 공개키를 바꿔치기하면 폰 서명이 이것과 맞지 않는다.
-pub fn join_hash(join_pub: &[u8]) -> String {
-    hex(&sha2::Sha256::digest(join_pub))
-}
-
-impl JoinSecret {
-    pub fn new() -> anyhow::Result<Self> {
-        let private = EphemeralPrivateKey::generate(&X25519, &SystemRandom::new()).map_err(|_| anyhow!("random"))?;
-        let public: [u8; 32] = private
-            .compute_public_key()
-            .map_err(|_| anyhow!("public"))?
-            .as_ref()
-            .try_into()
-            .map_err(|_| anyhow!("public"))?;
-        Ok(Self { private, public })
-    }
-
-    pub fn public_base64(&self) -> String {
-        b64().encode(self.public)
-    }
-
-    pub fn public(&self) -> &[u8; 32] {
-        &self.public
-    }
-
-    pub fn open(self, account: &str, device_id: &str, sealed: &SealedKey) -> anyhow::Result<VaultKey> {
-        let eph = b64().decode(&sealed.eph_pub).map_err(|_| anyhow!("bad_sealed"))?;
-        let blob = b64().decode(&sealed.blob).map_err(|_| anyhow!("bad_sealed"))?;
-        let public = self.public;
-        let key = agreement::agree_ephemeral(self.private, &UnparsedPublicKey::new(&X25519, &eph), |shared| {
-            join_key(shared, &eph, &public)
-        })
-        .map_err(|_| anyhow!("bad_sealed"))?;
-        let raw = aead_open(&key, &join_aad(account, device_id), &blob)?;
-        let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| anyhow!("bad_sealed"))?;
-        Ok(VaultKey(Zeroizing::new(bytes)))
-    }
-}
-
-/// 봉인 서명이 덮는 글.
-pub fn seal_message(account: &str, join_id: &str, eph_pub: &str, blob: &str) -> Vec<u8> {
-    format!("kasa.login-vault.seal.v1\n{account}\n{join_id}\n{eph_pub}\n{blob}\n").into_bytes()
-}
-
-/// 열쇠를 가진 기기 쪽 — 폰 서명을 확인한 뒤에만 부른다(`join::serve`).
-pub fn seal_for(key: &VaultKey, account: &str, device_id: &str, join_id: &str, join_pub_b64: &str) -> anyhow::Result<SealedKey> {
-    let join_pub = b64().decode(join_pub_b64).map_err(|_| anyhow!("bad_join_pub"))?;
-    if join_pub.len() != 32 {
-        bail!("bad_join_pub");
-    }
-    let eph = EphemeralPrivateKey::generate(&X25519, &SystemRandom::new()).map_err(|_| anyhow!("random"))?;
-    let eph_pub = eph.compute_public_key().map_err(|_| anyhow!("public"))?.as_ref().to_vec();
-    let wrap = agreement::agree_ephemeral(eph, &UnparsedPublicKey::new(&X25519, &join_pub), |shared| {
-        join_key(shared, &eph_pub, &join_pub)
-    })
-    .map_err(|_| anyhow!("bad_join_pub"))?;
-    let blob = b64().encode(aead_seal(&wrap, &join_aad(account, device_id), key.0.as_ref())?);
-    let eph_pub = b64().encode(eph_pub);
-    let sig = key.sign(&seal_message(account, join_id, &eph_pub, &blob));
-    Ok(SealedKey { eph_pub, blob, sig })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,26 +253,5 @@ m1");
         assert!(!signature_ok(&key.sign_pub(), b"other", &sig));
         assert!(!signature_ok(&VaultKey::generate().unwrap().sign_pub(), b"message", &sig), "다른 열쇠의 서명은 아니다");
         assert_eq!(VaultKey::from_base64(&key.to_base64()).unwrap().sign_pub(), key.sign_pub());
-    }
-
-    #[test]
-    fn join_hands_the_key_only_to_the_matching_secret() {
-        let key = VaultKey::generate().unwrap();
-        let secret = JoinSecret::new().unwrap();
-        let sealed = seal_for(&key, "acct", "dev-new", "j1", &secret.public_base64()).unwrap();
-        assert!(signature_ok(&key.sign_pub(), &seal_message("acct", "j1", &sealed.eph_pub, &sealed.blob), &sealed.sig));
-        let got = secret.open("acct", "dev-new", &sealed).unwrap();
-        assert_eq!(got.key_id(), key.key_id());
-
-        let wrong_device = JoinSecret::new().unwrap();
-        let sealed = seal_for(&key, "acct", "dev-new", "j1", &wrong_device.public_base64()).unwrap();
-        assert!(wrong_device.open("acct", "dev-other", &sealed).is_err(), "AAD 의 기기 id 가 다르면 풀리지 않는다");
-
-        let intended = JoinSecret::new().unwrap();
-        let intruder = JoinSecret::new().unwrap();
-        let sealed = seal_for(&key, "acct", "dev-new", "j1", &intended.public_base64()).unwrap();
-        assert!(intruder.open("acct", "dev-new", &sealed).is_err(), "다른 일회용 열쇠로는 못 푼다");
-        assert_eq!(join_hash(intended.public()).len(), 64);
-        assert!(seal_for(&key, "acct", "dev-new", "j1", "c2hvcnQ=").is_err());
     }
 }

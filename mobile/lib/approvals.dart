@@ -45,7 +45,6 @@ class Approval {
     this.challenge,
     this.refs = const [],
     this.secretValid = false,
-    this.joinCode = '',
   });
 
   final String id;
@@ -77,8 +76,6 @@ class Approval {
 
   /// 새 기기 등록이면 이 폰이 도전값의 `join`(새 기기 공개키 해시)에서 직접 계산한 기기 지문. 새 기기 화면의 지문과
   /// 맞춰 보게 한다 — 도전값의 다른 글은 관문이 바꿔 보일 수 있지만, 서명하는 `join` 에서 나온 이 값은 그럴 수 없다.
-  final String joinCode;
-
   bool get pending => state == 'pending';
   bool get isSecret => kind == 'secret';
 
@@ -87,10 +84,6 @@ class Approval {
   String get secretTitle => '${tool.isEmpty ? '비밀' : tool} 승인 요청';
 
   String get signReason {
-    // 새 기기 등록(로그인 동기화)의 학생 칸은 그 기기 이름이다 — 읽기가 아니라 열쇠를 넘기는 허락이다.
-    if (refs.isNotEmpty && refs.first.startsWith('login-vault://')) {
-      return '${student.isEmpty ? '새 기기' : student} 에 로그인 금고 열쇠 주기를 이번 한 번 허락 · 지문 $joinCode';
-    }
     final who = student.isEmpty ? '학생' : student;
     final first = refs.isEmpty ? '' : refs.first;
     final more = refs.length > 1 ? ' 외 ${refs.length - 1}개' : '';
@@ -137,10 +130,8 @@ class Approval {
       challenge: challenge,
       refs: secret?.refs ?? const [],
       secretValid: secret != null,
-      joinCode: secret?.joinCode ?? '',
       fields: secret != null
           ? [
-              if (secret.joinCode.isNotEmpty) ApprovalField('join', '기기 지문', secret.joinCode),
               ApprovalField('refs', '참조', secret.refs.join('\n')),
               ApprovalField('command', '명령', secret.command),
             ]
@@ -162,20 +153,12 @@ class Approval {
 
 /// 비밀 요청 도전값에서 편 것 — 사람이 보는 것과 서명하는 것이 같은 글에서 나온다.
 class _SecretAsk {
-  const _SecretAsk(this.student, this.pane, this.cwd, this.command, this.refs, this.joinCode);
+  const _SecretAsk(this.student, this.pane, this.cwd, this.command, this.refs);
   final String student;
   final String pane;
   final String cwd;
   final String command;
   final List<String> refs;
-  final String joinCode;
-
-  /// 새 기기 공개키 해시(64자 16진) 앞 16자를 넷씩 — 데스크톱 `login_vault::join::join_code` 와 같은 값.
-  static String? _joinCode(Object? join) {
-    if (join is! String || join.length != 64 || !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(join)) return null;
-    final head = join.substring(0, 16).toUpperCase();
-    return [for (var i = 0; i < 16; i += 4) head.substring(i, i + 4)].join('-');
-  }
 
   static _SecretAsk? parse(String? text) {
     if (text == null || text.length > 4096) return null;
@@ -186,8 +169,6 @@ class _SecretAsk {
       final prefix = switch (v['kind']) {
         'keychain.read' => 'keychain://',
         'op.read' => 'op://',
-        // 새 기기에 로그인 동기화 금고 열쇠를 넘기는 승인(docs/login-vault-sync.md).
-        'login-vault.join' => 'login-vault://',
         _ => null,
       };
       if (prefix == null) return null;
@@ -196,13 +177,7 @@ class _SecretAsk {
         return null;
       }
       String s(String k) => v[k] is String ? v[k] as String : '';
-      var code = '';
-      if (v['kind'] == 'login-vault.join') {
-        // 지문을 못 만드는 등록 요청은 사람이 맞춰 볼 것이 없으니 허락을 막는다.
-        code = _joinCode(v['join']) ?? '';
-        if (code.isEmpty) return null;
-      }
-      return _SecretAsk(s('student'), s('pane'), s('cwd'), s('command'), refs.cast<String>(), code);
+      return _SecretAsk(s('student'), s('pane'), s('cwd'), s('command'), refs.cast<String>());
     } on FormatException {
       return null;
     }

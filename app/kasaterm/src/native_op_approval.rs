@@ -32,8 +32,6 @@ const ISOLATED: &str = "검증 실행에서는 자격 증명 관리자를 쓰지
 pub(crate) enum Act {
     Trust(usize),
     Untrust(usize),
-    /// 자동으로 믿은 폰을 사람이 직접 믿는다 — 새 기기에 금고 열쇠를 넘기는 허락에도 쓰인다.
-    Believe(usize),
 }
 
 #[derive(Debug)]
@@ -44,7 +42,6 @@ enum Done {
 
 /// 시트의 답 — 완료 처리기는 App 을 못 잡으니 여기 두고 다음 poll 이 꺼내 간다.
 static TRUST_ANSWER: Mutex<Option<String>> = Mutex::new(None);
-static BELIEVE_ANSWER: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -198,11 +195,6 @@ impl App {
                 });
             }
         }
-        if let Some(id) = BELIEVE_ANSWER.lock().ok().and_then(|mut a| a.take()) {
-            self.device_account.op.run(move || {
-                kasa_device::login_vault::confirm_phone(&id).map(|()| "이 폰으로 새 기기 들이기도 허락할 수 있어요".to_string())
-            });
-        }
         self.op_autotrust();
         let op = &mut self.device_account.op;
         // 화면 상태(`logged_in`)는 설정을 열 때만 갱신된다 — 새 열쇠 알림은 설정을 안 열어도 떠야 하니
@@ -278,19 +270,6 @@ impl App {
                 let Some(key) = self.device_account.op.untrusted.get(index).cloned() else { return };
                 if let Some(window) = &self.window {
                     let _ = trust_sheet(window, &key);
-                }
-            }
-            Act::Believe(index) => {
-                let trusted = self.device_account.op.status["trusted"].as_array().cloned().unwrap_or_default();
-                let Some(key) = trusted.get(index).cloned() else { return };
-                let info = format!(
-                    "{}\n지문  {}\n\n폰 설정 → 계정 → Face ID 승인 열쇠의 지문이 모두 같은지 맞춰 보세요. 처음 연결할 때 자동으로 믿은 열쇠라 관문이 끼워 넣었을 수도 있어요. 믿으면 이 폰의 Face ID 로 새 기기에 로그인 금고 열쇠를 넘기는 것도 허락할 수 있어요.",
-                    key["label"].as_str().unwrap_or("폰"),
-                    key["fingerprint"].as_str().unwrap_or("")
-                );
-                let id = key["id"].as_str().unwrap_or_default().to_string();
-                if let Some(window) = &self.window {
-                    let _ = confirm_sheet(window, "이 폰을 직접 믿을까요?", &info, "믿기", &BELIEVE_ANSWER, id);
                 }
             }
             Act::Untrust(index) => {
@@ -606,11 +585,7 @@ pub(crate) fn paint_phones(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Ve
     for (index, key) in trusted.iter().enumerate() {
         let name = key["label"].as_str().unwrap_or("폰");
         let print = key["fingerprint"].as_str().unwrap_or("");
-        if key["manual"] == true {
-            line(g, hits, y, name, false, &format!("Face ID 로 허락 · 비밀 쓰기와 새 기기 들이기 · 지문 {print}"), &[("빼기", Act::Untrust(index), false)]);
-        } else {
-            line(g, hits, y, name, false, &format!("자동으로 믿었어요 · 새 기기를 들이려면 직접 믿어 주세요 · 지문 {print}"), &[("직접 믿기…", Act::Believe(index), true), ("빼기", Act::Untrust(index), false)]);
-        }
+        line(g, hits, y, name, false, &format!("Face ID 로 허락 · 비밀 쓰기 · 지문 {print}"), &[("빼기", Act::Untrust(index), false)]);
     }
     for (index, key) in v.untrusted.iter().enumerate() {
         let name = format!("{} · 새 열쇠", key["label"].as_str().unwrap_or("폰"));
