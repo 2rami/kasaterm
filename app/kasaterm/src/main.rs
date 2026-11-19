@@ -84,6 +84,7 @@ mod sprites;
 mod stream;
 mod testkit;
 mod theme;
+mod tray;
 mod update_card;
 mod update_notice;
 mod win_update;
@@ -4073,6 +4074,8 @@ enum UserEvent {
     RestartExit(String),
     /// 확인·준비한 업데이트를 도우미에 넘겼다 — 이제 정상 종료로 끄면 도우미가 갈아 끼운다.
     UpdateExit(String),
+    /// 트레이 아이콘을 눌렀다 — 숨긴 창을 다시 앞으로.
+    ShowMainWindow,
     /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(사용자: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),
@@ -6165,6 +6168,8 @@ struct App {
     update_menu_item: Option<muda::MenuItem>,
     /// "kasaterm 종료"(⌘Q) 메뉴 — MenuEvent id 로 매칭해 종료 확인 NSAlert 를 띄운다.
     quit_menu_item: Option<muda::MenuItem>,
+    /// 트레이 — 있으면 창 닫기는 숨기기다(`tray.rs`). 검증 실행·lite 는 없다.
+    tray: Option<tray::Tray>,
     /// Sparkle SPUStandardUpdaterController — 보관해야 판 확인이 유지된다(드롭=정지).
     #[cfg(target_os = "macos")]
     sparkle_updater: Option<macos_sparkle::Updater>,
@@ -6656,6 +6661,7 @@ impl App {
             paste_menu_item: None,
             update_menu_item: None,
             quit_menu_item: None,
+            tray: None,
             #[cfg(target_os = "macos")]
             sparkle_updater: None,
             update_card: Default::default(),

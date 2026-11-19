@@ -927,11 +927,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if !same {
                     return;
                 }
-                // 배너를 눌렀는데 창이 뒤에 남아 있으면 누른 뜻이 없다. 방 전환은
+                // 배너를 눌렀는데 창이 뒤에(트레이로 숨겨) 있으면 누른 뜻이 없다. 방 전환은
                 // `SocketFocus` 가 하므로 여기서는 창만 앞으로 올리고 넘긴다.
-                if let Some(w) = self.window.as_ref() {
-                    w.focus_window();
-                }
+                self.show_main_window();
                 let _ = self.proxy.send_event(UserEvent::SocketFocus(pane.clone()));
                 return;
             }
@@ -1074,6 +1072,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 eprintln!("[app-restart] exiting for job {job}");
                 event_loop.exit();
+                return;
+            }
+            UserEvent::ShowMainWindow => {
+                self.show_main_window();
                 return;
             }
             UserEvent::UpdateExit(job) => {
@@ -2271,6 +2273,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.sparkle_updater = crate::macos_sparkle::init();
             }
         }
+        if !self.lite {
+            self.tray = crate::tray::create(&self.proxy);
+        }
         // WaitUntil so the cursor blink ticks even when no terminal output
         // is arriving — the redraw inside RedrawRequested re-arms the
         // schedule. Pure Wait would freeze the blink mid-phase, Poll would
@@ -3430,14 +3435,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => {
-                if self.aux_flush_for_app_close() { return; }
-                // A running job (claude / build / editor) gets a confirm modal
-                // first; an idle window quits straight away.
-                if !self.confirm_or_close_window() {
-                    event_loop.exit();
-                }
-            }
+            WindowEvent::CloseRequested => self.close_main_window(event_loop),
             WindowEvent::ScaleFactorChanged { .. } => {
                 // 모니터가 바뀌면 뷰가 창보다 작게 남는 일이 있다 — 그 상태는
                 // 앱 내부에선 아무 모순도 안 보이므로(레이어·inner_size·스왑체인이
@@ -7812,6 +7810,16 @@ impl ApplicationHandler<UserEvent> for App {
         // Drain menu clicks from muda's global channel. The "Git 패널" item
         // toggles the in-window git column (open/close).
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
+            if let Some(tray) = self.tray.as_ref() {
+                if tray.open.id() == &ev.id {
+                    self.show_main_window();
+                    continue;
+                }
+                if tray.quit.id() == &ev.id {
+                    self.quit_app(event_loop);
+                    return;
+                }
+            }
             if self.media_preview.focused() { continue; }
             if self.image_preview.focused() {
                 if self.copy_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
@@ -7843,13 +7851,10 @@ impl ApplicationHandler<UserEvent> for App {
             } else if self.update_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.check_for_updates_now();
             } else if self.quit_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
-                // ⌘Q 는 빨간 버튼(CloseRequested)과 같은 길이다 — 도는 작업이 있으면
-                // 앱 안 모달로 묻고, 없으면 바로 끈다. 전에는 NSAlert `runModal` 을
-                // 띄웠는데 그 동안 winit 루프가 통째로 서서 화면·출력 펌프가 멈췄다
+                // ⌘Q 는 트레이 「종료」와 같은 길이다 — 도는 작업이 있으면 앱 안 모달로 묻고, 없으면 바로 끈다. 전에는
+                // NSAlert `runModal` 을 띄웠는데 그 동안 winit 루프가 통째로 서서 화면·출력 펌프가 멈췄다
                 // (「경고창 있으면 왜 멈춰」). 시스템 대화상자를 다시 쓰지 마라.
-                if !self.confirm_or_close_window() {
-                    event_loop.exit();
-                }
+                self.quit_app(event_loop);
                 return;
             }
         }

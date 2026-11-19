@@ -70,6 +70,8 @@ kasa-http.workspace = true
 wry = { version = "0.55", features = ["devtools"] }
 uuid.workspace = true
 muda = "0.19.2"
+# 트레이(맥 메뉴 막대·Windows 알림 영역, tray.rs) — 닫기 단추는 숨기고 여기서만 끈다. muda 0.19 와 짝인 판.
+tray-icon = "0.24.2"
 # Encode image bytes into a self-contained data: URI for the preview
 # window's <img> (the webview loads via with_html / null origin, so a
 # file:// src is unreliable across the origin boundary).
