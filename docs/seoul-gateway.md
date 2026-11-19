@@ -241,6 +241,16 @@ bd51029b 관문으로 교체(18:09:35, sha256 902a0ee6…, `/relay/login-vault` 
 `launchctl kickstart -k gui/$(id -u)/com.geono.kasa-relay`. 확인: 공개 주소의 설치 페이지 200(진행표·QR 카드), manifest 전후 바이트 같음,
 ipa 200, 서울 `latest` 무토큰 401(전후 같음), 관문 기록 error·panic 0.
 
+## 금고 열쇠 맡기기 교체 기록 (2026-11-20)
+
+7c9330be 관문으로 교체(08:49:15, sha256 1814c2ff…, `/relay/login-vault/escrow` 생김·`/relay/login-vault/joins` 와 승인 종류
+`login-vault.join` 걷음). env 변경 없음. 도커 엔진이 응답하지 않아 `cargo zigbuild --release -p kasa-gateway --bin kasa-relay --target
+x86_64-unknown-linux-gnu.2.36` 으로 지었다. 교체 전 운영 판(11-18 17:53 교체분, 기록 없음, sha256 dda61107…)은
+`/usr/local/bin/kasa-relay.bak-20261120`(옆에 `.info`). 되돌리기는 그 파일을 제자리로 놓고 `sudo systemctl restart kasa-relay` —
+옛 관문에는 맡기기 창구가 없어 새 판 기기는 열쇠를 못 받고(「이 관문은 … 지원하지 않아요」) 열쇠를 가진 기기는 다음 바퀴에 다시 맡겨
+본다. 확인: `/relay/health` 200, 무토큰 `/relay/login-vault/escrow` 404 → 401, `/relay/login-vault/joins` 401 → 404, 무토큰
+whoami·login-vault·browser-sync 401(전후 같음), 맥미니·2R4MI 재접속, 교체 뒤 관문 기록 error·panic 0.
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서
