@@ -1640,6 +1640,7 @@ impl App {
             self.set_toast(deferred_account_restart_toast(switched));
         }
         self.flush_held_trouble();
+        self.flush_held_question();
 
         // Each PTY keeps its own history, including hidden tabs. Switching the visible
         // tab must not look like the previous tab finishing its work.

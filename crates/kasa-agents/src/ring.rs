@@ -442,11 +442,6 @@ pub fn blocked(report: &Report, last_words: Option<&str>) -> String {
     clip(&format!("선생님, {head} {rest}"), BODY_MAX)
 }
 
-/// 저절로 안 풀리는 오류로 멈췄다.
-pub fn trouble(label: &str) -> String {
-    clip(&format!("선생님, 막혔어요. {}", label.trim()), BODY_MAX)
-}
-
 /// 다 끝났다는 말 — 학생이 마지막에 선생님께 한 답 글이 먼저, 못 찾으면 보고 요약.
 pub fn finished(report: Option<&Report>, last_words: Option<&str>) -> String {
     let said = last_words.map(spoken).filter(|s| !s.is_empty());
@@ -648,6 +643,5 @@ mod tests {
             "선생님, 블루그린으로 할까요, 한 번에 바꿀까요?");
         assert_eq!(question("선생님, 이거요?"), "선생님, 이거요?");
         assert_eq!(question(""), "선생님, 여쭤볼 게 있어요.");
-        assert_eq!(trouble("API 오류 (2분째)"), "선생님, 막혔어요. API 오류 (2분째)");
     }
 }

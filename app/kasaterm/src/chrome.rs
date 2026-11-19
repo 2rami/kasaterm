@@ -755,13 +755,17 @@ impl App {
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
                 }
-                let (body, push_kind) = match kind {
-                    crate::agent_state::WaitKind::Permission => (self.permission_words(id, &reason), "waiting:permission"),
-                    _ => (kasa_agents::ring::question(&reason), "waiting:question"),
-                };
-                let key = key.map(|key| format!("question:{id}:{key}")).unwrap_or_else(|| format!("approval:{id}"));
-                self.ring_phone(id, &heading, character.as_deref(), &body, push_kind, format!("wait-/{id}"), &key);
-                notify_desktop(&heading, &body, character.as_deref(), Some(&key), Some((id, sid.as_deref())));
+                // 질문 기다림은 기록의 질문 글보다 먼저 서서, 「답 기다림」 빈 알림 뒤에 진짜 질문이 한 번 더 울렸다
+                // (2026-11-19 하루 7쌍). 글 없는 질문은 붙들었다가 그 사이 글 있는 질문이 오면 버린다.
+                if kind == crate::agent_state::WaitKind::Question && key.is_none() {
+                    self.held_question.insert(id.to_string(), (reason, now));
+                    self.chrome_dirty = true;
+                    return;
+                }
+                if key.is_some() {
+                    self.held_question.remove(id);
+                }
+                self.notify_waiting(id, kind, &reason, key.as_deref());
             }
             // 스스로 다시 시도하는 오류는 붙들어 둔다 — 하루에도 몇 번 스쳐 가는 끊김마다 알림이
             // 오면 진짜 멈춘 것까지 안 보게 된다(2026-09-29 「가끔 연결 끊기면 알림 오는 것」).
@@ -770,9 +774,9 @@ impl App {
                 let since = self.held_trouble.get(id).map_or(now, |(_, at)| *at);
                 self.held_trouble.insert(id.to_string(), (label, since));
             }
-            Transition::Error { label } => {
+            Transition::Error { .. } => {
                 self.held_trouble.remove(id);
-                self.notify_trouble(id, &label);
+                self.mark_trouble(id);
             }
             Transition::Recovered => {
                 self.held_trouble.remove(id);
@@ -984,7 +988,7 @@ impl App {
         }
     }
 
-    /// 스스로 다시 시도하는 오류를 이만큼 기다린 뒤에도 그대로면 알린다. 하네스의 재시도는
+    /// 스스로 다시 시도하는 오류를 이만큼 기다린 뒤에도 그대로면 칸에 표시한다. 하네스의 재시도는
     /// 대개 몇 초에서 1분 안에 풀린다.
     const TROUBLE_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
 
@@ -994,13 +998,13 @@ impl App {
         if self.held_trouble.is_empty() {
             return;
         }
-        let due: Vec<(String, String)> = self
+        let due: Vec<String> = self
             .held_trouble
             .iter()
             .filter(|(_, (_, at))| at.elapsed() >= Self::TROUBLE_GRACE)
-            .map(|(id, (label, _))| (id.clone(), label.clone()))
+            .map(|(id, _)| id.clone())
             .collect();
-        for (id, label) in due {
+        for id in due {
             self.held_trouble.remove(&id);
             let still = self
                 .collab
@@ -1008,19 +1012,57 @@ impl App {
                 .resolved(&id)
                 .is_some_and(|r| matches!(r.state, crate::agent_state::AgentState::Error { .. }));
             if still {
-                let mins = Self::TROUBLE_GRACE.as_secs() / 60;
-                self.notify_trouble(&id, &format!("{label} ({mins}분째)"));
+                self.mark_trouble(&id);
                 self.chrome_dirty = true;
             }
         }
     }
 
-    fn notify_trouble(&mut self, id: &str, label: &str) {
+    /// 글 없는 질문을 이만큼 붙든다 — 그사이 기록에서 질문 글을 읽으면 그쪽 하나만 울린다.
+    const QUESTION_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+    /// 붙든 글 없는 질문 중 `QUESTION_GRACE` 가 지나도 글 있는 질문이 안 온 것을 그때 알린다 — 질문 글을 기록에 안 남기는
+    /// 하네스도 사람을 부른다. 그사이 답을 받았으면(더는 기다리지 않음) 조용히 걷는다.
+    pub(crate) fn flush_held_question(&mut self) {
+        if self.held_question.is_empty() {
+            return;
+        }
+        let due: Vec<(String, String)> = self
+            .held_question
+            .iter()
+            .filter(|(_, (_, at))| at.elapsed() >= Self::QUESTION_GRACE)
+            .map(|(id, (reason, _))| (id.clone(), reason.clone()))
+            .collect();
+        for (id, reason) in due {
+            self.held_question.remove(&id);
+            let still = self.collab.hub.resolved(&id).is_some_and(|r| {
+                matches!(r.state, crate::agent_state::AgentState::Waiting { kind: crate::agent_state::WaitKind::Question, .. })
+            });
+            if still {
+                self.notify_waiting(&id, crate::agent_state::WaitKind::Question, &reason, None);
+            }
+        }
+    }
+
+    /// 사람이 골라야 하는 대기(승인·질문)를 맥과 폰에 같은 말로.
+    fn notify_waiting(&mut self, id: &str, kind: crate::agent_state::WaitKind, reason: &str, key: Option<&str>) {
         let character = self.notification_character(id);
         let who = character.clone().unwrap_or_else(|| "pane".to_string());
-        let body = kasa_agents::ring::trouble(label);
         let heading = self.notification_heading(id, &who);
         let sid = self.pane_claude_sid.get(id).cloned();
+        let (body, push_kind) = match kind {
+            crate::agent_state::WaitKind::Permission => (self.permission_words(id, reason), "waiting:permission"),
+            _ => (kasa_agents::ring::question(reason), "waiting:question"),
+        };
+        let key = key.map(|key| format!("question:{id}:{key}")).unwrap_or_else(|| format!("approval:{id}"));
+        self.ring_phone(id, &heading, character.as_deref(), &body, push_kind, format!("wait-/{id}"), &key);
+        notify_desktop(&heading, &body, character.as_deref(), Some(&key), Some((id, sid.as_deref())));
+    }
+
+    /// 저절로 안 풀리는 오류·한도·세션 팅김 — 칸을 깨워 반짝이고 읽지 않음만 세운다. 맥·폰 알림은 보내지 않는다:
+    /// 알림은 세션이 직접 보낸 보고와 사람이 골라야 하는 것뿐이다(2026-11-19 「학생이 직접 보내는 것만, 오류 같은
+    /// 알림 말고」 — 하루 12건이 「오류로 턴이 끝남」·「API Error 502」였다). 학생이 이어 갈 수 없으면 그 학생이 막힘을 보고한다.
+    fn mark_trouble(&mut self, id: &str) {
         let is_active_pane = self.notification_surface_is_visible(id);
         self.wake_blink(id);
         if let Some(wi) = self.window_of_pane(id).filter(|wi| *wi != self.active_window) {
@@ -1029,10 +1071,6 @@ impl App {
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(id.to_string());
         }
-        // 저절로 안 풀리는 오류는 막힘이다 — 폰에도 같은 말로 간다.
-        let dedup = format!("error:{id}");
-        self.ring_phone(id, &heading, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup);
-        notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
     }
 
     /// 알림 제목 — 「학생 이름: 그 칸의 세션 이름」(`kasa_agents::ring::title`). 세션 이름은 칸 머리가 보이는 그 제목(탭의 OSC 제목)이다.
