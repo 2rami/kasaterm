@@ -4276,7 +4276,8 @@ pub(crate) fn cancel_hidden_login() {
 /// 계정을 붙일 때의 보조 선택지로 남는다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LoginBrowser {
-    /// 쿠키 없는 크롬 프로필. URL 을 우리가 주워 그 창으로 연다.
+    /// 쿠키 없는 창 — 카사브라우저의 새 시크릿 공간, 없으면 슬롯 몫 크롬 프로필.
+    /// URL 을 우리가 주워 그 창으로 연다.
     Isolated,
     /// 사용자가 쓰던 기본 브라우저. Codex는 CLI가 공식 localhost 콜백과 함께
     /// 직접 열고, Claude는 앱이 출력의 URL을 열어 코드 폴백을 유지한다.
@@ -4520,10 +4521,7 @@ fn spawn_hidden_login(
                             // 복사하는 것만으로 들어간다(아래 클립보드 경로).
                             if !browser_opened.swap(true, std::sync::atomic::Ordering::SeqCst) {
                                 match profile.as_deref() {
-                                    Some(prof) => {
-                                        let _ = std::fs::create_dir_all(prof);
-                                        open_isolated_browser(&url, prof);
-                                    }
+                                    Some(prof) => open_isolated_browser(&url, prof),
                                     None => open_default_browser(&with_account_chooser(&url)),
                                 }
                             }
@@ -4988,9 +4986,14 @@ mod login_url_tests {
     }
 }
 
-/// 프로필을 갈라 브라우저를 띄운다. 크롬이 없으면 아무것도 안 한다 — 그 경우
-/// pane 에 URL 이 남아 있으니 사용자가 직접 시크릿 창에 붙여넣으면 된다.
+/// 쿠키 없는 창에서 로그인하게 띄운다. 카사브라우저가 있으면 새 시크릿 공간에 연다 —
+/// 쿠키·기록이 남지 않고 학생(kb)도 못 본다. 없으면 슬롯 몫 크롬 프로필로, 그것도 없으면
+/// 아무것도 안 한다 — 그 경우 pane 에 URL 이 남아 있으니 사용자가 직접 시크릿 창에 붙여넣으면 된다.
 fn open_isolated_browser(url: &str, profile: &std::path::Path) {
+    if open_kasa_browser_secret(url) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(profile);
     #[cfg(target_os = "macos")]
     const CHROME: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
     #[cfg(target_os = "windows")]
@@ -5008,6 +5011,89 @@ fn open_isolated_browser(url: &str, profile: &std::path::Path) {
         .spawn();
     if let Err(e) = r {
         eprintln!("[account] 격리 브라우저 실행 실패: {e}");
+    }
+}
+
+/// 카사브라우저(kasabrowser-go)의 `--secret-open=<주소>` — 새 시크릿 공간에 열고 창을 앞으로
+/// 가져온다. 이미 떠 있으면 그 앱에 넘기고 띄운 프로세스는 바로 끝난다. 학생 칸 환경
+/// (`KASA_BROWSER_AGENT`·`KASATERM_AGENT`)을 물려받으면 브라우저가 거절하므로 지운다.
+fn open_kasa_browser_secret(url: &str) -> bool {
+    let Some(app) = kasa_browser_app() else {
+        return false;
+    };
+    let arg = format!("--secret-open={url}");
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = crate::proc::command("/usr/bin/open");
+        command.args(["-n", "-a"]).arg(&app).arg("--args").arg(&arg);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut command = {
+        let mut command = crate::proc::command(&app);
+        command.arg(&arg);
+        command
+    };
+    command.env_remove("KASA_BROWSER_AGENT").env_remove("KASATERM_AGENT");
+    match command.spawn() {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("[account] 카사브라우저 시크릿 공간 열기 실패: {e}");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn kasa_browser_app() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    [
+        home.map(|home| home.join("Applications/Kasa Browser OSR.app")),
+        Some(std::path::PathBuf::from("/Applications/Kasa Browser OSR.app")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|app| app.exists())
+}
+
+/// 정식 설치 자리, 아니면 기본 앱 후보로 적어 둔 실행 명령(`"<exe>" --open="%1"`)의 실행 파일.
+#[cfg(target_os = "windows")]
+fn kasa_browser_app() -> Option<std::path::PathBuf> {
+    let fixed = std::path::PathBuf::from(r"C:\kasaos-glass\browser\app\kasabrowser-osr.exe");
+    if fixed.exists() {
+        return Some(fixed);
+    }
+    let out = crate::proc::command("reg")
+        .args(["query", r"HKCU\Software\Clients\StartMenuInternet\KasaBrowser\shell\open\command", "/ve"])
+        .output()
+        .ok()?;
+    let exe = std::path::PathBuf::from(quoted_program(&String::from_utf8_lossy(&out.stdout))?);
+    exe.exists().then_some(exe)
+}
+
+/// `reg query` 줄(`(기본값)    REG_SZ    "C:\…\kasabrowser-osr.exe" --open="%1"`)에서 따옴표 안 실행 파일.
+#[cfg(any(target_os = "windows", test))]
+fn quoted_program(text: &str) -> Option<&str> {
+    let start = text.find('"')? + 1;
+    let end = start + text[start..].find('"')?;
+    Some(&text[start..end]).filter(|program| !program.is_empty())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn kasa_browser_app() -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(test)]
+mod kasa_browser_tests {
+    use super::quoted_program;
+
+    #[test]
+    fn the_registered_open_command_names_its_program() {
+        let line = "\r\nHKEY_CURRENT_USER\\Software\\Clients\\StartMenuInternet\\KasaBrowser\\shell\\open\\command\r\n    (Default)    REG_SZ    \"C:\\kasaos-glass\\browser\\app\\kasabrowser-osr.exe\" --open=\"%1\"\r\n";
+        assert_eq!(quoted_program(line), Some(r"C:\kasaos-glass\browser\app\kasabrowser-osr.exe"));
+        assert_eq!(quoted_program("    (Default)    REG_SZ    "), None);
+        assert_eq!(quoted_program("\"\" --open"), None);
     }
 }
 
