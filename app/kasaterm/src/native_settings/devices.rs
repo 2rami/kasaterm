@@ -133,11 +133,14 @@ pub(super) fn paint(
         y,
         w,
         "device-tools",
-        "브라우저 설정",
+        "브라우저 기기",
     ) {
         return;
     }
-    section_title(g, x, *y, "브라우저 도구", "");
+    // 설정 키는 아직 kasachrome_machine 이다 — 예전엔 같은 고르기가 kc 다리가 몰
+    // 크롬도 정했다. 이제 학생은 제 기기의 카사브라우저를 kb 로 몰아서, 여기서
+    // 고를 것은 보여 줄 페이지가 열릴 곳 하나뿐이다.
+    section_title(g, x, *y, "학생이 보여 주는 페이지", "");
     *y += 54.0;
     let names: Vec<_> = s
         .chrome_candidates
@@ -156,17 +159,24 @@ pub(super) fn paint(
             SettingsAction::ChromeMachine(label.clone()),
         ));
     }
-    seg_row(g, s, hits, x, y, w, "크롬이 있는 기기", &cells);
+    seg_row(g, s, hits, x, y, w, "열 기기", &cells);
     plain_hint(
         g,
         x,
         y,
         w,
         if s.chrome_machine.is_empty() {
-            "브라우저 도구는 이 기기의 Chrome을 사용합니다."
+            "학생이 보여 주려고 연 페이지를 이 기기의 브라우저로 엽니다."
         } else {
-            "선택한 기기의 Chrome을 사용합니다. 연결되지 않으면 이 기기의 Chrome을 사용합니다."
+            "학생이 보여 주려고 연 페이지를 선택한 기기의 브라우저로 엽니다. 연결되지 않으면 열지 못했다고 알립니다."
         },
+    );
+    plain_hint(
+        g,
+        x,
+        y,
+        w,
+        "비밀번호·패스키, 북마크·탭 동기화, 팝업 허용, 업데이트는 카사브라우저 설정에서 바꿉니다.",
     );
 }
 

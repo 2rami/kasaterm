@@ -20,14 +20,11 @@ pub(crate) struct StatusbarState {
     /// 여기 얹는다. `tunnel_on` 은 마지막 폴 결과(None=아직 모름), `tunnel_checked`
     /// 는 폴 박자 게이트 — 상태 조회에 pgrep 이 들어가 매 프레임은 못 돈다.
     pub(crate) tunnel_on: Option<bool>,
-    /// 본진→이 맥 카사크롬 다리 상태 — Some(true)=본진 상주 학생이 이 맥의 크롬
-    /// (로그인 살아 있는 것)을 쓸 수 있다 / Some(false)=끊겨 저쪽 크롬 폴백 중 /
-    /// None=기계 명부가 없어 표시할 이유가 없다.
-    pub(crate) chrome_bridge: Option<bool>,
-    /// 설정 「카사크롬이 쓰는 크롬」 — 기계 라벨, 빈 문자열=이 기계.
+    /// 설정 「브라우저 기기」(`kasachrome_machine`) — 학생이 보여 주려고 연 페이지를 열
+    /// 기계 라벨, 빈 문자열=이 기계.
     pub(crate) chrome_machine: String,
-    /// 그 크롬 다리가 지금 닿나(같은 5초 폴). 고른 기계가 안 닿으면 MCP 는 이 기계
-    /// 크롬으로 물러나므로 사람이 볼 창이 필요하다.
+    /// 그 기계로 페이지를 보낼 길이 있나(같은 5초 폴). 없으면 열기가 실패로만 끝나므로
+    /// 사람이 미리 볼 자리가 필요하다.
     pub(crate) chrome_reach: Option<bool>,
     pub(crate) chrome_rect: Option<(f32, f32, f32, f32)>,
     /// Browser targets are loaded once when the menu opens, never during paint.

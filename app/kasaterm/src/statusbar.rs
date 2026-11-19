@@ -761,7 +761,7 @@ fn paint_chrome_popover(
     g.draw_text(x + 40.0, y + 14.0, "브라우저 기기", gpu::DrawOpts {
         font_size: 12.0, color: theme::text(), bold: true, italic: false,
     });
-    g.draw_text(x + 15.0, y + 36.0, "학생이 사용할 브라우저를 골라줘.", gpu::DrawOpts {
+    g.draw_text(x + 15.0, y + 36.0, "학생이 보여 줄 페이지를 열 기기를 골라줘.", gpu::DrawOpts {
         font_size: 10.0, color: theme::text_dim(), bold: false, italic: false,
     });
     g.push_clip(x, top, w, inner);
@@ -802,9 +802,9 @@ fn paint_chrome_popover(
     g.pop_clip();
     let fy = y + h - FOOT;
     g.rect(x + 14.0, fy, w - 28.0, 1.0, theme::border());
-    let note = if sb.chrome_phone { "보여 줄 페이지는 폰 쪽지로. 조작은 이 기기 크롬." }
+    let note = if sb.chrome_phone { "보여 줄 페이지는 폰 쪽지로 보내." }
         else if sb.chrome_reach == Some(false) { "선택한 기기의 브라우저 연결을 확인해줘." }
-        else { "선택한 기기에서 열고 조작해." };
+        else { "선택한 기기의 브라우저로 열어." };
     let note = crate::info::fit_text(g, note, w - 28.0, 10.0, false);
     g.draw_text(x + 14.0, fy + 13.0, &note, gpu::DrawOpts {
         font_size: 10.0, color: theme::text_mute(), bold: false, italic: false,

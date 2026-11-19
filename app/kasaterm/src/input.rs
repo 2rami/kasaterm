@@ -1325,7 +1325,6 @@ impl App {
             self.statusbar.tunnel_host = sample.tunnel_host;
             self.statusbar.chrome_machine = sample.chrome_machine;
             self.statusbar.chrome_reach = sample.chrome_reach;
-            self.statusbar.chrome_bridge = sample.chrome_bridge;
         }
         self.statusbar.port = Some(sample.port);
         if let Some(u) = sample.usage {
@@ -4587,7 +4586,7 @@ impl AppUsage {
     }
 }
 
-/// 상태줄 5초 표본 하나 — 터널·크롬 다리·포트·사용량·물리 메모리.
+/// 상태줄 5초 표본 하나 — 터널·브라우저 기기·포트·사용량·물리 메모리.
 pub(crate) struct StatusSample {
     /// 이 표본을 부탁한 시각(`tunnel_checked` 와 견준다).
     kicked: Instant,
@@ -4595,7 +4594,6 @@ pub(crate) struct StatusSample {
     tunnel_host: Option<String>,
     chrome_machine: String,
     chrome_reach: Option<bool>,
-    chrome_bridge: Option<bool>,
     port: String,
     usage: Option<UsageSample>,
     mem: Option<crate::sysmem::MemSample>,
@@ -4645,42 +4643,18 @@ fn take_status_sample(kicked: Instant, track: &mut CpuTrack) -> StatusSample {
     // 브라우저 선택은 읽기만 한다 — 설정 요청이 표본을 뜨는 중에 와도 옛 선택을
     // 다시 쓰지 않는다.
     let chrome_machine = kasa_device::machines::kasachrome_machine();
-    let port = if chrome_machine.is_empty() {
-        Some(kasa_device::machines::KASACHROME_PORT)
-    } else {
-        kasa_device::machines::kasachrome_target_port(&chrome_machine)
-    };
-    let reach = |p: u16| {
-        std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
-            std::time::Duration::from_millis(250),
-        )
-        .is_ok()
-    };
-    let chrome_reach = port.map(reach);
-    // 본진→이 맥 카사크롬 다리 — 본진 상주 학생이 지금 어느 크롬을 쓰게 되는지.
-    // 폴백은 실패 기반이라 사람이 상태를 볼 창이 따로 필요하다(2026-08-30
-    // 지시 「하단에 맥북 열림 닫힘을 표시해둬서 나도 볼 수 있게」). 다리의
-    // 실체 = 이 맥의 크롬 브리지(8777)가 듣고 있고 + 역방향 터널
-    // (-R 18800→8777)을 실은 ssh 가 살아 있는 것. 기계 명부가 비면 잴 이유가
-    // 없다(칩도 안 그린다).
-    let chrome_bridge = if kasa_device::machines::machines().is_empty() {
-        None
-    } else {
-        let tunnel = crate::proc::command("pgrep")
-            .args(["-f", "18800:127.0.0.1:8777"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        Some(reach(8777) && tunnel)
-    };
+    // 크롬 다리(8777)를 재던 자리다. 이제 이 기기는 OS 기본 브라우저로 바로 열어 잴
+    // 것이 없고, 다른 기기는 `kasa_browser::target::open_selected` 가 쓰는 길이
+    // 있어야 열린다. 다리를 재면 크롬을 걷어낸 기기에서 늘 「연결 확인 필요」였다.
+    let chrome_reach = Some(
+        chrome_machine.is_empty() || kasa_device::machines::find_route(&chrome_machine).is_some(),
+    );
     StatusSample {
         kicked,
         tunnel_on: kasa_device::tunnel::is_on(),
         tunnel_host: kasa_device::tunnel::host(),
         chrome_machine,
         chrome_reach,
-        chrome_bridge,
         // 포트는 사실상 상수지만 파일이 bind 뒤에 써지므로 폴로 읽어야 부팅
         // 직후의 폴백(8765)이 굳지 않는다.
         port: crate::mcp_panel_port(),

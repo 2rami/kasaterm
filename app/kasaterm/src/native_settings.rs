@@ -2599,7 +2599,7 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
         SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth kasa 구글 github 프로필 account login password profile",
         SettingsCat::Claude => "클로드 claude 코덱스 codex 계정 로그인 재인증 자동 전환 한도 사용량 차례 순서 기본 에이전트 권한 상태줄 account login order permission",
         SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
-        SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 덮개 덮어 마저 잠자기 핫스팟 폰 face id 키체인 비밀 승인 열쇠 lid sleep hotspot 크롬 chrome 브라우저 device connection machine browser phone keychain secret",
+        SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 덮개 덮어 마저 잠자기 핫스팟 폰 face id 키체인 비밀 승인 열쇠 lid sleep hotspot 브라우저 기기 카사브라우저 페이지 열기 device connection machine browser phone keychain secret",
         SettingsCat::Feedback => "피드백 문의 오류 버그 문제 제안 feedback bug report",
     };
     let haystack = search_text(&format!("{title} {detail} {aliases}"));

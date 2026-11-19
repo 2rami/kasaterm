@@ -7,7 +7,7 @@ import '../twins_loading.dart';
 import '../server.dart';
 
 /// 하단바 「브라우저 기기」의 폰 판 — 학생이 사람에게 보여 주려 여는 페이지가 어디로
-/// 갈지. 「이 폰」이면 쪽지+알림으로 오고, 기계를 고르면 그 기계 크롬으로 간다.
+/// 갈지. 「이 폰」이면 쪽지+알림으로 오고, 기계를 고르면 그 기계의 브라우저로 열린다.
 ///
 /// 목록은 주소가 가리키는 기계의 것을 받는다(하단바 팝오버와 같은 값). 고른 것은
 /// 명부의 모든 기계에 같이 보낸다 — `open` 은 학생이 도는 기계가 처리하므로 본진에
@@ -162,7 +162,7 @@ class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
               _row(
                 icon: Icons.smartphone,
                 label: '이 폰',
-                hint: '쪽지와 알림으로 받는다. 학생이 조작하는 크롬은 그대로.',
+                hint: '쪽지와 알림으로 받는다.',
                 selected: t?.phone ?? false,
                 onTap: _pickPhone,
               ),
