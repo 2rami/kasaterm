@@ -2210,7 +2210,12 @@ impl ApplicationHandler<UserEvent> for App {
         // Windows 새 판 확인 시작 — MSI 설치본만(검증·격리·라이트 실행은 init 이 거른다).
         // mac 메뉴 블록은 cfg(macos) 라, 여기(메뉴 밖)서 별도로 건다.
         #[cfg(windows)]
-        crate::win_update::init();
+        {
+            crate::win_update::init();
+            crate::update_card::set_automatic(
+                crate::win_update::available() && crate::version::preview_opted_in(&crate::socket::read_settings()),
+            );
+        }
         #[cfg(windows)]
         crate::session_end::watch(self.proxy.clone());
         // macOS menu bar: app submenu (About/Quit) + a "보기" submenu with
@@ -2278,6 +2283,7 @@ impl ApplicationHandler<UserEvent> for App {
             // Sparkle 자동 업데이트 시작(.app 빌드에서만 — dev 는 framework 없어 no-op).
             if !self.lite {
                 self.sparkle_updater = crate::macos_sparkle::init();
+                crate::update_card::set_automatic(self.sparkle_updater.as_ref().is_some_and(crate::macos_sparkle::Updater::automatic));
             }
         }
         if !self.lite {
@@ -3214,6 +3220,8 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(state) = saved {
             self.restore_picker = crate::restore_picker::State::new(&state);
             self.restore_prompt = Some(state);
+            // 새 판으로 다시 켠 것이면 묻지 않고 복원한다 — 아무도 없을 때 다시 켜고 「복원할까요」 앞에서 멈추지 않게.
+            self.restore_after_update = crate::update_notice::relaunched_for_update();
         }
         // cold-launch 로 디퍼됐던 `.md` 오픈을 연다 — 이제 window·pty_layout(%0)
         // 둘 다 준비됨. 빈손이면 무비용.
@@ -7907,6 +7915,12 @@ impl ApplicationHandler<UserEvent> for App {
         // launch.
         if self.tick_control_exit() { event_loop.exit(); return; }
         self.tick_control_restore();
+        if self.restore_prompt.is_some() && std::mem::take(&mut self.restore_after_update) {
+            self.restore_dialog_pick(RestoreBtn::Restore);
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
         if self.restore_prompt.is_some() {
             match std::env::var("KASATERM_AUTORESTORE").as_deref() {
                 Ok("restore") => {

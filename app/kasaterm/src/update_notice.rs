@@ -25,6 +25,58 @@ fn interrupts(busy: &[String], dirty_docs: usize) -> Option<String> {
 /// 끊길 일을 다시 재는 주기 — 프로세스를 훑으니 프레임마다 하지 않는다.
 const INTERRUPTS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// 「내 기기」가 받은 판으로 저절로 다시 켜기 전, 아무도 키보드·마우스를 안 만진 시간.
+const IDLE_BEFORE_RELAUNCH: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// 새 판으로 다시 켠다는 표식 — 다음 실행이 「복원할까요」에서 멈추지 않고 칸·세션을 바로 되살린다.
+/// 설정 파일 옆에 두어 격리 리그는 제 자리에만 쓴다.
+fn relaunch_marker() -> Option<std::path::PathBuf> {
+    Some(crate::socket::settings_file_path()?.with_file_name("update-relaunch"))
+}
+
+/// 표식이 이만큼 지났으면 새 판 다시 켜기가 아니라 나중에 사람이 켠 것이다.
+const RELAUNCH_MARKER_FRESH: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+pub(crate) fn mark_relaunch() {
+    if let Some(path) = relaunch_marker() {
+        let _ = std::fs::write(path, "");
+    }
+}
+
+/// 이번 실행이 새 판 다시 켜기인가. 표식은 한 번 보면 걷는다.
+pub(crate) fn relaunched_for_update() -> bool {
+    let Some(path) = relaunch_marker() else { return false };
+    let fresh = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < RELAUNCH_MARKER_FRESH);
+    let _ = std::fs::remove_file(&path);
+    fresh
+}
+
+/// 받은 판으로 저절로 다시 켜도 되나 — 끊길 일을 한 번 이상 쟀고, 끊길 것이 없고, 아무도 안 만진 지 오래됐다.
+fn quiet_enough(measured: bool, interrupts: Option<&str>, untouched: std::time::Duration) -> bool {
+    measured && interrupts.is_none() && untouched >= IDLE_BEFORE_RELAUNCH
+}
+
+/// 이 기기를 아무도 만지지 않은 시간 — 키보드·마우스·트랙패드 어느 것이든.
+#[cfg(target_os = "macos")]
+fn untouched_for() -> std::time::Duration {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceSecondsSinceLastEventType(source: i32, event_type: u32) -> f64;
+    }
+    // kCGEventSourceStateCombinedSessionState · kCGAnyInputEventType
+    let seconds = unsafe { CGEventSourceSecondsSinceLastEventType(0, u32::MAX) };
+    std::time::Duration::try_from_secs_f64(seconds).unwrap_or_default()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn untouched_for() -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+
 impl App {
     /// 주 스레드 루프 턴마다(`about_to_wait`) — 업데이터 틱, 카드의 저절로 걷기·끊길 일 재기·리그 누르기.
     pub(crate) fn tick_update_notice(&mut self) {
@@ -60,6 +112,9 @@ impl App {
             self.update_card.interrupts = what;
             self.update_card.interrupts_at = Some(now);
         }
+        if crate::update_card::automatic() {
+            self.update_on_its_own(stage.as_ref());
+        }
         // 진행 막대는 업데이터 스레드가 값을 바꾸니 보이는 동안 계속 다시 그린다.
         if matches!(stage, Some(Stage::Checking | Stage::Downloading { .. } | Stage::Preparing { .. } | Stage::Installing { .. })) {
             self.chrome_dirty = true;
@@ -67,9 +122,31 @@ impl App {
         self.rig_update_press(now);
     }
 
+    /// 「내 기기」 — 새 판은 묻지 않고 받고, 맥은 아무도 안 쓰고 끊길 일(일하는 창·저장 안 한 문서)도 없을 때 다시 켠다.
+    /// 끊길 일은 준비된 카드가 2초마다 잰 값을 쓴다 — 아직 한 번도 안 쟀으면 기다린다.
+    fn update_on_its_own(&mut self, stage: Option<&Stage>) {
+        match stage {
+            Some(Stage::Found { version, .. }) if self.update_card.fetched_on_its_own.as_deref() != Some(version.as_str()) => {
+                self.update_card.fetched_on_its_own = Some(version.clone());
+                self.update_card_act(Action::Download);
+            }
+            Some(Stage::Ready { .. })
+                if crate::update_card::RELAUNCHES_ON_ITS_OWN
+                    && quiet_enough(self.update_card.interrupts_at.is_some(), self.update_card.interrupts.as_deref(), untouched_for()) =>
+            {
+                eprintln!("[update] 아무도 안 써서 새 판으로 다시 켬");
+                self.update_card_act(Action::Relaunch);
+            }
+            _ => {}
+        }
+    }
+
     /// 카드의 단추.
     pub(crate) fn update_card_act(&mut self, action: Action) {
         self.chrome_dirty = true;
+        if action == Action::Relaunch {
+            mark_relaunch();
+        }
         match action {
             Action::Close => {
                 crate::update_card::post(None);
@@ -118,7 +195,7 @@ impl App {
         if self.update_card.pressed || now.duration_since(since) < after {
             return;
         }
-        let content = crate::update_card::content(&stage, self.update_card.interrupts.as_deref(), crate::update_card::LATER_INSTALLS);
+        let content = crate::update_card::content(&stage, self.update_card.interrupts.as_deref(), crate::update_card::LATER_INSTALLS, crate::update_card::relaunches_on_its_own());
         let wanted = std::env::var("KASATERM_UPDATE_RIG_BUTTON").ok();
         if let Some(action) = crate::update_card::rig_choice(&content, wanted.as_deref()) {
             self.update_card.pressed = true;
@@ -154,6 +231,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_update_relaunches_on_its_own_only_when_nobody_is_there_and_nothing_breaks() {
+        let long = IDLE_BEFORE_RELAUNCH + std::time::Duration::from_secs(1);
+        assert!(quiet_enough(true, None, long));
+        assert!(!quiet_enough(false, None, long), "끊길 일을 아직 안 쟀다");
+        assert!(!quiet_enough(true, Some("일하는 창: 아리스"), long), "학생이 일하는 중");
+        assert!(!quiet_enough(true, None, std::time::Duration::from_secs(60)), "사람이 방금 만졌다");
+    }
 
     #[test]
     fn restart_warning_preserves_running_work_and_unsaved_documents() {

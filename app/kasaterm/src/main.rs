@@ -5610,6 +5610,8 @@ struct App {
     /// awaiting the user's 복원/새로 시작 decision. While `Some`, a modal is
     /// painted over the fresh session and swallows input.
     restore_prompt: Option<serde_json::Value>,
+    /// 이번 실행이 새 판 다시 켜기라 복원을 묻지 않고 한다(`update_notice::relaunched_for_update`).
+    restore_after_update: bool,
     restore_picker: restore_picker::State,
     /// 복원을 누른 뒤 실제 재구성까지의 짧은 유예 — `(저장본, 시작할 시각)`.
     ///
@@ -6418,6 +6420,7 @@ impl App {
             mirror_close_scope: None,
             confirm_btn_rects: Vec::new(),
             restore_prompt: None,
+            restore_after_update: false,
             restore_picker: restore_picker::State::default(),
             restore_applying: None,
             restore_progress: None,

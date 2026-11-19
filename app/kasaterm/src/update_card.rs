@@ -7,6 +7,7 @@
 //!
 //! 키보드로는 누를 수 없다 — 타자 중에 Return 이 「다시 켜기」를 누르는 일을 막는다.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -45,6 +46,24 @@ pub(crate) enum Action {
 /// 「나중에」가 끌 때 설치하는가 — 맥 Sparkle 은 받은 판을 종료 때 설치하고, Windows 는 다음 확인 때 다시 묻는다.
 pub(crate) const LATER_INSTALLS: bool = cfg!(target_os = "macos");
 
+/// 쉴 때 저절로 다시 켜는가 — 맥만. Windows MSI 는 관리자 확인(UAC)을 사람이 눌러야 끝난다.
+pub(crate) const RELAUNCHES_ON_ITS_OWN: bool = cfg!(target_os = "macos");
+
+/// 미리보기 참여 기기(사람의 「내 기기」) — 새 판을 묻지 않고 받고, 맥은 쉴 때 다시 켠다. 켤 때 한 번 정한다.
+static AUTOMATIC: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_automatic(on: bool) {
+    AUTOMATIC.store(on, Ordering::Relaxed);
+}
+
+pub(crate) fn automatic() -> bool {
+    AUTOMATIC.load(Ordering::Relaxed)
+}
+
+pub(crate) fn relaunches_on_its_own() -> bool {
+    automatic() && RELAUNCHES_ON_ITS_OWN
+}
+
 /// 업데이터가 알린 지금 단계. 업데이터 스레드(Windows 받기)와 주 스레드(맥 Sparkle) 어디서든 쓴다.
 static STAGE: Mutex<Option<Stage>> = Mutex::new(None);
 
@@ -78,8 +97,8 @@ pub(crate) struct Content {
 }
 
 /// `interrupts` 는 지금 다시 켜면 끊길 일(`App::update_interrupts_now`). `later_installs` 는 「나중에」가 끌 때 설치되는가
-/// (맥 Sparkle — 받은 판은 종료 때 설치된다).
-pub(crate) fn content(stage: &Stage, interrupts: Option<&str>, later_installs: bool) -> Content {
+/// (맥 Sparkle — 받은 판은 종료 때 설치된다). `on_its_own` 은 쉴 때 저절로 다시 켜는 기기인가.
+pub(crate) fn content(stage: &Stage, interrupts: Option<&str>, later_installs: bool, on_its_own: bool) -> Content {
     let mb = |b: u64| format!("{:.1}MB", b as f64 / 1_048_576.0);
     let plain = |title: String, body: Vec<String>, progress, buttons| Content { title, body, progress, buttons, warn: false };
     match stage {
@@ -106,7 +125,13 @@ pub(crate) fn content(stage: &Stage, interrupts: Option<&str>, later_installs: b
             Vec::new(),
         ),
         Stage::Ready { version } => {
-            let later = if later_installs { "나중에 하면 다음에 끌 때 바뀌어요." } else { "나중에 하면 다음에 다시 알려 드려요." };
+            let later = if on_its_own {
+                "아무도 안 쓰고 끊길 일이 없으면 저절로 다시 켜요."
+            } else if later_installs {
+                "나중에 하면 다음에 끌 때 바뀌어요."
+            } else {
+                "나중에 하면 다음에 다시 알려 드려요."
+            };
             Content {
                 title: format!("새 판 v{version} 준비됐어요"),
                 body: match interrupts {
@@ -234,6 +259,8 @@ pub(crate) struct Shown {
     /// 리그 — 이 단계에서 이미 눌렀다.
     pub pressed: bool,
     pub shots: u32,
+    /// 「내 기기」가 묻지 않고 받기 시작한 판 — 받다 실패해도 같은 판을 되풀이해 받지 않는다.
+    pub fetched_on_its_own: Option<String>,
 }
 
 impl Shown {
@@ -243,6 +270,9 @@ impl Shown {
             self.stage = stage.cloned();
             self.since = stage.map(|_| now);
             self.pressed = false;
+            // 앞 단계에서 잰 끊길 일로 새 준비 카드가 저절로 다시 켜지 않게 다시 잰다.
+            self.interrupts = None;
+            self.interrupts_at = None;
         }
         match (stage.and_then(lingers), self.since) {
             (Some(d), Some(at)) => now.duration_since(at) >= d,
@@ -330,11 +360,11 @@ mod tests {
             Stage::Failed { message: "망이 끊겼어요".into() },
         ];
         for stage in &stages {
-            let c = content(stage, None, true);
+            let c = content(stage, None, true, false);
             assert!(!c.title.is_empty() && !c.body.is_empty(), "{stage:?}");
             assert!(!c.buttons.is_empty(), "누를 것이 없으면 걷을 길도 없다: {stage:?}");
         }
-        let down = content(&stages[2], None, true);
+        let down = content(&stages[2], None, true, false);
         assert_eq!(down.progress, Some(0.25));
         assert_eq!(down.body[0], "5.0MB / 20.0MB");
     }
@@ -342,13 +372,15 @@ mod tests {
     #[test]
     fn ready_names_what_a_relaunch_would_interrupt() {
         let ready = Stage::Ready { version: "0.2.300".into() };
-        let calm = content(&ready, None, true);
+        let calm = content(&ready, None, true, false);
         assert!(!calm.warn);
         assert_eq!(calm.buttons.last().map(|b| b.1), Some(Action::Relaunch));
-        let busy = content(&ready, Some("일하는 창: 아리스 외 1개"), false);
+        let busy = content(&ready, Some("일하는 창: 아리스 외 1개"), false, false);
         assert!(busy.warn && busy.body[0].contains("아리스 외 1개"));
         assert_eq!(busy.buttons.last().map(|b| b.0), Some("그래도 다시 켜기"));
         assert!(busy.body[1].contains("다시 알려"), "Windows 는 끌 때 설치하지 않는다");
+        let alone = content(&ready, None, true, true);
+        assert!(alone.body[1].contains("저절로"), "쉴 때 저절로 다시 켜는 기기는 그렇게 말한다");
     }
 
     #[test]
@@ -364,7 +396,7 @@ mod tests {
 
     #[test]
     fn the_rig_presses_the_named_or_primary_button() {
-        let c = content(&Stage::Found { version: "1.0.0".into(), note: None }, None, true);
+        let c = content(&Stage::Found { version: "1.0.0".into(), note: None }, None, true, false);
         assert_eq!(rig_choice(&c, None), Some(Action::Download));
         assert_eq!(rig_choice(&c, Some("나중에")), Some(Action::Later));
         assert_eq!(rig_choice(&c, Some("없는 단추")), None);

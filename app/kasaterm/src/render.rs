@@ -5498,7 +5498,7 @@ impl App {
             self.update_card.card = None;
             self.update_card.hits.clear();
             if let Some(stage) = self.update_card.stage.clone() {
-                let content = crate::update_card::content(&stage, self.update_card.interrupts.as_deref(), crate::update_card::LATER_INSTALLS);
+                let content = crate::update_card::content(&stage, self.update_card.interrupts.as_deref(), crate::update_card::LATER_INSTALLS, crate::update_card::relaunches_on_its_own());
                 let above = restore_toast.map_or(0.0, |r| r.3);
                 let card = crate::update_card::rect((win_px.0 / scale, win_px.1 / scale), restore_bottom_reserved, above, &content);
                 self.update_card.hits = crate::update_card::paint(g, card, &content, self.cursor_px, std::time::Instant::now());

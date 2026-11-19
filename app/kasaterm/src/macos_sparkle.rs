@@ -450,6 +450,13 @@ pub(crate) fn init() -> Option<Updater> {
     }
 }
 
+impl Updater {
+    /// 미리보기 참여 기기 — 앱이 새 판을 묻지 않고 받고 쉴 때 다시 켠다(`update_notice`).
+    pub(crate) fn automatic(&self) -> bool {
+        self.preview
+    }
+}
+
 /// 주 스레드 루프 턴마다 — preview 의 시간마다 확인.
 pub(crate) fn tick(updater: &Updater) {
     rig_watch_windows();
