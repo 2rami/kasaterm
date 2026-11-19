@@ -6771,6 +6771,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             doc_forward::Forward::None => {}
         }
     }
+    #[cfg(windows)]
+    if !launch.viewer_only
+        && !launch.lite
+        && launch.paths.is_empty()
+        && (!verification_run() || std::env::var_os("KASATERM_TEST_TRAY").is_some())
+        && tray::hand_off()
+    {
+        return Ok(());
+    }
     if !launch.viewer_only {
         let log_suffix = if launch.lite { "-lite" } else { "" };
         install_panic_logger(log_suffix);

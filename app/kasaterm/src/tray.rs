@@ -18,11 +18,6 @@ pub(crate) fn create(proxy: &winit::event_loop::EventLoopProxy<UserEvent>) -> Op
     if crate::verification_run() && std::env::var_os("KASATERM_TEST_TRAY").is_none() {
         return None;
     }
-    // Windows 는 바로가기를 다시 누르면 새 프로세스가 떠, 숨긴 창이 있는 채로 앱이 둘이 된다. 두 번째 실행이 숨은 창을
-    // 불러오고 물러나는 길을 실기에서 확인하기 전에는 예전처럼 닫기가 끈다.
-    if cfg!(windows) {
-        return None;
-    }
     let open = MenuItem::new("카사텀 열기", true, None);
     let quit = MenuItem::new("종료", true, None);
     let menu = Menu::new();
@@ -82,6 +77,56 @@ fn tray_icon_image() -> Option<Icon> {
         })
         .collect();
     Icon::from_rgba(rgba, px, px).ok()
+}
+
+/// 이 창이 트레이로 숨는 본창이라는 표 — 바로가기로 다시 실행된 프로세스가 숨은 창을 찾는다(`hand_off`).
+#[cfg(windows)]
+pub(crate) fn mark_main(window: &winit::window::Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::{HANDLE, HWND};
+    use windows::Win32::UI::WindowsAndMessaging::SetPropW;
+    let Ok(handle) = window.window_handle() else { return };
+    if let RawWindowHandle::Win32(h) = handle.as_raw() {
+        let hwnd = HWND(h.hwnd.get() as *mut core::ffi::c_void);
+        let _ = unsafe { SetPropW(hwnd, MAIN_MARK, Some(HANDLE(1 as *mut core::ffi::c_void))) };
+    }
+}
+
+#[cfg(windows)]
+const MAIN_MARK: windows::core::PCWSTR = windows::core::w!("kasaterm.main");
+
+/// 다른 프로세스의 숨은 본창을 찾아 보이고 앞으로 올린다. 찾았으면 참 — 이 실행은 아무것도 쓰지 않고 물러난다. Windows 는
+/// 바로가기를 다시 누를 때마다 새 프로세스가 떠, 그대로 두면 숨긴 창과 같은 세션을 쓰는 앱이 둘이 된다.
+#[cfg(windows)]
+pub(crate) fn hand_off() -> bool {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetPropW, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+    unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> BOOL {
+        let found = unsafe { &mut *(data.0 as *mut Option<HWND>) };
+        if !unsafe { GetPropW(hwnd, MAIN_MARK) }.0.is_null() {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if pid != std::process::id() {
+                *found = Some(hwnd);
+                return false.into();
+            }
+        }
+        true.into()
+    }
+    let mut found: Option<HWND> = None;
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut found as *mut Option<HWND> as isize));
+    }
+    let Some(hwnd) = found else { return false };
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+    true
 }
 
 impl App {

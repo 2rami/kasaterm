@@ -3117,6 +3117,10 @@ impl ApplicationHandler<UserEvent> for App {
         // 토스트 클릭을 받을 활성화기 — **알림이 배달되기 전에** 걸어야 하고, 눌렀을 때 올릴 창이 있어야 한다.
         #[cfg(windows)]
         crate::win_notify::install(self.proxy.clone(), &window);
+        #[cfg(windows)]
+        if self.tray.is_some() {
+            crate::tray::mark_main(&window);
+        }
         self.window = Some(window);
         // 배율을 한 번도 안 고른 사람에게만, 이 모니터에 맞는 값을 넘겨준다.
         // **백엔드보다 먼저** 정해야 한다 — `start_pty` 가 `window_cells()` 로
