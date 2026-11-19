@@ -776,6 +776,11 @@ kasapane 스킬의 설명(`skills/kasapane/SKILL.md`)으로 이 규칙을 받는
   압축 `✻ Conversation compacted (ctrl+o for history)`, 멈춤 `  ⎿  Interrupted · What should Claude do instead?`.
   다른 칸·카사텀이 넣은 말은 기록 원문(`⟦이름⟧ …`) 그대로 내 말 꼴 — 카사텀 쪽지 꾸밈이 얹힌다.
 - 접힌 줄(`… +N lines`·읽기 묶음)은 누르면 펼치고 다시 누르면 접는다(ctrl+o 대신).
+- 올려 보는 동안 두 가지는 풀스크린 claude 것을 그대로 가져온다(2026-11-20 사용자 요청 — classic 에 없는 유일한 것들):
+  지금 보는 턴의 내 말이 화면 위로 밀렸으면 대화 줄 맨 위 한 줄에 그 첫 줄을 붙인다(내 말 띠 그대로, 넘치면 `…`, 누르면
+  그 말이 맨 위에 서게 간다). 대화 줄 맨 아래 가운데(스크롤바 칸 뺀 폭)에는 알약 ` Jump to bottom ↓ `(글 231·바탕 237,
+  양옆 한 칸 — 2.1.329 실측) — 맨 아래를 떠난 뒤 답이 오면 ` N new messages ↓ `, 바닥에 선택지 창이 섰으면
+  ` Waiting for your answer ↓ `. 누르면 맨 아래로. 둘 다 그 줄을 덮고, 고르기·복사는 기록 줄을 읽어 덮인 글도 빠지지 않는다.
 - 스크롤바(`chat_view/scrollbar.rs`): 대화 줄 칸의 마지막 한 칸(`BAR_COLS`) — 대화 줄은 그만큼 좁게 접는다. 칸 경계의
   나누기 손잡이가 경계 양쪽 6px 를 먼저 받아 여백에 두면 눌리지 않는다. 손잡이는 쉴 때 폭 3.5 · `with_alpha(text, 0x66)`,
   올리거나 끄는 중 폭 5 · `0x99` 에 홈 `with_alpha(text, 0x14)`, 최소 높이 24, `pill_rect`. 대화가 한 화면에 들면 없다.

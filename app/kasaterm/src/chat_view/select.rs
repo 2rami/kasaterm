@@ -348,12 +348,25 @@ impl App {
         self.focus_pane(&id);
         self.selection = None;
         self.drag_anchor = None;
-        let (view, toggle) = {
+        let (view, toggle, sticky, pill) = {
             let drawn = self.chat_view.drawn.borrow();
             let Some(d) = drawn.get(&id) else { return false };
-            (d.view, d.toggles.get(row).copied().flatten())
+            (d.view, d.toggles.get(row).copied().flatten(), d.sticky, d.pill)
         };
         let shift = self.modifiers.shift_key();
+        // 맨 위에 붙인 내 말은 그 말로, 알약은 맨 아래로 — 풀스크린 claude 의 두 단추와 같다.
+        let to_prompt = sticky.filter(|_| row == 0 && !shift);
+        let to_bottom = pill.is_some_and(|(r, a, b)| row == r && (a..b).contains(&col) && !shift);
+        if to_prompt.is_some() || to_bottom {
+            let Some(pane) = self.chat_view.panes.get_mut(&id) else { return false };
+            match to_prompt {
+                Some(item) => pane.jump.set(Some(item)),
+                None => pane.back.set(0),
+            }
+            pane.sel = None;
+            self.chrome_dirty = true;
+            return true;
+        }
         let now = Instant::now();
         let clicks = match self.cell_click {
             Some((t, cell, n)) if cell == (col as u16, row as u16) && now.duration_since(t).as_millis() < 400 => n % 3 + 1,

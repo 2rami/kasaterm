@@ -1200,6 +1200,11 @@ fn blocks(
     shelf.done()
 }
 
+/// 풀스크린 claude 의 「Jump to bottom」 알약 — 흰 글자(231)·내 말 띠 바탕(237), 양옆 한 칸(실측 2.1.329).
+pub(super) fn pill(text: &str) -> Vec<GridCell> {
+    cells(&format!(" {text} "), St::fg(Col::Idx(231)).on(Col::Idx(237)))
+}
+
 /// 내 말 띠 — 행 전폭이 같은 바탕이라 카사텀의 프롬프트 띠 꾸밈(`restyle_user_prompt_row`)이 그대로 얹힌다.
 fn prompt(width: usize, text: &str, ink: &Ink) -> Vec<Line> {
     let base = St::fg(ink.text).on(ink.band);

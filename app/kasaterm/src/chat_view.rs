@@ -88,6 +88,10 @@ pub(crate) struct Drawn {
     caret: Option<(usize, usize)>,
     /// 이 화면이 보인 대화 줄 범위 — 문서 선택을 화면 칸으로 옮긴다.
     view: select::View,
+    /// 맨 위 줄에 붙인 내 말(풀스크린 claude 처럼) — 누르면 그 말로 간다.
+    sticky: Option<usize>,
+    /// 「Jump to bottom」 알약 (줄, 시작 열, 끝 열) — 누르면 맨 아래로.
+    pill: Option<(usize, usize, usize)>,
 }
 
 impl Drawn {
@@ -106,6 +110,8 @@ pub(crate) struct ChatFrame {
     toggles: Vec<Option<usize>>,
     caret: Option<(usize, usize)>,
     view: select::View,
+    sticky: Option<usize>,
+    pill: Option<(usize, usize, usize)>,
 }
 
 pub(crate) struct ChatPane {
@@ -133,6 +139,8 @@ pub(crate) struct ChatPane {
     /// 거울이면 원본 (주소, 칸). 기록을 거기서 받는다.
     remote: Option<(String, String)>,
     esc_at: Option<Instant>,
+    /// 맨 아래를 떠날 때 받은 쪽(앞에 붙은 쪽 뺌)의 답 수 — 그 뒤 온 답을 알약이 「N new messages」로 센다.
+    left_at: Cell<Option<usize>>,
     /// 진짜 화면에서 본 코덱스 사람 말 칸 바탕 — 그 줄이 화면 밖으로 밀려도 같은 색을 쓴다.
     prompt_bg: RefCell<Option<kasa_bridge::screen::Color>>,
     /// 진짜 화면에서 본 배너 줄 — 첫 말 전 새 세션엔 기록이 없고, 말이 쌓이면 화면 밖으로 밀린다.
@@ -168,6 +176,7 @@ impl ChatPane {
             live_tab: None,
             remote: None,
             esc_at: None,
+            left_at: Cell::new(None),
             prompt_bg: RefCell::new(None),
             banner: RefCell::new(None),
             frame: RefCell::new(None),
@@ -416,6 +425,69 @@ fn full_rule(row: &[GridCell]) -> bool {
 
 /// 진짜 화면에서 바닥에 붙여 옮길 줄의 시작 — 스피너·입력칸·상태줄, 입력칸 대신 선 선택지 창(승인·
 /// 질문). 둘 다 못 찾으면 None: 대화 보기가 못 그리는 판이니 진짜 터미널을 보인다.
+/// 위로 올려 보는 동안의 두 표시 — 풀스크린 claude 와 같다(2026-11-20 「상단에 친 거랑 jump 그거」). 맨 위 줄에는 지금
+/// 보는 턴의 내 말이 화면 위로 밀렸으면 그 첫 줄을 붙이고(넘치면 `…`), 대화 줄 맨 아래 가운데에는 「Jump to bottom ↓」
+/// 알약 — 떠난 뒤 답이 왔으면 「N new messages ↓」, 선택지 창이 기다리면 「Waiting for your answer ↓」. 둘 다 그 줄을
+/// 덮는다. 고르기·복사는 기록 줄을 읽어 덮인 글도 빠지지 않는다.
+#[allow(clippy::too_many_arguments)]
+fn overlay_scrolled(
+    cache: &classic::Cache,
+    prompts: &[usize],
+    first: usize,
+    fresh: usize,
+    asking: bool,
+    cells: &mut [Vec<GridCell>],
+    toggles: &mut [Option<usize>],
+    faces: &mut Vec<(usize, classic::Face)>,
+) -> (Option<usize>, Option<(usize, usize, usize)>) {
+    let Some(cols) = cells.first().map(Vec::len) else { return (None, None) };
+    let width = cols.saturating_sub(scrollbar::BAR_COLS);
+    let mut sticky = None;
+    if first > 0 {
+        let above = prompts.iter().rev().find_map(|&item| cache.line_of(item).filter(|&l| l < first).map(|l| (item, l)));
+        if let Some((item, line)) = above {
+            let mut row = cache.lines[line].cells.clone();
+            row.resize(cols, GridCell::blank());
+            let band = row.first().map(|c| c.bg.clone());
+            let more = cache.lines.get(line + 1).and_then(|l| l.cells.first()).is_some_and(|c| Some(&c.bg) == band.as_ref());
+            if more {
+                let last = row[..width].iter().rposition(|c| !matches!(c.ch, ' ' | '\0')).unwrap_or(0);
+                let at = (last + 1).min(width.saturating_sub(1));
+                let style = row[last].clone();
+                row[at] = GridCell { ch: '…', ..style };
+            }
+            cells[0] = row;
+            toggles[0] = None;
+            faces.retain(|(r, _)| *r > 0);
+            sticky = Some(item);
+        }
+    }
+    let label = if asking {
+        "Waiting for your answer".to_string()
+    } else if fresh > 0 {
+        format!("{fresh} new {}", if fresh == 1 { "message" } else { "messages" })
+    } else {
+        "Jump to bottom".to_string()
+    };
+    let pill = classic::pill(&format!("{label} ↓"));
+    let row = cells.len().saturating_sub(1);
+    if row == 0 || pill.len() > width {
+        return (sticky, None);
+    }
+    let start = (width - pill.len()) / 2;
+    let end = start + pill.len();
+    let line = &mut cells[row];
+    // 넓은 글자의 반만 덮이면 남은 반쪽이 깨져 보인다 — 걸친 글자는 비운다.
+    if start > 0 && line[start].ch == '\0' {
+        line[start - 1] = GridCell::blank();
+    }
+    if end < line.len() && line[end].ch == '\0' {
+        line[end] = GridCell::blank();
+    }
+    line[start..end].clone_from_slice(&pill);
+    (sticky, Some((row, start, end)))
+}
+
 /// 대화 판을 짓는 데 드는 것의 열쇠. 짓는 동안 소비되는 옮기기(`jump`)·앞 쪽 붙음(`anchor`)이 걸렸거나 기록이
 /// 잠겨 있으면 None — 그 판은 새로 짓는다. 배너·입력칸 바탕처럼 판이 기억해 두는 것은 원본 화면에서 오므로
 /// 원본 내용 번호가 덮는다.
@@ -695,12 +767,20 @@ impl App {
         };
         let mut cache = chat.cache.borrow_mut();
         let mut older_left = false;
+        // 내 말 칸들과 받은 쪽의 답 수 — 캐시를 이 기록으로 지은 판에서만 칸 번호가 캐시와 맞는다.
+        let mut prompts: Vec<usize> = Vec::new();
+        let mut replies = None;
         if let Ok(f) = chat.feed.try_lock() {
             // 앞머리가 바뀐 판은 `pump_chat_views` 가 펼침·캐시를 맞춘 뒤에 그린다.
             if f.front_changes == chat.front_seen.get() {
                 // 마지막 칸은 스크롤바 자리라 대화 줄은 그만큼 좁게 접는다.
                 cache.build(&f.conv, f.version, cols - scrollbar::BAR_COLS, &chat.open, &look);
                 chat.painted.set(f.version);
+                prompts = f.conv.items.iter().enumerate()
+                    .filter(|(_, it)| matches!(it, parse::Item::Bubble { user: true, .. }))
+                    .map(|(i, _)| i)
+                    .collect();
+                replies = Some(f.conv.items.iter().skip(f.head_items).filter(|it| matches!(it, parse::Item::Bubble { user: false, .. })).count());
             }
             older_left = f.start > 0;
         }
@@ -744,6 +824,24 @@ impl App {
             cells[0] = loading_row("  ↑ 앞 대화를 불러오는 중…", cols);
             toggles[0] = None;
         }
+        let fresh = match (back, replies) {
+            (0, _) => {
+                chat.left_at.set(None);
+                0
+            }
+            (_, Some(now)) => {
+                let at = chat.left_at.get().filter(|&at| at <= now).unwrap_or(now);
+                chat.left_at.set(Some(at));
+                now - at
+            }
+            (_, None) => 0,
+        };
+        let asking = crate::screenread::prompt_box(&src.cells).is_none();
+        let (sticky, pill) = if back > 0 {
+            overlay_scrolled(&cache, &prompts, first, fresh, asking, &mut cells, &mut toggles, &mut faces)
+        } else {
+            (None, None)
+        };
         // 코덱스 사람 말 칸 바탕은 코덱스가 터미널 바탕에서 섞어 낸 값이다 — 진짜 화면에서 읽어 둔 것을 쓴다.
         if let Some(crate::screenread::PromptBox::Filled { rows: input }) = crate::screenread::prompt_box(&src.cells) {
             if let Some(seen) = codex_prompt_bg(&src.cells, input) {
@@ -775,7 +873,7 @@ impl App {
             ..Default::default()
         };
         let caret = cursor.map(|(r, c)| (r as usize, c as usize));
-        let frame = Rc::new(ChatFrame { term, faces, face_slug, hist_rows, toggles, caret, view });
+        let frame = Rc::new(ChatFrame { term, faces, face_slug, hist_rows, toggles, caret, view, sticky, pill });
         *chat.frame.borrow_mut() = key.map(|key| (key, Rc::clone(&frame), wants_older));
         Some(frame)
     }
@@ -793,6 +891,8 @@ impl App {
                 cursor: frame.term.cursor_visible.then_some((frame.term.cursor_row as usize, frame.term.cursor_col as usize)),
                 caret: frame.caret,
                 view: frame.view,
+                sticky: frame.sticky,
+                pill: frame.pill,
             },
         );
     }
@@ -1062,6 +1162,37 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 올려 보는 동안 대화 줄 맨 아래 가운데에 풀스크린 claude 의 알약 — 떠난 뒤 온 답 수·기다리는 선택지가 글을 바꾸고,
+    /// 걸친 넓은 글자의 남은 반쪽은 비운다.
+    #[test]
+    fn a_scrolled_view_puts_the_jump_pill_in_the_middle_of_the_last_row() {
+        let cache = classic::Cache::default();
+        let text_of = |cells: &[GridCell]| cells.iter().map(|c| c.ch).collect::<String>();
+        for (fresh, asking, want) in [
+            (0, false, " Jump to bottom ↓ "),
+            (1, false, " 1 new message ↓ "),
+            (3, false, " 3 new messages ↓ "),
+            (3, true, " Waiting for your answer ↓ "),
+        ] {
+            let mut cells = vec![vec![GridCell::blank(); 41]; 5];
+            let (mut toggles, mut faces) = (vec![None; 5], Vec::new());
+            let (sticky, pill) = overlay_scrolled(&cache, &[], 0, fresh, asking, &mut cells, &mut toggles, &mut faces);
+            assert_eq!(sticky, None, "위에 내 말이 없으면 맨 위 줄은 그대로");
+            let (row, a, b) = pill.expect("알약");
+            assert_eq!(row, 4);
+            assert_eq!(text_of(&cells[4][a..b]), want);
+            let room = 41 - scrollbar::BAR_COLS;
+            assert_eq!(a, (room - want.chars().count()) / 2, "스크롤바 칸을 뺀 폭의 가운데");
+        }
+        let mut cells = vec![vec![GridCell::blank(); 41]; 5];
+        let start = (41 - scrollbar::BAR_COLS - " Jump to bottom ↓ ".chars().count()) / 2;
+        cells[4][start - 1].ch = '한';
+        cells[4][start].ch = '\0';
+        let (mut toggles, mut faces) = (vec![None; 5], Vec::new());
+        overlay_scrolled(&cache, &[], 0, 0, false, &mut cells, &mut toggles, &mut faces);
+        assert_eq!(cells[4][start - 1].ch, ' ', "반만 덮인 넓은 글자는 비운다");
+    }
 
     /// 원본 화면·보던 자리가 같은 동안만 지난 판을 다시 쓰고, 짓는 동안 소비되는 옮기기가 걸리면 새로 짓는다.
     #[test]

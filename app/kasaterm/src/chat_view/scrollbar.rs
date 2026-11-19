@@ -163,10 +163,14 @@ mod tests {
                 toggles: Vec::new(),
                 caret: None,
                 view: select::View { first, hist, total, bottom: 5, cols: 100 },
+                sticky: None,
+                pill: None,
             }),
             cursor: None,
             caret: None,
             view: select::View { first, hist, total, bottom: 5, cols: 100 },
+            sticky: None,
+            pill: None,
         }
     }
 
