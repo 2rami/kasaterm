@@ -2133,6 +2133,9 @@ impl ApplicationHandler<UserEvent> for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
         crate::lid_away::shutdown();
+        // 다른 기기가 소리를 받아 가는 중이면 끈 스피커를 되켠다 — 허브는 정적이라 끝날 때 안 놓인다.
+        #[cfg(any(target_os = "macos", windows))]
+        crate::screen_stream::restore_speakers();
         self.save_aux_windows_state();
         if self.viewer_only {
             return;

@@ -17,6 +17,10 @@ mod host;
 #[cfg(target_os = "macos")]
 mod scroll_probe;
 #[cfg(any(target_os = "macos", windows))]
+mod source_mute;
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use source_mute::restore as restore_speakers;
+#[cfg(any(target_os = "macos", windows))]
 mod view;
 #[cfg(windows)]
 mod win;

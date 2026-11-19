@@ -225,6 +225,7 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Dxgi_Common",
     # 화면 칸 소리(screen_stream/audio_win.rs): 기본 출력 장치의 WASAPI 루프백 뜨기와 공유 모드 틀기.
     "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com_StructuredStorage",
     # 화면 스트림 Windows 보내기(screen_stream/win.rs): 하드웨어 인코더의 저지연·키프레임 설정이 ICodecAPI(VARIANT)를 쓴다.

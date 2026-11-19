@@ -15,7 +15,18 @@ use super::{contains, Rect};
 
 /// 부팅 때 한 번 — 이 기기 화면을 보는 쪽이 소리도 받게 한다.
 pub(crate) fn install() {
-    kasa_remote::screen_stream::audio::install(Arc::new(os::Source));
+    super::source_mute::restore_after_crash();
+    kasa_remote::screen_stream::audio::install(Arc::new(Speakers));
+}
+
+/// 소리를 뜨는 동안 이 기기 스피커를 끈다 — 보는 쪽에서만 난다(`source_mute.rs`). 마지막 구독이 떠나 뜨기를 멈추면 되켠다.
+struct Speakers;
+
+impl kasa_remote::screen_stream::audio::Source for Speakers {
+    fn start(&self, out: Box<dyn FnMut(f64, &[i16]) + Send>) -> Result<Box<dyn Send>, String> {
+        let running = os::Source.start(out)?;
+        Ok(Box::new((running, super::source_mute::mute())))
+    }
 }
 
 /// 이 앱이 떠 있는 동안 소리를 끈 기기 — 칸을 넘겼다 돌아와 다시 붙어도 꺼진 채로 둔다.
