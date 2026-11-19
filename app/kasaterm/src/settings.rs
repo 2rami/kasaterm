@@ -5045,15 +5045,12 @@ fn open_kasa_browser_secret(url: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+/// 설치 스크립트가 까는 자리 하나만 본다. 이름으로 부르면 Launch Services 가 같은 번들 ID 의
+/// 다른 사본(업데이트가 남긴 `.previous` 같은 옛 판)을 고를 수 있고, 옛 판은 `--secret-open` 을
+/// 몰라 켜지기만 한다.
 fn kasa_browser_app() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    [
-        home.map(|home| home.join("Applications/Kasa Browser OSR.app")),
-        Some(std::path::PathBuf::from("/Applications/Kasa Browser OSR.app")),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|app| app.exists())
+    let app = std::path::PathBuf::from(std::env::var_os("HOME")?).join("Applications/Kasa Browser OSR.app");
+    app.exists().then_some(app)
 }
 
 /// 정식 설치 자리, 아니면 기본 앱 후보로 적어 둔 실행 명령(`"<exe>" --open="%1"`)의 실행 파일.
