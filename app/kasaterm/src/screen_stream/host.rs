@@ -183,8 +183,10 @@ impl Capture for Host {
             eprintln!("[screen-stream] 압축기를 못 열었다: {e:#}");
             Denied::Unavailable
         })?;
+        // 검증 리그는 Windows 인 척할 수 있다 — 맥에서 Windows 를 조작할 때의 키 보내기를 맥 둘로 잰다.
+        let os = crate::verification_run().then(|| std::env::var("KASATERM_TEST_SCREEN_OS").ok()).flatten();
         let info = json!({
-            "os": "macos", "display": cap.display, "displays": super::displays_json(),
+            "os": os.as_deref().unwrap_or("macos"), "display": cap.display, "displays": super::displays_json(),
             "width": width, "height": height, "codec": config.codec, "fps": config.fps,
             "bitrate": config.bitrate, "refine": config.refine, "rejected": encoder.rejected,
         });

@@ -1078,6 +1078,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.show_main_window();
                 return;
             }
+            UserEvent::ScreenCapsLock => {
+                self.screen_caps_lock();
+                return;
+            }
             UserEvent::UpdateExit(job) => {
                 // 재시작과 같은 까닭 — 끄는 순간 자기설치가 끼면 도우미가 다른 번들을 갈아 끼운다.
                 if crate::install_pending_paths().is_some() {
@@ -2276,6 +2280,8 @@ impl ApplicationHandler<UserEvent> for App {
         if !self.lite {
             self.tray = crate::tray::create(&self.proxy);
         }
+        #[cfg(target_os = "macos")]
+        crate::screen_stream::watch_caps_lock(&self.proxy);
         // WaitUntil so the cursor blink ticks even when no terminal output
         // is arriving — the redraw inside RedrawRequested re-arms the
         // schedule. Pure Wait would freeze the blink mid-phase, Poll would

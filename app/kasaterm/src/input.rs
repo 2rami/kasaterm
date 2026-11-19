@@ -3326,6 +3326,8 @@ impl App {
 
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
+            // 뗌은 화면 칸만 쓴다 — 맥에서 Windows 를 조작할 때 ⌥ 혼자 누르기가 Windows 키다.
+            self.screen_view_key(event);
             return;
         }
         // A sidebar name field still owns its keys when a narrow Info panel covers the terminal.

@@ -4076,6 +4076,8 @@ enum UserEvent {
     UpdateExit(String),
     /// 트레이 아이콘을 눌렀다 — 숨긴 창을 다시 앞으로.
     ShowMainWindow,
+    /// 이 앱 창에서 Caps Lock 을 눌렀다(맥) — 조작 중인 Windows 화면 칸이면 그 기기 한/영.
+    ScreenCapsLock,
     /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(사용자: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),

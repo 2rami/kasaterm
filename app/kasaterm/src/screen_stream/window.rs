@@ -31,7 +31,7 @@ pub(crate) struct ScreenWindow {
     gpu: gpu::GpuRenderer,
     pub(crate) window: Arc<Window>,
     cursor_px: (f32, f32),
-    focused: bool,
+    pub(crate) focused: bool,
     dock_btn: (f32, f32, f32, f32),
 }
 

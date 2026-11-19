@@ -14,6 +14,11 @@ pub(crate) fn request_permission() {
     os::request_permission();
 }
 
+/// 그 기기가 이 키 이름을 누를 줄 아는가 — 모르는 키는 보는 쪽이 글자째 보낸다.
+pub(crate) fn known_key(code: &str) -> bool {
+    key_of(code).is_some()
+}
+
 /// 웹 `KeyboardEvent.code` 이름 → (macOS 가상 키, Windows VK, Windows 확장 키인가).
 fn key_of(code: &str) -> Option<(u16, u16, bool)> {
     const LETTERS: [u16; 26] = [
@@ -34,11 +39,17 @@ fn key_of(code: &str) -> Option<(u16, u16, bool)> {
         let i = (c as u8 - b'0') as usize;
         return Some((DIGITS[i], u16::from(c as u8), false));
     }
+    if let Some(c) = code.strip_prefix("Numpad").and_then(one).filter(char::is_ascii_digit) {
+        const PAD: [u16; 10] = [82, 83, 84, 85, 86, 87, 88, 89, 91, 92];
+        let i = (c as u8 - b'0') as usize;
+        return Some((PAD[i], 0x60 + i as u16, false));
+    }
     if let Some(n) = code.strip_prefix('F').and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=12).contains(n)) {
         return Some((F_KEYS[n - 1], 0x70 + n as u16 - 1, false));
     }
     Some(match code {
-        "Enter" | "NumpadEnter" => (36, 0x0D, false),
+        "Enter" => (36, 0x0D, false),
+        "NumpadEnter" => (76, 0x0D, true),
         "Tab" => (48, 0x09, false),
         "Backspace" => (51, 0x08, false),
         "Escape" => (53, 0x1B, false),
@@ -64,6 +75,17 @@ fn key_of(code: &str) -> Option<(u16, u16, bool)> {
         "Period" => (47, 0xBE, false),
         "Slash" => (44, 0xBF, false),
         "Backquote" => (50, 0xC0, false),
+        "Insert" => (114, 0x2D, true),
+        "ContextMenu" => (110, 0x5D, true),
+        // 한/영·한자(웹 이름은 Lang1·Lang2). 맥 쪽은 표준 대응대로 가나·영숫 키다.
+        "Lang1" => (104, 0x15, false),
+        "Lang2" => (102, 0x19, false),
+        "NumpadDecimal" => (65, 0x6E, false),
+        "NumpadMultiply" => (67, 0x6A, false),
+        "NumpadAdd" => (69, 0x6B, false),
+        "NumpadSubtract" => (78, 0x6D, false),
+        "NumpadDivide" => (75, 0x6F, true),
+        "NumpadEqual" => (81, 0xBB, false),
         _ => return None,
     })
 }
@@ -281,10 +303,11 @@ mod os {
     use windows::Win32::Foundation::{LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
+        MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
         KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
         MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-        MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+        MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, MAPVK_VK_TO_VSC,
+        VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -353,8 +376,24 @@ mod os {
         Some(mouse(ax, ay, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK))
     }
 
-    fn modifiers(mods: u8) -> Vec<u16> {
-        [(1u8, 0x10u16), (2, 0x11), (4, 0x12), (8, 0x5B)].iter().filter(|(b, _)| mods & b != 0).map(|(_, vk)| *vk).collect()
+    /// 손가락 비트 → (VK, 확장 키인가). Windows 키는 E0 이 붙는 확장 키다.
+    fn modifiers(mods: u8) -> Vec<(u16, bool)> {
+        [(1u8, 0x10u16, false), (2, 0x11, false), (4, 0x12, false), (8, 0x5B, true)]
+            .iter()
+            .filter(|(b, _, _)| mods & b != 0)
+            .map(|(_, vk, ext)| (*vk, *ext))
+            .collect()
+    }
+
+    /// VK 와 스캔 코드를 같이 실은 키 — 게임처럼 키보드를 원시 입력으로 읽는 앱은 VK 가 아니라 스캔 코드를 보고, 0 이면
+    /// 아무 키도 안 눌린 것으로 친다(마우스는 먹는데 키만 안 먹던 까닭).
+    fn press(vk: u16, extended: bool, up: bool) -> INPUT {
+        let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) } as u16;
+        let mut flags = if extended { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) };
+        if up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        key(vk, scan, flags)
     }
 
     pub(super) fn put(display: u32, input: &Input) -> Result<(), Denied> {
@@ -390,16 +429,15 @@ mod os {
                     return Ok(());
                 }
                 let Some((_, vk, extended)) = key_of(code) else { return Ok(()) };
-                let ext = if extended { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) };
                 let held = modifiers(*mods);
                 let mut out: Vec<INPUT> = Vec::new();
                 if *down != Some(false) {
-                    out.extend(held.iter().map(|m| key(*m, 0, KEYBD_EVENT_FLAGS(0))));
-                    out.push(key(vk, 0, ext));
+                    out.extend(held.iter().map(|(m, ext)| press(*m, *ext, false)));
+                    out.push(press(vk, extended, false));
                 }
                 if *down != Some(true) {
-                    out.push(key(vk, 0, ext | KEYEVENTF_KEYUP));
-                    out.extend(held.iter().rev().map(|m| key(*m, 0, KEYEVENTF_KEYUP)));
+                    out.push(press(vk, extended, true));
+                    out.extend(held.iter().rev().map(|(m, ext)| press(*m, *ext, true)));
                 }
                 send(&out);
             }
@@ -456,7 +494,10 @@ mod tests {
         assert_eq!(key_of("Enter"), Some((36, 0x0D, false)));
         assert_eq!(key_of("MetaLeft"), Some((55, 0x5B, true)), "키 메뉴의 Windows 키·⌘ 혼자 누르기");
         assert_eq!(key_of("ArrowUp"), Some((126, 0x26, true)));
-        for unknown in ["", "Key", "KeyAA", "Keya", "F13", "F0", "Digit10", "Lang1"] {
+        assert_eq!(key_of("Lang1"), Some((104, 0x15, false)), "맥 Caps Lock 이 보내는 Windows 한/영");
+        assert_eq!(key_of("Numpad7"), Some((89, 0x67, false)));
+        assert_eq!(key_of("NumpadEnter"), Some((76, 0x0D, true)));
+        for unknown in ["", "Key", "KeyAA", "Keya", "F13", "F0", "Digit10", "Numpad10", "ShiftLeft", "CapsLock"] {
             assert_eq!(key_of(unknown), None, "{unknown}");
         }
     }

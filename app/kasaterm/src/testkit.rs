@@ -4074,7 +4074,7 @@ impl App {
             }
         }
     }
-    /// `KASATERM_AUTOKEYS="9000:text:hello;9500:alt+left;10000:cmd+c"` — 앱 시작 기준 ms 에 AppKit 키
+    /// `KASATERM_AUTOKEYS="9000:text:hello;9500:alt+left;10000:cmd+c;10500:flags:58:1"` — 앱 시작 기준 ms 에 AppKit 키
     /// NSEvent 를 winit 뷰에 넘긴다. winit 이 그 깃발로 수정키를 갱신하고 `forward_key` 까지 사람 손과 같은
     /// 길을 탄다(소켓 `tell --raw` 는 PTY 에 바로 써서 키 처리를 못 본다). 창 서버를 안 거쳐 초점은 안 뺏는다.
     #[cfg(target_os = "macos")]
@@ -4099,6 +4099,13 @@ impl App {
                 return;
             }
             NEXT.fetch_add(1, Ordering::Relaxed);
+            if let Some((code, on)) = key.strip_prefix("flags:").and_then(|r| r.split_once(':')) {
+                if let Ok(code) = code.parse() {
+                    self.native_flags(code, on == "1");
+                }
+                eprintln!("[autokeys] {key}");
+                continue;
+            }
             match key.strip_prefix("text:") {
                 Some(text) => text.chars().for_each(|ch| self.native_key(0, ch)),
                 None => {
@@ -4137,6 +4144,45 @@ impl App {
 
     /// 키 하나를 눌렀다 뗀다. 물리 키(맥 가상 키 번호)가 있어야 `KeyCode` 로 보는 단축키(⌘C 등)가 듣는다.
     #[cfg(target_os = "macos")]
+    /// 수정키 하나만 누르거나 뗀다(`flags:<키 코드>:<1|0>`, ⌥ 58 · Caps Lock 57). 앱 사건 줄에 넣어 AppKit 감시(Caps Lock)와
+    /// winit 의 `flagsChanged`(⌥ 혼자 누르기)가 사람 손과 같은 길로 받는다.
+    #[cfg(target_os = "macos")]
+    fn native_flags(&self, code: u16, on: bool) {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_foundation::{NSPoint, NSString};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let bit = match code {
+            57 => 1 << 16,
+            56 | 60 => NS_SHIFT,
+            59 | 62 => NS_CONTROL,
+            58 | 61 => NS_OPTION,
+            _ => NS_COMMAND,
+        };
+        let Some(window) = self.window.as_ref() else { return };
+        let Ok(handle) = window.window_handle() else { return };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+        let view = h.ns_view.as_ptr() as *mut AnyObject;
+        let empty = NSString::from_str("");
+        unsafe {
+            let ns_window: *mut AnyObject = msg_send![view, window];
+            let (Some(class), Some(app_class)) = (AnyClass::get(c"NSEvent"), AnyClass::get(c"NSApplication")) else { return };
+            if ns_window.is_null() {
+                return;
+            }
+            let number: isize = msg_send![ns_window, windowNumber];
+            let event: *mut AnyObject = msg_send![class, keyEventWithType: 12u64, location: NSPoint::new(0.0, 0.0),
+                modifierFlags: if on { bit } else { 0u64 }, timestamp: 0.0f64, windowNumber: number,
+                context: std::ptr::null_mut::<AnyObject>(), characters: &*empty, charactersIgnoringModifiers: &*empty,
+                isARepeat: false, keyCode: code];
+            if event.is_null() {
+                return;
+            }
+            let app: *mut AnyObject = msg_send![app_class, sharedApplication];
+            let _: () = msg_send![app, postEvent: event, atStart: false];
+        }
+    }
+
     pub(crate) fn native_key(&self, flags: u64, ch: char) {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};

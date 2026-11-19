@@ -405,10 +405,26 @@ UAC 확인 창·잠금 화면은 Windows 가 보안 데스크톱(Winlogon)에 �
   자동으로 올리지 않는다. 올리려면 해상도를 같이 낮추는 길이 먼저다.
 - **클립보드**: 따로 화면 칸 길을 만들지 않았다 — 카사텀끼리 이미 글 클립보드를 나눈다(`clipboard.rs share` →
   `clipboard_set_from_peer`). 화면 칸에서 그 기기에 Ctrl+C 하면 이 기기 클립보드에도 담기고 「<기기>에서 복사됨」 토스트가 뜬다.
-- **키 메뉴·⌘→Ctrl**(2026-11-18): 그 기기 OS 는 압축 정보 `os`(옛 판은 Windows 도우미 표시 `agent`)로 안다. 맥에서 Windows 를
-  볼 때 손가락 ⌘ 를 Ctrl 로 바꿔 보낸다(`view.rs remote_mods`) — 그대로면 ⌘C 가 Win+C 로 들어갔다. 이 기기 키보드로 못 보내는 키는
-  조작 중 「키」 메뉴로 보낸다(`special_keys`). Ctrl+Alt+Del 은 넣은 키로는 SAS 가 안 가서 Windows 쪽이 `SendSAS` 를 부른다 —
-  SYSTEM 도우미에서만 먹고 정책 `SoftwareSASGeneration=1` 이 있어야 해서 설치기가 그 값을 건다(`main.wxs`).
+- **키 메뉴**(2026-11-18): 그 기기 OS 는 압축 정보 `os`(옛 판은 Windows 도우미 표시 `agent`)로 안다. 이 기기 키보드로 못
+  보내는 키는 조작 중 「키」 메뉴로 보낸다(`special_keys`). Ctrl+Alt+Del 은 넣은 키로는 SAS 가 안 가서 Windows 쪽이 `SendSAS` 를
+  부른다 — SYSTEM 도우미에서만 먹고 정책 `SoftwareSASGeneration=1` 이 있어야 해서 설치기가 그 값을 건다(`main.wxs`).
+- **맥에서 Windows 조작 — 키 자리로 보내기**(2026-11-19): 「키보드가 안 먹는다」의 까닭은 넣는 방식이었다. 글자는 유니코드
+  패킷(`KEYEVENTF_UNICODE`)으로, 이름 붙은 키는 스캔 코드 0 인 VK 로 넣었는데, 게임처럼 키보드를 원시 입력으로 읽는 앱은 둘 다
+  못 받는다(마우스는 먹었다). 그래서 Windows 쪽은 VK 에 `MapVirtualKeyW` 스캔 코드를 같이 싣고(`screen_input.rs press`), 맥에서
+  Windows 를 볼 때는 글 대신 누른 자리(웹 `code`)를 보낸다(`input.rs screen_raw_key`) — 한글은 이 앱 조합기를 거치지 않고 그 기기
+  입력기가 조합한다. 그 기기가 모르는 키만 글자째 보낸다(`screen_input::known_key`).
+  - 손가락은 키보드 자리대로 ⌘ → Alt, ⌥ → Windows 키, Ctrl·Shift 그대로(`view.rs windows_mods`). 앞의 ⌘ → Ctrl 은 사용자가 바꿨다
+    (「커맨드가 알트, 옵션이 윈도우」). ⌘V 는 그대로 앱이 먼저 받아 이 기기 클립보드 글을 넣는다.
+  - 손가락 키 자체는 따로 안 보내고 다음 키에 실어 그 자리에서 눌렀다 뗀다 — 따로 눌러 두면 이 앱 단축키(⌘W 등)가 가로챈 뒤 그
+    기기에 손가락이 눌린 채 남는다. ⌥ 만 눌렀다 떼면 Windows 키 한 번(시작 메뉴) — 그래서 칸 키 처리는 뗌도 받는다.
+  - Caps Lock → 한/영(`Lang1` = VK_HANGUL). winit 은 Caps Lock 의 `flagsChanged` 를 키로 안 넘겨 AppKit 지역 감시가 잡는다
+    (`watch_caps_lock` → `UserEvent::ScreenCapsLock`). 입력 소스 바꾸기로 쓰는 Caps Lock 은 한 번 누름이 잠금 켬·끔 둘로 올 수
+    있어 0.3초 안의 둘째는 버린다. 맥 입력 소스도 같이 바뀌지만 키 자리로 보내니 그 기기 글에는 상관없다.
+  - 검증(맥 리그 둘, 원본이 `KASATERM_TEST_SCREEN_OS=windows` 로 Windows 인 척): `ab`·⇧A·⌘A·⌥A·⌃C·자모 ㅎ·Enter·Space·Esc 가
+    `KeyA`·`KeyB`·(KeyA,1)·(KeyA,4)·(KeyA,8)·(KeyC,2)·`KeyA`·`Enter`·`Space`·`Escape` 로, ⌥ 혼자 누르기가 `MetaLeft` 로, 0.1초
+    간격 Caps Lock 켬·끔이 `Lang1` 하나로, 1초 간격 둘이 `Lang1` 둘로 갔다. 수정키만 누르기는 `KASATERM_AUTOKEYS` 의
+    `flags:<키 코드>:<1|0>` 이 앱 사건 줄에 넣는다(`testkit.rs native_flags`). 실제 Caps Lock·Windows 입력기 조합·게임 입력은
+    합성 키로 못 재서 실기기에서 본다.
 - ⋮ 「별도 창으로」가 화면 탭을 별도 OS 창(`window.rs ScreenWindow`)으로 꺼낸다. 탭만 칸에서 빠지고 보기·연결은 `screen_views` 에
   그대로라 끊기지 않는다. 보기는 그려진 창(`Surface`)을 기억해 누름은 그 창 것만 받고, 창을 옮긴 직후 그 창 렌더러에 장이 없으면
   멈춘 화면이라도 마지막 장을 다시 올린다. 본창은 본창 보기의 새 장에만 다시 그리고, 꺼낸 창은 제 보기의 새 장에만 다시 그린다.

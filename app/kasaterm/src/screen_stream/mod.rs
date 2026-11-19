@@ -31,6 +31,8 @@ use codec as platform;
 use win_view as platform;
 mod annexb;
 mod input;
+#[cfg(target_os = "macos")]
+pub(crate) use input::watch_caps_lock;
 mod pane;
 mod window;
 

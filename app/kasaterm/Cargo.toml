@@ -135,7 +135,7 @@ objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCen
 objc2-intents = { version = "0.3", default-features = false, features = ["std", "INPerson", "INPersonHandle", "INImage", "INIntent", "INIntentResponse", "INSendMessageIntent", "INOutgoingMessageType", "INInteraction", "INSpeakableString", "INSendMessageAttachment", "block2"] }
 # Dock tile badge (unread-notification count) via NSApplication.dockTile,
 # 그리고 창마다 NSWindow.tabbingMode 를 끄는 데 NSWindow/NSView 가 필요하다.
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSDockTile", "NSWindow", "NSView", "NSGraphics", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSColor", "NSColorSpace", "NSColorSampler", "block2"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSDockTile", "NSWindow", "NSView", "NSGraphics", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSColor", "NSColorSpace", "NSColorSampler", "NSEvent", "block2"] }
 # 웹 pane 스크린샷(web-shot) — WKWebView 자체 스냅샷이라 화면 녹화 권한이 필요 없다.
 # 버전은 wry 0.55 가 쓰는 것과 같아야 타입이 이어진다(WryWebView → WKWebView deref).
 objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }

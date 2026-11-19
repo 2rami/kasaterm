@@ -2,7 +2,7 @@
 //! 「조작」 단추를 켠 칸만 넣는다. 꺼져 있으면 칸 누름은 보통 칸처럼 초점만 옮긴다.
 
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 use super::Surface;
 use crate::App;
@@ -13,6 +13,20 @@ const TEXT_CHUNK: usize = 4000;
 /// 1 shift·2 control·4 option(alt)·8 command(win).
 fn mods_of(m: ModifiersState) -> u8 {
     u8::from(m.shift_key()) | u8::from(m.control_key()) << 1 | u8::from(m.alt_key()) << 2 | u8::from(m.super_key()) << 3
+}
+
+fn is_modifier(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::ShiftLeft
+            | KeyCode::ShiftRight
+            | KeyCode::ControlLeft
+            | KeyCode::ControlRight
+            | KeyCode::SuperLeft
+            | KeyCode::SuperRight
+            | KeyCode::CapsLock
+            | KeyCode::Fn
+    )
 }
 
 /// 휠 한 줄을 화면 포인트로 — 화면 거울 웹 보기와 같은 값.
@@ -113,6 +127,7 @@ impl App {
                     return true;
                 }
                 let buttons = if pressed { view.buttons | bit } else { view.buttons & !bit };
+                view.option_alone &= !pressed;
                 let mods = view.remote_mods(mods);
                 view.pointer(p, buttons, mods);
                 if pressed {
@@ -173,6 +188,7 @@ impl App {
     /// 그 보기에 키 하나 — 꺼낸 화면 창은 늘 이 보기 하나가 앞이다.
     pub(crate) fn screen_key_for(&mut self, id: u64, event: &KeyEvent) -> bool {
         if event.state != ElementState::Pressed {
+            self.screen_key_up(id, event);
             return true;
         }
         // 확대 키(⌘ = · ⌘ - · ⌘ 0)는 조작을 켜지 않은 보기에서만 — 조작 중이면 그 기기 단축키다.
@@ -192,6 +208,9 @@ impl App {
             return true;
         }
         let mods = mods_of(self.modifiers);
+        if self.screen_views.get(&id).is_some_and(super::ScreenView::raw_keys) {
+            return self.screen_raw_key(id, event, mods);
+        }
         let chord = mods & (2 | 4 | 8) != 0;
         #[cfg(target_os = "macos")]
         if let Some(c) = event.text.as_ref().filter(|t| !chord && t.chars().count() == 1).and_then(|t| t.chars().next()) {
@@ -232,6 +251,56 @@ impl App {
             }
         }
         true
+    }
+
+    /// 맥에서 Windows 를 조작할 때의 키 — 글자 대신 누른 자리(웹 `code`)를 보낸다. 한글은 이 기기 입력기 대신 그 기기
+    /// 입력기가 조합하고(한/영은 Caps Lock — `screen_caps_lock`), 게임도 받는다. 그 기기가 모르는 키만 글자째 보낸다.
+    fn screen_raw_key(&mut self, id: u64, event: &KeyEvent, mods: u8) -> bool {
+        // 조작 방식이 바뀌기 전에 이 기기에서 조합하던 글자가 남았으면 마저 보낸다.
+        if let Some(done) = self.hangul.flush() {
+            self.screen_text(id, &done);
+            self.screen_preedit(id);
+        }
+        let PhysicalKey::Code(code) = event.physical_key else { return true };
+        let Some(view) = self.screen_views.get_mut(&id) else { return true };
+        if view.key_menu.is_some() && code == KeyCode::Escape {
+            view.key_menu = None;
+            self.chrome_dirty = true;
+            return true;
+        }
+        let option = matches!(code, KeyCode::AltLeft | KeyCode::AltRight);
+        view.option_alone = option && !event.repeat;
+        // 손가락 키 자체는 안 보낸다 — 다음 키에 손가락 비트로 실려 그 자리에서 눌렀다 뗀다. 따로 눌러 두면 이 앱 단축키
+        // (⌘W 등)가 가로챈 뒤 그 기기에 손가락이 눌린 채 남는다.
+        if option || is_modifier(code) {
+            return true;
+        }
+        let name = format!("{code:?}");
+        let mods = view.remote_mods(mods);
+        if crate::screen_input::known_key(&name) {
+            view.key(&name, mods);
+        } else if let Some(t) = event.text.as_ref().filter(|t| !t.chars().any(char::is_control)) {
+            view.text(t);
+        }
+        true
+    }
+
+    /// 뗌 — ⌥ 만 눌렀다 떼면 Windows 키 한 번(시작 메뉴). 다른 키는 누를 때 눌렀다 떼서 보낼 것이 없다.
+    fn screen_key_up(&mut self, id: u64, event: &KeyEvent) {
+        let Some(view) = self.screen_views.get_mut(&id).filter(|v| v.control && v.raw_keys()) else { return };
+        if matches!(event.physical_key, PhysicalKey::Code(KeyCode::AltLeft | KeyCode::AltRight)) && view.option_alone {
+            view.key("MetaLeft", 0);
+        }
+        view.option_alone = false;
+    }
+
+    /// Caps Lock — 맥에서 Windows 를 조작 중이면 그 기기 한/영. winit 은 Caps Lock 을 키로 안 넘겨 AppKit 감시가 부른다.
+    pub(crate) fn screen_caps_lock(&mut self) {
+        let focused = self.screen_windows.iter().find(|w| w.focused).map(|w| w.view_id);
+        let Some(id) = focused.or_else(|| self.active_screen_view()) else { return };
+        if let Some(view) = self.screen_views.get(&id).filter(|v| v.control && v.raw_keys()) {
+            view.key("Lang1", 0);
+        }
     }
 
     /// 입력기 확정 글(일본어 등 OS 입력기를 거친 글)도 조작 중인 화면 탭으로.
@@ -307,5 +376,38 @@ impl App {
             }
             ws.active_pane = Some(pid);
         }
+    }
+}
+
+/// Caps Lock 을 AppKit 에서 지켜본다 — winit 은 Caps Lock 의 `flagsChanged` 를 키로 안 넘긴다. 이 앱 창에 온 것만 보고
+/// 사건은 그대로 흘린다(맥 입력 소스 바꾸기도 그대로 산다). 한 번만 건다.
+#[cfg(target_os = "macos")]
+pub(crate) fn watch_caps_lock(proxy: &winit::event_loop::EventLoopProxy<crate::UserEvent>) {
+    use objc2_app_kit::{NSEvent, NSEventMask};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ON: AtomicBool = AtomicBool::new(false);
+    if ON.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    const CAPS_LOCK: u16 = 57;
+    // 한 번 누름이 사건 둘(잠금 켬·끔)로 올 수 있다 — 입력 소스 바꾸기로 쓰면 누를 때 켰다가 바로 푼다. 둘 다 보내면
+    // 그 기기 한/영이 두 번 바뀌어 제자리다.
+    const SAME_PRESS: std::time::Duration = std::time::Duration::from_millis(300);
+    let proxy = proxy.clone();
+    let last = std::cell::Cell::new(None::<std::time::Instant>);
+    let block = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
+        // SAFETY: AppKit 이 감시 블록에 넘기는 사건은 블록이 도는 동안 살아 있다.
+        if unsafe { event.as_ref().keyCode() } == CAPS_LOCK {
+            let now = std::time::Instant::now();
+            if last.get().is_none_or(|at| now.duration_since(at) > SAME_PRESS) {
+                let _ = proxy.send_event(crate::UserEvent::ScreenCapsLock);
+            }
+            last.set(Some(now));
+        }
+        event.as_ptr()
+    });
+    // SAFETY: 블록은 받은 사건을 그대로 돌려준다. 감시는 앱이 끝날 때까지 두므로 돌려받은 표를 놓지 않는다.
+    if let Some(monitor) = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::FlagsChanged, &block) } {
+        std::mem::forget(monitor);
     }
 }

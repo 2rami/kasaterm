@@ -61,6 +61,8 @@ pub(crate) struct ScreenView {
     pub buttons: u8,
     /// 조합 중인 한글 — 그 기기에는 다 된 글자만 가니 칸 위에 보여 준다.
     pub preedit: String,
+    /// ⌥ 를 누른 뒤 다른 키가 없었다 — 그대로 떼면 Windows 키 한 번(시작 메뉴)이다.
+    pub option_alone: bool,
     frame: (u32, u32),
     /// GPU 에 넘긴 최근 장들 — 복사 없이 IOSurface 를 텍스처로 쓰므로 GPU 가 다 그릴 때까지 디코더가 같은 버퍼를 다시 못
     /// 쓰게 쥐고 있는다. 마지막 것은 텍스처를 못 만들 때 CPU 로 올리는 밑감이다.
@@ -169,6 +171,7 @@ impl ScreenView {
             key_menu: None,
             buttons: 0,
             preedit: String::new(),
+            option_alone: false,
             frame: (0, 0),
             held: VecDeque::new(),
             zero_copy: false,
@@ -304,12 +307,19 @@ impl ScreenView {
         self.shared.windows.load(Ordering::Relaxed)
     }
 
-    /// 이 기기 키보드로 못 보내는 키 — (메뉴 글, 키, 손가락). 손가락은 그 기기 것 그대로다(⌘→Ctrl 바꾸기를 안 거친다).
+    /// 맥에서 Windows 를 조작하나 — 그러면 글이 아니라 누른 키 자리를 보낸다(`input.rs screen_raw_key`). 한글은 그 기기
+    /// 입력기가 조합하고, 글자로 넣는 유니코드는 게임처럼 키보드를 직접 읽는 앱이 못 받는다.
+    pub(crate) fn raw_keys(&self) -> bool {
+        cfg!(target_os = "macos") && self.remote_windows()
+    }
+
+    /// 이 기기 키보드로 못 보내는 키 — (메뉴 글, 키, 손가락). 손가락은 그 기기 것 그대로다(`remote_mods` 를 안 거친다).
     pub(crate) fn special_keys(&self) -> &'static [(&'static str, &'static str, u8)] {
         if self.remote_windows() {
             &[
                 ("Ctrl+Alt+Del", "Delete", 2 | 4),
                 ("시작 메뉴 (Windows 키)", "MetaLeft", 0),
+                ("한/영", "Lang1", 0),
                 ("창 전환 (Alt+Tab)", "Tab", 4),
                 ("작업 관리자 (Ctrl+Shift+Esc)", "Escape", 2 | 1),
             ]
@@ -318,11 +328,11 @@ impl ScreenView {
         }
     }
 
-    /// 이 기기 손가락(1 shift·2 control·4 option·8 command)을 그 기기 것으로 — 맥에서 Windows 를 볼 때 ⌘ 는 Ctrl 이다.
-    /// 그대로 넘기면 ⌘C 가 Win+C(Copilot)로 들어갔다. 맥의 Ctrl 은 그대로 Ctrl 이다.
+    /// 이 기기 손가락(1 shift·2 control·4 option·8 command)을 그 기기 것으로 — 맥에서 Windows 를 볼 때는 키보드 자리대로
+    /// ⌘ 가 Alt, ⌥ 가 Windows 키다(2026-11-19 「커맨드가 알트, 옵션이 윈도우」). 맥의 Ctrl 은 그대로 Ctrl 이다.
     pub(crate) fn remote_mods(&self, mods: u8) -> u8 {
-        if cfg!(target_os = "macos") && self.remote_windows() && mods & 8 != 0 {
-            (mods & !8) | 2
+        if cfg!(target_os = "macos") && self.remote_windows() {
+            windows_mods(mods)
         } else {
             mods
         }
@@ -551,9 +561,23 @@ fn decode_loop(
     }
 }
 
+/// 맥 손가락 → Windows 손가락: ⌘(8) ↔ ⌥(4) 자리를 바꾼다 — Windows 에서 8 은 Windows 키, 4 는 Alt 다.
+fn windows_mods(mods: u8) -> u8 {
+    (mods & 3) | (mods & 8) >> 1 | (mods & 4) << 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mac_command_is_windows_alt_and_option_is_the_windows_key() {
+        assert_eq!(windows_mods(8), 4, "⌘ → Alt");
+        assert_eq!(windows_mods(4), 8, "⌥ → Windows 키");
+        assert_eq!(windows_mods(2 | 1), 2 | 1, "Ctrl·Shift 는 그대로");
+        assert_eq!(windows_mods(8 | 1), 4 | 1, "⌘⇧ → Alt+Shift");
+        assert_eq!(windows_mods(15), 15);
+    }
 
     #[test]
     fn a_refused_connection_keeps_the_refusal_reason() {
