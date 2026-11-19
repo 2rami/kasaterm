@@ -43,6 +43,8 @@ pub fn take_for_session(backend: &dyn Backend, surface: &str, via: &str) -> Resu
         store.next_for(surface)
     };
     let Some(record) = candidate else { return Ok(None) };
+    // 명령은 입력칸에 쳐야 돈다 — 쉬는 차례의 붙여넣기 길에 남긴다. 뒤의 쪽지도 순서를 지켜 그 뒤에 선다.
+    if tell::is_slash_command(&record.body) { return Ok(None); }
     let identity = backend.collab_tell_identity(surface)?;
     // 코덱스 훅은 claude 의 차례 막기·맥락 덧붙이기 꼴을 모른다 — 붙여넣기 길에 둔다.
     if Address::parse(&identity).ok().as_ref() != Some(&record.address)

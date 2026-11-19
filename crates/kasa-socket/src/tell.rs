@@ -118,6 +118,14 @@ pub fn leaked_cli_flag(body: &str) -> Option<&'static str> {
         .find(|flag| text.strip_prefix(flag).is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)))
 }
 
+/// 입력칸에 쳐야만 도는 하네스 명령(`/rename 이름`·`/compact`). 훅으로 세션에 넘기면 명령이 아니라 글로 읽혀
+/// 아무것도 안 바뀐다(2026-11-19 일하는 칸의 `/rename` 이 그렇게 사라졌다). `/Users/…` 같은 경로는 명령이 아니다.
+pub fn is_slash_command(body: &str) -> bool {
+    let Some(rest) = body.trim_start().strip_prefix('/') else { return false };
+    let name_len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))).unwrap_or(rest.len());
+    name_len > 0 && rest[name_len..].chars().next().is_none_or(char::is_whitespace)
+}
+
 /// 꼬리표에 싣는 이름 — 표식 글자·줄바꿈을 걷고 20자까지. 비면 None.
 fn tag_label(raw: &str) -> Option<String> {
     let clean: String = raw.chars().filter(|c| !matches!(c, '⟦' | '⟧' | '@' | '\n' | '\r')).collect();
@@ -526,6 +534,16 @@ mod tests {
         assert_eq!(super::mark_sender_machine("사람이 친 말", "맥미니"), "사람이 친 말");
         assert_eq!(super::split_sender("유즈@맥미니"), ("유즈", Some("맥미니")));
         assert_eq!(super::split_sender("유즈"), ("유즈", None));
+    }
+
+    #[test]
+    fn harness_commands_are_told_apart_from_paths_and_prose() {
+        assert!(super::is_slash_command("/rename PC 쪽지·기기 업데이트"));
+        assert!(super::is_slash_command("/compact"));
+        assert!(super::is_slash_command("  /plugin:skill 인자"));
+        assert!(!super::is_slash_command("/Users/kasa/a.png 봐 줘"), "경로는 글이다");
+        assert!(!super::is_slash_command("/"));
+        assert!(!super::is_slash_command("이름을 /rename 으로 바꿔"));
     }
 
     use super::*;

@@ -211,6 +211,12 @@ box`. One message per hook call keeps the order; the next waits for the next bou
 A tell `title` still renames the pane; Claude's own session name follows only on the paste
 path (it is set by the turn-start hook).
 
+A harness command (`/rename <title>`, `/compact`: a body that starts with `/name` followed by
+a space or the end, `tell::is_slash_command`) is never taken. Handed to the session, it is
+read as prose and runs nothing. It stays `accepted` for the idle paste, and messages behind
+it wait their turn after it, so `rename-window` on a working Claude pane renames it once
+the turn ends. A path such as `/Users/…` is prose and is taken as usual.
+
 An idle receiver with a draft and no turn running has no hook to run. That message waits
 as `waiting:draft` as before and is taken by the next turn's first tool or its end.
 
