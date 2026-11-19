@@ -66,6 +66,8 @@ pub struct Counts {
     pub devices_shown: usize,
     /// 브라우저가 꺼져 있어 북마크·탭을 건너뛰었다.
     pub browser_away: bool,
+    /// 관문에만 있던 계정이라 브라우저에 빈 계정 폴더를 만들게 한 수. 다음 바퀴의 처음 합류가 채운다.
+    pub accounts_made: usize,
 }
 
 pub struct Engine<'a> {
@@ -259,6 +261,10 @@ impl Engine<'_> {
             return Err(SyncError::Undecryptable);
         }
 
+        if self.sync_bookmarks && !away {
+            counts.accounts_made = self.make_accounts(&read, &marks);
+        }
+
         let mut outgoing = Vec::new();
         let empty = BTreeMap::new();
         let mut complete = !(away && self.sync_bookmarks);
@@ -297,6 +303,20 @@ impl Engine<'_> {
         self.upload(state, outgoing, &key_id, &mut counts)?;
         self.sweep(state, &key_id);
         Ok(counts)
+    }
+
+    /// 다른 기기가 맞추는 계정 모음(이름이 이메일인 것)이 이 기기 브라우저에 없으면 빈 계정 폴더를 만들게 한다 —
+    /// 새 기기에서 사람이 계정 폴더를 만들 일이 없게. 옛 브라우저의 오류는 그대로 넘긴다(만든 것이 없다).
+    fn make_accounts<V>(&self, read: &Read, remote: &BTreeMap<String, V>) -> usize {
+        let missing: Vec<String> = remote
+            .keys()
+            .filter(|key| key.contains('@') && !read.collections.iter().any(|c| c.key.eq_ignore_ascii_case(key)))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return 0;
+        }
+        self.browser.put_accounts(&missing).map(|made| made.len()).unwrap_or(0)
     }
 
     /// 모음 하나를 맞춘다. 브라우저에 고치기를 한 뒤에만 상태를 고친다 — `Stale` 이면 아무것도 안 바뀐다.

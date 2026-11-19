@@ -101,7 +101,7 @@ fn log_counts(counts: &Counts) {
         return;
     }
     eprintln!(
-        "[browser-sync] 올림 {} · 브라우저 고침 {} · 지우기 대기 {} · 미룸 {} · 실패 {} · 안 풀림 {} · 탭 보냄 {} · 기기 {}",
+        "[browser-sync] 올림 {} · 브라우저 고침 {} · 지우기 대기 {} · 미룸 {} · 실패 {} · 안 풀림 {} · 탭 보냄 {} · 기기 {} · 계정 폴더 {}",
         counts.uploaded,
         counts.applied,
         counts.deletions_held,
@@ -109,7 +109,8 @@ fn log_counts(counts: &Counts) {
         counts.failed,
         counts.undecryptable,
         u8::from(counts.tabs_sent),
-        counts.devices_shown
+        counts.devices_shown,
+        counts.accounts_made
     );
 }
 
@@ -186,7 +187,8 @@ fn round() -> Duration {
                 "too_large": counts.too_large,
                 "at_ms": now_ms(),
             }));
-            INTERVAL
+            // 브라우저가 방금 만든 계정 폴더는 다음 바퀴가 처음 합류로 채운다 — 15초를 기다리지 않는다.
+            if counts.accounts_made > 0 { Duration::from_secs(1) } else { INTERVAL }
         }
         Err(error) => {
             let (phase, message) = match error {

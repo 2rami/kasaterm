@@ -54,6 +54,9 @@ struct FakeBrowser {
     away: Cell<bool>,
     /// 다음 apply 앞에 사람이 고친 척.
     edit_before_apply: RefCell<Option<Box<dyn Fn(&mut Vec<Mark>)>>>,
+    /// 이 브라우저의 모음 이름, 비면 `KEY`.
+    key: RefCell<String>,
+    accounts_asked: RefCell<Vec<Vec<String>>>,
 }
 
 fn locate<'a>(marks: &'a mut Vec<Mark>, id: &str) -> Option<(&'a mut Vec<Mark>, usize)> {
@@ -132,6 +135,11 @@ impl FakeBrowser {
         format!("e.{}", self.rev.get())
     }
 
+    fn key(&self) -> String {
+        let key = self.key.borrow();
+        if key.is_empty() { KEY.into() } else { key.clone() }
+    }
+
     /// 사람이 고친다 — 저장 횟수가 오른다.
     fn edit(&self, change: impl FnOnce(&mut Vec<Mark>)) {
         change(&mut self.marks.borrow_mut());
@@ -149,13 +157,13 @@ impl Browser for FakeBrowser {
         }
         let tabs = self.tabs.borrow().clone();
         Ok(Read {
-            collections: vec![Collection { key: KEY.into(), rev: self.rev(), marks: self.marks.borrow().clone() }],
+            collections: vec![Collection { key: self.key(), rev: self.rev(), marks: self.marks.borrow().clone() }],
             tabs_rev: format!("{:?}", tabs).len().to_string() + &tabs.iter().map(|w| w.tabs.len()).sum::<usize>().to_string(),
             tabs,
         })
     }
     fn apply(&self, collection: &str, base_rev: &str, ops: &[Op]) -> Result<String, BrowserError> {
-        assert_eq!(collection, KEY);
+        assert_eq!(collection, self.key());
         if let Some(edit) = self.edit_before_apply.borrow_mut().take() {
             self.edit(|m| edit(m));
         }
@@ -169,6 +177,10 @@ impl Browser for FakeBrowser {
         *self.marks.borrow_mut() = next;
         self.rev.set(self.rev.get() + 1);
         Ok(self.rev())
+    }
+    fn put_accounts(&self, accounts: &[String]) -> Result<Vec<String>, BrowserError> {
+        self.accounts_asked.borrow_mut().push(accounts.to_vec());
+        Ok(accounts.to_vec())
     }
     fn put_tabs(&self, devices: &[Device]) -> Result<(), BrowserError> {
         *self.shown.borrow_mut() = devices.to_vec();
@@ -608,4 +620,25 @@ fn a_bookmark_too_large_to_seal_is_counted_and_the_rest_go() {
     assert_eq!(a.round(&relay).too_large, 1, "바퀴마다 다시 세어 화면에 남는다");
     b.round(&relay);
     assert_eq!(titles(&b.marks()), vec!["하나"]);
+}
+
+/// 다른 기기가 맞추는 계정이 이 기기 브라우저에 없으면 빈 계정 폴더를 만들게 한다. 이메일이 아닌 모음 이름이나
+/// 이미 있는 계정은 묻지 않는다.
+#[test]
+fn an_account_only_the_relay_has_gets_a_folder_in_this_browser() {
+    let (mut a, mut b, relay) = pair();
+    *a.browser.key.borrow_mut() = "other-account@example.test".into();
+    a.browser.edit(|m| m.push(mark("x", "다른 계정의 북마크")));
+    a.round(&relay);
+    let counts = b.round(&relay);
+    assert_eq!(*b.browser.accounts_asked.borrow(), vec![vec!["other-account@example.test".to_string()]]);
+    assert_eq!(counts.accounts_made, 1);
+    assert!(a.browser.accounts_asked.borrow().is_empty(), "its own account is already there");
+
+    let (mut c, mut d, relay) = pair();
+    *c.browser.key.borrow_mut() = "default".into();
+    c.browser.edit(|m| m.push(mark("y", "계정 없는 프로필")));
+    c.round(&relay);
+    d.round(&relay);
+    assert!(d.browser.accounts_asked.borrow().is_empty(), "not an account name");
 }

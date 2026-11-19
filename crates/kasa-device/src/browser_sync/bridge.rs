@@ -87,6 +87,11 @@ impl Browser for Bridge {
     fn put_tabs(&self, devices: &[Device]) -> Result<(), BrowserError> {
         self.call("sync.tabs.put", json!({"devices": devices})).map(|_| ())
     }
+
+    fn put_accounts(&self, accounts: &[String]) -> Result<Vec<String>, BrowserError> {
+        let result = self.call("sync.accounts.put", json!({"accounts": accounts}))?;
+        Ok(result["made"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect())
+    }
 }
 
 fn read_line(reader: &mut impl BufRead) -> Result<Vec<u8>, BrowserError> {

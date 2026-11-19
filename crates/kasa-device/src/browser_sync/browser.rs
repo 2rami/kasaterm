@@ -1,4 +1,4 @@
-//! 카사브라우저 쪽 창구(`sync.status`·`sync.read`·`sync.apply`·`sync.tabs.put`)의 꼴. 브라우저 레포의
+//! 카사브라우저 쪽 창구(`sync.status`·`sync.read`·`sync.apply`·`sync.tabs.put`·`sync.accounts.put`)의 꼴. 브라우저 레포의
 //! `internal/browsersync` 가 같은 JSON 을 쓴다. 시험은 [`Browser`] 를 흉내 내고, 앱은 [`super::bridge`] 로 붙는다.
 
 use std::collections::BTreeMap;
@@ -127,4 +127,7 @@ pub trait Browser {
     /// 새 rev 를 준다.
     fn apply(&self, collection: &str, base_rev: &str, ops: &[Op]) -> Result<String, BrowserError>;
     fn put_tabs(&self, devices: &[Device]) -> Result<(), BrowserError>;
+    /// 관문에는 모음이 있는데 이 기기 브라우저에는 없는 계정마다 빈 계정 폴더를 만들게 한다. 만든 계정을 준다.
+    /// 옛 브라우저는 모르는 명령이라 `Failed` 다.
+    fn put_accounts(&self, accounts: &[String]) -> Result<Vec<String>, BrowserError>;
 }
