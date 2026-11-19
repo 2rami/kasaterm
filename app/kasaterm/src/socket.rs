@@ -5012,9 +5012,8 @@ pub(crate) fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::
     }
     let mut raw = String::from_utf8_lossy(slice).into_owned();
     // tail 윈도 밖으로 밀린 미처리 예약(queue-operation)도 채팅에 살린다 — 작업 turn 이
-    // 512KB 넘게 쌓이면 오래된 enqueue 가 윈도 밖이라 큐 버블이 안 뜨던 것(사용자). 큐 op
-    // 라인은 작아(텍스트) 전부 prepend 해도 가볍고, 프론트가 enqueue/dequeue/remove 를
-    // FIFO 매칭해 미처리만 큐 버블로 그린다(처리된 예약은 droppedQ 로 제거).
+    // 512KB 넘게 쌓이면 오래된 enqueue 가 윈도 밖이라 큐 버블이 안 뜨던 것(사용자). 윈도
+    // 시작 때 아직 처리 안 된 enqueue 만 붙인다(`scan_queue_ops_before`).
     if reset && start > 0 {
         let head = scan_queue_ops_before(path, start);
         if !head.is_empty() {
@@ -5034,16 +5033,16 @@ pub(crate) fn transcript_source(path: &std::path::Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// `[0, start)` 구간에서 queue-operation(예약 enqueue/dequeue/remove/popAll) 줄만 모은다.
-/// reset(tail) 로드 때 윈도 밖으로 밀린 미처리 예약 큐 버블을 복원하려는 것. enqueue 만이
-/// 아니라 처리 op 까지 다 모아야 프론트 FIFO 매칭에서 이미 처리된 예약이 영구 잔존하지 않는다.
+/// `[0, start)` 구간의 예약 중 윈도가 시작하는 순간 아직 처리 안 된 것(enqueue 줄)만 — 프론트와 같은 FIFO(dequeue·remove 는
+/// 맨 앞, popAll 은 전부)로 맞춰 본다. 윈도 밖에서 이미 처리된 예약까지 다 붙이면 프론트가 remove(작업 중 흡수)된 것을
+/// 말풍선으로 남겨, 긴 기록에선 며칠 치 쪽지가 꼬리 앞에 쌓였다(2026-11-19 폰 대화 「뒤죽박죽」 — 1.1GB 기록, 큐 줄 2천여 개).
 fn scan_queue_ops_before(path: &std::path::Path, start: u64) -> String {
     use std::io::{BufRead, BufReader};
     let Ok(f) = std::fs::File::open(path) else {
         return String::new();
     };
     let mut reader = BufReader::new(f);
-    let mut out = String::new();
+    let mut pending: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut pos: u64 = 0;
     let mut line = String::new();
     loop {
@@ -5055,16 +5054,55 @@ fn scan_queue_ops_before(path: &std::path::Path, start: u64) -> String {
                 if pos > start {
                     break; // tail 윈도 진입 — 이후 줄은 tail 이 담당
                 }
-                if line.contains("\"type\":\"queue-operation\"") {
-                    out.push_str(line.trim_end_matches('\n'));
-                    out.push('\n');
+                if !line.contains("\"type\":\"queue-operation\"") {
+                    continue;
+                }
+                let op = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("operation").and_then(|o| o.as_str()).map(str::to_string));
+                match op.as_deref() {
+                    Some("enqueue") => pending.push_back(line.trim_end_matches('\n').to_string()),
+                    Some("dequeue" | "remove") => {
+                        pending.pop_front();
+                    }
+                    Some("popAll") => pending.clear(),
+                    _ => {}
                 }
             }
             Err(_) => break,
         }
     }
-    out.truncate(out.trim_end().len());
-    out
+    Vec::from(pending).join("\n")
+}
+
+#[cfg(test)]
+mod queue_prefix_tests {
+    use super::scan_queue_ops_before;
+
+    #[test]
+    fn only_requests_still_queued_at_the_window_start_are_carried() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-queue-prefix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let op = |o: &str, c: &str| format!("{{\"type\":\"queue-operation\",\"operation\":\"{o}\",\"content\":\"{c}\"}}\n");
+        let body = [
+            op("enqueue", "absorbed long ago"),
+            op("remove", ""),
+            "{\"type\":\"assistant\"}\n".to_string(),
+            op("enqueue", "became a turn"),
+            op("dequeue", ""),
+            op("enqueue", "dropped"),
+            op("enqueue", "dropped too"),
+            op("popAll", ""),
+            op("enqueue", "still waiting"),
+        ]
+        .concat();
+        std::fs::write(&path, &body).unwrap();
+        let head = scan_queue_ops_before(&path, body.len() as u64);
+        assert_eq!(head.lines().count(), 1, "{head}");
+        assert!(head.contains("still waiting"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Foreground process name under a pane's shell pid — the youngest direct child
