@@ -4142,8 +4142,6 @@ impl App {
         }
     }
 
-    /// 키 하나를 눌렀다 뗀다. 물리 키(맥 가상 키 번호)가 있어야 `KeyCode` 로 보는 단축키(⌘C 등)가 듣는다.
-    #[cfg(target_os = "macos")]
     /// 수정키 하나만 누르거나 뗀다(`flags:<키 코드>:<1|0>`, ⌥ 58 · Caps Lock 57). 앱 사건 줄에 넣어 AppKit 감시(Caps Lock)와
     /// winit 의 `flagsChanged`(⌥ 혼자 누르기)가 사람 손과 같은 길로 받는다.
     #[cfg(target_os = "macos")]
@@ -4183,6 +4181,8 @@ impl App {
         }
     }
 
+    /// 키 하나를 눌렀다 뗀다. 물리 키(맥 가상 키 번호)가 있어야 `KeyCode` 로 보는 단축키(⌘C 등)가 듣는다.
+    #[cfg(target_os = "macos")]
     pub(crate) fn native_key(&self, flags: u64, ch: char) {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};
