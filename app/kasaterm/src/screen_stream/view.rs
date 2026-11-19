@@ -124,14 +124,7 @@ impl ScreenView {
                 Event::Frame { frame, offset, .. } => {
                     let _ = tx.lock().unwrap_or_else(|e| e.into_inner()).send(Incoming { frame, offset });
                 }
-                Event::Denied(reason) => {
-                    let text = if reason == "permission" {
-                        "그 기기 카사텀에 화면 기록 권한이 없어요 — 그 기기에서 켜고 카사텀을 다시 열어 주세요"
-                    } else {
-                        "그 기기가 화면을 보낼 수 없어요"
-                    };
-                    set_status(&shared, &wake, text);
-                }
+                Event::Denied(reason) => set_status(&shared, &wake, denied_text(&reason)),
                 Event::Closed(why) => set_status(&shared, &wake, &closed_text(&why)),
                 Event::Input { ok, reason } => {
                     let note = (!ok).then(|| {
@@ -443,8 +436,21 @@ impl Drop for ScreenView {
 }
 
 /// 카사넷 연결 실패 말(`kasanet::connect`)을 칸에 띄울 말로.
+/// 그쪽이 거절한 까닭(`permission`·`unavailable`).
+fn denied_text(reason: &str) -> &'static str {
+    if reason == "permission" {
+        "그 기기 카사텀에 화면 기록 권한이 없어요 — 그 기기의 시스템 설정 「화면 및 시스템 오디오 녹음」에서 카사텀을 켜 주세요"
+    } else {
+        "그 기기가 화면을 보낼 수 없어요"
+    }
+}
+
+/// 거절로 끝난 연결은 닫힘 글이 거절 까닭을 덮지 않는다 — 「끊겼어요 — 거절: permission」만 남아 무엇을 할지 몰랐다
+/// (2026-11-19 맥미니). 칸은 3초마다 다시 붙으니 권한을 켜면 저절로 보인다.
 fn closed_text(why: &str) -> String {
-    if why.contains("직통도 믿는 중계도 아니다") || why.contains("이은 길이 없다") {
+    if let Some(reason) = why.strip_prefix("거절: ") {
+        denied_text(reason).into()
+    } else if why.contains("직통도 믿는 중계도 아니다") || why.contains("이은 길이 없다") {
         "카사넷 직통을 기다리는 중 — 길이 서면 바로 붙어요".into()
     } else if why.contains("주소를 아직 모른다") {
         "그 기기를 찾는 중".into()
@@ -542,5 +548,17 @@ fn decode_loop(
             drop(s);
             wake();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_connection_keeps_the_refusal_reason() {
+        assert!(closed_text("거절: permission").contains("화면 및 시스템 오디오 녹음"));
+        assert_eq!(closed_text("거절: unavailable"), "그 기기가 화면을 보낼 수 없어요");
+        assert!(closed_text("연결이 닫혔다").starts_with("끊겼어요"));
     }
 }
