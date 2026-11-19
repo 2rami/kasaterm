@@ -675,6 +675,10 @@ impl App {
             return (80, 24);
         };
         let size = window.inner_size();
+        let minimized = window.is_minimized() == Some(true);
+        if let Some(kept) = kept_cells((size.width, size.height), minimized, self.window_cells_seen.get()) {
+            return kept;
+        }
         let scale = self.effective_scale();
         let raw_lw = size.width as f32 / scale;
         let raw_lh = size.height as f32 / scale;
@@ -699,6 +703,7 @@ impl App {
                 self.cell.w, self.cell.h
             );
         }
+        self.window_cells_seen.set((cols, rows));
         (cols, rows)
     }
     /// Push the current PtyLayout into `ws.layout` so the renderer
@@ -4505,5 +4510,26 @@ mod rect_layout_tests {
             ("%4", [0.0, 0.4, 0.4, 0.6]),
         ])).is_none());
         assert!(layout_from_rects(&[]).is_none());
+    }
+}
+
+/// 최소화된 창에서 잰 칸 대신 쓸 값. 윈도는 최소화하면 창 크기를 0×0 으로 알리는데, 그 값으로 재면 모든 칸이
+/// 최소 폭(`GRID_MIN_COLS` 를 칸 수로 나눈 것)으로 접혀 claude 화면이 한 줄 서너 글자가 된다 — 다른 기기 거울에도
+/// 그대로 비친다. 마지막으로 잰 칸을 두고, 한 번도 못 쟀으면 기본 80×24.
+fn kept_cells(size: (u32, u32), minimized: bool, seen: (u16, u16)) -> Option<(u16, u16)> {
+    (minimized || size.0 == 0 || size.1 == 0).then_some(if seen == (0, 0) { (80, 24) } else { seen })
+}
+
+#[cfg(test)]
+mod minimized_window_tests {
+    use super::kept_cells;
+
+    #[test]
+    fn a_minimized_window_keeps_the_last_measured_cells() {
+        assert_eq!(kept_cells((0, 0), true, (212, 58)), Some((212, 58)), "윈도 최소화 = 0×0");
+        assert_eq!(kept_cells((0, 0), false, (212, 58)), Some((212, 58)), "최소화 표시 없이 0 만 와도");
+        assert_eq!(kept_cells((2880, 1800), true, (212, 58)), Some((212, 58)), "맥 독으로 내린 창");
+        assert_eq!(kept_cells((0, 0), true, (0, 0)), Some((80, 24)), "한 번도 못 쟀으면 기본");
+        assert_eq!(kept_cells((2880, 1800), false, (212, 58)), None, "보이는 창은 지금 크기로 잰다");
     }
 }

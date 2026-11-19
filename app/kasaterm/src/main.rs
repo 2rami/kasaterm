@@ -5642,6 +5642,8 @@ struct App {
     /// we re-shape every pane PTY (alacritty Term::resize + SIGWINCH) and
     /// re-publish layout on every wiggle of the pointer.
     last_resized_cells: (u16, u16),
+    /// `window_cells` 가 보이는 창에서 마지막으로 잰 칸 — 최소화된 동안 이 값을 쓴다(`layout::kept_cells`).
+    window_cells_seen: std::cell::Cell<(u16, u16)>,
     /// During a macOS live-resize we deliberately do NOT call surface.configure
     /// or render — the CAMetalLayer keeps its old IOSurface and gravity=topLeft
     /// anchors it to the top-left while AppKit stretches the layer bounds
@@ -6421,6 +6423,7 @@ impl App {
             sidebar_w_logical: ui.sidebar_w.unwrap_or(SIDEBAR_W),
             sidebar_resize: None,
             last_resized_cells: (0, 0),
+            window_cells_seen: std::cell::Cell::new((0, 0)),
             pending_resize: None,
             mouse_forward_pane: None,
             hover_probe: None,
