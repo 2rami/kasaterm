@@ -184,10 +184,10 @@ pub(crate) enum StatusbarHit {
     PickClip(u64),
     CopyClip(u64),
     RemoveClip(u64),
-    /// 쪽지 줄 — 읽음으로 두고 그 칸으로 간다.
-    OpenNote(u64, String),
+    /// 쪽지 줄 — 읽음으로 두고 그 칸으로 간다. 앞 칸은 그 쪽지가 사는 기기(명부 이름, 이 기기면 None).
+    OpenNote(Option<String>, u64, String),
     /// 쪽지 줄에 올리면 서는 ×.
-    DeleteNote(u64),
+    DeleteNote(Option<String>, u64),
     ReadAllNotes,
     /// 주소 줄 클릭 — 완성 주소(토큰 포함)를 기본 브라우저로 연다. 복사와 열기
     /// 둘 다 있다(2026-08-17 「누르면 바로 열리게, 복사버튼도 괜찮은데 둘다」).

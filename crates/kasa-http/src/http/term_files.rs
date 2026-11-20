@@ -194,9 +194,14 @@ async fn term_path_get(
 /// 안 쓰는 이유도 같다(jsonl 마지막 조각 유실). 인자에서 권한 모드도 읽어 준다:
 /// 로컬은 원격 프로세스의 argv 를 볼 손이 없어서, 여기서 읽어 실어 보내야
 /// 「옮겨오니 오토모드로 바뀌었다」(2026-08-27 지적의 역방향)가 안 생긴다.
-/// 학생 쪽지 목록 — 최근 것부터. 폰 허브의 종 아이콘이 5초마다 읽는다.
-async fn term_notes_get() -> impl IntoResponse {
-    Json(serde_json::json!(kasa_students::notes::list()))
+/// 학생 쪽지 목록 — 최근 것부터. 폰 허브의 종 아이콘과 다른 기기의 하단바 「학생 쪽지」가 읽는다. 기기는 5초마다
+/// 붙은 기기 전부에 묻으니 `?unread=1` 로 안 읽은 것만 받는다(읽은 것까지 200건을 매번 나르지 않게).
+async fn term_notes_get(q: Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    let mut notes = kasa_students::notes::list();
+    if q.get("unread").is_some_and(|v| v == "1") {
+        notes.retain(|n| !n.read);
+    }
+    Json(serde_json::json!(notes))
 }
 
 /// 폰이 애플에서 받은 기기 토큰을 맡긴다 — `{token, env: prod|dev}`. 주소의 slug 로

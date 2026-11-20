@@ -1286,6 +1286,20 @@ impl App {
         true
     }
 
+    /// 다른 기기 학생의 쪽지를 눌렀다 — 사이드바에서 그 칸을 누른 것과 같은 길로 그 방을 연다. 그 칸이 이제
+    /// 없으면(닫혔거나 명부가 아직 모름) 거짓.
+    pub(crate) fn open_remote_note_pane(&mut self, label: &str, remote_id: &str) -> bool {
+        let Some((window, room)) = self.info.machines_col.machines.iter().find(|m| m.label == label)
+            .and_then(|m| m.remote.iter().chain(m.mirrored.iter()).find(|r| !r.closed && r.remote_id == remote_id))
+            .map(|r| (r.window, r.room.clone())) else { return false };
+        match self.open_remote_room(label, window, &room, Some(remote_id)) {
+            Ok(_) => self.visit_remote_room(label, window, &room),
+            Err(e) => self.set_toast(format!("방 열기 실패 — {e:#}")),
+        }
+        self.info.machines_col.last_refresh = None;
+        true
+    }
+
     /// 다른 기기 방을 보러 왔다 — 본기기 방으로 옮겨 올 때처럼 그 방 칸들의 깜빡임을 멈춘다.
     fn visit_remote_room(&mut self, label: &str, window: Option<u64>, room: &str) {
         let ids: Vec<String> = self.remote_room_panes(label, window, room).into_iter().map(|r| r.remote_id.clone()).collect();

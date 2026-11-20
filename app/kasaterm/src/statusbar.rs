@@ -1589,24 +1589,51 @@ impl crate::App {
                 self.chrome_dirty = true;
                 return true;
             }
-            Some(state::StatusbarHit::OpenNote(id, pane)) => {
-                kasa_students::notes::mark_read(&[id], false);
-                notes::forget();
+            Some(state::StatusbarHit::OpenNote(machine, id, pane)) => {
                 self.statusbar.popover = None;
-                if !self.focus_surface(&pane) {
+                let found = match machine {
+                    None => {
+                        kasa_students::notes::mark_read(&[id], false);
+                        notes::forget();
+                        self.focus_surface(&pane)
+                    }
+                    Some(label) => {
+                        notes::tell_origin(self.proxy.clone(), label.clone(), notes::Change::Read, vec![id]);
+                        self.open_remote_note_pane(&label, &pane)
+                    }
+                };
+                if !found {
                     self.set_toast("그 칸은 이제 없어요".to_string());
                 }
                 self.chrome_dirty = true;
                 return true;
             }
-            Some(state::StatusbarHit::DeleteNote(id)) => {
-                kasa_students::notes::remove(&[id], false);
-                notes::forget();
+            Some(state::StatusbarHit::DeleteNote(machine, id)) => {
+                match machine {
+                    None => {
+                        kasa_students::notes::remove(&[id], false);
+                        notes::forget();
+                    }
+                    Some(label) => notes::tell_origin(self.proxy.clone(), label, notes::Change::Delete, vec![id]),
+                }
                 self.chrome_dirty = true;
                 return true;
             }
             Some(state::StatusbarHit::ReadAllNotes) => {
-                kasa_students::notes::mark_read(&[], true);
+                // 보이던 것만 — 그사이 다른 기기에 새로 온 쪽지까지 읽음으로 덮지 않는다.
+                let mut remote: Vec<(String, Vec<u64>)> = Vec::new();
+                for entry in notes::unread() {
+                    match entry.machine {
+                        None => { kasa_students::notes::mark_read(&[entry.note.id], false); }
+                        Some(label) => match remote.iter_mut().find(|(l, _)| *l == label) {
+                            Some((_, ids)) => ids.push(entry.note.id),
+                            None => remote.push((label, vec![entry.note.id])),
+                        },
+                    }
+                }
+                for (label, ids) in remote {
+                    notes::tell_origin(self.proxy.clone(), label, notes::Change::Read, ids);
+                }
                 notes::forget();
                 self.chrome_dirty = true;
                 return true;

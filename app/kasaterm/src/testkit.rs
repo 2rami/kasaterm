@@ -3731,8 +3731,24 @@ impl App {
         static START: OnceLock<Instant> = OnceLock::new();
         static STEP: AtomicUsize = AtomicUsize::new(0);
         static SEED: Mutex<Option<(String, [u64; 3])>> = Mutex::new(None);
+        // `KASATERM_NOTES_PROBE_REMOTE=<명부 이름>` 이면 그 기기 쪽지(11·12·13)를 ×·줄·「모두 읽음」으로 그 기기에 적는 걸음이 낀다.
+        let remote = std::env::var("KASATERM_NOTES_PROBE_REMOTE").ok().filter(|l| !l.is_empty());
+        let last = if remote.is_some() { 8 } else { 5 };
         let step = STEP.load(Ordering::Relaxed);
-        if step > 5 || START.get_or_init(Instant::now).elapsed().as_millis() < 3000 + step as u128 * 1400 { return; }
+        if step > last || START.get_or_init(Instant::now).elapsed().as_millis() < 3000 + step as u128 * 1400 { return; }
+        let remote_ids = |label: &str| -> Vec<u64> {
+            crate::statusbar::notes::unread().into_iter().filter(|e| e.machine.as_deref() == Some(label)).map(|e| e.note.id).collect()
+        };
+        if let (0, Some(label)) = (step, remote.as_deref()) {
+            if remote_ids(label).len() < 3 {
+                if START.get_or_init(Instant::now).elapsed().as_secs() > 30 {
+                    eprintln!("[notes-probe] FAILED remote_notes_never_arrived");
+                    STEP.store(last + 1, Ordering::Relaxed);
+                }
+                crate::statusbar::notes::forget();
+                return;
+            }
+        }
         let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return; };
         let active = |app: &Self| {
             let ws = app.ws.lock().unwrap();
@@ -3762,28 +3778,42 @@ impl App {
             1 => {
                 let rows = self.statusbar.popover_hits.iter().filter(|(hit, _)| matches!(hit, state::StatusbarHit::OpenNote(..))).count();
                 eprintln!("[notes-probe] open={} rows={rows}", matches!(self.statusbar.popover, Some((state::StatusbarPopover::Notes, _))));
-                find(&|hit| *hit == state::StatusbarHit::DeleteNote(ids[1]))
+                find(&|hit| *hit == state::StatusbarHit::DeleteNote(None, ids[1]))
             }
             2 => {
                 let gone = kasa_students::notes::list().iter().all(|n| n.id != ids[1]);
                 eprintln!("[notes-probe] deleted={gone} count={}", crate::statusbar::notes::count());
-                find(&|hit| matches!(hit, state::StatusbarHit::OpenNote(id, _) if *id == ids[0]))
+                find(&|hit| matches!(hit, state::StatusbarHit::OpenNote(None, id, _) if *id == ids[0]))
             }
             3 => {
                 let read = kasa_students::notes::list().iter().any(|n| n.id == ids[0] && n.read);
                 eprintln!("[notes-probe] focused_first={} read={read} closed={}", active(self).as_deref() == Some(first.as_str()), self.statusbar.popover.is_none());
                 self.statusbar.notes_rect
             }
-            4 => find(&|hit| *hit == state::StatusbarHit::ReadAllNotes),
+            4 if remote.is_some() => {
+                let label = remote.clone().unwrap_or_default();
+                eprintln!("[notes-probe] remote_rows={:?}", remote_ids(&label));
+                find(&|hit| *hit == state::StatusbarHit::DeleteNote(Some(label.clone()), 11))
+            }
+            5 if remote.is_some() => {
+                let label = remote.clone().unwrap_or_default();
+                find(&|hit| matches!(hit, state::StatusbarHit::OpenNote(Some(l), 12, _) if *l == label))
+            }
+            6 if remote.is_some() => {
+                let label = remote.clone().unwrap_or_default();
+                eprintln!("[notes-probe] remote_left={:?} closed={}", remote_ids(&label), self.statusbar.popover.is_none());
+                self.statusbar.notes_rect
+            }
+            n if n == last - 1 => find(&|hit| *hit == state::StatusbarHit::ReadAllNotes),
             _ => {
                 eprintln!("[notes-probe] read_all={} still_open={} completed=true", crate::statusbar::notes::count() == 0, self.statusbar.popover.is_some());
-                STEP.store(6, Ordering::Relaxed);
+                STEP.store(last + 1, Ordering::Relaxed);
                 return;
             }
         };
         let Some(r) = rect else {
             eprintln!("[notes-probe] FAILED missing_rendered_target step={step}");
-            STEP.store(6, Ordering::Relaxed);
+            STEP.store(last + 1, Ordering::Relaxed);
             return;
         };
         STEP.store(step + 1, Ordering::Relaxed);
