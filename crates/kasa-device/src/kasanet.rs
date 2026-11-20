@@ -187,6 +187,11 @@ pub async fn start(mcp_port: u16) {
     if NODE.set(node).is_err() {
         return;
     }
+    if let Some(n) = NODE.get() {
+        for (base, node) in load_screen_nodes() {
+            learn_screen_node(n, &base, Some(&node));
+        }
+    }
     tokio::spawn(sweep_phones());
     if let Some(n) = NODE.get().filter(|_| !loopback_rig) {
         tokio::spawn(kasa_net::portmap::keep_swept(n.endpoint.clone(), |s| {
@@ -363,6 +368,7 @@ pub fn learn(base: &str, kasanet: &Value) {
 /// 믿는 근거는 앱 id 와 같다: 루프백 base 로 물은 `/version` 이 알려 준 id 다.
 fn learn_screen_node(n: &Node, base: &str, node: Option<&Value>) {
     let addr = node.and_then(peer::addr_from_json).filter(|a| a.id != n.endpoint.id());
+    remember_screen_node(base, addr.as_ref().and(node));
     let Ok(mut screens) = n.screens.lock() else { return };
     match addr {
         Some(addr) => match screens.get(&key(base)) {
@@ -378,6 +384,46 @@ fn learn_screen_node(n: &Node, base: &str, node: Option<&Value>) {
         None => {
             screens.remove(&key(base));
         }
+    }
+}
+
+/// 배운 화면 서비스 노드를 키 옆에 남긴다 — 그 기기 앱이 꺼져 `/version` 이 안 와도(앱을 안 띄운 맥미니·앱 재시작 중) 다음 실행이
+/// 그 노드로 붙는다(`docs/screen-service-split.md` 「앱이 없을 때」). 공개키·주소라 비밀이 아니다.
+fn screen_nodes_path() -> Option<std::path::PathBuf> {
+    if cfg!(any(test, feature = "test-isolation")) || (std::env::var_os(identity::KEY_PATH_ENV).is_none() && isolated()) {
+        return None;
+    }
+    Some(identity::default_key_path()?.with_file_name("kasanet-screens.json"))
+}
+
+static SCREEN_NODES: Mutex<Option<serde_json::Map<String, Value>>> = Mutex::new(None);
+
+fn load_screen_nodes() -> Vec<(String, Value)> {
+    let map = screen_nodes_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let out = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    *SCREEN_NODES.lock().unwrap_or_else(|e| e.into_inner()) = Some(map);
+    out
+}
+
+fn remember_screen_node(base: &str, node: Option<&Value>) {
+    let Some(path) = screen_nodes_path() else { return };
+    let mut guard = SCREEN_NODES.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(serde_json::Map::new);
+    let before = map.get(&key(base)).cloned();
+    match node {
+        Some(v) => {
+            map.insert(key(base), v.clone());
+        }
+        None => {
+            map.remove(&key(base));
+        }
+    }
+    if map.get(&key(base)) != before.as_ref() {
+        let _ = std::fs::write(path, Value::Object(map.clone()).to_string());
     }
 }
 

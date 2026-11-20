@@ -31,13 +31,35 @@ pub(crate) enum Surface {
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use view::ScreenView;
 
-/// 부팅 때 한 번 — 카사넷 화면 입구와 이 기기 소리 허브를 연다. 화면 기록 권한은 붙는 때 따진다.
-#[cfg(any(target_os = "macos", windows))]
+/// 부팅 때 한 번 — 기기 화면 거울(JPEG)·카사넷 화면 입구·이 기기 소리 허브를 연다. 화면 기록 권한은 붙는 때 따진다.
+/// 맥은 화면 서비스(도우미)가 있으면 그 화면을 받아 중계한다 — 앱은 스트림에 화면 권한이 필요 없다(`docs/screen-service-split.md` P5).
 pub(crate) fn install() {
-    if let Some(capture) = kasa_cast_host::capture() {
-        kasa_remote::screen_stream::install(capture);
+    #[cfg(target_os = "macos")]
+    {
+        use kasa_cast_host::local::{Duplex, Hybrid, HybridAudio, HybridCapture, HybridSource};
+        let hybrid = std::sync::Arc::new(Hybrid::new(service_socket, kasa_cast_host::capture(), kasa_cast_host::jpeg_source()));
+        kasa_remote::screen_mirror::install(std::sync::Arc::new(HybridSource(hybrid.clone())));
+        kasa_remote::screen_stream::install(std::sync::Arc::new(HybridCapture(hybrid.clone())));
+        kasa_cast_host::audio::install_with(std::sync::Arc::new(HybridAudio(hybrid, kasa_cast_host::audio::speakers())));
+        fn service_socket() -> Option<Box<dyn Duplex>> {
+            let dir = match std::env::var_os("KASATERM_SCREEN_STATE").filter(|d| !d.is_empty()) {
+                Some(d) => std::path::PathBuf::from(d),
+                None => std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/kasaterm/screen"),
+            };
+            let stream = std::os::unix::net::UnixStream::connect(dir.join("local.sock")).ok()?;
+            Some(Box::new(stream))
+        }
     }
-    kasa_cast_host::audio::install();
+    #[cfg(windows)]
+    {
+        kasa_remote::screen_mirror::install(kasa_cast_host::jpeg_source());
+        if let Some(capture) = kasa_cast_host::capture() {
+            kasa_remote::screen_stream::install(capture);
+        }
+        kasa_cast_host::audio::install();
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    kasa_remote::screen_mirror::install(kasa_cast_host::jpeg_source());
 }
 
 /// 그 기기를 네이티브 칸으로 볼 수 있나 — 이 판이 보고, 그 기기가 보내는 판이고, 카사넷 직통·믿는 중계일 때.

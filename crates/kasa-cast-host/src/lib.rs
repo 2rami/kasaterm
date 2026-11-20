@@ -33,6 +33,9 @@ pub mod win_view;
 mod annexb;
 pub mod input;
 mod jpeg;
+#[cfg(unix)]
+pub mod local;
+mod wire;
 
 /// 보는 칸이 쓰는 풀기 — 맥은 VideoToolbox(IOSurface), Windows 는 Media Foundation(D3D11 공유 텍스처).
 #[cfg(target_os = "macos")]

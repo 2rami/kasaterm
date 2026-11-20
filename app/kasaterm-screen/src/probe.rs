@@ -2,7 +2,7 @@
 //! (`docs/screen-service-split.md` 「검증 리그」). 사람 앱의 명부·키를 안 쓴다: 탐침 키는 리그 폴더에 두고 그 id 를 서비스 허용
 //! 목록에 미리 넣는다.
 //!
-//! `kasaterm-screen --probe-id <키 파일> <출력 파일>` · `kasaterm-screen --probe-watch <키 파일> <노드 JSON 파일> <초> <출력 파일>`
+//! `kasaterm-screen --probe-id <키 파일> <출력 파일>` · `kasaterm-screen --probe-watch <키 파일> <노드 JSON 파일> <초> <출력 파일> [Esc 를 넣을 초]`
 //! 결과는 출력 파일에 쓴다 — 릴리스 빌드는 창 서브시스템이라 표준 출력이 없다.
 
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,7 @@ struct Tally {
     info: Value,
     denied: Option<String>,
     closed: Option<String>,
+    input: Vec<String>,
     path: String,
 }
 
@@ -88,10 +89,19 @@ pub fn run(args: &[String]) -> i32 {
                 Event::Audio { .. } => t.audio += 1,
                 Event::Denied(why) => t.denied = Some(why),
                 Event::Closed(why) => t.closed = Some(why),
-                _ => {}
+                Event::Input { ok, reason } => t.input.push(if ok { "ok".into() } else { reason.unwrap_or_default() }),
             }
         });
-        tokio::time::sleep(Duration::from_secs(secs)).await;
+        // 보안 데스크톱(UAC) 따라가기 시험 — 그 초에 Esc 를 넣어 떠 있는 확인 창을 닫는다.
+        let escape: Option<u64> = args.get(5).and_then(|s| s.parse().ok()).filter(|e| *e < secs);
+        let mut per_sec = Vec::new();
+        for i in 0..secs {
+            if escape == Some(i) {
+                watch.send_input(&json!({ "t": "key", "k": "Escape" }));
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            per_sec.push(tally.lock().unwrap_or_else(|e| e.into_inner()).frames);
+        }
         drop(watch);
         endpoint.close().await;
         let mut t = tally.lock().unwrap_or_else(|e| e.into_inner());
@@ -103,7 +113,7 @@ pub fn run(args: &[String]) -> i32 {
             "frames": t.frames, "keys": t.keys, "audio_chunks": t.audio, "fps": t.frames as f64 / secs as f64,
             "cap_to_recv_ms": [pct(&mut t.lat, 0.5), pct(&mut t.lat, 0.9)],
             "enc_to_recv_ms": [pct(&mut t.net, 0.5), pct(&mut t.net, 0.9)],
-            "denied": t.denied, "closed": t.closed, "path": t.path, "info": t.info,
+            "denied": t.denied, "closed": t.closed, "path": t.path, "info": t.info, "frames_by_second": per_sec, "input": t.input,
         });
         let code = say(args.get(4), &out.to_string());
         if t.frames == 0 {

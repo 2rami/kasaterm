@@ -117,12 +117,21 @@ def get(url):
 def kid(v):
     return ((v or {}).get("kasanet") or {}).get("id")
 
-print(f"이 맥: {kid(get('http://127.0.0.1:8765/version')) or '카사넷 꺼짐'}")
+# 화면 서비스 노드(docs/screen-service-split.md) — 서비스 자기 키라 기기 id 와 따로 넣는다(`allow <id> <기기>-screen`).
+def sid(v):
+    return (((v or {}).get("kasanet") or {}).get("screen_node") or {}).get("id")
+
+def show(name, v):
+    print(f"{name}: {kid(v) or '꺼짐·옛 판·안 닿음'}")
+    if sid(v):
+        print(f"{name} 화면 서비스: {sid(v)}")
+
+show("이 맥", get('http://127.0.0.1:8765/version'))
 ms = get("http://127.0.0.1:8765/machines") or []
 for m in ms if isinstance(ms, list) else ms.get("machines", []):
     base = (m.get("base") or "").rstrip("/")
     if base.startswith(("http://127.0.0.1:", "http://localhost:")):
-        print(f"기기 {m.get('label')}: {kid(get(base + '/version')) or '꺼짐·옛 판·안 닿음'}")
+        show(f"기기 {m.get('label')}", get(base + '/version'))
 f = os.path.expanduser("~/.config/kasaterm/kasanet-phone-app.json")
 if os.path.exists(f):
     for pid, at in (json.load(open(f)).get("phones") or {}).items():

@@ -14,7 +14,20 @@ use crate::audio_win as os;
 #[cfg(any(target_os = "macos", windows))]
 pub fn install() {
     crate::source_mute::restore_after_crash();
-    kasa_cast::audio::install(Arc::new(Speakers));
+    kasa_cast::audio::install(speakers());
+}
+
+/// 이 기기 시스템 소리 뜨기(+ 원본 스피커 끄기) — 다른 길(`local::HybridAudio`)이 감쌀 때 쓴다.
+#[cfg(any(target_os = "macos", windows))]
+pub fn speakers() -> Arc<dyn kasa_cast::audio::Source> {
+    Arc::new(Speakers)
+}
+
+/// 다른 소리 길로 허브를 꽂는다(맥 앱이 화면 서비스를 먼저 쓸 때).
+#[cfg(any(target_os = "macos", windows))]
+pub fn install_with(source: Arc<dyn kasa_cast::audio::Source>) {
+    crate::source_mute::restore_after_crash();
+    kasa_cast::audio::install(source);
 }
 
 /// 소리를 뜨는 동안 이 기기 스피커를 끈다 — 보는 쪽에서만 난다(`source_mute.rs`). 마지막 구독이 떠나 뜨기를 멈추면 되켠다.

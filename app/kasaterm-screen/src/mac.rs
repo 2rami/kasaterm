@@ -31,6 +31,11 @@ pub fn ctl_path(dir: &Path) -> PathBuf {
     dir.join("ctl.sock")
 }
 
+/// 앱이 폰·옛 보는 쪽에 중계할 화면을 받아 가는 소켓(`kasa_cast_host::local`).
+pub fn local_path(dir: &Path) -> PathBuf {
+    dir.join("local.sock")
+}
+
 /// `--launch-agent` — launchd 가 부른다. 끝 코드를 돌려준다.
 pub fn serve() -> i32 {
     let Some(dir) = state_dir() else {
@@ -44,6 +49,25 @@ pub fn serve() -> i32 {
     ctl::apply(*settings.lock().unwrap_or_else(|e| e.into_inner()));
     let Some(inner) = kasa_cast_host::capture() else { return 1 };
     let capture: Arc<dyn kasa_cast::Capture> = Arc::new(ctl::Gate { inner, settings: settings.clone() });
+    let local = match bind(&local_path(&dir)) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[screen-service] 중계 소켓을 못 열었다: {e}");
+            return 1;
+        }
+    };
+    {
+        let (capture, source, sessions) = (capture.clone(), kasa_cast_host::jpeg_source(), kasa_cast_host::local::sessions());
+        let _ = std::thread::Builder::new().name("screen-service-local".into()).spawn(move || {
+            for stream in local.incoming().flatten() {
+                if !trusted(&stream) {
+                    continue;
+                }
+                let (c, s, t) = (capture.clone(), source.clone(), sessions.clone());
+                let _ = std::thread::Builder::new().name("screen-service-local-conn".into()).spawn(move || kasa_cast_host::local::serve(stream, &c, &s, &t));
+            }
+        });
+    }
     kasa_cast_host::audio::install();
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build() {
         Ok(rt) => rt,
