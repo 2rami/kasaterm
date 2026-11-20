@@ -256,7 +256,7 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
         else if p.unread { Some((theme::accent(), 1.6)) } else { None };
     if let Some((mut color, period)) = band {
         if !p.quiet {
-            color[3] = (90.0 + 165.0 * crate::sprites::blink(crate::sprites::anim_phase_secs(), period)) as u8;
+            color[3] = (90.0 + 165.0 * crate::sprites::blinking(period)) as u8;
         }
         g.rect(rx, ry + 3.0, 2.0, rh - 6.0, color);
     }

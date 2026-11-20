@@ -749,7 +749,7 @@ pub(crate) fn breathe(t: f32, period: f32) -> f32 {
 /// 목록이 들썩여 보인다. 자국을 남기면 "있다"는 계속 읽히고 깜빡임은 "봐라"만 한다.
 pub(crate) fn blink_dot(g: &mut gpu::GpuRenderer, x: f32, y: f32, size: f32, col: [u8; 4], period: f32) {
     let mut c = col;
-    c[3] = (70.0 + 185.0 * blink(anim_phase_secs(), period)) as u8;
+    c[3] = (70.0 + 185.0 * blinking(period)) as u8;
     circle_rect(g, x, y, size, c);
 }
 
@@ -759,25 +759,81 @@ pub(crate) fn blink_phase(period: f32) -> f32 {
     blink(anim_phase_secs(), period)
 }
 
+/// 지금 그리는 깜빡임의 값. 다음에 값이 바뀌는 때를 크롬 장 시각으로 남긴다.
+pub(crate) fn blinking(period: f32) -> f32 {
+    let t = anim_phase_secs();
+    chrome_changes_in(blink_changes_in(t, period));
+    blink(t, period)
+}
+
+const BLINK_EDGE: f32 = 0.08;
+
 pub(crate) fn blink(t: f32, period: f32) -> f32 {
-    const EDGE: f32 = 0.08;
     let x = (t / period.max(0.001)).rem_euclid(1.0);
-    if x < EDGE {
-        x / EDGE
+    if x < BLINK_EDGE {
+        x / BLINK_EDGE
     } else if x < 0.5 {
         1.0
-    } else if x < 0.5 + EDGE {
-        1.0 - (x - 0.5) / EDGE
+    } else if x < 0.5 + BLINK_EDGE {
+        1.0 - (x - 0.5) / BLINK_EDGE
     } else {
         0.0
     }
 }
 
+/// 켜짐·꺼짐 구간은 평평해 그 끝까지 그릴 것이 없다 — 오르내리는 가장자리에서만 박자마다 다시 그린다.
+fn blink_changes_in(t: f32, period: f32) -> f32 {
+    let period = period.max(0.001);
+    let x = (t / period).rem_euclid(1.0);
+    let flat_end = if (BLINK_EDGE..0.5).contains(&x) {
+        0.5
+    } else if x >= 0.5 + BLINK_EDGE {
+        1.0
+    } else {
+        return CHROME_BEAT_MS;
+    };
+    ((flat_end - x) * period * 1000.0).max(1.0)
+}
+
+static ANIM_EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+
 /// 프로세스 시작 기준 단조증가 초 — 시간으로 도는 그림(로딩바 스윕, idle gif)이
 /// 전부 같은 시계를 본다. 펌프가 도는 동안 매 프레임 갱신된다.
 pub(crate) fn anim_phase_secs() -> f32 {
-    static EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
-    EPOCH.elapsed().as_secs_f32()
+    ANIM_EPOCH.elapsed().as_secs_f32()
+}
+
+/// 크롬 애니 타이머(handler.rs)가 깨우는 박자 — 펌프의 33ms 와 같다.
+pub(crate) const CHROME_BEAT_MS: f32 = 33.0;
+
+/// 직전 크롬 장에서 시간 따라 바뀌는 그림(대기 gif 얼굴·숨쉬는 칸·깜빡이는 점)이 다음에
+/// 바뀌는 시각, `ANIM_EPOCH` 기준 µs. 없으면 `u64::MAX`.
+///
+/// 펌프는 펼친 방이 있으면 33ms 마다 리드로우를 청하지만 가려진 창엔 닿지 않고, 그리기 게이트(render.rs)도
+/// `chrome_dirty` 같은 사유가 없으면 장을 건너뛴다. 그래서 이 그림들은 커서 깜빡임(530ms)이나 칸 출력에 얹혀서만 넘어갔다 —
+/// 160ms 네 장짜리 얼굴 gif 가 장 순서를 건너뛰고, 기다림 칸이 제멋대로 번쩍여 미니맵이 깜빡이는
+/// 것으로 읽혔다(2026-11-20, 다른 기기 방만 보는 기기). 걷기는 같은 까닭으로 전용 박자를 받았다
+/// (`STUDENT_WALK_ANIMATING`). 그리는 쪽이 여기 적고, 크롬 장 첫머리가 비우고, 타이머(handler.rs)와 게이트는
+/// 그 시각이 지났을 때만 깨우고 통과시킨다 — 평평한 깜빡임 구간이나 gif 한 장 동안은 그리지 않는다.
+static CHROME_DUE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn anim_clock_us() -> u64 {
+    ANIM_EPOCH.elapsed().as_micros() as u64
+}
+
+/// 지금 그린 그림이 `ms` 뒤에 바뀐다.
+pub(crate) fn chrome_changes_in(ms: f32) {
+    let due = anim_clock_us().saturating_add((ms.max(0.0) * 1000.0) as u64);
+    CHROME_DUE_US.fetch_min(due, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn reset_chrome_due() {
+    CHROME_DUE_US.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 그 그림이 바뀔 때가 됐다 — 타이머·게이트 사유.
+pub(crate) fn chrome_due() -> bool {
+    CHROME_DUE_US.load(std::sync::atomic::Ordering::Relaxed) <= anim_clock_us()
 }
 
 /// override 폴더 안 대기 gif 의 상대 경로. 폴더가 나뉘기 전에는 이 자리에 아무것도
@@ -945,14 +1001,9 @@ pub(crate) fn draw_student_face_anim(
     let Some(anim) = student_idle_anim(slug) else {
         return draw_student_face(g, name, x, y, size);
     };
-    let mut at = ((phase * 1000.0) as u32) % anim.total_ms;
-    let mut idx = 0;
-    for (i, d) in anim.delays_ms.iter().enumerate() {
-        if at < *d {
-            idx = i;
-            break;
-        }
-        at -= d;
+    let (idx, left_ms) = gif_frame_at(&anim.delays_ms, anim.total_ms, (phase * 1000.0) as u32);
+    if anim.frames.len() > 1 {
+        chrome_changes_in(left_ms as f32);
     }
     let key = format!("student:{slug}:idle:{idx}");
     if !g.has_image(&key) {
@@ -961,6 +1012,18 @@ pub(crate) fn draw_student_face_anim(
     }
     g.queue_image_above(&key, x, y, size, size);
     true
+}
+
+/// gif 시계 `phase_ms` 의 장 번호와 그 장이 끝나기까지 남은 ms.
+fn gif_frame_at(delays_ms: &[u32], total_ms: u32, phase_ms: u32) -> (usize, u32) {
+    let mut at = phase_ms % total_ms.max(1);
+    for (i, d) in delays_ms.iter().enumerate() {
+        if at < *d {
+            return (i, d - at);
+        }
+        at -= d;
+    }
+    (0, delays_ms.first().copied().unwrap_or(1))
 }
 
 /// 사이드바 줄에서 **걷는** 학생. 도는 pane 임을 그림 자체로 말한다.
@@ -1518,6 +1581,48 @@ mod sidebar_blink_tests {
         // 주기를 넘겨도 같은 위상. 프레임 시계는 프로세스 시작부터 단조증가라
         // 몇 시간 뒤에도 같은 리듬이어야 한다.
         assert!((blink(0.25, 1.0) - blink(600.25, 1.0)).abs() < 1e-3);
+    }
+
+    /// 평평한 구간은 그 끝까지 다시 그리지 않고, 가장자리에서는 박자마다 그린다. 남은 시간 동안
+    /// 값이 정말 안 바뀌어야 장을 건너뛰어도 깜빡임이 안 뭉개진다.
+    #[test]
+    fn blink_wakes_only_where_its_value_moves() {
+        let period = 0.9;
+        for k in 0..900 {
+            let t = k as f32 / 1000.0 + 37.0 * period;
+            let wait = blink_changes_in(t, period);
+            if wait > CHROME_BEAT_MS {
+                let later = t + (wait - 1.0) / 1000.0;
+                assert!((blink(t, period) - blink(later, period)).abs() < 1e-3, "t={t} wait={wait}");
+            }
+        }
+        assert_eq!(blink_changes_in(0.04 * period, period), CHROME_BEAT_MS);
+        assert!((blink_changes_in(0.25 * period, period) - 0.25 * period * 1000.0).abs() < 1.0);
+    }
+
+    /// 대기 gif 는 장 경계에서 다시 그려야 장 순서를 건너뛰지 않는다.
+    #[test]
+    fn idle_gif_wakes_at_the_next_frame_boundary() {
+        let delays = [160, 160, 160, 160];
+        assert_eq!(gif_frame_at(&delays, 640, 0), (0, 160));
+        assert_eq!(gif_frame_at(&delays, 640, 170), (1, 150));
+        assert_eq!(gif_frame_at(&delays, 640, 639), (3, 1));
+        assert_eq!(gif_frame_at(&delays, 640, 640 * 50 + 330), (2, 150));
+        assert_eq!(gif_frame_at(&[100, 300], 400, 150), (1, 250));
+    }
+
+    /// 게이트는 등록한 시각이 지나야 통과하고, 장 첫머리가 비우면 다시 막힌다.
+    #[test]
+    fn chrome_due_follows_the_earliest_registered_change() {
+        reset_chrome_due();
+        assert!(!chrome_due());
+        chrome_changes_in(60_000.0);
+        chrome_changes_in(120_000.0);
+        assert!(!chrome_due());
+        chrome_changes_in(0.0);
+        assert!(chrome_due());
+        reset_chrome_due();
+        assert!(!chrome_due());
     }
 
     /// 남이 보낸 메시지가 학생 테마로 뜨려면 발신자 이름에서 슬러그가 나와야 한다.

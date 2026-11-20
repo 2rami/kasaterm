@@ -230,7 +230,7 @@ fn signal_alpha(quiet: bool, period: f32) -> u8 {
     if quiet {
         90
     } else {
-        (30.0 + 120.0 * blink(anim_phase_secs(), period)) as u8
+        (30.0 + 120.0 * blinking(period)) as u8
     }
 }
 
@@ -2354,6 +2354,7 @@ impl App {
         // 걷는 학생 표시는 이 프레임에서 `draw_student_walk` 가 다시 세운다 —
         // 여기서 내려야 걷던 pane 이 멈춘 뒤 타이머가 저절로 잠든다.
         STUDENT_WALK_ANIMATING.store(false, std::sync::atomic::Ordering::Relaxed);
+        crate::sprites::reset_chrome_due();
         STUDENT_SPRITE_ANIMATING.store(
             // waiting(승인 대기)·standing(입력박스 위)은 렌더 펌프가 없는 정적
             // 상태에서도 idle 애니가 돌아야 해서 이 타이머에 의존한다. 스피너
@@ -6348,6 +6349,7 @@ impl App {
             || git_op_animating
             || banner_animating
             || walk_animating
+            || crate::sprites::chrome_due()
             // 혜성은 그리드에 얹히므로 `bar_animating` 처럼 bar-only 경로로 두면 안 된다
             // — 전체 프레임을 다시 그려야 위상이 반영된다.
             || comet_animating;

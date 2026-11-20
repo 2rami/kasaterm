@@ -2472,6 +2472,19 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        // 얼굴 gif·깜빡임 타이머. 펌프의 리드로우는 가려진 창에 닿지 않고 게이트도 그 사유를
+        // 몰라 이 그림들이 커서 깜빡임에 얹혀 장을 건너뛰었다 — 직전 장이 남긴 시각이 지났을 때만 깨운다.
+        // 걷기 타이머가 도는 동안은 그 장(70ms)이 gif 한 장(160ms)보다 촘촘해 따로 깨우지 않는다.
+        {
+            let chrome_proxy = self.proxy.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(crate::sprites::CHROME_BEAT_MS as u64));
+                let walking = crate::render::STUDENT_WALK_ANIMATING.load(std::sync::atomic::Ordering::Relaxed);
+                if !walking && crate::sprites::chrome_due() && chrome_proxy.send_event(UserEvent::Redraw).is_err() {
+                    break;
+                }
+            });
+        }
         // ultracode 혜성 타이머. 도트 배너 스레드와 같은 패턴이지만 주기가 다르다
         // (66ms) — 혜성은 픽셀 이동이라 200ms 론 순간이동으로 보인다. ultracode
         // pane 이 없으면 sleep+load 만 도는 무비용 루프.

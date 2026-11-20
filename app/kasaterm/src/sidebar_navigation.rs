@@ -454,7 +454,7 @@ fn draw_cell(
     if let Some((col, period)) = signal {
         if mw > 5.0 && mh > 5.0 {
             let mut c = col;
-            c[3] = if quiet { 90 } else { (30.0 + 120.0 * crate::sprites::blink(crate::sprites::anim_phase_secs(), period)) as u8 };
+            c[3] = if quiet { 90 } else { (30.0 + 120.0 * crate::sprites::blinking(period)) as u8 };
             round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
         }
     }
