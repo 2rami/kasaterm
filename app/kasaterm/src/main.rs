@@ -61,6 +61,7 @@ mod render;
 mod rich_document;
 mod vault;
 mod vault_graph;
+mod screen_service;
 mod screen_stream;
 mod screenread;
 mod session;

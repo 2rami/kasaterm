@@ -19,11 +19,15 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 pub mod mirror;
+pub mod service;
 
 pub use mirror::{Denied, Input};
 
 /// 화면 스트림 ALPN. 보내는 쪽 엔드포인트가 이 ALPN 으로 받는다(앱 노드·화면 서비스 노드).
 pub const SCREEN_ALPN: &[u8] = b"kasa/screen/1";
+/// 화면 서비스 노드의 길 재기 — 보는 쪽 앱이 서비스 노드와 길(직통·믿는 중계)을 쥐고 재는 연결. 스트림을 열지 않고 닫힐
+/// 때까지 둔다. 서비스 노드는 카사넷 `fwd` 를 받지 않아 앱 노드끼리의 링크 ALPN 을 못 쓴다.
+pub const SCREEN_LINK_ALPN: &[u8] = b"kasa/screen-link/1";
 
 pub mod ctl {
     pub const CONFIG: u8 = b'C';

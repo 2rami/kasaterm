@@ -150,12 +150,14 @@ if (-not $SkipBuild) {
     Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasaterm")
     Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasa-socket", "--bin", "kasaterm-cli")
     Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasa-acp", "--bin", "kasa-acp")
+    Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasaterm-screen")
 }
 
 $appExe = Join-Path $releaseRoot "kasaterm.exe"
 $cliExe = Join-Path $releaseRoot "kasaterm-cli.exe"
 $acpExe = Join-Path $releaseRoot "kasa-acp.exe"
-foreach ($artifact in @($appExe, $cliExe, $acpExe)) {
+$screenExe = Join-Path $releaseRoot "kasaterm-screen.exe"
+foreach ($artifact in @($appExe, $cliExe, $acpExe, $screenExe)) {
     if (-not (Test-Path -LiteralPath $artifact)) {
         throw "build artifact is missing: $artifact"
     }
@@ -196,7 +198,9 @@ $candleExe = Join-Path $wixRoot "candle.exe"
 $lightExe = Join-Path $wixRoot "light.exe"
 $darkExe = Join-Path $wixRoot "dark.exe"
 $wixUiExtension = Join-Path $wixRoot "WixUIExtension.dll"
-foreach ($tool in @($heatExe, $candleExe, $lightExe, $darkExe, $wixUiExtension)) {
+$wixUtilExtension = Join-Path $wixRoot "WixUtilExtension.dll"
+$wixFirewallExtension = Join-Path $wixRoot "WixFirewallExtension.dll"
+foreach ($tool in @($heatExe, $candleExe, $lightExe, $darkExe, $wixUiExtension, $wixUtilExtension, $wixFirewallExtension)) {
     if (-not (Test-Path -LiteralPath $tool)) {
         throw "WiX tool is missing: $tool"
     }
@@ -231,12 +235,24 @@ Invoke-External -FilePath $heatExe -ArgumentList @(
     "-scom", "-nologo", "-out", $collabWxs
 )
 
+# 화면 서비스 판(app/kasaterm-screen/Cargo.toml)은 앱 판과 따로 센다. 판마다 설치 폴더와 구성요소 GUID 가 갈린다 —
+# 판이 같으면 같은 GUID 라 업데이트가 서비스를 건드리지 않는다(docs/screen-service-split.md 「Windows — MSI」).
+$screenManifest = Get-Content -LiteralPath (Join-Path $repoRoot "app\kasaterm-screen\Cargo.toml") -Raw
+if ($screenManifest -notmatch '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+    throw "screen service version is missing in app\kasaterm-screen\Cargo.toml"
+}
+$screenVersion = $Matches[1]
+$screenHash = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes("kasaterm-screen-service/$screenVersion"))
+$screenGuid = [Guid]::new([byte[]]$screenHash[0..15]).ToString().ToUpperInvariant()
+
 $mainWxs = Join-Path $repoRoot "app\kasaterm\wix\main.wxs"
 $mainObj = Join-Path $wixBuildRoot "main.wixobj"
 $aronaObj = Join-Path $wixBuildRoot "aronaui.wixobj"
 $collabObj = Join-Path $wixBuildRoot "collabhooks.wixobj"
 Invoke-External -FilePath $candleExe -ArgumentList @(
-    "-nologo", "-arch", "x64", "-dVersion=$version", "-dCargoTargetBinDir=$releaseRoot",
+    "-nologo", "-arch", "x64", "-ext", $wixUtilExtension, "-ext", $wixFirewallExtension,
+    "-dVersion=$version", "-dCargoTargetBinDir=$releaseRoot",
+    "-dScreenServiceVersion=$screenVersion", "-dScreenServiceGuid=$screenGuid",
     "-out", $mainObj, $mainWxs
 )
 Invoke-External -FilePath $candleExe -ArgumentList @(
@@ -253,7 +269,7 @@ if (Test-Path -LiteralPath $wixPdbPath) {
     Remove-Item -LiteralPath $wixPdbPath -Force
 }
 Invoke-External -FilePath $lightExe -ArgumentList @(
-    "-nologo", "-spdb", "-ext", $wixUiExtension, "-cultures:ko-kr",
+    "-nologo", "-spdb", "-ext", $wixUiExtension, "-ext", $wixUtilExtension, "-ext", $wixFirewallExtension, "-cultures:ko-kr",
     "-loc", (Join-Path $repoRoot "app\kasaterm\wix\ko-kr.wxl"), "-out", $msiPath,
     $mainObj, $aronaObj, $collabObj
 )
@@ -289,7 +305,7 @@ $requiredFiles = @(
     "characters.json", "kasacollab.py",
     "NotoSansKR-Variable.ttf", "OFL-NotoSansKR.txt", "OFL-D2Coding.txt"
 )
-Assert-MsiManifest -Manifest $verifyWxs -Names $requiredFiles
+Assert-MsiManifest -Manifest $verifyWxs -Names ($requiredFiles + @("kasaterm-screen.exe"))
 Assert-PackageFiles -Root $portableStage -Names $requiredFiles
 
 foreach ($artifact in @($msiPath, $portableZip)) {

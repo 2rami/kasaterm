@@ -3,6 +3,7 @@ resolver = "2"
 # 크레이트 층과 의존 방향은 docs/workspace.md, 검사는 scripts/check-workspace.py.
 members = [
     "app/kasaterm",
+    "app/kasaterm-screen",
     "crates/kasa-socket",
     "crates/kasa-identity",
     "crates/kasa-characters",
@@ -42,6 +43,7 @@ members = [
 ]
 default-members = [
     "app/kasaterm",
+    "app/kasaterm-screen",
     "crates/kasa-socket",
     "crates/kasa-identity",
     "crates/kasa-characters",
@@ -141,6 +143,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 libc = "=0.2.189"
 miniz_oxide = "0.8"
 objc2 = "0.6"
+winresource = "0.1"
 # 맥 OS 바인딩 — 앱과 화면 스트림 OS 부분(kasa-cast-host)이 같은 판을 쓴다. 기능은 받는 쪽이 고른다.
 block2 = "0.6"
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }

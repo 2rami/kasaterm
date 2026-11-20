@@ -50,10 +50,12 @@ use windows::Win32::System::Pipes::{
 };
 use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Services::{
-    RegisterServiceCtrlHandlerExW, SetServiceStatus, StartServiceCtrlDispatcherW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
-    SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_STATUS,
-    SERVICE_STATUS_CURRENT_STATE, SERVICE_STATUS_HANDLE, SERVICE_STOPPED, SERVICE_STOP_PENDING, SERVICE_TABLE_ENTRYW,
-    SERVICE_WIN32_OWN_PROCESS,
+    ChangeServiceConfig2W, CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW, RegisterServiceCtrlHandlerExW,
+    SetServiceStatus, StartServiceCtrlDispatcherW, QUERY_SERVICE_CONFIGW, SC_ACTION, SC_ACTION_RESTART, SC_MANAGER_CONNECT,
+    SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP, SERVICE_CHANGE_CONFIG, SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+    SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_FAILURE_ACTIONSW, SERVICE_FAILURE_ACTIONS_FLAG,
+    SERVICE_QUERY_CONFIG, SERVICE_RUNNING, SERVICE_START, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE, SERVICE_STATUS_HANDLE,
+    SERVICE_STOPPED, SERVICE_STOP_PENDING, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS,
 };
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, ResumeThread,
@@ -62,12 +64,39 @@ use windows::Win32::System::Threading::{
 };
 
 pub(crate) const SERVICE_NAME: &str = "KasatermScreen";
+
+/// 서비스 이름 — 시험 서비스 리그는 `KASATERM_SCREEN_SERVICE_NAME` 으로 갈라 사람 서비스의 설정(복구 동작·등록 경로)을 안 건드린다.
+fn service_name() -> String {
+    std::env::var("KASATERM_SCREEN_SERVICE_NAME")
+        .ok()
+        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| SERVICE_NAME.to_string())
+}
 /// 장 연결에 장이 없을 때도 이만큼마다 숨을 보내 — 앱이 떠난 것을 도우미가 쓰기 실패로 알고, 앱 쪽 읽기 스레드도 멈춤 표시를
 /// 볼 수 있다.
 const BREATH: Duration = Duration::from_secs(1);
 const MAX_BODY: usize = 64 << 20;
 
-/// `kasaterm.exe` 가 서비스·도우미로 불렸으면 그 일을 하고 참. 앱의 로그·설정·세션 무엇 하나 건드리기 전에 부른다.
+/// 서비스로 돌 때 도우미 감독과 함께 돌릴 일 — 화면 서비스 실행 파일(`kasaterm-screen`)이 카사넷 화면 노드·제어 파이프를
+/// 여기서 연다(`docs/screen-service-split.md`). 받은 깃발이 서면 멈춘다.
+static SERVICE_WORK: std::sync::OnceLock<fn(&'static AtomicBool)> = std::sync::OnceLock::new();
+
+/// [`run`] 과 같고, 서비스로 돌면 `work` 를 따로 스레드에서 함께 돌린다.
+pub fn run_with(args: &[OsString], work: fn(&'static AtomicBool)) -> bool {
+    let _ = SERVICE_WORK.set(work);
+    run(args)
+}
+
+/// 화면 서비스 상태 폴더 — 서비스 키·허용 목록·설정·스피커 표. SYSTEM·Administrators 만 열게 둔다.
+/// 시험 서비스 리그는 `KASATERM_SCREEN_STATE` 로 따로 둔다.
+pub fn state_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("KASATERM_SCREEN_STATE").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    Some(PathBuf::from(std::env::var_os("ProgramData")?).join("kasaterm").join("screen"))
+}
+
+/// `kasaterm.exe`·`kasaterm-screen.exe` 가 서비스·도우미로 불렸으면 그 일을 하고 참. 앱의 로그·설정·세션 무엇 하나 건드리기 전에 부른다.
 pub(crate) fn run(args: &[OsString]) -> bool {
     match args.first().and_then(|a| a.to_str()) {
         Some("--screen-service") => {
@@ -86,8 +115,10 @@ fn wide(s: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()
 }
 
+/// 도우미 파이프 이름. 시험 서비스 리그는 `KASATERM_SCREEN_PIPE` 로 이름을 갈라 사람 서비스의 도우미와 섞이지 않는다.
 fn pipe_name(session: u32) -> String {
-    format!(r"\\.\pipe\kasaterm-screen-{session}")
+    let prefix = std::env::var("KASATERM_SCREEN_PIPE").ok().filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    format!(r"\\.\pipe\{}-{session}", prefix.as_deref().unwrap_or("kasaterm-screen"))
 }
 
 fn my_session() -> Option<u32> {
@@ -106,13 +137,13 @@ fn image_of(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
 }
 
-/// 파이프 건너편이 이 kasaterm.exe 와 같은 실행 파일인가 — 설치판은 관리자만 쓰는 Program Files 에 있다.
-fn same_exe(pid: u32) -> bool {
+/// 파이프 건너편이 믿는 실행 파일인가 — 이 도우미와 같은 실행 파일(화면 서비스, 옛 꼴이면 앱 자신)이거나 같은 설치의 앱
+/// (`bin\screen\<판>\kasaterm-screen.exe` 옆 `bin\kasaterm.exe`). 설치판은 관리자만 쓰는 Program Files 에 있다.
+fn trusted_peer(pid: u32) -> bool {
     let norm = |p: &Path| p.to_string_lossy().to_lowercase();
-    match (image_of(pid), std::env::current_exe()) {
-        (Some(peer), Ok(me)) => norm(&peer) == norm(&me),
-        _ => false,
-    }
+    let (Some(peer), Ok(me)) = (image_of(pid), std::env::current_exe()) else { return false };
+    norm(&peer) == norm(&me)
+        || me.parent().and_then(Path::parent).and_then(Path::parent).is_some_and(|bin| norm(&peer) == norm(&bin.join("kasaterm.exe")))
 }
 
 fn sid_text(sid: PSID) -> Option<String> {
@@ -203,9 +234,13 @@ fn denied_of(reason: &[u8]) -> Denied {
 
 // ---- 앱 쪽 ----
 
-/// 이 세션의 도우미에 붙는다. 없으면(서비스 없는 설치) None — 앱이 직접 뜬다.
+/// 이 세션의 도우미에 붙는다 — 세션 0 의 화면 서비스는 지금 콘솔 세션의 도우미에. 없으면(서비스 없는 설치) None — 앱이 직접 뜬다.
 pub(super) fn connect() -> Option<File> {
-    let name = pipe_name(my_session()?);
+    let session = match my_session()? {
+        0 => unsafe { WTSGetActiveConsoleSessionId() },
+        s => s,
+    };
+    let name = pipe_name(session);
     for _ in 0..3 {
         match std::fs::OpenOptions::new().read(true).write(true).open(&name) {
             // 같은 이름을 먼저 차지한 다른 프로그램에 화면·조작을 넘기지 않는다.
@@ -218,6 +253,14 @@ pub(super) fn connect() -> Option<File> {
         }
     }
     None
+}
+
+/// 화면 서비스 제어 파이프에 붙는다(앱 쪽). 주인이 SYSTEM 인 파이프만 — 같은 이름을 먼저 차지한 사용자 프로그램에 명부를
+/// 넘기지 않는다.
+pub fn connect_ctl() -> Option<File> {
+    let name = format!(r"\\.\pipe\{}", kasa_cast::service::ctl_name());
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(&name).ok()?;
+    owned_by_system(&file).then_some(file)
 }
 
 struct AgentSession {
@@ -320,14 +363,25 @@ fn agent_main() {
     redirect_stderr();
     super::win::com();
     let Some(session) = my_session() else { return };
-    // 로그인 전에는 세션 사용자가 없다 — 붙을 앱도 없으니 생길 때까지 기다린다.
-    let sid = loop {
-        if let Some(sid) = session_user_sid(session) {
-            break sid;
+    if let Some(dir) = state_dir() {
+        crate::set_state_dir(dir);
+    }
+    crate::source_mute::restore_after_crash();
+    // 로그인 전(로그인 화면)에는 세션 사용자가 없다 — 화면 서비스(SYSTEM)만 붙게 열고, 사용자가 생기면 끝나 서비스가 그
+    // 사용자까지 받게 다시 띄운다.
+    let sddl = match session_user_sid(session) {
+        Some(sid) => wide(format!("O:SYD:P(A;;GA;;;SY)(A;;GRGW;;;{sid})")),
+        None => {
+            let _ = std::thread::Builder::new().name("screen-agent-logon".into()).spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(2));
+                if session_user_sid(session).is_some() {
+                    log("세션 사용자가 생겼다 — 그 사용자도 받게 다시 뜬다");
+                    std::process::exit(0);
+                }
+            });
+            wide("O:SYD:P(A;;GA;;;SY)")
         }
-        std::thread::sleep(Duration::from_secs(2));
     };
-    let sddl = wide(format!("O:SYD:P(A;;GA;;;SY)(A;;GRGW;;;{sid})"));
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(sddl.as_ptr()), SDDL_REVISION_1, &mut descriptor, None) }.is_err() {
         log("파이프 보안 설명자를 못 만든다");
@@ -381,13 +435,18 @@ fn agent_main() {
         };
         let file = unsafe { File::from_raw_handle(pipe.0) };
         let mut pid = 0;
-        let trusted = connected && unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }.is_ok() && same_exe(pid);
+        let trusted = connected && unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }.is_ok() && trusted_peer(pid);
         if !trusted {
             continue;
         }
         let (sessions, input_tx) = (sessions.clone(), input_tx.clone());
         let _ = std::thread::Builder::new().name("screen-agent-conn".into()).spawn(move || serve(file, &sessions, &input_tx));
     }
+}
+
+/// 지금 콘솔 세션에 로그인한 사용자가 있나 — 없으면 로그인 화면이다.
+pub fn console_has_user() -> bool {
+    session_user_sid(unsafe { WTSGetActiveConsoleSessionId() }).is_some()
 }
 
 fn session_user_sid(session: u32) -> Option<String> {
@@ -408,6 +467,7 @@ fn serve(mut pipe: File, sessions: &Sessions, input_tx: &mpsc::Sender<(u32, Inpu
     let Ok((kind, body)) = recv(&mut pipe) else { return };
     match kind {
         b'S' => serve_frames(pipe, &body, sessions),
+        b'A' => serve_audio(pipe, body.first().is_none_or(|m| *m != 0)),
         b'C' => {
             while let Ok((kind, body)) = recv(&mut pipe) {
                 match kind {
@@ -474,11 +534,95 @@ fn serve_frames(mut pipe: File, body: &[u8], sessions: &Sessions) {
     drop(gone);
 }
 
+/// 소리 연결 — 기본 출력 장치 루프백을 떠 `a`(QPC 초 f64 LE + s16le 48kHz 스테레오) 덩이로 보낸다. 뜨는 동안 이 기기
+/// 스피커를 끈다(`source_mute`). 소리가 없으면 루프백이 꾸러미를 안 줘 1초마다 숨(`H`)을 보낸다 — 떠난 것을 쓰기 실패로 안다.
+fn serve_audio(mut pipe: File, mute: bool) {
+    let (tx, rx) = mpsc::channel::<(f64, Vec<i16>)>();
+    let started = kasa_cast::audio::Source::start(&crate::audio_win::Source, Box::new(move |t, pcm: &[i16]| drop(tx.send((t, pcm.to_vec())))));
+    let running = match started {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = send(&mut pipe, b'D', e.as_bytes());
+            return;
+        }
+    };
+    crate::set_source_mute(mute);
+    let muted = crate::source_mute::mute();
+    if send(&mut pipe, b'N', &[]).is_err() {
+        return;
+    }
+    loop {
+        let sent = match rx.recv_timeout(BREATH) {
+            Ok((t, pcm)) => {
+                let mut body = Vec::with_capacity(8 + pcm.len() * 2);
+                body.extend_from_slice(&t.to_le_bytes());
+                for s in pcm {
+                    body.extend_from_slice(&s.to_le_bytes());
+                }
+                send(&mut pipe, b'a', &body)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => send(&mut pipe, b'H', &[]),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if sent.is_err() {
+            break;
+        }
+    }
+    drop(muted);
+    drop(running);
+}
+
+/// 도우미가 뜨는 시스템 소리 — 세션 0 의 화면 서비스가 쓴다(세션 0 에는 소리 장치 세션이 없다).
+pub(crate) struct AgentAudio;
+
+struct AgentAudioRunning(Arc<AtomicBool>);
+
+impl Drop for AgentAudioRunning {
+    /// 읽기 스레드가 다음 덩이·숨에서 멈추고 파이프를 닫는다 — 도우미는 쓰기 실패로 뜨기를 멈추고 스피커를 되켠다.
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+impl kasa_cast::audio::Source for AgentAudio {
+    fn start(&self, mut out: Box<dyn FnMut(f64, &[i16]) + Send>) -> Result<Box<dyn Send>, String> {
+        let mut pipe = connect().ok_or("화면 도우미가 없다")?;
+        send(&mut pipe, b'A', &[u8::from(crate::source_mute_on())]).map_err(|e| e.to_string())?;
+        match recv(&mut pipe) {
+            Ok((b'N', _)) => {}
+            Ok((b'D', why)) => return Err(String::from_utf8_lossy(&why).into_owned()),
+            _ => return Err("화면 도우미 소리 연결이 끊겼다".into()),
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        std::thread::Builder::new()
+            .name("screen-agent-audio".into())
+            .spawn(move || {
+                let mut pcm = Vec::new();
+                while !s.load(Ordering::Relaxed) {
+                    match recv(&mut pipe) {
+                        Ok((b'a', body)) if body.len() >= 8 => {
+                            let t = f64::from_le_bytes(body[..8].try_into().unwrap_or([0; 8]));
+                            pcm.clear();
+                            pcm.extend(body[8..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])));
+                            out(t, &pcm);
+                        }
+                        Ok(_) => {}
+                        Err(_) => return,
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Box::new(AgentAudioRunning(stop)))
+    }
+}
+
 /// SYSTEM 프로세스라 표준 오류가 어디에도 안 남는다 — 화면 스트림의 `eprintln!` 까지 `%ProgramData%\kasaterm\screen-service.log`
 /// 로 보낸다(Rust 의 표준 오류는 쓸 때마다 표준 핸들을 다시 읽는다).
 fn redirect_stderr() {
     use std::os::windows::io::IntoRawHandle;
-    let Some(dir) = std::env::var_os("ProgramData").map(|p| PathBuf::from(p).join("kasaterm")) else { return };
+    // 상태 폴더 옆(`%ProgramData%\kasaterm`) — 시험 서비스 리그는 제 상태 폴더 옆에 따로 남는다.
+    let Some(dir) = state_dir().and_then(|d| d.parent().map(Path::to_path_buf)) else { return };
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("screen-service.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
@@ -498,23 +642,94 @@ fn log(line: &str) {
 
 static STOP: AtomicBool = AtomicBool::new(false);
 static STATUS: AtomicUsize = AtomicUsize::new(0);
+/// 끝날 때 「실패」로 알려 서비스 관리자가 다시 띄우게 — 판이 바뀐 실행 파일로 갈아탈 때.
+static RESTART: AtomicBool = AtomicBool::new(false);
+/// 서비스 고유 실패 — 복구 동작(다시 시작)이 이것을 보고 다시 띄운다.
+const ERROR_SERVICE_SPECIFIC_ERROR: u32 = 1066;
 
 fn set_state(state: SERVICE_STATUS_CURRENT_STATE, accept: u32) {
+    set_state_exit(state, accept, 0);
+}
+
+fn set_state_exit(state: SERVICE_STATUS_CURRENT_STATE, accept: u32, specific: u32) {
     let handle = SERVICE_STATUS_HANDLE(STATUS.load(Ordering::Acquire) as *mut _);
     let status = SERVICE_STATUS {
         dwServiceType: SERVICE_WIN32_OWN_PROCESS,
         dwCurrentState: state,
         dwControlsAccepted: accept,
-        dwWin32ExitCode: 0,
-        dwServiceSpecificExitCode: 0,
+        dwWin32ExitCode: if specific == 0 { 0 } else { ERROR_SERVICE_SPECIFIC_ERROR },
+        dwServiceSpecificExitCode: specific,
         dwCheckPoint: 0,
         dwWaitHint: 5000,
     };
     let _ = unsafe { SetServiceStatus(handle, &status) };
 }
 
+/// 서비스를 끝내고 서비스 관리자가 다시 띄우게 한다 — MSI 가 새 판 실행 파일을 깔고 등록 경로만 바꿔 두면(돌던 서비스는
+/// 안 멈춘다), 보는 사람이 없을 때 이것으로 갈아탄다(`docs/screen-service-split.md` 「Windows — MSI」).
+pub fn restart_service() {
+    RESTART.store(true, Ordering::Relaxed);
+    STOP.store(true, Ordering::Relaxed);
+}
+
+/// 서비스 관리자에 적힌 이 서비스의 실행 파일(등록 경로의 첫 토막).
+pub fn configured_exe() -> Option<PathBuf> {
+    let name = wide(service_name());
+    let manager = unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }.ok()?;
+    let service = unsafe { OpenServiceW(manager, PCWSTR(name.as_ptr()), SERVICE_QUERY_CONFIG) };
+    let out = service.ok().and_then(|service| {
+        let mut need = 0u32;
+        let _ = unsafe { QueryServiceConfigW(service, None, 0, &mut need) };
+        let mut buf = vec![0u64; (need as usize).div_ceil(8).max(1)];
+        let got = unsafe { QueryServiceConfigW(service, Some(buf.as_mut_ptr().cast()), need, &mut need) };
+        let _ = unsafe { CloseServiceHandle(service) };
+        got.ok()?;
+        let config = unsafe { &*(buf.as_ptr() as *const QUERY_SERVICE_CONFIGW) };
+        let line = unsafe { config.lpBinaryPathName.to_string() }.ok()?;
+        Some(PathBuf::from(exe_of_command(&line)))
+    });
+    let _ = unsafe { CloseServiceHandle(manager) };
+    out
+}
+
+/// `"C:\a b\x.exe" --flag` → `C:\a b\x.exe`.
+fn exe_of_command(line: &str) -> String {
+    let line = line.trim();
+    match line.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or_default().to_string(),
+        None => line.split_whitespace().next().unwrap_or_default().to_string(),
+    }
+}
+
+/// 죽거나 갈아타려고 끝나면 서비스 관리자가 다시 띄우게 — 「실패로 끝남」에도 복구 동작을 건다.
+fn configure_recovery() {
+    let name = wide(service_name());
+    let Ok(manager) = (unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }) else { return };
+    if let Ok(service) = unsafe { OpenServiceW(manager, PCWSTR(name.as_ptr()), SERVICE_CHANGE_CONFIG | SERVICE_START) } {
+        let mut actions = [
+            SC_ACTION { Type: SC_ACTION_RESTART, Delay: 1000 },
+            SC_ACTION { Type: SC_ACTION_RESTART, Delay: 5000 },
+            SC_ACTION { Type: SC_ACTION_RESTART, Delay: 30_000 },
+        ];
+        let failure = SERVICE_FAILURE_ACTIONSW {
+            dwResetPeriod: 24 * 3600,
+            lpRebootMsg: PWSTR::null(),
+            lpCommand: PWSTR::null(),
+            cActions: actions.len() as u32,
+            lpsaActions: actions.as_mut_ptr(),
+        };
+        let flag = SERVICE_FAILURE_ACTIONS_FLAG { fFailureActionsOnNonCrashFailures: true.into() };
+        unsafe {
+            let _ = ChangeServiceConfig2W(service, SERVICE_CONFIG_FAILURE_ACTIONS, Some((&failure as *const SERVICE_FAILURE_ACTIONSW).cast()));
+            let _ = ChangeServiceConfig2W(service, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, Some((&flag as *const SERVICE_FAILURE_ACTIONS_FLAG).cast()));
+            let _ = CloseServiceHandle(service);
+        }
+    }
+    let _ = unsafe { CloseServiceHandle(manager) };
+}
+
 fn service_dispatch() {
-    let mut name = wide(SERVICE_NAME);
+    let mut name = wide(service_name());
     let table = [
         SERVICE_TABLE_ENTRYW { lpServiceName: PWSTR(name.as_mut_ptr()), lpServiceProc: Some(service_main) },
         SERVICE_TABLE_ENTRYW { lpServiceName: PWSTR::null(), lpServiceProc: None },
@@ -524,15 +739,24 @@ fn service_dispatch() {
 }
 
 unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
-    let name = wide(SERVICE_NAME);
+    let name = wide(service_name());
     let Ok(handle) = (unsafe { RegisterServiceCtrlHandlerExW(PCWSTR(name.as_ptr()), Some(service_control), None) }) else { return };
     STATUS.store(handle.0 as usize, Ordering::Release);
     set_state(SERVICE_RUNNING, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN);
     redirect_stderr();
     log("서비스 시작");
+    configure_recovery();
+    if let Some(work) = SERVICE_WORK.get().copied() {
+        let _ = std::thread::Builder::new().name("screen-service-work".into()).spawn(move || work(&STOP));
+    }
     supervise();
-    log("서비스 멈춤");
-    set_state(SERVICE_STOPPED, 0);
+    if RESTART.load(Ordering::Relaxed) {
+        log("서비스 멈춤 — 새 판으로 다시 뜬다");
+        set_state_exit(SERVICE_STOPPED, 0, 1);
+    } else {
+        log("서비스 멈춤");
+        set_state(SERVICE_STOPPED, 0);
+    }
 }
 
 unsafe extern "system" fn service_control(control: u32, _event: u32, _data: *mut std::ffi::c_void, _context: *mut std::ffi::c_void) -> u32 {
@@ -672,6 +896,12 @@ mod tests {
         }
         assert_eq!(input_from(&json!({ "d": 0, "t": "pointer", "x": 9.0, "y": -1.0 })).map(|x| x.1), Some(Input::Pointer { x: 1.0, y: 0.0, buttons: 0, prev: 0, mods: 0 }));
         assert_eq!(input_from(&json!({ "t": "text", "s": "x" })), None, "화면 번호 없는 조작은 버린다");
+    }
+
+    #[test]
+    fn service_command_line_gives_the_exe() {
+        assert_eq!(exe_of_command(r#""C:\Program Files\kasaterm\bin\screen\1.0.0\kasaterm-screen.exe" --screen-service"#), r"C:\Program Files\kasaterm\bin\screen\1.0.0\kasaterm-screen.exe");
+        assert_eq!(exe_of_command(r"C:\x\a.exe --screen-service"), r"C:\x\a.exe");
     }
 
     #[test]

@@ -135,10 +135,11 @@ pub(crate) async fn serve_ws_with(socket: axum::extract::ws::WebSocket, capture:
     let _ = tx.close().await;
 }
 
-/// base 의 기기 화면을 본다. 카사넷 직통·믿는 중계가 아니면 바로 `Closed` 로 끝난다.
+/// base 의 기기 화면을 본다 — 그 기기 화면 서비스가 있으면 서비스로, 없으면 앱으로. 카사넷 직통·믿는 중계가 아니면 바로
+/// `Closed` 로 끝난다.
 pub fn watch(base: String, config: Config, on: impl Fn(Event) + Send + Sync + 'static) -> Option<Watch> {
     let rt = kasa_device::kasanet::runtime()?;
-    let connect = async move { kasa_device::kasanet::connect(&base, SCREEN_ALPN).await };
+    let connect = async move { kasa_device::kasanet::connect_screen(&base).await };
     Some(spawn_watch(&rt, connect, config, on))
 }
 

@@ -58,6 +58,7 @@ kasa-characters.workspace = true
 kasa-wire.workspace = true
 kasa-device.workspace = true
 kasa-backend.workspace = true
+kasa-cast.workspace = true
 kasa-cast-host.workspace = true
 kasa-remote.workspace = true
 kasa-students.workspace = true
@@ -253,7 +254,7 @@ webview2-com = "0.38"
 # Embed the app icon (assets/app.ico) + version info into kasaterm.exe so the
 # taskbar / Start menu / .msi installer show the real icon, not the default.
 [target.'cfg(windows)'.build-dependencies]
-winresource = "0.1"
+winresource = { workspace = true }
 
 [lints]
 workspace = true

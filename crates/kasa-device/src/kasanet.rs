@@ -45,6 +45,8 @@ struct Node {
     routes: Mutex<HashMap<String, Arc<Route>>>,
     /// base → 상대 id 와 화면 스트림을 받는 판인지. `connect` 가 base 로 상대를 찾는다.
     bases: Mutex<HashMap<String, (EndpointId, bool)>>,
+    /// base → 그 기기 화면 서비스 노드와의 길(`/version` 의 `screen_node`). 앱이 다시 떠도 이 길의 화면은 이어진다.
+    screens: Mutex<HashMap<String, Link>>,
     /// 등록된 폰 → 수명이 끝나는 때.
     phones: Mutex<HashMap<EndpointId, Instant>>,
 }
@@ -59,7 +61,7 @@ static PHONE_INGRESS: OnceLock<u16> = OnceLock::new();
 static NODE: OnceLock<Node> = OnceLock::new();
 
 /// 화면 스트림(`docs/screen-stream.md`). 받는 일은 위층(`kasa_remote::screen_stream`)이 꽂는다 — 이 층은 화면을 모른다.
-pub use kasa_cast::SCREEN_ALPN;
+pub use kasa_cast::{SCREEN_ALPN, SCREEN_LINK_ALPN};
 pub type ScreenHandler =
     Arc<dyn Fn(Connection) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 static SCREEN: OnceLock<ScreenHandler> = OnceLock::new();
@@ -179,6 +181,7 @@ pub async fn start(mcp_port: u16) {
         links: Mutex::new(HashMap::new()),
         routes: Mutex::new(HashMap::new()),
         bases: Mutex::new(HashMap::new()),
+        screens: Mutex::new(HashMap::new()),
         phones: Mutex::new(HashMap::new()),
     };
     if NODE.set(node).is_err() {
@@ -220,17 +223,46 @@ pub fn shutdown() {
     let _ = rx.recv_timeout(Duration::from_millis(500));
 }
 
+/// 이 기기 화면 서비스 노드(`docs/screen-service-split.md`) — 앱이 제어 길로 받아 `/version` 에 싣는다. 서비스가 없거나
+/// 끊기면 None.
+static SCREEN_NODE: Mutex<Option<Value>> = Mutex::new(None);
+
+/// 화면 서비스가 알린 노드 `{id, relay, addrs, proto, version}` — 바뀔 때마다 앱이 부른다.
+pub fn set_screen_node(node: Option<Value>) {
+    *SCREEN_NODE.lock().unwrap_or_else(|e| e.into_inner()) = node;
+}
+
 /// `/version` 에 싣는 이 기기의 카사넷 주소. 엔드포인트가 없으면 None — 옛 판과 같은 모양이 된다.
 pub fn info() -> Option<Value> {
     let n = NODE.get()?;
     let addr = n.endpoint.addr();
-    Some(serde_json::json!({
+    let mut v = serde_json::json!({
         "id": addr.id.to_string(),
         "relay": addr.relay_urls().next().map(|u| u.to_string()),
         "addrs": addr.ip_addrs().map(|a| a.to_string()).collect::<Vec<_>>(),
         "port": n.mcp_port,
         "screen": SCREEN.get().is_some(),
-    }))
+    });
+    if let Some(node) = SCREEN_NODE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        v["screen_node"] = node;
+    }
+    Some(v)
+}
+
+/// 화면 서비스가 받을 보는 쪽 — 명부로 배운 기기 id 와 등록된 주인 폰 id·만료(유닉스 초). 앱의 입구(`ScreenAccept`)와 같은 범위다.
+pub fn screen_viewers() -> (Vec<String>, Vec<(String, u64)>) {
+    let Some(n) = NODE.get() else { return (Vec::new(), Vec::new()) };
+    let mut machines: Vec<String> = n.links.lock().map(|l| l.keys().map(|id| id.to_string()).collect()).unwrap_or_default();
+    machines.sort();
+    let now = Instant::now();
+    let unix = unix_now();
+    let mut phones: Vec<(String, u64)> = n
+        .phones
+        .lock()
+        .map(|p| p.iter().map(|(id, until)| (id.to_string(), unix + until.saturating_duration_since(now).as_secs())).collect())
+        .unwrap_or_default();
+    phones.sort();
+    (machines, phones)
 }
 
 /// base 가 이 기기 루프백을 가리키면 그 소켓 주소. 루프백이 아니면(LAN 주소를 손으로 적은 항목) None —
@@ -314,6 +346,7 @@ pub fn learn(base: &str, kasanet: &Value) {
         let screen = kasanet.get("screen").and_then(Value::as_bool).unwrap_or(false);
         bases.insert(key(base), (link.id(), screen));
     }
+    learn_screen_node(n, base, kasanet.get("screen_node"));
     if fresh {
         eprintln!(
             "[kasanet] {base} = {} 허용·연결 시작",
@@ -323,6 +356,28 @@ pub fn learn(base: &str, kasanet: &Value) {
     if let Some(route) = route_for(n, base) {
         let _rt = n.handle.enter();
         route.set_link(link, port);
+    }
+}
+
+/// 그 base 의 화면 서비스 노드를 배운다 — 있으면 그 노드와 길을 따로 쥐고(`SCREEN_LINK_ALPN`), 없어졌으면 놓는다.
+/// 믿는 근거는 앱 id 와 같다: 루프백 base 로 물은 `/version` 이 알려 준 id 다.
+fn learn_screen_node(n: &Node, base: &str, node: Option<&Value>) {
+    let addr = node.and_then(peer::addr_from_json).filter(|a| a.id != n.endpoint.id());
+    let Ok(mut screens) = n.screens.lock() else { return };
+    match addr {
+        Some(addr) => match screens.get(&key(base)) {
+            Some(link) if link.id() == addr.id => link.set_addr(addr),
+            _ => {
+                let _rt = n.handle.enter();
+                let link = Link::start_alpn(n.endpoint.clone(), addr, n.trust.clone(), SCREEN_LINK_ALPN);
+                eprintln!("[kasanet] {base} 화면 서비스 {} 길 시작", link.id().fmt_short());
+                tokio::spawn(log_changes(format!("{base} 화면 서비스"), link.clone()));
+                screens.insert(key(base), link);
+            }
+        },
+        None => {
+            screens.remove(&key(base));
+        }
     }
 }
 
@@ -469,11 +524,44 @@ async fn log_changes(base: String, link: Link) {
     }
 }
 
-/// 그 기기가 화면 스트림을 받는 판인가(`/version` 의 `kasanet.screen`).
+/// 그 기기가 화면 스트림을 받는 판인가(`/version` 의 `kasanet.screen`, 또는 화면 서비스 노드).
 pub fn screen_capable(base: &str) -> bool {
-    NODE.get()
-        .and_then(|n| n.bases.lock().ok()?.get(&key(base)).map(|(_, screen)| *screen))
-        .unwrap_or(false)
+    NODE.get().is_some_and(|n| {
+        n.bases.lock().ok().and_then(|b| b.get(&key(base)).map(|(_, screen)| *screen)).unwrap_or(false)
+            || n.screens.lock().is_ok_and(|s| s.contains_key(&key(base)))
+    })
+}
+
+/// 화면을 실을 길 — 화면 서비스 노드와 직통·믿는 중계면 그 길, 아니면 앱 노드의 길(`path`).
+pub fn screen_path(base: &str) -> Option<(&'static str, Option<u64>)> {
+    let n = NODE.get()?;
+    let service = n.screens.lock().ok().and_then(|s| s.get(&key(base)).map(Link::state));
+    match service {
+        Some(LinkState::Direct { rtt }) => Some(("kasanet", Some(rtt.as_millis() as u64))),
+        Some(LinkState::TrustedRelay { rtt }) => Some(("kasanet-relay", Some(rtt.as_millis() as u64))),
+        _ => path(base),
+    }
+}
+
+/// 그 기기 화면에 `kasa/screen/1` 연결을 연다 — 화면 서비스 노드와 데이터를 실을 길이면 서비스로(앱이 다시 떠도 이어진다),
+/// 아니면 앱 노드로(옛 판·서비스 없는 기기).
+pub async fn connect_screen(base: &str) -> Result<(Connection, &'static str), String> {
+    let n = NODE.get().ok_or("카사넷이 꺼져 있다")?;
+    let service = n.screens.lock().ok().and_then(|s| s.get(&key(base)).cloned());
+    if let Some(link) = service {
+        let path = match link.state() {
+            LinkState::Direct { .. } => Some("kasanet"),
+            LinkState::TrustedRelay { .. } => Some("kasanet-relay"),
+            _ => None,
+        };
+        if let Some(path) = path {
+            match n.endpoint.connect(link.addr(), SCREEN_ALPN).await {
+                Ok(conn) => return Ok((conn, path)),
+                Err(e) => eprintln!("[kasanet] {base} 화면 서비스에 못 붙어 앱으로: {e}"),
+            }
+        }
+    }
+    connect(base, SCREEN_ALPN).await
 }
 
 /// 카사넷 일꾼 런타임 — 위층이 같은 런타임에서 연결을 돌린다.

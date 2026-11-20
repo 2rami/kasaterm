@@ -50,7 +50,7 @@ pub(crate) fn run_helper(args: &[std::ffi::OsString]) -> bool {
 pub(crate) fn can_view(base: &str) -> bool {
     cfg!(any(target_os = "macos", windows))
         && kasa_device::kasanet::screen_capable(base)
-        && kasa_device::kasanet::path(base).is_some_and(|(p, _)| p != "ssh")
+        && kasa_device::kasanet::screen_path(base).is_some_and(|(p, _)| p != "ssh")
 }
 
 type Rect = (f32, f32, f32, f32);

@@ -71,8 +71,8 @@
 
 | 프로세스 | 계정·세션 | 맡는 것 |
 |---|---|---|
-| 서비스 `kasaterm-screen.exe --service`(이름 `KasatermScreen` 그대로) | LocalSystem, 세션 0 | 도우미 감독(세션 바뀜·죽음·물러서기, 잡 오브젝트 그대로), **카사넷 화면 엔드포인트**, 제어 파이프, 허용 목록·설정 저장 |
-| 도우미 `kasaterm-screen.exe --agent` | SYSTEM, 콘솔 세션 | 뜨기·압축·조작(보안 데스크톱까지)·**시스템 소리·스피커 끄기** — 지금 `win_agent.rs` 에 소리를 더한다. 장·소리를 세션 파이프로 서비스에 |
+| 서비스 `kasaterm-screen.exe --screen-service`(이름 `KasatermScreen` 그대로) | LocalSystem, 세션 0 | 도우미 감독(세션 바뀜·죽음·물러서기, 잡 오브젝트 그대로), **카사넷 화면 엔드포인트**, 제어 파이프, 허용 목록·설정 저장, 새 판으로 갈아타기 |
+| 도우미 `kasaterm-screen.exe --screen-agent` | SYSTEM, 콘솔 세션 | 뜨기·압축·조작(보안 데스크톱까지)·**시스템 소리·스피커 끄기** — 지금 `win_agent.rs` 에 소리를 더한다. 장·소리를 세션 파이프로 서비스에 |
 | 앱 `kasaterm.exe` | 사용자 | 설정·명부를 제어 파이프로 넘김, 폰 `/screen/ws`·옛 보는 쪽 중계 |
 
 - 엔드포인트를 세션 0 서비스에 두는 까닭: 도우미는 세션이 바뀔 때마다 옮겨 뜨므로 거기 두면 빠른 사용자 전환·원격 데스크톱 세션에서
@@ -203,7 +203,7 @@
 | `status` | 앱 → | 구독. 바뀔 때마다 `{viewers: [{id, label, since, audio, input}], node, capture, input}` — 앱이 「보는 중」 표시를 세운다 |
 | `ask_permission` | 앱 → | `screen`·`accessibility` — 맥 권한 창을 **서비스 프로세스가** 띄운다(TCC 는 띄운 프로세스에 붙는다) |
 | `kick` | 앱 → | 그 보는 쪽 연결을 닫는다 |
-| `restart_when_idle` | 앱 → | 보는 사람이 없을 때 스스로 끝낸다(launchd·SCM 이 새 판으로 다시 띄운다) |
+| `restart_when_idle` | 앱 → | (macOS, P4) 보는 사람이 없을 때 스스로 끝낸다 — launchd 가 새 판으로 다시 띄운다. Windows 는 서비스가 등록 경로를 보고 스스로 한다 |
 | `watch` | 앱 → (장 연결) | `Config` → 지금 Windows 장 연결의 `S`/`N`·`D`/`F`·`H` 그대로 — 앱의 중계(옛 보는 쪽·폰)용 |
 | `input`·`keyframe` | 앱 → | 지금 조작 연결의 `C`/`I`·`K` 그대로 |
 
@@ -219,6 +219,7 @@
 | 로그인 전 화면(Windows) | 앱 `settings.logon_screen` | 켬(결정 5) — 허용 목록은 그대로 명부 기기·주인 폰 |
 | 서비스 켜고 끄기 | 앱 설정 → 맥 `SMAppService.unregister`, Windows 서비스 시작 유형 | 설치하면 켬 |
 
+- 앱은 설정 파일(`settings.json`)의 `screen_service` 칸(`{input, audio, source_mute, logon_screen}`)을 그대로 넘긴다 — 아직 설정 화면은 없다.
 - 서비스는 마지막으로 받은 설정을 디스크에 둔다. 앱이 없을 때도 그대로 쓴다. 스피커 표(`stream-muted`)는 서비스 상태 폴더로 옮기고, 서비스가
   뜰 때 남아 있으면 되켠다. 앱의 `exiting` 은 서비스가 보낼 때는 스피커를 건드리지 않는다.
 - 비트레이트·fps·코덱은 지금처럼 보는 쪽 `Config` 가 정하고 서비스가 범위로 깎는다(`Config::from_json`). 설정 칸에 따로 두지 않는다.
@@ -241,37 +242,42 @@
 
 ### Windows — MSI
 
-[확인] P0(2026-11-21 집 PC, 시험 제품 `KasaP0Test`·시험 서비스 `KasatermScreenP0`, WiX 3.14)로 정한 배치다. 처음 세운 「판 붙은 구성요소에
-`ServiceControl Stop·Remove` 까지 거는」 꼴은 서비스 판이 바뀔 때 옛 제품 제거가 **같은 이름의 서비스를 지워 버렸다**(새 판 파일은 깔렸는데
-서비스가 없음). `Stop='install'` 을 걸면 서비스 판이 같아도 업데이트마다 다시 켜졌다. 아래 꼴이 셋 다 피한다.
+[확인] P0(2026-11-21 집 PC, 시험 제품 `KasaP0Test`·시험 서비스 `KasatermScreenP0`, WiX 3.14)로 정한 배치다.
 
 | 구성요소 | GUID | 담는 것 |
 |---|---|---|
-| 서비스 실행 파일 | **서비스 판마다** 고정, 폴더 `bin\screen\<서비스 판>\` | `kasaterm-screen.exe` + `ServiceInstall`(`KasatermScreen`) + `ServiceControl Start='install'` — 멈춤·지움은 걸지 않는다 |
-| 서비스 지우개 | **늘 같다** | 레지스트리 값 하나(키 경로) + `ServiceControl Stop='uninstall' Remove='uninstall'` — 마지막 제품이 지워질 때만 돈다 |
+| 서비스 실행 파일 | **서비스 판마다** 고정(판으로 지은 값), 폴더 `bin\screen\<서비스 판>\`, **`Permanent='yes'`** | `kasaterm-screen.exe` + `ServiceInstall`(`KasatermScreen`, `--screen-service`) + `ServiceControl Start='install'` — 멈춤·지움은 걸지 않는다 |
+| 서비스 정책 | 늘 같다 | `SoftwareSASGeneration`(키 경로) + 방화벽 예외(서비스 실행 파일, 들어오는 UDP) |
+| 지우기 | 사용자 지정 동작 `ScreenServiceRemove`(WixQuietExec, `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`) | 서비스 멈추고 지우기, `bin\screen`·`%ProgramData%\kasaterm\screen` 걷기 |
 
-- `MajorUpgrade Schedule='afterInstallExecute'`(새 판을 먼저 깔고 옛 판을 뒤에 지운다), 재시작 관리자는 기본값 그대로.
-- 잰 것(서비스 PID·`ImagePath`·파일):
+- `MajorUpgrade` 예약은 **지금 그대로 `afterInstallInitialize`**(옛 판을 다 지우고 새 판을 깐다).
+- 서비스는 **스스로 갈아탄다**: MSI 는 새 판을 옆 폴더에 깔고 등록 경로(`ImagePath`)만 바꾼다. 서비스가 2초마다 등록 경로와 제 실행 파일을
+  견줘 다르고 보는 사람이 없으면 「실패」로 끝나고, 서비스 관리자가 복구 동작(1·5·30초 뒤 다시 시작, 「실패로 끝남」에도)으로 새 판을 띄운다.
+  새 판은 지난 판 폴더를 치운다. 그래서 **결정 9(보는 사람이 떠날 때까지 미룸)를 서비스가 지킨다** — 업데이트 도우미는 할 일이 없다.
+- 잰 것(서비스 PID·`ImagePath`·파일, 시험 MSI):
 
 | 업데이트 | 결과 |
 |---|---|
-| 앱만 바뀜(서비스 판 같음) | **서비스 PID 그대로**, 앱 파일은 새 판 |
-| 서비스 판이 바뀜 | MSI 안에서 **한 번 다시 켜짐**(재시작 관리자가 옛 파일을 쥔 서비스를 멈추고 다시 띄운다), `ImagePath` 는 새 폴더, 옛 폴더 지워짐, 재부팅 대기 없음 |
-| 지금 설치판 꼴(`kasaterm.exe` 구성요소에 서비스, `afterInstallInitialize`·`Stop='both'`)에서 넘어감 | 한 번 다시 켜지고 `ImagePath` 가 새 실행 파일로, 서비스는 안 지워짐 |
-| 지우기 | 서비스·폴더 다 사라짐 |
-| 재시작 관리자를 끔(`MSIRESTARTMANAGERCONTROL=Disable`) | 그래도 다시 켜졌고 `Config.Msi\*.rbf` 재부팅 대기가 남았다 — 쓰지 않는다 |
+| 지금 설치판 꼴(`kasaterm.exe` 구성요소에 서비스, `Stop='both'`)에서 넘어감 | 옛 제품이 서비스를 멈추고 지운 뒤 새 판이 깔고 띄운다 — **한 번 다시 켜짐**(넘어갈 때 한 번) |
+| 앱만 바뀜(서비스 판 같음) | **서비스 PID 그대로** |
+| 서비스 판이 바뀜 | **서비스 PID 그대로**(옛 판이 계속 돈다), `ImagePath` 는 새 폴더, 두 판 폴더가 다 있다 → 다시 켜면 새 판 |
+| 지우기 | 서비스·`bin\screen` 사라짐, 재부팅 대기 없음 |
 
-- 그래서 **결정 9(보는 사람이 떠날 때까지 미룸)는 MSI 를 부르기 전에** 지킨다. MSI 속성 `KASA_SCREEN_SERVICE_VERSION` 에 서비스 판을 싣고, 업데이트
-  도우미(`swap_powershell`)가 그 값을 지금 서비스 판(`%ProgramData%\kasaterm\screen\status.json`)과 견줘 다르고 보는 사람이 있으면 떠날 때까지
-  기다린 뒤 `msiexec` 를 부른다. 서비스 판이 같으면 기다리지 않는다.
-- 첫 전환(지금 설치판 → 새 꼴)은 서비스가 한 번 다시 켜진다. 옛 제품 구성요소의 `Remove='uninstall'` 은 `kasaterm.exe` 구성요소(경로가 같아
-  두 제품이 나눠 쥔다)에 걸려 있어 돌지 않는다.
-- 서비스 전용 MSI(결정 2 의 물러설 길)는 쓰지 않는다 — 한 MSI 로 위 셋을 다 맞췄다.
+- 처음 세운 꼴(`afterInstallExecute` + 판 붙은 구성요소)은 쓰지 않는다 — 잰 것과 까닭:
+  - `ServiceControl Stop·Remove` 까지 걸면 서비스 판이 바뀔 때 옛 제품 제거가 **같은 이름의 서비스를 지워 버렸다**.
+  - `Stop='install'` 을 걸면 서비스 판이 같아도 업데이트마다 다시 켜졌다.
+  - 멈춤을 빼면 서비스 판이 바뀔 때 재시작 관리자가 옛 파일을 쥔 서비스를 다시 켰다(`MSIRESTARTMANAGERCONTROL=Disable` 이어도 다시 켜지고
+    `Config.Msi\*.rbf` 재부팅 대기가 남았다).
+  - 무엇보다 **굽기 스크립트의 `heat -gg` 가 웹 UI·협업 훅 파일의 구성요소 GUID 를 빌드마다 새로 짓는다.** `afterInstallExecute` 면 새 판을 깐
+    뒤 옛 제품 제거가 같은 경로의 새 파일을 지운다(구성요소 규칙 위반). 예약을 그대로 두면 이 위험이 없다.
+- 서비스 전용 MSI(결정 2 의 물러설 길)는 쓰지 않는다 — 한 MSI 로 위를 다 맞췄다.
 - 앱 [다시 켜기] 흐름(`swap_powershell` → 앱 종료 기다림 → `msiexec /passive` → 앱 다시 띄움)은 그대로다. 앱이 꺼져 있는 동안 보는 쪽은
   서비스에 붙어 있다.
-- MSI 가 방화벽 예외(`kasaterm-screen.exe`, 들어오는 UDP)와 `SoftwareSASGeneration` 을 건다(지금 것을 새 구성요소로 옮긴다).
+- 서비스 판은 `app/kasaterm-screen/Cargo.toml` 의 판이고 실행 파일 판(FileVersion)으로도 박힌다. 서비스 코드(그 크레이트·`kasa-cast`·
+  `kasa-cast-host`·`kasa-net`)를 바꾸면 판을 올리고 `source-hash.txt` 를 고친다 — 시험 `service_version_follows_its_source` 가 지킨다. 판이 같으면
+  설치된 서비스는 그대로라 새 코드가 안 간다.
 - 집 PC 관리자 ssh 에서 빌드할 때: `%USERPROFILE%\.cargo\bin` 의 rustup 대리 실행 파일은 심볼릭 링크라 관리자(높은 무결성) 프로세스가 못 따라간다
-  (`os error 448`, 신뢰하지 않는 탑재 지점). 툴체인의 `cargo.exe` 를 바로 부르고 `RUSTC` 를 같은 폴더의 `rustc.exe` 로 준다.
+  (`os error 448`, 신뢰하지 않는 탑재 지점). 툴체인의 `cargo.exe` 를 바로 부르고 `RUSTC`·`RUSTDOC` 을 같은 폴더의 것으로 준다.
 
 ### macOS — Sparkle
 
@@ -353,13 +359,39 @@
   전까지 산다.
 - Windows 는 MSI 실패 때 Windows Installer 가 옛 판을 그대로 두고(구성요소째), 서비스 판 폴더가 갈려 있어 옛 서비스가 남는다.
 
+## W1 실측 (2026-11-21 집 PC, 시험 서비스)
+
+- 시험 서비스 `KasatermScreenTest`(세션 0) → 시험 도우미(SYSTEM, 세션 1, 파이프 `kasaterm-screen-test-1`) → 탐침(`--probe-watch`, `127.0.0.2`
+  루프백). **앱 없이** 15초에 장 860장(57fps, 3840×1600 HEVC, `agent:true`), 소리 덩이 2949개(5ms 덩이, 초당 약 197), 뜸→받음 p50 6.5ms·p90 8.5ms,
+  압축 끝→받음 p50 0.28ms. 사람 서비스(`KasatermScreen`)·도우미 파이프(`kasaterm-screen-1`)는 그대로 돌았다.
+- 서비스 키는 국내 중계 허용 목록에 없어 `not authorized` 로 거절되고 n0 를 홈으로 썼다 — 실기에서는 `relay.sh allow <서비스 id> <기기>-screen` 이 있어야
+  믿는 중계로 데이터를 싣는다(직통은 상관없다).
+- 처음엔 탐침이 장을 하나도 못 받았다: 탐침이 연결 퓨처 안으로 옮긴 엔드포인트가 연결 직후 버려져 소켓이 닫혔다(서비스는 핑을 기다림). 엔드포인트는
+  끝까지 쥔다.
+
+## 구현 메모 (P2, Windows)
+
+- 제어 규약은 `kasa_cast::service`(`PROTO`·틀·`ask`), 서비스 쪽 처리는 `app/kasaterm-screen/src/ctl.rs`, 파이프는 `win.rs`, 앱 쪽은
+  `app/kasaterm/src/screen_service.rs`(2초마다 `allow`(바뀔 때만)·`settings`(바뀔 때만)·`status` → `kasanet::set_screen_node`).
+- 보는 쪽 길: `kasanet::learn` 이 `/version` 의 `screen_node` 를 보면 그 노드와 길을 따로 쥔다(`Link::start_alpn` + `kasa/screen-link/1` —
+  서비스 노드는 `fwd` 를 안 받는다). `kasanet::connect_screen` 은 그 길이 직통·믿는 중계면 서비스로, 아니면 앱으로 붙는다. `can_view` 는
+  `kasanet::screen_path` 를 본다.
+- 소리: 도우미 파이프에 소리 연결(`A` → `N` 뒤 `a` 덩이·1초 숨 `H`)을 더했다. 세션 0 서비스의 소리 허브는 그 연결을 쓴다
+  (`kasa_cast_host::service::audio`). 스피커 끄기는 도우미가 하고 서비스 설정 `source_mute` 를 따른다.
+- 로그인 화면: 콘솔 세션에 사용자가 없으면 도우미 파이프를 SYSTEM 만 열게 만들고, 사용자가 생기면 도우미가 끝나 서비스가 그 사용자까지 받게
+  다시 띄운다.
+- 도우미 파이프의 상대 확인은 「같은 실행 파일 또는 같은 설치의 `bin\kasaterm.exe`」다 — 앱의 폰 웹소켓·옛 보는 쪽 중계가 지금처럼 도우미 파이프로
+  장을 받는다(결정 4 의 「앱이 중계」).
+- 리그용 이름 가르기: `KASATERM_SCREEN_SERVICE_NAME`(서비스 이름 — 복구 동작·등록 경로를 그 이름으로), `KASATERM_SCREEN_PIPE`(도우미 파이프),
+  `KASATERM_SCREEN_CTL`(제어 파이프), `KASATERM_SCREEN_STATE`(상태 폴더, 기록은 그 옆 `screen-service.log`), `KASATERM_SCREEN_VERIFY=1`(검증 실행).
+
 ## 이행 단계
 
 | 단계 | 내용 | 대략 크기 | 끝 조건 |
 |---|---|---|---|
 | P0 실측 | 아래 「재야 할 것」 1–7. 시험 MSI·시험 서비스·서명된 시험 도우미로 잰다. 제품 코드 변경 없음 | 시험 스크립트 수백 줄, 1–2일 | 이 문서에 수치·결론 |
 | P1 떼어 옮기기 | `kasa-cast`·`kasa-cast-host` 로 옮긴다. 동작 그대로 | 옮김 약 4,500줄, 새 약 200줄 | 앱 시험·`kasa-remote screen_stream` 시험·`check-workspace` 통과, 리그 S1 수치 그대로 |
-| P2 Windows 서비스가 보냄 | `kasaterm-screen.exe`(서비스·도우미, 소리는 도우미), 서비스 키·엔드포인트, 제어 파이프, 허용 목록 넘기기·저장, `/version screen_node`, 보는 쪽 서비스 링크·물러나기, 앱 중계(`Capture` = 서비스 클라이언트), MSI(판 붙은 서비스 구성요소·지우개·방화벽·복구·`afterInstallExecute`) | 새 약 2,000–2,500줄, MSI 약 60줄 | 아래 리그 W1–W3 |
+| P2 Windows 서비스가 보냄 | `kasaterm-screen.exe`(서비스·도우미, 소리는 도우미), 서비스 키·엔드포인트, 제어 파이프, 허용 목록 넘기기·저장, `/version screen_node`, 보는 쪽 서비스 링크·물러나기, 앱 중계(`Capture` = 서비스 클라이언트), MSI(판마다 Permanent 서비스 구성요소·정책·방화벽·지우기 동작)·서비스가 스스로 갈아타기·복구 동작 | 새 약 2,000–2,500줄, MSI 약 60줄 | 아래 리그 W1–W3 |
 | P3 Windows 정리 | `kasaterm.exe --screen-service`·`--screen-agent`, 이름 세기 예외, 앱 안 보내기(Windows) 지움 — Windows 기기가 다 새 판이 된 뒤 | 지움 약 1,000줄 | 앱 시험, 집 PC 설치판 |
 | P4 macOS 도우미 | `KasatermScreen.app`, `SMAppService`, 유닉스 소켓 제어·서명 확인, 권한 창·상태 표시, `build-app.sh` 안쪽 서명·공증, 보는 사람 없을 때 갈아 끼우기 | 새 약 1,500–2,000줄, 굽기 약 80줄 | 아래 리그 M1–M3 |
 | P5 앱 없이 | 보는 쪽 `screen_node` 캐시, `relay.sh ids`, 맥미니 앱 없이 보내기, (선택) JPEG 도 서비스로, 앱 안 보내기(맥) 지움 | 새 약 500줄, 지움 약 1,500줄 | 앱이 꺼진 기계를 칸으로 본다 |
@@ -377,9 +409,12 @@
 - **M2 맥 — 옛 보는 쪽**: A 를 P1 판(서비스 모름)으로 띄워 B 앱 중계로 보이는지.
 - **M3 맥 — 등록·업데이트·TCC**: 서명된 preview 판 둘로 `SMAppService` 등록 → 권한 → Sparkle 갈아 끼우기 → 보는 사람 없을 때 갈아 끼우기. 사람의
   로그인 항목을 바꾸므로 별도 기기·별도 사용자에서, 사람 승인 뒤.
-- **W1 Windows — 앱 재시작**: S3b 처럼 관리자 ssh 에서 시험 서비스(`sc.exe create KasatermScreenTest binPath= "\"<리그>\kasaterm-screen.exe\" --service"`),
-  리그 폴더 exe, 시험 뒤 바로 `sc.exe delete`. 보는 쪽은 리그 웹소켓 대신 카사넷 시험 클라이언트(`kasa-cast` 의 `run_watch` 를 부르는 작은 시험 바이너리)로
-  받는다 — 루프백 밖 UDP 를 안 열게 `KASATERM_KASANET_BIND`. 앱 리그를 끝냈다 다시 띄우는 동안 장이 이어지는지.
+- **W1 Windows — 앱 없이 보내기**: S3b 처럼 관리자 ssh 에서 시험 서비스(`sc.exe create KasatermScreenTest binPath= "\"<리그>\bin\screen\0\kasaterm-screen.exe\" --screen-service"`,
+  서비스 환경 `KASATERM_SCREEN_SERVICE_NAME=KasatermScreenTest`·`KASATERM_SCREEN_PIPE`·`KASATERM_SCREEN_CTL`·`KASATERM_SCREEN_STATE`·`KASATERM_KASANET_BIND` 로 사람
+  서비스·도우미 파이프와 가른다),
+  리그 폴더 exe, 시험 뒤 바로 `sc.exe delete`. 보는 쪽은 같은 실행 파일의 탐침(`kasaterm-screen --probe-watch <키> <screen-status.json> <초>`)이다 —
+  탐침 id(`--probe-id`)를 리그 상태 폴더 `allow.json` 에 미리 넣고, 루프백 밖 UDP 를 안 열게 둘 다 `KASATERM_KASANET_BIND=127.0.0.2:0`. 앱 없이 장·소리가
+  오는지, 지연(뜸→받음)이 앱 직결과 견줘 늘지 않는지 잰다.
 - **W2 Windows — MSI 업데이트**: P0 의 시험 MSI 셋을 실제로 깔아 본다(사람 설치판과 다른 ProductCode·UpgradeCode·서비스 이름으로).
 - **W3 Windows — 소리·보안 데스크톱**: UAC 창이 장에 실리고 원격 Esc 로 닫히는 S3b 시험을 서비스 길로 다시. 소리는 세션 0 이 튼 소리를 뜨던 S4 실측을
   서비스 길로 다시.
@@ -390,12 +425,12 @@
 
 | # | 모르는 것 | 결과 |
 |---|---|---|
-| 1 | MSI 가 앱만 바뀐 업데이트에서 서비스를 안 멈추는가 | **[확인] 된다** — 위 「Windows — MSI」 꼴로. 처음 꼴은 서비스 판이 바뀔 때 서비스를 지워 버려 고쳤다 |
+| 1 | MSI 가 앱만 바뀐 업데이트에서 서비스를 안 멈추는가 | **[확인] 된다** — 위 「Windows — MSI」 꼴(Permanent 서비스 구성요소, 예약 그대로)로. 서비스 판이 바뀌어도 안 멈추고 서비스가 스스로 갈아탄다 |
 | 2 | SYSTEM 도우미가 사용자 세션 소리를 뜨고 장치를 음소거하나 | **[확인] 된다** — 꾸러미 300개/3초·봉우리 −16.4dBFS, 음소거 켜기·되돌리기 |
 | 3 | Sparkle 갈아 끼우기 뒤 도우미가 살고 등록·TCC 가 이어지나 | P4 에서 잰다 — 서명된 preview 판 둘과 사람의 로그인 항목 승인이 필요하다 |
 | 4 | 맥미니 거부의 까닭 | 못 쟀다 — 2026-11-21 맥미니 ssh 길(직접·Cloudflare·경유)이 다 닫혀 있었다. P4 에서 다시 본다 |
-| 5 | 도우미 → 서비스 파이프가 지연을 더하나 | P2 리그에서 잰다 |
-| 6 | 세션 0 서비스의 방화벽·UPnP | P2 리그에서 잰다 |
+| 5 | 도우미 → 서비스 파이프가 지연을 더하나 | **[확인] 거의 안 더한다** — W1(2026-11-21 집 PC): 뜸→받음 p50 6.5·p90 8.5ms(앱 직결 화면→풀림 6–7ms), 압축 끝→받음 p50 0.28ms |
+| 6 | 세션 0 서비스의 방화벽·UPnP | 루프백 리그만 쟀다(방화벽 무관). MSI 가 서비스 실행 파일에 들어오는 UDP 예외를 건다. 실기 설치판에서 같은 망 직통을 본다 |
 | 7 | 두 프로세스가 같은 출력을 DXGI 복제할 수 있나 | **[확인] 된다** — SYSTEM 프로세스 둘이 같은 출력을 함께 복제해 4초에 476장씩 받았다(그 PC 주사율) |
 
 ## 결정 (2026-11-21)

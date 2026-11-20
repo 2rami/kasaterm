@@ -40,6 +40,7 @@
 | 호스트 | 9 | `kasa-gateway` | 폰 관문 서버·계정 라우팅·설치판 배포 창구. kasa-relay 실행 파일 | 금지 | 허용 |
 | 호스트 | 10 | `kasa-http` | 이 기기 HTTP 라우터·칸·화면 API와 서버 수명 | 금지 | 허용 |
 | 호스트 | 11 | `kasa-serve` | 독립 HTTP 서버 kasa-serve-web 실행 파일 | 금지 | 허용 |
+| 앱 | 12 | `kasaterm-screen` | 화면 서비스 실행 파일 — 앱 밖에서 이 기기 화면을 보낸다(Windows 서비스·도우미, 서비스 카사넷 노드·제어 길, `docs/screen-service-split.md`). 판을 따로 센다. 받는 쪽이 없다 | 금지 | 허용 |
 | 앱 | 12 | `kasaterm` | 본판 GUI 실행 파일. 산출물이라 받는 쪽이 없다(바탕화면 펫 `kasapet` 은 2026-10-19 레포 밖으로 뗐다) | 허용 | 허용 |
 | 실험 | — | `spikes/*` | 렌더러·IME 시험판. 제품이 아니다 | — | — |
 

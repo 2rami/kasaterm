@@ -28,6 +28,9 @@ pub(super) fn mute() -> Option<Muted> {
     if crate::verification_run() && std::env::var_os("KASATERM_TEST_SCREEN_SOURCE_MUTE").is_none() {
         return None;
     }
+    if !crate::source_mute_on() {
+        return None;
+    }
     let device = os::default_output()?;
     if os::muted(&device)? {
         return None;

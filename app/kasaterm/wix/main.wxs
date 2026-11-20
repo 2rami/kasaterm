@@ -56,7 +56,9 @@
     <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
 <?endif ?>
 
-<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
+     xmlns:util='http://schemas.microsoft.com/wix/UtilExtension'
+     xmlns:fire='http://schemas.microsoft.com/wix/FirewallExtension'>
 
     <Product
         Id='*'
@@ -120,35 +122,58 @@
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\kasaterm.exe'
                                 KeyPath='yes'/>
-                            <!-- 화면 도우미(screen_stream/win_agent.rs, docs/screen-stream.md S3b) — Parsec 처럼 SYSTEM
-                                 서비스가 사용자 세션에 도우미를 SYSTEM 으로 띄워 UAC·잠금 화면까지 보고 누른다. 서비스가
-                                 못 떠도 설치는 이어 간다(앱이 직접 뜨는 길로 물러난다). -->
-                            <ServiceInstall
-                                Id='ScreenService'
-                                Name='KasatermScreen'
-                                DisplayName='kasaterm Screen Helper'
-                                Description='다른 기기에서 이 PC 화면을 볼 때 보안 화면(UAC·잠금 화면)까지 보이고 조작하게 해요.'
-                                Type='ownProcess'
-                                Start='auto'
-                                ErrorControl='normal'
-                                Account='LocalSystem'
-                                Arguments='--screen-service'
-                                Vital='no'/>
-                            <!-- 화면 칸의 Ctrl+Alt+Del — 넣은 키로는 SAS 가 안 가서 도우미가 SendSAS 를 부른다. 서비스에게
-                                 SAS 를 허락하는 정책(1 = 서비스)이 있어야 먹는다. VNC 서버들이 거는 값과 같고 지우면 함께 걷힌다. -->
+                        </Component>
+                        <!-- 화면 서비스(app/kasaterm-screen, docs/screen-service-split.md「Windows — MSI」) — 이 PC 화면을 앱 밖에서
+                             보낸다. SYSTEM 서비스가 콘솔 세션에 도우미를 SYSTEM 으로 띄워 UAC·잠금·로그인 화면까지 보고 누른다.
+                             서비스 판마다 폴더·GUID 가 갈리고 Permanent 라 업데이트가 서비스를 멈추지 않는다 — 판이 바뀌면 등록
+                             경로만 새 폴더로 바뀌고, 서비스가 보는 사람이 없을 때 스스로 갈아타며 지난 판 폴더를 치운다. 지우기는
+                             아래 ScreenServiceRemove 가 맡는다. 서비스가 못 떠도 설치는 이어 간다(앱이 직접 뜨는 길로 물러난다). -->
+                        <Directory Id='ScreenDir' Name='screen'>
+                            <Directory Id='ScreenVersionDir' Name='$(var.ScreenServiceVersion)'>
+                                <Component Id='ScreenService' Guid='$(var.ScreenServiceGuid)' Permanent='yes'>
+                                    <File
+                                        Id='screenexe'
+                                        Name='kasaterm-screen.exe'
+                                        DiskId='1'
+                                        Source='$(var.CargoTargetBinDir)\kasaterm-screen.exe'
+                                        KeyPath='yes'/>
+                                    <ServiceInstall
+                                        Id='ScreenService'
+                                        Name='KasatermScreen'
+                                        DisplayName='kasaterm Screen Helper'
+                                        Description='다른 기기에서 이 PC 화면을 볼 때 앱이 꺼져 있어도, 보안 화면(UAC·잠금·로그인 화면)까지 보이고 조작하게 해요.'
+                                        Type='ownProcess'
+                                        Start='auto'
+                                        ErrorControl='normal'
+                                        Account='LocalSystem'
+                                        Arguments='--screen-service'
+                                        Vital='no'/>
+                                    <ServiceControl
+                                        Id='ScreenServiceStart'
+                                        Name='KasatermScreen'
+                                        Start='install'
+                                        Wait='no'/>
+                                </Component>
+                            </Directory>
+                        </Directory>
+                        <!-- 화면 칸의 Ctrl+Alt+Del — 넣은 키로는 SAS 가 안 가서 도우미가 SendSAS 를 부른다. 서비스에게 SAS 를
+                             허락하는 정책(1 = 서비스)이 있어야 먹는다. VNC 서버들이 거는 값과 같고 지우면 함께 걷힌다. 화면 서비스
+                             노드는 세션 0 이라 방화벽 묻기 창이 안 뜨고 들어오는 UDP 가 조용히 막혀 같은 망 직통이 안 서므로 예외를 건다. -->
+                        <Component Id='ScreenPolicy' Guid='{73C9C6B6-C5C0-554D-9DE0-09F24321ED6C}'>
                             <RegistryValue
                                 Root='HKLM'
                                 Key='SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
                                 Name='SoftwareSASGeneration'
                                 Type='integer'
-                                Value='1'/>
-                            <ServiceControl
-                                Id='ScreenServiceControl'
-                                Name='KasatermScreen'
-                                Start='install'
-                                Stop='both'
-                                Remove='uninstall'
-                                Wait='no'/>
+                                Value='1'
+                                KeyPath='yes'/>
+                            <fire:FirewallException
+                                Id='ScreenServiceUdp'
+                                Name='kasaterm screen service'
+                                Program='[#screenexe]'
+                                Protocol='udp'
+                                Scope='any'
+                                IgnoreFailure='yes'/>
                         </Component>
                         <!-- 크로스-pane RPC + statusline. locate_cmux_compat_binary 가
                              exe 옆에서 찾아 pane PATH(shim dir)에 스테이징하고, claude
@@ -277,6 +302,16 @@
             </Component>
         </DirectoryRef>
 
+        <!-- 지우기(업데이트가 아닌)에서만 화면 서비스를 멈추고 지운다 — 서비스 구성요소는 Permanent 라 MSI 가 안 지운다.
+             상태 폴더(서비스 카사넷 키·허용 목록)도 함께 걷는다. -->
+        <CustomAction Id='ScreenServiceRemove_Set' Property='ScreenServiceRemove' Execute='immediate'
+            Value='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Stop-Service KasatermScreen -Force -ErrorAction SilentlyContinue; sc.exe delete KasatermScreen | Out-Null; Remove-Item -Recurse -Force -LiteralPath &apos;[Bin]screen&apos; -ErrorAction SilentlyContinue; Remove-Item -Recurse -Force -LiteralPath (Join-Path $env:ProgramData &apos;kasaterm\screen&apos;),(Join-Path $env:ProgramData &apos;kasaterm\screen-status.json&apos;) -ErrorAction SilentlyContinue"'/>
+        <CustomAction Id='ScreenServiceRemove' BinaryKey='WixCA' DllEntry='WixQuietExec64' Execute='deferred' Return='ignore' Impersonate='no'/>
+        <InstallExecuteSequence>
+            <Custom Action='ScreenServiceRemove_Set' Before='InstallInitialize'>REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+            <Custom Action='ScreenServiceRemove' After='RemoveFiles'>REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+        </InstallExecuteSequence>
+
         <Feature
             Id='Binaries'
             Title='Application'
@@ -293,6 +328,8 @@
             <ComponentRef Id='License'/>
             
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='ScreenService'/>
+            <ComponentRef Id='ScreenPolicy'/>
             <ComponentRef Id='binary2'/>
             <ComponentRef Id='binary3'/>
             <ComponentRef Id='ConptyDll'/>

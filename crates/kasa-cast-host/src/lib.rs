@@ -107,3 +107,26 @@ fn displays_json() -> serde_json::Value {
 pub fn run_helper(args: &[std::ffi::OsString]) -> bool {
     win_agent::run(args)
 }
+
+/// 원본 스피커 끄기를 쓸지 — 화면 서비스 설정(`source_mute`). 끄면 소리를 떠도 이 기기 스피커를 그대로 둔다.
+static SOURCE_MUTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_source_mute(on: bool) {
+    SOURCE_MUTE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+fn source_mute_on() -> bool {
+    SOURCE_MUTE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Windows 화면 서비스(`kasaterm-screen --screen-service`) 쪽 — 세션 0 에서 돌아 화면·소리는 콘솔 세션 도우미에서 받는다.
+#[cfg(windows)]
+pub mod service {
+    pub use crate::win_agent::{configured_exe, connect_ctl, console_has_user, restart_service, run_with, state_dir};
+
+    /// 도우미가 뜨는 시스템 소리 — 소리 허브(`kasa_cast::audio::install`)에 꽂는다.
+    pub fn audio() -> std::sync::Arc<dyn kasa_cast::audio::Source> {
+        std::sync::Arc::new(crate::win_agent::AgentAudio)
+    }
+}

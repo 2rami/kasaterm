@@ -113,6 +113,11 @@ impl Drop for Inner {
 impl Link {
     /// 붙기를 뒤에서 계속 시도한다. 끊기면 다시 건다. tokio 런타임 안에서 부른다.
     pub fn start(endpoint: Endpoint, peer: EndpointAddr, trust: RelayTrust) -> Self {
+        Self::start_alpn(endpoint, peer, trust, fwd::ALPN)
+    }
+
+    /// `fwd` 를 받지 않는 상대(화면 서비스 노드)에는 그 상대가 받는 ALPN 으로 길만 쥐고 잰다.
+    pub fn start_alpn(endpoint: Endpoint, peer: EndpointAddr, trust: RelayTrust, alpn: &'static [u8]) -> Self {
         let inner = Arc::new(Inner {
             id: peer.id,
             trust,
@@ -122,7 +127,7 @@ impl Link {
             last_error: Mutex::new(None),
             task: Mutex::new(None),
         });
-        let task = tokio::spawn(maintain(endpoint, Arc::downgrade(&inner)));
+        let task = tokio::spawn(maintain(endpoint, Arc::downgrade(&inner), alpn));
         *inner.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
         Self { inner }
     }
@@ -199,7 +204,7 @@ fn publish(inner: &Inner, next: LinkState) {
     });
 }
 
-async fn maintain(endpoint: Endpoint, weak: Weak<Inner>) {
+async fn maintain(endpoint: Endpoint, weak: Weak<Inner>, alpn: &'static [u8]) {
     let mut wait = RETRY_MIN;
     loop {
         let Some(addr) = weak
@@ -209,7 +214,7 @@ async fn maintain(endpoint: Endpoint, weak: Weak<Inner>) {
             return;
         };
         let conn =
-            match tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, fwd::ALPN)).await {
+            match tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, alpn)).await {
                 Ok(Ok(conn)) => conn,
                 failed => {
                     let why = match failed {
