@@ -147,6 +147,8 @@ block2.workspace = true
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video", "AVAsset", "AVAssetImageGenerator", "AVAssetTrack", "AVAsynchronousKeyValueLoading", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVPlayerItemTrack"] }
 objc2-core-media = { workspace = true, features = ["CMTime", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "objc2-core-video"] }
 objc2-core-video = { workspace = true, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
+# 화면 도우미(KasatermScreen.app)를 로그인 항목으로 등록한다(screen_service.rs, macOS 13+).
+objc2-service-management = { workspace = true, features = ["SMAppService", "objc2", "objc2-foundation"] }
 objc2-core-graphics = { workspace = true, features = ["CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
 objc2-core-foundation = { workspace = true, features = ["CFCGTypes", "CFString", "CFArray", "CFDictionary", "CFNumber"] }
 # Sparkle.framework 를 런타임 dlopen 하기 위한 libc::dlopen/RTLD_NOW (macos_sparkle.rs).

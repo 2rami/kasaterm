@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use kasa_cast::mirror::{Denied, Input};
-use kasa_cast::{Capture, Config, Frame, Session};
+use kasa_cast::Capture;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, LocalFree, ERROR_PIPE_CONNECTED, HLOCAL, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::Authorization::{
@@ -30,7 +29,7 @@ use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW,
 
 use crate::ctl::{self, Service};
 use crate::node::{self, Node};
-use crate::state::{unix_now, Settings, State};
+use crate::state::{unix_now, State};
 
 fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()
@@ -53,7 +52,7 @@ pub fn serve(stop: &'static AtomicBool) {
     let settings = Arc::new(Mutex::new(state.settings()));
     ctl::apply(*settings.lock().unwrap_or_else(|e| e.into_inner()));
     let Some(inner) = kasa_cast_host::capture() else { return };
-    let capture: Arc<dyn Capture> = Arc::new(Gate { inner, settings: settings.clone() });
+    let capture: Arc<dyn Capture> = Arc::new(ctl::Gate { inner, settings: settings.clone() });
     kasa_cast::audio::install(kasa_cast_host::service::audio());
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build() {
         Ok(rt) => rt,
@@ -121,46 +120,6 @@ fn drop_old_versions() {
         if !keep && std::fs::remove_dir_all(&dir).is_ok() {
             eprintln!("[screen-service] 지난 판 폴더를 치웠다: {}", dir.display());
         }
-    }
-}
-
-/// 서비스 설정을 따르는 보내기 — 조작 허용·로그인 화면 허용을 여기서 가른다.
-struct Gate {
-    inner: Arc<dyn Capture>,
-    settings: Arc<Mutex<Settings>>,
-}
-
-impl Gate {
-    fn settings(&self) -> Settings {
-        *self.settings.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-impl Capture for Gate {
-    fn start(&self, config: &Config, out: Box<dyn Fn(Frame) + Send + Sync>) -> Result<Box<dyn Session>, Denied> {
-        if !self.settings().logon_screen && !kasa_cast_host::service::console_has_user() {
-            return Err(Denied::Unavailable);
-        }
-        self.inner.start(config, out)
-    }
-
-    fn request_permission(&self) {
-        self.inner.request_permission();
-    }
-
-    fn input(&self, display: u32, input: &Input) -> Result<(), Denied> {
-        if !self.settings().input {
-            return Err(Denied::Unavailable);
-        }
-        self.inner.input(display, input)
-    }
-
-    fn request_input_permission(&self) {
-        self.inner.request_input_permission();
-    }
-
-    fn now(&self) -> f64 {
-        self.inner.now()
     }
 }
 

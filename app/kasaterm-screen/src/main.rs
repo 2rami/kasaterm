@@ -3,16 +3,17 @@
 //!
 //! - Windows: `--screen-service`(LocalSystem 서비스 `KasatermScreen`, 세션 0 — 카사넷 화면 노드·제어 파이프·콘솔 세션 도우미 감독)와
 //!   `--screen-agent`(콘솔 세션 SYSTEM 도우미 — 뜨기·압축·조작·소리, `kasa_cast_host`).
-//! - macOS: 사용자 LaunchAgent(단계 P4).
+//! - macOS: `--launch-agent`(사용자 LaunchAgent — 앱 번들 안 `KasatermScreen.app`, 앱이 `SMAppService` 로 등록).
 #![cfg_attr(all(windows, not(debug_assertions), not(test)), windows_subsystem = "windows")]
 
-// 맥 화면 서비스(LaunchAgent)는 단계 P4 에서 같은 제어·노드·상태를 쓴다 — 그때까지 맥 빌드에서는 시험만 부른다.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod ctl;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(target_os = "macos")]
+mod mac;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod node;
 mod probe;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod state;
 #[cfg(windows)]
 mod win;
@@ -30,7 +31,11 @@ fn main() {
     if kasa_cast_host::service::run_with(&args, win::serve) {
         return;
     }
-    eprintln!("kasaterm-screen {VERSION} — 서비스 관리자가 띄운다(Windows `--screen-service`·`--screen-agent`)");
+    #[cfg(target_os = "macos")]
+    if words.first().map(String::as_str) == Some("--launch-agent") {
+        std::process::exit(mac::serve());
+    }
+    eprintln!("kasaterm-screen {VERSION} — 서비스 관리자가 띄운다(Windows `--screen-service`·`--screen-agent`, macOS `--launch-agent`)");
     let _ = args;
     std::process::exit(2);
 }

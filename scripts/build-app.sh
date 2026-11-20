@@ -106,10 +106,10 @@ fi
 # 릴리스 도구(tools/release)는 격리 target(CARGO_TARGET_DIR)으로 굽는다 — 바이너리는 cargo 가 실제로 쓴 자리에서 가져온다.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp --bins
+  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp -p kasaterm-screen --bins
   BINDIR="$TARGET_DIR/release"
 else
-  cargo build --locked -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp --bins
+  cargo build --locked -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp -p kasaterm-screen --bins
   BINDIR="$TARGET_DIR/debug"
 fi
 
@@ -122,6 +122,69 @@ cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
 # 디스패처의 ACP 학생 runner — 칸 PATH 에 없어 디스패처가 본판 옆 절대 경로로 부른다(docs/acp.md).
 cp "$BINDIR/kasa-acp" "$APP/Contents/MacOS/kasa-acp"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# 화면 서비스 도우미(docs/screen-service-split.md 「macOS」) — 번들 안 LoginItems 의 작은 앱. 앱이 SMAppService 로 등록하면
+# launchd 가 띄워, 화면 기록·손쉬운 사용 권한이 앱이 아니라 이 번들(com.kasa.kasaterm.screen)에 붙는다. 판은 서비스 판이다 —
+# 번들을 갈아 끼워도 판이 같으면 돌던 도우미는 그대로 두고, 바뀌면 보는 사람이 없을 때 도우미가 스스로 갈아탄다.
+SCREEN_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' app/kasaterm-screen/Cargo.toml | head -1)"
+[[ -n "$SCREEN_VERSION" ]] || { echo "error: screen service version missing in app/kasaterm-screen/Cargo.toml" >&2; exit 1; }
+SCREEN_HELPER="$APP/Contents/Library/LoginItems/KasatermScreen.app"
+mkdir -p "$SCREEN_HELPER/Contents/MacOS" "$APP/Contents/Library/LaunchAgents"
+cp "$BINDIR/kasaterm-screen" "$SCREEN_HELPER/Contents/MacOS/kasaterm-screen"
+cat > "$SCREEN_HELPER/Contents/Info.plist" <<SCREENPLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.kasa.kasaterm.screen</string>
+    <key>CFBundleName</key>
+    <string>KasatermScreen</string>
+    <key>CFBundleDisplayName</key>
+    <string>kasaterm 화면 서비스</string>
+    <key>CFBundleExecutable</key>
+    <string>kasaterm-screen</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$SCREEN_VERSION</string>
+    <key>CFBundleVersion</key>
+    <string>$SCREEN_VERSION</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+SCREENPLIST
+cat > "$APP/Contents/Library/LaunchAgents/com.kasa.kasaterm.screen.plist" <<'SCREENAGENT'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kasa.kasaterm.screen</string>
+    <key>BundleProgram</key>
+    <string>Contents/Library/LoginItems/KasatermScreen.app/Contents/MacOS/kasaterm-screen</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>kasaterm-screen</string>
+        <string>--launch-agent</string>
+    </array>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.kasa.kasaterm</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
+SCREENAGENT
 mkdir -p "$APP/Contents/Resources/licenses"
 cp crates/kasa-gridview/assets/fonts/OFL-D2Coding.txt "$APP/Contents/Resources/licenses/OFL-D2Coding.txt"
 # 협업 훅 정본 — claude PATH shim 이 --settings 로 가리키는 스크립트들
@@ -553,6 +616,8 @@ fi
 # kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
 sign_part "$APP/Contents/MacOS/kasaterm-cli"
 sign_part "$APP/Contents/MacOS/kasa-acp"
+# 화면 도우미는 따로 서명한 안쪽 앱이다 — 앱 서명보다 먼저(안쪽 → 바깥쪽). 번들 id 가 TCC 의 열쇠라 바꾸지 않는다.
+sign_part "$SCREEN_HELPER"
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
 # hardened runtime 은 마이크(음성 입력)·osascript 자동화를 권한 항목 없이는 막는다 — 번들 본체에만 싣는다.
 APP_ENTITLEMENTS="-"

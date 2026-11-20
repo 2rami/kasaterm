@@ -153,6 +153,7 @@ objc2-core-media = { version = "0.3", default-features = false, features = ["std
 objc2-core-video = { version = "0.3", default-features = false, features = ["std"] }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std"] }
 objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std"] }
+objc2-service-management = { version = "0.3", default-features = false, features = ["std"] }
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 pollster = "0.4"

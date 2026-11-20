@@ -283,11 +283,23 @@
 
 - 도우미는 `kasaterm.app` 안에 들어 있어 Sparkle 이 번들째 바꾼다. 갈아 끼우기는 이름 바꾸기라 [추측] 돌던 도우미는 옛 파일(지워진 아이노드)로
   계속 돈다 — 스트림은 이어진다. 다음에 launchd 가 띄울 때 새 판이 뜬다.
-- 앱이 새 판으로 다시 뜨면 `hello` 의 서비스 판과 번들 안 도우미 판을 견준다. 다르면 `restart_when_idle` — 보는 사람이 떠난 뒤 도우미가 끝나고
-  launchd(`KeepAlive`)가 새 판을 띄운다. 보는 중에는 갈아 끼우지 않는다.
+- 도우미가 2초마다 제 번들의 `Info.plist` 판(`CFBundleShortVersionString` = 서비스 판)을 읽어 제 판과 다르고 보는 사람이 없으면 끝 코드 75 로 끝나고,
+  launchd(`KeepAlive`)가 새 판을 띄운다. 보는 중에는 갈아 끼우지 않는다(결정 9). 서비스 판이 같으면 번들이 바뀌어도 돌던 도우미를 그대로 둔다.
+  앱 쪽 `restart_when_idle` 은 두지 않았다 — Windows 와 같이 서비스가 스스로 본다.
 - [잴 것] (1) Sparkle 갈아 끼우기 동안·뒤에 도우미 프로세스가 살아 있는가(백그라운드 작업 관리 BTM 이 등록을 지우거나 죽이지 않는가), (2) 새 판
   도우미가 같은 TCC 허락을 쓰는가(지정 요구조건이 번들 id·팀이라 같아야 한다), (3) Sparkle 설치기가 도우미를 끄지 않는가. 서명된 preview 판 두 개로
   잰다 — 사람의 로그인 항목을 건드리므로 맥미니 같은 별도 기기·별도 사용자에서, 승인 뒤에.
+
+### macOS 구현 (P4)
+
+- 번들: `kasaterm.app/Contents/Library/LoginItems/KasatermScreen.app`(번들 id `com.kasa.kasaterm.screen`, `LSUIElement`, 최소 13.0, 판 = 서비스 판)과
+  `Contents/Library/LaunchAgents/com.kasa.kasaterm.screen.plist`(`BundleProgram`, `--launch-agent`, `RunAtLoad`·`KeepAlive`, `Aqua`,
+  `AssociatedBundleIdentifiers = com.kasa.kasaterm`). `scripts/build-app.sh` 가 넣고 안쪽부터 서명한다.
+- 앱이 부팅 때 `SMAppService.agentServiceWithPlistName` 으로 등록한다(이미 켜졌으면 그대로, 「허용 필요」면 기록만). 검증 실행·번들 밖·13 이전은 등록하지
+  않는다. 설정 `screen_service.enabled: false` 면 등록을 푼다.
+- 제어 길은 상태 폴더(`~/Library/Application Support/kasaterm/screen`, 0700)의 `ctl.sock`(0600). 도우미는 붙은 상대가 같은 uid(`getpeereid`)이고 실행 파일이
+  같은 번들의 `Contents/MacOS/kasaterm`(`LOCAL_PEERPID` → `proc_pidpath`)인지 본다. 검증 실행은 uid 만 본다.
+- 도우미 안에서 뜨기·압축(SCK·VT)·소리(SCK 소리·스피커 끄기)·조작(CGEvent)·카사넷 노드가 한 프로세스다.
 
 ### 판이 어긋날 때
 

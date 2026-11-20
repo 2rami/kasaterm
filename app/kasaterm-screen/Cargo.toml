@@ -3,7 +3,7 @@ name = "kasaterm-screen"
 description = "Screen service: sends this device's screen over kasanet outside the kasaterm app."
 # 서비스 판 — 앱 판과 따로 센다. 서비스 코드(이 크레이트·kasa-cast·kasa-cast-host·kasa-net)가 바뀔 때만 올리고
 # `source-hash.txt` 를 함께 고친다(시험 `service_version_follows_its_source`). MSI 는 판이 같으면 서비스를 건드리지 않는다.
-version = "1.0.0"
+version = "1.1.0"
 edition.workspace = true
 license.workspace = true
 
@@ -14,6 +14,9 @@ kasa-cast-host = { workspace = true }
 kasa-net = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
