@@ -488,6 +488,22 @@ fn overlay_scrolled(
     (sticky, Some((row, start, end)))
 }
 
+/// 학생이 입력창 위에 설 빈 줄 수. 합성기는 서 있는 그림(`INPUT_STANDING_ROWS` 줄)이 글을 덮으면 세우지 않는데, 그려서
+/// 보기는 대화를 칸 폭에 다시 접어 입력창 바로 위까지 글이 차서 쉬는·끝난 학생이 사라졌다(2026-11-20 「안 서 있다」).
+/// 바닥 첫 줄이 입력창 테두리면 발 디딜 줄까지 세 줄, 스피너·effort 줄이 발판이면 그 위 두 줄. 맨 아래에 이미 빈
+/// 줄이 있으면 그만큼 덜 비운다. 학생 그림이 없는 칸(테마 끔 포함)은 None.
+fn stand_room(student: bool, bottom: &[Vec<GridCell>], lines: &[classic::Line], at_bottom: bool) -> Option<usize> {
+    if !student {
+        return None;
+    }
+    let need = crate::screenread::INPUT_STANDING_ROWS - usize::from(!bottom.first().is_some_and(|r| full_rule(r)));
+    if !at_bottom {
+        return Some(need);
+    }
+    let trailing = lines.iter().rev().take_while(|l| l.cells.iter().all(|c| matches!(c.ch, ' ' | '\0'))).count();
+    Some(need.saturating_sub(trailing))
+}
+
 /// 대화 판을 짓는 데 드는 것의 열쇠. 짓는 동안 소비되는 옮기기(`jump`)·앞 쪽 붙음(`anchor`)이 걸렸거나 기록이
 /// 잠겨 있으면 None — 그 판은 새로 짓는다. 배너·입력칸 바탕처럼 판이 기억해 두는 것은 원본 화면에서 오므로
 /// 원본 내용 번호가 덮는다.
@@ -503,7 +519,7 @@ fn chat_frame_key(chat: &ChatPane, src: &TerminalPane, name: Option<&str>, cols:
     let mut open: Vec<usize> = chat.open.iter().copied().collect();
     open.sort_unstable();
     open.hash(&mut hasher);
-    (theme::accent(), theme::pane_bg(), theme::fg()).hash(&mut hasher);
+    (theme::accent(), theme::pane_bg(), theme::fg(), theme::character_appearance()).hash(&mut hasher);
     Some(hasher.finish())
 }
 
@@ -755,7 +771,6 @@ impl App {
         if region == 0 || region as f32 > rows as f32 * REGION_MAX {
             return None;
         }
-        let hist_rows = rows.saturating_sub(region).max(1);
         let face_slug = name.as_deref().and_then(crate::screenread::student_face_slug);
         if let Some(rows) = screen_banner(&src.cells[..top]) {
             *chat.banner.borrow_mut() = Some(rows);
@@ -785,6 +800,11 @@ impl App {
             older_left = f.start > 0;
         }
         let total = cache.lines.len();
+        let student = face_slug.is_some() && theme::character_appearance();
+        let room = stand_room(student, &bottom.rows, &cache.lines, chat.back.get() == 0)
+            .filter(|room| rows >= region + room + 4)
+            .unwrap_or(0);
+        let hist_rows = rows.saturating_sub(region + room).max(1);
         let max_back = total.saturating_sub(hist_rows);
         let mut back = chat.back.get();
         // 아래에 덧붙은 줄만큼 올려 보던 자리를 지킨다. 앞 쪽은 위에 붙으니 아래 기준 자리가 그대로다.
@@ -853,9 +873,11 @@ impl App {
                 c.bg = fill.clone();
             }
         }
+        cells.extend(std::iter::repeat_n(vec![GridCell::blank(); cols], room));
         cells.extend(bottom.rows);
         cells.truncate(rows);
-        let cursor = bottom.cursor.filter(|(r, _)| hist_rows + r < rows).map(|(r, c)| ((hist_rows + r) as u16, c as u16));
+        let lift = hist_rows + room;
+        let cursor = bottom.cursor.filter(|(r, _)| lift + r < rows).map(|(r, c)| ((lift + r) as u16, c as u16));
         let view = select::View { first, hist: hist_rows, total, bottom: rows.saturating_sub(hist_rows), cols };
         let term = TerminalPane {
             rows: rows as u16,
@@ -1162,6 +1184,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 학생이 설 자리 — 서 있는 그림 세 줄이 글을 안 덮게 바닥 위를 비운다. 입력창 테두리가 바닥 첫 줄이면 발판까지 세 줄,
+    /// effort·스피너 줄이 발판이면 두 줄, 대화 끝의 빈 줄은 빼고, 올려 보는 동안은 그대로 다 비운다.
+    #[test]
+    fn the_rows_above_the_input_box_are_kept_clear_for_the_student() {
+        let rule = row(&"─".repeat(30));
+        let effort = row(&format!("{}◉ xhigh · /effort", " ".repeat(14)));
+        let text = classic::Line { cells: row("마지막 답"), toggle: None, face: None };
+        let blank = classic::Line { cells: vec![GridCell::blank(); 30], toggle: None, face: None };
+        let ends_in_text = [blank.clone(), text.clone()];
+        let ends_in_blank = [text.clone(), blank.clone()];
+        assert_eq!(stand_room(true, &[rule.clone()], &ends_in_text, true), Some(3));
+        assert_eq!(stand_room(true, &[effort.clone(), rule.clone()], &ends_in_text, true), Some(2));
+        assert_eq!(stand_room(true, &[rule.clone()], &ends_in_blank, true), Some(2), "끝의 빈 줄만큼 덜");
+        assert_eq!(stand_room(true, &[rule.clone()], &ends_in_blank, false), Some(3), "올려 볼 땐 끝 줄이 화면 끝이 아니다");
+        assert_eq!(stand_room(false, &[rule], &ends_in_text, true), None, "학생 그림이 없는 칸");
+    }
 
     /// 올려 보는 동안 대화 줄 맨 아래 가운데에 풀스크린 claude 의 알약 — 떠난 뒤 온 답 수·기다리는 선택지가 글을 바꾸고,
     /// 걸친 넓은 글자의 남은 반쪽은 비운다.
