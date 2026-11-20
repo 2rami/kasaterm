@@ -783,9 +783,8 @@ pub(crate) fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// Windows 도우미의 「앱이 떠 있나」 — 실행 파일 경로가 같은 프로세스 중 화면 도우미(`--screen-service`·`--screen-agent`,
-/// SYSTEM)는 뺀다. 같은 kasaterm.exe 라 경로로만 세면 관리자 권한 도우미가 늘 「다른 인스턴스」를 보고 설치·재시작을 멈췄다.
-/// 사용자 권한에서는 SYSTEM 프로세스의 경로가 비어 원래도 안 셌다.
+/// Windows 도우미의 「앱이 떠 있나」 — 실행 파일 경로가 같은 프로세스. 화면 서비스·도우미는 따로 된 실행 파일
+/// (`kasaterm-screen.exe`, `docs/screen-service-split.md`)이라 경로로 세면 빠진다.
 pub(crate) fn ps_running_fn(app_exe: &str) -> String {
     let exe = ps_quote(app_exe);
     let leaf = app_exe.rsplit(['\\', '/']).next().unwrap_or(app_exe);
@@ -796,7 +795,7 @@ pub(crate) fn ps_running_fn(app_exe: &str) -> String {
         String::new()
     };
     format!(
-        "function running($skip) {{ Get-CimInstance Win32_Process{filter} -ErrorAction SilentlyContinue | Where-Object {{ $_.ProcessId -ne $skip -and $_.ExecutablePath -and $_.ExecutablePath -ieq {exe} -and $_.CommandLine -notmatch '--screen-(service|agent)' }} | Select-Object -First 1 -ExpandProperty ProcessId }}"
+        "function running($skip) {{ Get-CimInstance Win32_Process{filter} -ErrorAction SilentlyContinue | Where-Object {{ $_.ProcessId -ne $skip -and $_.ExecutablePath -and $_.ExecutablePath -ieq {exe} }} | Select-Object -First 1 -ExpandProperty ProcessId }}"
     )
 }
 
@@ -1165,8 +1164,8 @@ mod tests {
         assert!(script.contains(r"'C:\it''s\kasaterm.exe'"), "작은따옴표를 PowerShell 식으로 감싼다");
         assert!(script.contains("-gt 450"), "부팅 상한 90초 = 0.2초 × 450");
         assert!(
-            script.contains("-Filter \"Name='kasaterm.exe'\"") && script.contains("-notmatch '--screen-(service|agent)'"),
-            "화면 도우미(SYSTEM, 같은 kasaterm.exe)를 앱으로 세지 않는다"
+            script.contains("-Filter \"Name='kasaterm.exe'\"") && script.contains(r"-ieq 'C:\Program Files\kasaterm\bin\kasaterm.exe'"),
+            "앱은 실행 파일 경로로만 센다 — 화면 서비스는 다른 실행 파일이다"
         );
         assert!(script.contains("Get-Process -Name explorer") && script.contains("GetEnvironmentVariables($scope)")
                 && script.contains(r"Start-Process -FilePath 'C:\Program Files\kasaterm\bin\kasaterm.exe'"),

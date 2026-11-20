@@ -102,12 +102,6 @@ fn displays_json() -> serde_json::Value {
     )
 }
 
-/// `kasaterm.exe --screen-service`·`--screen-agent` 면 Windows 화면 도우미로 돌고 참 — 앱 초기화 전에 부른다.
-#[cfg(windows)]
-pub fn run_helper(args: &[std::ffi::OsString]) -> bool {
-    win_agent::run(args)
-}
-
 /// 원본 스피커 끄기를 쓸지 — 화면 서비스 설정(`source_mute`). 끄면 소리를 떠도 이 기기 스피커를 그대로 둔다.
 static SOURCE_MUTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 

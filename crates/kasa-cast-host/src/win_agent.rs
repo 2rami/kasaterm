@@ -96,8 +96,8 @@ pub fn state_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("ProgramData")?).join("kasaterm").join("screen"))
 }
 
-/// `kasaterm.exe`·`kasaterm-screen.exe` 가 서비스·도우미로 불렸으면 그 일을 하고 참. 앱의 로그·설정·세션 무엇 하나 건드리기 전에 부른다.
-pub(crate) fn run(args: &[OsString]) -> bool {
+/// `kasaterm-screen.exe` 가 서비스·도우미로 불렸으면 그 일을 하고 참.
+fn run(args: &[OsString]) -> bool {
     match args.first().and_then(|a| a.to_str()) {
         Some("--screen-service") => {
             service_dispatch();
@@ -137,7 +137,7 @@ fn image_of(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
 }
 
-/// 파이프 건너편이 믿는 실행 파일인가 — 이 도우미와 같은 실행 파일(화면 서비스, 옛 꼴이면 앱 자신)이거나 같은 설치의 앱
+/// 파이프 건너편이 믿는 실행 파일인가 — 이 도우미와 같은 실행 파일(화면 서비스)이거나 같은 설치의 앱
 /// (`bin\screen\<판>\kasaterm-screen.exe` 옆 `bin\kasaterm.exe`). 설치판은 관리자만 쓰는 Program Files 에 있다.
 fn trusted_peer(pid: u32) -> bool {
     let norm = |p: &Path| p.to_string_lossy().to_lowercase();

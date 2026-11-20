@@ -404,7 +404,7 @@
 | P0 실측 | 아래 「재야 할 것」 1–7. 시험 MSI·시험 서비스·서명된 시험 도우미로 잰다. 제품 코드 변경 없음 | 시험 스크립트 수백 줄, 1–2일 | 이 문서에 수치·결론 |
 | P1 떼어 옮기기 | `kasa-cast`·`kasa-cast-host` 로 옮긴다. 동작 그대로 | 옮김 약 4,500줄, 새 약 200줄 | 앱 시험·`kasa-remote screen_stream` 시험·`check-workspace` 통과, 리그 S1 수치 그대로 |
 | P2 Windows 서비스가 보냄 | `kasaterm-screen.exe`(서비스·도우미, 소리는 도우미), 서비스 키·엔드포인트, 제어 파이프, 허용 목록 넘기기·저장, `/version screen_node`, 보는 쪽 서비스 링크·물러나기, 앱 중계(`Capture` = 서비스 클라이언트), MSI(판마다 Permanent 서비스 구성요소·정책·방화벽·지우기 동작)·서비스가 스스로 갈아타기·복구 동작 | 새 약 2,000–2,500줄, MSI 약 60줄 | 아래 리그 W1–W3 |
-| P3 Windows 정리 | `kasaterm.exe --screen-service`·`--screen-agent`, 이름 세기 예외, 앱 안 보내기(Windows) 지움 — Windows 기기가 다 새 판이 된 뒤 | 지움 약 1,000줄 | 앱 시험, 집 PC 설치판 |
+| P3 Windows 정리 | `kasaterm.exe --screen-service`·`--screen-agent`(앱 실행 파일의 서비스·도우미 모드)와 업데이트·재시작 도우미의 이름 세기 예외를 지웠다. 앱 안 보내기(도우미가 없을 때 앱이 직접 뜨기)는 휴대판(zip)·개발 실행이 쓰므로 둔다 | 지움 약 30줄 | 앱 시험, 집 PC 설치판 |
 | P4 macOS 도우미 | `KasatermScreen.app`, `SMAppService`, 유닉스 소켓 제어·서명 확인, 권한 창·상태 표시, `build-app.sh` 안쪽 서명·공증, 보는 사람 없을 때 갈아 끼우기 | 새 약 1,500–2,000줄, 굽기 약 80줄 | 아래 리그 M1–M3 |
 | P5 앱 없이 | 보는 쪽 `screen_node` 캐시, `relay.sh ids`, 맥미니 앱 없이 보내기, (선택) JPEG 도 서비스로, 앱 안 보내기(맥) 지움 | 새 약 500줄, 지움 약 1,500줄 | 앱이 꺼진 기계를 칸으로 본다 |
 

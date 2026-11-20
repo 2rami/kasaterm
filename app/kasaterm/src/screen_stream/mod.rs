@@ -40,12 +40,6 @@ pub(crate) fn install() {
     kasa_cast_host::audio::install();
 }
 
-/// `kasaterm.exe --screen-service`·`--screen-agent` 면 Windows 화면 도우미로 돌고 참 — 앱 초기화 전에 부른다.
-#[cfg(windows)]
-pub(crate) fn run_helper(args: &[std::ffi::OsString]) -> bool {
-    kasa_cast_host::run_helper(args)
-}
-
 /// 그 기기를 네이티브 칸으로 볼 수 있나 — 이 판이 보고, 그 기기가 보내는 판이고, 카사넷 직통·믿는 중계일 때.
 pub(crate) fn can_view(base: &str) -> bool {
     cfg!(any(target_os = "macos", windows))
