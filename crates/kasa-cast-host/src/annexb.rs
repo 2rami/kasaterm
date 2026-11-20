@@ -1,5 +1,5 @@
 //! Annex-B(시작 부호 `00 00 01`) ↔ 화면 스트림 장 꼴. Windows Media Foundation 인코더·디코더는 Annex-B 를 쓰고, 화면 스트림 장은
-//! 4바이트 길이 머리 NAL(AVCC/HVCC)과 따로 떼어 낸 파라미터 셋(VPS·SPS·PPS)을 싣는다(`kasa_remote::screen_stream::Frame`).
+//! 4바이트 길이 머리 NAL(AVCC/HVCC)과 따로 떼어 낸 파라미터 셋(VPS·SPS·PPS)을 싣는다(`kasa_cast::Frame`).
 
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

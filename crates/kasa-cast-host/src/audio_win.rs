@@ -8,7 +8,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use kasa_remote::screen_stream::audio::Jitter;
+use kasa_cast::audio::Jitter;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::{
@@ -19,7 +19,7 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
-use super::audio::{FromWire, Mix, Sample, ToWire};
+use crate::audio::{FromWire, Mix, Sample, ToWire};
 
 const FORMAT_PCM: u16 = 1;
 const FORMAT_FLOAT: u16 = 3;
@@ -108,7 +108,7 @@ impl Drop for Running {
 
 pub(super) struct Source;
 
-impl kasa_remote::screen_stream::audio::Source for Source {
+impl kasa_cast::audio::Source for Source {
     fn start(&self, out: Box<dyn FnMut(f64, &[i16]) + Send>) -> Result<Box<dyn Send>, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();

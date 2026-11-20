@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kasa_remote::screen_mirror::{Denied, Input};
-use kasa_remote::screen_stream::{Config, Frame, Session};
+use kasa_cast::mirror::{Denied, Input};
+use kasa_cast::{Config, Frame, Session};
 use serde_json::{json, Value};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -344,7 +344,7 @@ fn agent_main() {
         let mut desk = None;
         for (display, input) in input_rx {
             super::win::follow_input_desktop(&mut desk);
-            let _ = crate::screen_input::put(display, &input);
+            let _ = crate::input::put(display, &input);
         }
     });
     let name = wide(pipe_name(session));
@@ -485,7 +485,7 @@ fn redirect_stderr() {
         let _ = std::fs::remove_file(&path);
     }
     if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = unsafe { windows_sys::Win32::System::Console::SetStdHandle(windows_sys::Win32::System::Console::STD_ERROR_HANDLE, f.into_raw_handle()) };
+        let _ = unsafe { windows::Win32::System::Console::SetStdHandle(windows::Win32::System::Console::STD_ERROR_HANDLE, HANDLE(f.into_raw_handle())) };
     }
 }
 

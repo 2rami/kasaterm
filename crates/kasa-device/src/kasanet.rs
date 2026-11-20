@@ -59,7 +59,7 @@ static PHONE_INGRESS: OnceLock<u16> = OnceLock::new();
 static NODE: OnceLock<Node> = OnceLock::new();
 
 /// 화면 스트림(`docs/screen-stream.md`). 받는 일은 위층(`kasa_remote::screen_stream`)이 꽂는다 — 이 층은 화면을 모른다.
-pub const SCREEN_ALPN: &[u8] = b"kasa/screen/1";
+pub use kasa_cast::SCREEN_ALPN;
 pub type ScreenHandler =
     Arc<dyn Fn(Connection) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 static SCREEN: OnceLock<ScreenHandler> = OnceLock::new();

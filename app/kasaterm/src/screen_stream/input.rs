@@ -277,7 +277,7 @@ impl App {
         }
         let name = format!("{code:?}");
         let mods = view.remote_mods(mods);
-        if crate::screen_input::known_key(&name) {
+        if kasa_cast_host::input::known_key(&name) {
             view.key(&name, mods);
         } else if let Some(t) = event.text.as_ref().filter(|t| !t.chars().any(char::is_control)) {
             view.text(t);

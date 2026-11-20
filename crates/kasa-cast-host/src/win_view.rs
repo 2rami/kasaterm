@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use kasa_remote::screen_stream::Frame;
+use kasa_cast::Frame;
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -29,7 +29,7 @@ const SLOTS: usize = 6;
 /// 칸이 공유 텍스처를 못 들여왔다 — 그 뒤 장은 BGRA 바이트도 싣는다.
 static CPU_COPY: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn zero_copy_result(ok: bool) {
+pub fn zero_copy_result(ok: bool) {
     if !ok && !CPU_COPY.swap(true, Ordering::Relaxed) {
         eprintln!("[screen-stream] 칸이 D3D11 텍스처를 못 들여온다 — CPU 로 읽어 올린다");
     }
@@ -37,7 +37,7 @@ pub(crate) fn zero_copy_result(ok: bool) {
 
 /// 풀린 장 하나 — 공유 텍스처 한 칸, 그리고 CPU 길이면 BGRA 바이트(줄 간격 `stride`).
 #[derive(Clone)]
-pub(crate) struct Picture {
+pub struct Picture {
     slot: Arc<Slot>,
     bytes: Option<Arc<Vec<u8>>>,
     w: u32,
@@ -46,16 +46,16 @@ pub(crate) struct Picture {
 }
 
 impl Picture {
-    pub(crate) fn size(&self) -> (u32, u32) {
+    pub fn size(&self) -> (u32, u32) {
         (self.w, self.h)
     }
 
     /// 칸이 들여올 공유 NT 핸들과 그 텍스처의 번호.
-    pub(crate) fn surface(&self) -> (*mut std::ffi::c_void, u64) {
+    pub fn surface(&self) -> (*mut std::ffi::c_void, u64) {
         (self.slot.handle.0, self.slot.key)
     }
 
-    pub(crate) fn with_bgra<R>(&self, f: impl FnOnce(&[u8], u32, u32, u32) -> R) -> Option<R> {
+    pub fn with_bgra<R>(&self, f: impl FnOnce(&[u8], u32, u32, u32) -> R) -> Option<R> {
         self.bytes.as_ref().map(|b| f(b, self.w, self.h, self.stride))
     }
 }
@@ -79,7 +79,7 @@ impl Drop for Slot {
     }
 }
 
-pub(crate) struct VideoDecoder {
+pub struct VideoDecoder {
     gpu: Option<Gpu>,
     mft: Option<Mft>,
     /// CPU 길의 BGRA 버퍼들 — GUI 가 다 놓은 것을 다시 쓴다(장마다 24MB 를 새로 잡으면 페이지 폴트로 몇 ms 씩 든다).
@@ -89,13 +89,13 @@ pub(crate) struct VideoDecoder {
 
 impl VideoDecoder {
     /// 받고 싶은 코덱 — HEVC 확장이 없는 Windows 도 풀 수 있게.
-    pub(crate) const CODEC: &'static str = "h264";
+    pub const CODEC: &'static str = "h264";
 
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self { gpu: None, mft: None, pool: Vec::new(), pts: 0 }
     }
 
-    pub(crate) fn decode(&mut self, frame: &mut Frame) -> Result<Option<Picture>> {
+    pub fn decode(&mut self, frame: &mut Frame) -> Result<Option<Picture>> {
         let fresh = frame.key
             && !frame.param_sets.is_empty()
             && self.mft.as_ref().is_none_or(|m| m.sets != frame.param_sets || m.display != (frame.width, frame.height));

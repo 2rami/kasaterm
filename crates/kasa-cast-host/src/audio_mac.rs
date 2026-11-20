@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
-use kasa_remote::screen_stream::audio::{Jitter, CHANNELS, RATE};
+use kasa_cast::audio::{Jitter, CHANNELS, RATE};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass};
@@ -14,7 +14,7 @@ use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{SCContentFilter, SCStream, SCStreamConfiguration, SCStreamOutput, SCStreamOutputType};
 
-use super::audio::ToWire;
+use crate::audio::ToWire;
 
 type Sink = Box<dyn FnMut(f64, &[i16]) + Send>;
 
@@ -207,7 +207,7 @@ impl Drop for Running {
     }
 }
 
-impl kasa_remote::screen_stream::audio::Source for Source {
+impl kasa_cast::audio::Source for Source {
     /// 주 화면 필터로 SCK 를 열되 화면은 2×2·초당 1장만 받는다 — 소리만 쓴다. 화면 출력도 붙여 두는 까닭: 소리 출력만
     /// 있으면 SCK 가 화면 장마다 「stream output NOT found」를 로그에 쏟는다.
     fn start(&self, sink: Sink) -> Result<Box<dyn Send>, String> {

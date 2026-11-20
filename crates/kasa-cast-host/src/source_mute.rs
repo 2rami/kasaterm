@@ -46,7 +46,7 @@ pub(super) fn mute() -> Option<Muted> {
 }
 
 /// 끈 스피커를 되켠다. 보는 동안 사람이 이미 켰으면 그대로 둔다.
-pub(crate) fn restore() {
+pub fn restore() {
     let Some(device) = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
     if os::muted(&device) == Some(true) {
         os::set(&device, false);
@@ -65,7 +65,7 @@ pub(super) fn restore_after_crash() {
 }
 
 fn marker() -> Option<std::path::PathBuf> {
-    Some(crate::socket::settings_file_path()?.parent()?.join("stream-muted"))
+    Some(crate::state_dir()?.join("stream-muted"))
 }
 
 #[cfg(windows)]
@@ -76,7 +76,7 @@ mod win {
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
 
     fn devices() -> Option<IMMDeviceEnumerator> {
-        crate::screen_stream::win::com();
+        crate::win::com();
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.ok()
     }
 

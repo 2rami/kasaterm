@@ -1,0 +1,62 @@
+[package]
+name = "kasa-cast-host"
+description = "OS side of the screen stream: capture, hardware encode and decode, system sound, input injection."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+image = { workspace = true }
+kasa-cast = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true, features = ["NSString", "NSError", "NSArray"] }
+block2 = { workspace = true }
+libc = { workspace = true }
+dispatch2 = { workspace = true, features = ["objc2"] }
+objc2-core-media = { workspace = true, features = ["CMTime", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "objc2-core-video"] }
+objc2-core-video = { workspace = true, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
+objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCShareableContent", "block2", "dispatch2", "objc2-core-graphics", "objc2-core-media"] }
+objc2-video-toolbox = { workspace = true, features = ["VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
+# 화면 스트림 OS 부분은 kasa-cast-host 에 있다(ScreenCaptureKit·VideoToolbox).
+objc2-core-graphics = { workspace = true, features = ["CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+objc2-core-foundation = { workspace = true, features = ["CFCGTypes", "CFString", "CFArray", "CFDictionary", "CFNumber"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = { workspace = true }
+
+[lints]
+workspace = true

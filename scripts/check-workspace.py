@@ -31,6 +31,8 @@ LAYERS = {
     "kasa-socket": ("protocol", 2),
     "kasa-net": ("transport", 2),
     "kasa-net-ffi": ("transport", 3),
+    "kasa-cast": ("transport", 3),
+    "kasa-cast-host": ("transport", 4),
     "kasa-agents": ("collab", 3),
     "kasa-acp": ("collab", 3),
     "kasa-collab": ("collab", 4),

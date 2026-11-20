@@ -1,0 +1,384 @@
+use std::net::Ipv4Addr;
+
+use kasa_net::iroh::endpoint::{presets, PortmapperConfig};
+use kasa_net::iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use kasa_net::iroh::{Endpoint, RelayMode, SecretKey};
+
+use super::*;
+
+const T: Duration = Duration::from_secs(20);
+
+use crate::testing::{Counts, FakeCapture};
+
+#[derive(Clone)]
+struct Host(Arc<dyn Capture>);
+
+impl std::fmt::Debug for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Host")
+    }
+}
+
+impl ProtocolHandler for Host {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        serve_conn(conn, Some(self.0.clone())).await;
+        Ok(())
+    }
+}
+
+async fn node() -> Endpoint {
+    Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::generate())
+        .relay_mode(RelayMode::Disabled)
+        .portmapper_config(PortmapperConfig::Disabled)
+        .clear_ip_transports()
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap()
+}
+
+/// 보내는 쪽 라우터와 보는 쪽 연결, 그리고 보는 쪽 사건을 받는 채널.
+/// 보는 쪽 엔드포인트도 함께 돌려준다 — 버리면 연결이 닫힌다.
+async fn session(capture: FakeCapture) -> (Router, Endpoint, mpsc::UnboundedReceiver<Event>, mpsc::UnboundedSender<(u8, Vec<u8>)>, tokio::task::JoinHandle<String>) {
+    let host = node().await;
+    let router = Router::builder(host.clone()).accept(SCREEN_ALPN, Host(Arc::new(capture))).spawn();
+    let viewer = node().await;
+    let conn = tokio::time::timeout(T, viewer.connect(host.addr(), SCREEN_ALPN)).await.unwrap().unwrap();
+    let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+    let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+    let config = Config { fps: 30, ..Config::default() };
+    let run = tokio::spawn(run_watch(conn, config, Arc::new(move |e| drop(ev_tx.send(e))), ctl_rx));
+    (router, viewer, ev_rx, ctl_tx, run)
+}
+
+async fn next_frame(rx: &mut mpsc::UnboundedReceiver<Event>) -> (Frame, f64) {
+    loop {
+        match tokio::time::timeout(T, rx.recv()).await.unwrap().unwrap() {
+            Event::Frame { frame, offset, .. } => return (frame, offset),
+            Event::Closed(why) => panic!("닫힘: {why}"),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn frames_arrive_in_order_from_a_keyframe_and_closing_stops_capture() {
+    let counts = Arc::new(Counts::default());
+    let (_router, _viewer, mut rx, ctl, run) = session(FakeCapture { counts: counts.clone(), deny: None, deny_input: None }).await;
+    let (first, offset) = next_frame(&mut rx).await;
+    assert!(first.key && first.param_sets == vec![vec![1, 2], vec![3]], "첫 장은 파라미터 셋을 실은 키프레임");
+    assert!((offset - 100.0).abs() < 0.05, "시계 차이를 장이 흐르기 전에 잡는다: {offset}");
+    let mut last = first.seq;
+    for _ in 0..10 {
+        let (f, _) = next_frame(&mut rx).await;
+        assert_eq!(f.seq, last + 1, "장은 순서대로, 빠짐없이");
+        assert_eq!(f.data, vec![f.seq as u8; 100]);
+        last = f.seq;
+    }
+    ctl.send((ctl::KEYFRAME, Vec::new())).unwrap();
+    let key = loop {
+        let (f, _) = next_frame(&mut rx).await;
+        if f.key {
+            break f;
+        }
+    };
+    assert!(!key.param_sets.is_empty());
+    assert_eq!(counts.keyframes.load(Ordering::Relaxed), 1);
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
+    assert_eq!(tokio::time::timeout(T, run).await.unwrap().unwrap(), "닫음");
+    let waited = Instant::now();
+    while counts.stopped.load(Ordering::Relaxed) == 0 && waited.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!((counts.started.load(Ordering::Relaxed), counts.stopped.load(Ordering::Relaxed)), (1, 1), "닫으면 뜨기를 멈춘다");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capture_without_permission_says_so_and_asks_once() {
+    let counts = Arc::new(Counts::default());
+    let (_router, _viewer, mut rx, _ctl, run) = session(FakeCapture { counts: counts.clone(), deny: Some(Denied::Permission), deny_input: None }).await;
+    let why = tokio::time::timeout(T, run).await.unwrap().unwrap();
+    assert_eq!(why, "거절: permission");
+    let mut denied = None;
+    while let Ok(e) = rx.try_recv() {
+        if let Event::Denied(r) = e {
+            denied = Some(r);
+        }
+    }
+    assert_eq!(denied.as_deref(), Some("permission"));
+    assert_eq!(counts.prompts.load(Ordering::Relaxed), 1, "그 기기 앞에 권한 창을 한 번");
+}
+
+fn input(v: Value) -> (u8, Vec<u8>) {
+    (ctl::INPUT, v.to_string().into_bytes())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_lands_on_the_captured_display_in_order_and_held_buttons_are_released() {
+    let counts = Arc::new(Counts::default());
+    let (_router, _viewer, mut rx, ctl, run) = session(FakeCapture { counts: counts.clone(), deny: None, deny_input: None }).await;
+    next_frame(&mut rx).await;
+    ctl.send(input(json!({ "t": "pointer", "x": 0.25, "y": 0.5, "b": 1 }))).unwrap();
+    ctl.send(input(json!({ "t": "pointer", "x": 0.3, "y": 0.5, "b": 1 }))).unwrap();
+    ctl.send(input(json!({ "t": "text", "s": "안녕" }))).unwrap();
+    ctl.send(input(json!({ "t": "nonsense" }))).unwrap();
+    ctl.send((ctl::CURSOR, vec![1])).unwrap();
+    ctl.send((ctl::CURSOR, vec![0])).unwrap();
+    ctl.send((ctl::CURSOR, Vec::new())).unwrap();
+    let waited = Instant::now();
+    while (counts.inputs.lock().unwrap().len() < 3 || counts.cursor_hidden.lock().unwrap().len() < 2) && waited.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
+    tokio::time::timeout(T, run).await.unwrap().unwrap();
+    while counts.inputs.lock().unwrap().len() < 4 && waited.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let got = counts.inputs.lock().unwrap().clone();
+    assert!(got.iter().all(|(d, _)| *d == 7), "세션이 뜨는 화면에 넣는다");
+    let kinds: Vec<Input> = got.into_iter().map(|(_, i)| i).collect();
+    assert_eq!(kinds[0], Input::Pointer { x: 0.25, y: 0.5, buttons: 1, prev: 0, mods: 0 }, "첫 누름");
+    assert_eq!(kinds[1], Input::Pointer { x: 0.3, y: 0.5, buttons: 1, prev: 1, mods: 0 }, "끌기는 직전 단추와 견준다");
+    assert_eq!(kinds[2], Input::Text("안녕".into()));
+    assert_eq!(kinds[3], Input::Pointer { x: 0.3, y: 0.5, buttons: 0, prev: 1, mods: 0 }, "끊길 때 눌린 단추를 그 자리에서 뗀다");
+    assert_eq!(kinds.len(), 4, "모르는 메시지는 버린다");
+    assert_eq!(*counts.cursor_hidden.lock().unwrap(), vec![true, false], "조작을 켜고 끄면 커서를 빼고 되돌린다. 빈 본문은 버린다");
+    let mut told = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        if let Event::Input { ok, reason } = e {
+            told.push((ok, reason));
+        }
+    }
+    assert_eq!(told, vec![(true, None)], "사정은 바뀔 때만 한 번");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_without_permission_says_so_once_and_asks_once() {
+    let counts = Arc::new(Counts::default());
+    let (_router, _viewer, mut rx, ctl, run) =
+        session(FakeCapture { counts: counts.clone(), deny: None, deny_input: Some(Denied::Permission) }).await;
+    next_frame(&mut rx).await;
+    for _ in 0..3 {
+        ctl.send(input(json!({ "t": "key", "k": "Enter" }))).unwrap();
+    }
+    let mut told = Vec::new();
+    let waited = Instant::now();
+    while told.is_empty() && waited.elapsed() < T {
+        if let Ok(Some(Event::Input { ok, reason })) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+            told.push((ok, reason));
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while let Ok(e) = rx.try_recv() {
+        if let Event::Input { ok, reason } = e {
+            told.push((ok, reason));
+        }
+    }
+    assert_eq!(told, vec![(false, Some("permission".into()))]);
+    assert_eq!(counts.input_prompts.load(Ordering::Relaxed), 1, "권한 창은 연결마다 한 번");
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
+    tokio::time::timeout(T, run).await.unwrap().unwrap();
+}
+
+#[test]
+fn frame_round_trips_and_refuses_truncation() {
+    let f = Frame {
+        seq: 7,
+        cap_id: 3,
+        key: true,
+        t_cap: 1.5,
+        t_enc: 1.52,
+        width: 3024,
+        height: 1964,
+        param_sets: vec![vec![0x40, 1], vec![0x42]],
+        data: b"nal".to_vec(),
+    };
+    let buf = f.encode();
+    assert_eq!(Frame::decode(&buf), Some(f));
+    for cut in 1..40 {
+        assert!(Frame::decode(&buf[..cut]).is_none() || cut >= buf.len() - 3, "잘린 머리는 거절: {cut}");
+    }
+    assert!(Frame::decode(b"Xjunk").is_none());
+}
+
+#[test]
+fn viewer_config_is_clamped_on_the_sending_side() {
+    let c = Config::from_json(&json!({ "codec": "vp9", "bitrate": 1u64 << 40, "fps": 0, "scale": 4.0, "refine": 100000, "max_w": 3, "max_h": 1u64 << 40 }));
+    assert_eq!(c, Config { codec: "hevc".into(), bitrate: 200_000_000, fps: 1, scale: 1.0, refine: 240, max_w: 160, max_h: 16384, display: None, audio: false });
+    let second = Config { display: Some(2), ..Config::default() };
+    assert_eq!(Config::from_json(&second.to_json()), second, "고른 화면이 건너간다");
+    assert_eq!(Config::from_json(&json!({ "display": -1 })).display, None);
+    let fit = Config { max_w: 2560, max_h: 1440, ..Config::default() };
+    assert_eq!(Config::from_json(&fit.to_json()), fit, "보는 쪽 모니터 크기는 그대로 건너간다");
+    assert!(Config::default().audio && Config::from_json(&Config::default().to_json()).audio, "소리는 기본으로 켠다");
+    assert_eq!(Config::from_json(&Value::Null), Config { audio: false, ..Config::default() }, "소리 값을 안 싣는 옛 보는 쪽에는 안 보낸다");
+    assert!(!Config::from_json(&json!({ "audio": "yes" })).audio && !Config::from_json(&json!({ "audio": 1 })).audio);
+    assert_eq!(Config::from_json(&Config { codec: "h264".into(), ..Config::default() }.to_json()).codec, "h264");
+}
+
+/// 5ms 마다 소리 덩이 하나 — 시각은 `FakeCapture::now` 와 같은 보내는 쪽 시계다.
+struct Tone {
+    running: Arc<AtomicBool>,
+}
+
+struct ToneRun(Arc<AtomicBool>);
+
+impl Drop for ToneRun {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+impl audio::Source for Tone {
+    fn start(&self, mut out: Box<dyn FnMut(f64, &[i16]) + Send>) -> Result<Box<dyn Send>, String> {
+        self.running.store(true, Ordering::Relaxed);
+        let running = self.running.clone();
+        std::thread::spawn(move || {
+            while running.load(Ordering::Relaxed) {
+                out(now() + 100.0, &[1000; audio::CHUNK_FRAMES * audio::CHANNELS]);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        Ok(Box::new(ToneRun(self.running.clone())))
+    }
+}
+
+#[derive(Clone)]
+struct AudioHost(Arc<dyn Capture>, Arc<audio::Hub>);
+
+impl std::fmt::Debug for AudioHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AudioHost")
+    }
+}
+
+impl ProtocolHandler for AudioHost {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        serve_conn_audio(conn, Some(self.0.clone()), Some(self.1.clone())).await;
+        Ok(())
+    }
+}
+
+async fn sound_session(audio: bool) -> (Router, Endpoint, Arc<audio::Hub>, Arc<AtomicBool>, mpsc::UnboundedReceiver<Event>, mpsc::UnboundedSender<(u8, Vec<u8>)>, tokio::task::JoinHandle<String>) {
+    let running = Arc::new(AtomicBool::new(false));
+    let hub = audio::Hub::new(Arc::new(Tone { running: running.clone() }));
+    let host = node().await;
+    let capture = FakeCapture { counts: Arc::new(Counts::default()), deny: None, deny_input: None };
+    let router = Router::builder(host.clone()).accept(SCREEN_ALPN, AudioHost(Arc::new(capture), hub.clone())).spawn();
+    let viewer = node().await;
+    let conn = tokio::time::timeout(T, viewer.connect(host.addr(), SCREEN_ALPN)).await.unwrap().unwrap();
+    let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+    let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+    let config = Config { fps: 30, audio, ..Config::default() };
+    let run = tokio::spawn(run_watch(conn, config, Arc::new(move |e| drop(ev_tx.send(e))), ctl_rx));
+    (router, viewer, hub, running, ev_rx, ctl_tx, run)
+}
+
+async fn until(what: impl Fn() -> bool) {
+    let waited = Instant::now();
+    while !what() {
+        assert!(waited.elapsed() < T, "기다리다 지쳤다");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// 받은 사건에서 소리 덩이만 — (덩이, 받은 때의 나이).
+fn sound_of(rx: &mut mpsc::UnboundedReceiver<Event>) -> Vec<(audio::Chunk, f64)> {
+    let mut got = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        if let Event::Audio { chunk, t_recv, offset } = e {
+            let age = t_recv + offset - chunk.t_cap;
+            got.push((chunk, age));
+        }
+    }
+    got
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sound_rides_datagrams_beside_frames_and_stops_when_the_viewer_turns_it_off() {
+    let (_router, _viewer, hub, running, mut rx, ctl, run) = sound_session(true).await;
+    let info = loop {
+        match tokio::time::timeout(T, rx.recv()).await.unwrap().unwrap() {
+            Event::Info(v) => break v,
+            Event::Closed(why) => panic!("닫힘: {why}"),
+            _ => {}
+        }
+    };
+    assert_eq!(info["audio"], json!(true), "보는 쪽은 그 기기가 소리를 보낼 수 있는지 압축 정보로 안다");
+    next_frame(&mut rx).await;
+    let mut got = Vec::new();
+    let waited = Instant::now();
+    while got.len() < 20 && waited.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        got.extend(sound_of(&mut rx));
+    }
+    assert!(got.len() >= 20, "장과 함께 소리 덩이가 온다: {}", got.len());
+    assert!(got.windows(2).all(|w| w[1].0.seq > w[0].0.seq), "루프백에서는 차례대로");
+    assert!(got.iter().all(|(c, _)| c.frames() == audio::CHUNK_FRAMES && c.pcm.iter().all(|s| *s == 1000)));
+    assert!(got.iter().all(|(_, age)| (0.0..0.2).contains(age)), "시각은 보내는 쪽 시계 — 시계 차이로 나이를 잰다: {:?}", got.iter().map(|g| g.1).collect::<Vec<_>>());
+
+    ctl.send((ctl::AUDIO, vec![0])).unwrap();
+    until(|| hub.subscribers() == 0 && !running.load(Ordering::Relaxed)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sound_of(&mut rx);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(sound_of(&mut rx).is_empty(), "「소리 끔」 뒤에는 안 온다 — 마지막 보는 쪽이 끄면 뜨기도 멈춘다");
+
+    ctl.send((ctl::AUDIO, vec![1])).unwrap();
+    until(|| running.load(Ordering::Relaxed)).await;
+    let waited = Instant::now();
+    let mut again = Vec::new();
+    while again.is_empty() && waited.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        again.extend(sound_of(&mut rx));
+    }
+    assert!(again[0].0.seq > got.last().unwrap().0.seq, "다시 켜도 seq 는 이어 센다");
+
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
+    tokio::time::timeout(T, run).await.unwrap().unwrap();
+    until(|| hub.subscribers() == 0 && !running.load(Ordering::Relaxed)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_that_does_not_ask_for_sound_gets_none() {
+    let (_router, _viewer, hub, running, mut rx, ctl, run) = sound_session(false).await;
+    for _ in 0..20 {
+        next_frame(&mut rx).await;
+    }
+    assert!(sound_of(&mut rx).is_empty());
+    assert_eq!(hub.subscribers(), 0);
+    assert!(!running.load(Ordering::Relaxed), "아무도 안 들으면 뜨지 않는다");
+    ctl.send((ctl::QUIT, Vec::new())).unwrap();
+    tokio::time::timeout(T, run).await.unwrap().unwrap();
+}
+
+#[test]
+fn rate_drops_when_frames_pile_up_and_climbs_back_when_calm() {
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let mut r = Rate::new(30_000_000);
+    assert_eq!(r.observe(0, t0), None, "처음엔 그대로");
+    assert_eq!(r.observe(4, t0 + Duration::from_secs(1)), Some(21_000_000), "쌓이면 30% 내린다");
+    assert_eq!(r.observe(5, t0 + Duration::from_millis(1200)), None, "내린 값이 닿을 때까지 한 번 더 내리지 않는다");
+    assert_eq!(r.observe(5, t0 + Duration::from_millis(1800)), Some(14_700_000));
+    assert_eq!(r.observe(0, t0 + Duration::from_secs(3)), None, "조용해도 3초는 기다린다");
+    assert_eq!(r.observe(0, t0 + Duration::from_secs(5)), Some(16_905_000), "조용하면 15%씩 올린다");
+    let mut low = Rate::new(30_000_000);
+    let mut at = t0;
+    for _ in 0..40 {
+        at += Duration::from_secs(1);
+        low.observe(8, at);
+    }
+    assert_eq!(low.observe(8, at + Duration::from_secs(1)), None, "바닥(2Mbps) 아래로는 안 내린다");
+    let mut back = Rate::new(4_000_000);
+    back.observe(9, t0 + Duration::from_secs(1));
+    let mut up = 0;
+    for i in 0..40 {
+        if let Some(b) = back.observe(0, t0 + Duration::from_secs(5 + i * 4)) {
+            up = b;
+        }
+    }
+    assert_eq!(up, 4_000_000, "처음 값까지만 올린다");
+}

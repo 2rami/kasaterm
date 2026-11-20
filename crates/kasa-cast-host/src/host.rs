@@ -1,12 +1,12 @@
-//! 보내는 쪽 — SCK 로 뜬 장을 VT 로 압축해 `kasa_remote::screen_stream` 에 넘긴다.
+//! 보내는 쪽 — SCK 로 뜬 장을 VT 로 압축해 `kasa_cast` 의 흐름에 넘긴다.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use kasa_remote::screen_mirror::Denied;
-use kasa_remote::screen_stream::{Capture, Config, Frame, Session};
+use kasa_cast::mirror::Denied;
+use kasa_cast::{Capture, Config, Frame, Session};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, CVPixelBuffer};
 use serde_json::{json, Value};
@@ -45,7 +45,7 @@ impl Shared {
         let Some(enc) = guard.as_ref() else { return };
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         let force = self.force_key.swap(false, Ordering::Relaxed);
-        enc.encode(px, FrameMeta { seq, cap_id, t_cap }, force, super::host_now());
+        enc.encode(px, FrameMeta { seq, cap_id, t_cap }, force, crate::host_now());
         *self.last_encode.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
 
@@ -105,9 +105,7 @@ impl Drop for HostSession {
 }
 
 fn keep_awake() {
-    if let Some(source) = kasa_remote::screen_mirror::installed() {
-        source.keep_awake();
-    }
+    crate::jpeg::keep_awake();
 }
 
 fn permitted() -> bool {
@@ -186,7 +184,7 @@ impl Capture for Host {
         // 검증 리그는 Windows 인 척할 수 있다 — 맥에서 Windows 를 조작할 때의 키 보내기를 맥 둘로 잰다.
         let os = crate::verification_run().then(|| std::env::var("KASATERM_TEST_SCREEN_OS").ok()).flatten();
         let info = json!({
-            "os": os.as_deref().unwrap_or("macos"), "display": cap.display, "displays": super::displays_json(),
+            "os": os.as_deref().unwrap_or("macos"), "display": cap.display, "displays": crate::displays_json(),
             "width": width, "height": height, "codec": config.codec, "fps": config.fps,
             "bitrate": config.bitrate, "refine": config.refine, "rejected": encoder.rejected,
         });
@@ -204,12 +202,10 @@ impl Capture for Host {
     }
 
     fn request_permission(&self) {
-        if let Some(source) = kasa_remote::screen_mirror::installed() {
-            source.request_permission();
-        }
+        crate::jpeg::request_permission();
     }
 
-    fn input(&self, display: u32, input: &kasa_remote::screen_mirror::Input) -> Result<(), Denied> {
+    fn input(&self, display: u32, input: &kasa_cast::mirror::Input) -> Result<(), Denied> {
         // 검증 리그는 사람 화면에 누름·키를 넣지 않고 받은 조작만 적는다 — 넣는 길은 화면 거울의 `screen_input` 그대로다.
         if let Some(path) = crate::verification_run().then(|| std::env::var_os("KASATERM_TEST_SCREEN_INPUT_LOG")).flatten() {
             use std::io::Write as _;
@@ -217,15 +213,15 @@ impl Capture for Host {
             let _ = writeln!(f, "{display} {input:?}");
             return Ok(());
         }
-        crate::screen_input::put(display, input)
+        crate::input::put(display, input)
     }
 
     fn request_input_permission(&self) {
-        crate::screen_input::request_permission();
+        crate::input::request_permission();
     }
 
     fn now(&self) -> f64 {
-        super::host_now()
+        crate::host_now()
     }
 }
 
@@ -247,7 +243,7 @@ fn refine_loop(shared: &Shared, fps: u32) {
             let next = base.and_then(|b| shared.scroll.lock().unwrap_or_else(|e| e.into_inner()).as_mut()?.next(&b.0));
             if let Some(px) = next {
                 let cap_id = shared.cap_id.fetch_add(1, Ordering::Relaxed) + 1;
-                shared.submit(&px, cap_id, super::host_now());
+                shared.submit(&px, cap_id, crate::host_now());
             }
             continue;
         }

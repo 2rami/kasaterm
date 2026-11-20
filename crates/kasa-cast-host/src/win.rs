@@ -15,8 +15,8 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use kasa_remote::screen_mirror::{Denied, Input};
-use kasa_remote::screen_stream::{Capture, Config, Frame, Session};
+use kasa_cast::mirror::{Denied, Input};
+use kasa_cast::{Capture, Config, Frame, Session};
 use serde_json::{json, Value};
 use windows::core::{Interface, GUID};
 use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, LPARAM, RECT};
@@ -48,10 +48,6 @@ const RING: usize = 6;
 const HNS_PER_SEC: f64 = 10_000_000.0;
 
 pub(crate) struct Host;
-
-pub(crate) fn install() {
-    kasa_remote::screen_stream::install(Arc::new(Host));
-}
 
 /// 호스트 시계(초) — 부팅부터의 QPC. 화면 도우미(다른 프로세스)가 찍은 장의 시각과 이 앱의 시계가 같아야 해서
 /// 프로세스마다 기점이 다른 `Instant` 를 쓰지 않는다.
@@ -101,7 +97,7 @@ fn input_desktop_moved(on: Option<HDESK>) -> bool {
 /// 멈춘 화면에서 입력 데스크톱이 바뀌었는지 묻는 간격.
 const DESKTOP_CHECK: Duration = Duration::from_millis(250);
 
-pub(super) fn com() {
+pub fn com() {
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
 }
 
@@ -645,7 +641,7 @@ impl Capture for Host {
         if super::win_agent::input(display, input) {
             return Ok(());
         }
-        crate::screen_input::put(display, input)
+        crate::input::put(display, input)
     }
 
     fn request_input_permission(&self) {}

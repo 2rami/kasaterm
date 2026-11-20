@@ -487,7 +487,7 @@ class LocalRunTests(Fixture):
         packages = [cargo[0][i + 1] for i, arg in enumerate(cargo[0]) if arg == "-p"]
         self.assertEqual(packages, ["kasaterm", "kasa-http", "kasa-identity", "kasa-characters", "kasa-wire",
             "kasa-device", "kasa-backend", "kasa-students", "kasa-remote", "kasa-browser", "kasa-git",
-            "kasa-gateway", "kasa-serve", "kasa-socket"])
+            "kasa-gateway", "kasa-serve", "kasa-socket", "kasa-cast", "kasa-cast-host"])
         self.assertEqual(cargo[0][-1], "--release", "no test-name filter may narrow coverage")
         self.assertIn("built", state["stages"]["build"]["detail"])
         self.assertEqual(state["stages"]["build"]["detail"]["identity"]["team"], "ABCDE12345")

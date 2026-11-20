@@ -1,0 +1,23 @@
+[package]
+name = "kasa-cast"
+description = "Screen stream contract: control, frames, sound datagrams and input over kasanet QUIC."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+# Fake capture for tests in this crate and in the web socket adapter (kasa-remote).
+testing = []
+
+[dependencies]
+kasa-net = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+kasa-net = { workspace = true }
+
+[lints]
+workspace = true

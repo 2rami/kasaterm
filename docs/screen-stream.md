@@ -180,7 +180,7 @@ screen-stream view <ADDR> --key PATH [--secs N] [--codec hevc|h264] [--mbps N] [
 - A 에 `KASATERM_TEST_SCREEN_LABEL=<B 라벨>` 이면 직통이 선 뒤 화면 칸을 열고 2초마다 `[screen-view-test] … hud=60fps · 21ms · 직통
   upload=2.6ms uploads=N` 을 로그에 적는다(`testkit.rs run_pending_screen_view_test`).
 - B 에 `KASATERM_TEST_SCREEN_SCROLL=<줄>` 이면 사람 화면을 건드리지 않고 마지막 화면을 장마다 밀어 60fps 로 움직이는 화면을 만든다
-  (`screen_stream/scroll_probe.rs`, 검증 실행에서만).
+  (`kasa-cast-host/src/scroll_probe.rs`, 검증 실행에서만).
 
 ### 남은 것
 
@@ -274,7 +274,7 @@ screen-stream view <ADDR> --key PATH [--secs N] [--codec hevc|h264] [--mbps N] [
 
 ## S3 — Windows 보내기·보기 (2026-11-16)
 
-### 보내기 (`app/kasaterm/src/screen_stream/win.rs`)
+### 보내기 (`crates/kasa-cast-host/src/win.rs`)
 
 - 뜨기는 DXGI 데스크톱 복제(주 화면, GPU 텍스처째), 압축은 Media Foundation 하드웨어 인코더 MFT(비동기 — NVENC·Quick Sync·AMF 가
   MFT 로 낸다)에 BGRA(ARGB32) D3D11 텍스처를 그대로 넣는다. 낮은 지연(`LowLatencyMode`·`LowDelayVBR`)·B 장 없음·키프레임은 청할
@@ -410,7 +410,7 @@ UAC 확인 창·잠금 화면은 Windows 가 보안 데스크톱(Winlogon)에 �
   부른다 — SYSTEM 도우미에서만 먹고 정책 `SoftwareSASGeneration=1` 이 있어야 해서 설치기가 그 값을 건다(`main.wxs`).
 - **맥에서 Windows 조작 — 키 자리로 보내기**(2026-11-19): 「키보드가 안 먹는다」의 까닭은 넣는 방식이었다. 글자는 유니코드
   패킷(`KEYEVENTF_UNICODE`)으로, 이름 붙은 키는 스캔 코드 0 인 VK 로 넣었는데, 게임처럼 키보드를 원시 입력으로 읽는 앱은 둘 다
-  못 받는다(마우스는 먹었다). 그래서 Windows 쪽은 VK 에 `MapVirtualKeyW` 스캔 코드를 같이 싣고(`screen_input.rs press`), 맥에서
+  못 받는다(마우스는 먹었다). 그래서 Windows 쪽은 VK 에 `MapVirtualKeyW` 스캔 코드를 같이 싣고(`kasa-cast-host/src/input.rs press`), 맥에서
   Windows 를 볼 때는 글 대신 누른 자리(웹 `code`)를 보낸다(`input.rs screen_raw_key`) — 한글은 이 앱 조합기를 거치지 않고 그 기기
   입력기가 조합한다. 그 기기가 모르는 키만 글자째 보낸다(`screen_input::known_key`).
   - 손가락은 키보드 자리대로 ⌘ → Alt, ⌥ → Windows 키, Ctrl·Shift 그대로(`view.rs windows_mods`). 앞의 ⌘ → Ctrl 은 사용자가 바꿨다
@@ -447,7 +447,7 @@ UAC 확인 창·잠금 화면은 Windows 가 보안 데스크톱(Winlogon)에 �
   Windows 기본 출력 장치 공유 모드, 장치 섞기 형식으로 바꿔 넣는다
 ```
 
-틀·허브·지터 버퍼는 `kasa_remote::screen_stream::audio`, OS 부분과 칸 알약은 `app/kasaterm/src/screen_stream/audio*.rs`.
+틀·허브·지터 버퍼는 `kasa_cast::audio`, OS 부분은 `crates/kasa-cast-host/src/audio*.rs`, 칸 알약은 `app/kasaterm/src/screen_stream/audio.rs`.
 
 ### 계약
 

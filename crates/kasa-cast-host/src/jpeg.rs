@@ -1,15 +1,27 @@
-//! 기기 화면 거울의 화면 뜨기 — `kasa_remote::screen_mirror` 에 꽂는다(`docs/screen-mirror.md`).
+//! 기기 화면 거울의 화면 뜨기 — 앱이 `kasa_remote::screen_mirror` 에 꽂는다(`docs/screen-mirror.md`). 화면 목록·화면 깨우기·화면 기록
+//! 권한 창은 화면 스트림(`host.rs`)도 쓴다.
 //!
 //! 화면을 OS 가 줄여 주는 크기로 바로 받아(macOS 는 비트맵 문맥에 그리기, Windows 는 StretchBlt) 줄인 픽셀만
 //! 만진다 — 5K 화면을 통째로 들고 줄이면 한 장에 수십 ms 가 더 든다. 줄인 픽셀이 지난 장과 같으면 인코딩하지 않는다.
 
-use kasa_remote::screen_mirror::{Ask, Denied, Display, Input, Shot, Source};
+use kasa_cast::mirror::{Ask, Denied, Display, Input, Shot, Source};
 
-pub(crate) fn install() {
-    kasa_remote::screen_mirror::install(std::sync::Arc::new(Screen));
+pub(crate) struct Screen;
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn displays() -> Vec<Display> {
+    os::displays()
 }
 
-struct Screen;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn keep_awake() {
+    os::keep_awake();
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn request_permission() {
+    os::request_permission();
+}
 
 impl Source for Screen {
     fn displays(&self) -> Vec<Display> {
@@ -31,11 +43,11 @@ impl Source for Screen {
     }
 
     fn input(&self, display: u32, input: &Input) -> Result<(), Denied> {
-        crate::screen_input::put(display, input)
+        crate::input::put(display, input)
     }
 
     fn request_input_permission(&self) {
-        crate::screen_input::request_permission();
+        crate::input::request_permission();
     }
 
     fn keep_awake(&self) {

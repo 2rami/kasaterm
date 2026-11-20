@@ -15,6 +15,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = { workspace = true }
 futures-util = { workspace = true }
+kasa-cast = { workspace = true }
 kasa-device = { workspace = true }
 kasa-identity = { workspace = true }
 kasa-net = { workspace = true }
@@ -32,6 +33,7 @@ tokio-tungstenite = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+kasa-cast = { workspace = true, features = ["testing"] }
 kasa-device = { workspace = true, features = ["test-isolation"] }
 
 [lints]

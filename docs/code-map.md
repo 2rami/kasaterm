@@ -112,14 +112,15 @@
   `kasa-wire`(화면 전송 형식·피드), `kasa-backend`(독립 Backend), `kasa-serve`(`kasa-serve-web`).
   `kasa-http`는 이 표면들을 같은 HTTP 경로로 합친다. 학생 디스패처 정본은 `crates/kasa-students/src/dispatch.rs`다.
 - 기기 화면 거울 — `kasa-remote/src/screen_mirror.rs`(소켓·ack 창 2장·뜨는 박자, 앱이 꽂는 `Source`)·`http/screen.rs`(`/screen/ws` — 폰.
-  PC 는 화면 칸), 앱 `screen_capture.rs`(macOS `CGDisplayCreateImage`·
-  Windows `StretchBlt` 줄여 뜨기·JPEG)·`screen_input.rs`(조작 넣기 — macOS CGEvent·손쉬운 사용 권한, Windows `SendInput`). PC 입구는 Info 「다른 기계」 메뉴 「화면 보기」(`machinescol.rs open_screen_mirror`),
+  PC 는 화면 칸), `kasa-cast-host/src/jpeg.rs`(macOS `CGDisplayCreateImage`·
+  Windows `StretchBlt` 줄여 뜨기·JPEG)·`kasa-cast-host/src/input.rs`(조작 넣기 — macOS CGEvent·손쉬운 사용 권한, Windows `SendInput`). PC 입구는 Info 「다른 기계」 메뉴 「화면 보기」(`machinescol.rs open_screen_mirror`),
   폰은 `mobile/lib/screen_session.dart`·`screens/screen_mirror.dart`(허브 기기 머리글 모니터 단추). 계약 [screen-mirror.md](screen-mirror.md)
-- 화면 스트림(하드웨어 영상) — `kasa-remote/src/screen_stream.rs`(카사넷 `kasa/screen/1` 틀·보내기·보기, 앱이 꽂는 `Capture`)·
-  `kasa-device/src/kasanet.rs`(입구 `SCREEN_ALPN`·`connect`·`screen_capable`), 앱 `screen_stream/`(macOS: `capture.rs` SCK·`codec.rs`
-  VT 압축·풀기·`host.rs` 보내는 세션과 정지 화면 다듬기·`view.rs` 풀기 일꾼·`pane.rs` 화면 칸 여닫기·그리기·`input.rs` 조작(누름·휠·키·한글·⌘V)·`scroll_probe.rs` 검증 스크롤; `window.rs` 화면 칸을 별도 창으로 꺼내기;
+- 화면 스트림(하드웨어 영상) — 계약·흐름은 `crates/kasa-cast`(카사넷 `kasa/screen/1` 틀·보내기·보기·소리 허브, `Capture`), 앱 프로세스에 꽂는
+  자리는 `kasa-remote/src/screen_stream.rs`(입구·`serve_ws`·base 로 보기)·`kasa-device/src/kasanet.rs`(입구 `SCREEN_ALPN`·`connect`·`screen_capable`).
+  OS 부분은 `crates/kasa-cast-host`(macOS: `capture.rs` SCK·`codec.rs` VT 압축·풀기·`host.rs` 보내는 세션과 정지 화면 다듬기·`scroll_probe.rs` 검증 스크롤;
   Windows: `win.rs` DXGI 복제(입력 데스크톱 따라가기)·MF 하드웨어 압축·`win_agent.rs` SYSTEM 화면 도우미 서비스와 파이프(UAC·잠금 화면, 설치기 `wix/main.wxs` 가 서비스 등록)·`win_view.rs` MF 풀기와 D3D11
-  공유 텍스처·`annexb.rs` Annex-B↔길이 머리 NAL, 칸 들여오기는 `GpuRenderer::set_image_d3d11`). 폰은 `/screen/ws` 영상 방식(`screen_stream::serve_ws`)을
+  공유 텍스처·`annexb.rs` Annex-B↔길이 머리 NAL; 소리 `audio*.rs`·스피커 끄기 `source_mute.rs`). 앱 `screen_stream/` 은 보는 칸이다 — `view.rs` 풀기 일꾼·`pane.rs` 화면 칸 여닫기·그리기·
+  `input.rs` 조작(누름·휠·키·한글·⌘V)·`window.rs` 별도 창·`audio.rs` 「소리」 알약, 칸 들여오기는 `GpuRenderer::set_image_d3d11`). 폰은 `/screen/ws` 영상 방식(`screen_stream::serve_ws`)을
   `mobile/lib/screen_video.dart`·`ios/Runner/ScreenVideo.swift`(VT 풀기 → `FlutterTexture`)로 본다. 칸 탭은
   `PaneContent::Screen`, 연결은 `App.screen_views`. 계약·실측 [screen-stream.md](screen-stream.md)
 - `kasa-wire/src/terminal_wire.rs` — PC 터미널 미러의 협상된 무손실 압축·64KiB 해제 상한. `http/socket.rs`가 보내고 `remote.rs`가 VT 파서 앞에서 푼다. 구판 연결은 원문 바이트를 유지한다.

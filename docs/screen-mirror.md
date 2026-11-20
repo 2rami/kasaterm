@@ -18,7 +18,7 @@
                          그 기기 카사텀  GET /screen/ws  (kasa-http http/screen.rs → screen_mirror.rs)
                                                      │  Source::capture (앱이 꽂는다)
                                                      ▼
-                         app/kasaterm/src/screen_capture.rs  macOS CGDisplayCreateImage · Windows StretchBlt
+                         crates/kasa-cast-host/src/jpeg.rs  macOS CGDisplayCreateImage · Windows StretchBlt
 ```
 
 - 화면을 뜨는 법은 OS 마다 달라 앱이 부팅 때 `kasa_remote::screen_mirror::install` 로 꽂는다. 관문·`kasa-device`·lite 처럼 꽂지
@@ -125,7 +125,7 @@
 - `cargo test -p kasaterm --bin kasaterm screen_input` — 키 이름 표·누름 수. 실제 HID 길은
   `screen_input::tests::pointer_lands -- --ignored`(커서를 3포인트 옮겼다 되돌린다. 커서가 있는 화면 기준이어야 한다 — 주 화면
   기준으로 풀면 옆 모니터의 커서가 주 화면 끝으로 끌려온다).
-- Windows 쪽은 이 맥에서 `ring` 의 C 빌드 때문에 앱 통째 교차 검사가 안 된다. `screen_input.rs` 만 같은 `windows` 판으로 떼어
+- Windows 쪽은 이 맥에서 `ring` 의 C 빌드 때문에 앱 통째 교차 검사가 안 된다. `kasa-cast-host/src/input.rs` 만 같은 `windows` 판으로 떼어
   `cargo check --target x86_64-pc-windows-msvc` 했다.
 - 격리 리그 둘(A 원본, B 가 `KASATERM_MACHINES` 로 A 를 가리킴): B 의 `/m/rigA/screen/ws` 로 실제 화면이 오고 ack 를 안 하면 2장에서
   멈춘다.

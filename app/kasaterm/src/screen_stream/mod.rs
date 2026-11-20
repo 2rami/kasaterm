@@ -1,39 +1,16 @@
 //! 화면 스트림 — 다른 기기 화면을 하드웨어 영상 압축으로 카사텀 칸 안에 본다. 계약·실측은 `docs/screen-stream.md`.
-//! 틀과 흐름은 `kasa_remote::screen_stream`, 여기는 macOS 의 화면 뜨기(SCK)·압축·풀기(VT)와 Windows 의 보내기(DXGI·MF, `win.rs`)·
-//! 풀기(MF·D3D11, `win_view.rs`)다. 보는 칸(`view.rs`)은 둘이 같고 풀기만 `platform` 으로 갈린다.
+//! 틀과 흐름은 `kasa_cast`, OS 부분(뜨기·압축·풀기·소리·조작 넣기)은 `kasa_cast_host`, 여기는 보는 칸이다. 보는 칸(`view.rs`)은
+//! 맥·Windows 가 같고 풀기만 `platform` 으로 갈린다.
 
 #[cfg(any(target_os = "macos", windows))]
 mod audio;
-#[cfg(target_os = "macos")]
-mod audio_mac;
-#[cfg(windows)]
-mod audio_win;
-#[cfg(target_os = "macos")]
-mod capture;
-#[cfg(target_os = "macos")]
-mod codec;
-#[cfg(target_os = "macos")]
-mod host;
-#[cfg(target_os = "macos")]
-mod scroll_probe;
 #[cfg(any(target_os = "macos", windows))]
-mod source_mute;
-#[cfg(any(target_os = "macos", windows))]
-pub(crate) use source_mute::restore as restore_speakers;
+pub(crate) use kasa_cast_host::restore_speakers;
 #[cfg(any(target_os = "macos", windows))]
 mod view;
-#[cfg(windows)]
-mod win;
-#[cfg(windows)]
-mod win_agent;
-#[cfg(windows)]
-mod win_view;
 
-#[cfg(target_os = "macos")]
-use codec as platform;
-#[cfg(windows)]
-use win_view as platform;
-mod annexb;
+#[cfg(any(target_os = "macos", windows))]
+use kasa_cast_host as platform;
 mod input;
 #[cfg(target_os = "macos")]
 pub(crate) use input::watch_caps_lock;
@@ -54,30 +31,19 @@ pub(crate) enum Surface {
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use view::ScreenView;
 
-/// 호스트 시계(초). SCK 장의 시각과 같은 시계다.
-#[cfg(target_os = "macos")]
-pub(crate) fn host_now() -> f64 {
-    unsafe { objc2_core_media::CMClock::host_time_clock().time().seconds() }
-}
-
-/// 부팅 때 한 번 — 카사넷 화면 입구를 연다. 화면 기록 권한은 붙는 때 따진다.
-#[cfg(target_os = "macos")]
+/// 부팅 때 한 번 — 카사넷 화면 입구와 이 기기 소리 허브를 연다. 화면 기록 권한은 붙는 때 따진다.
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn install() {
-    kasa_remote::screen_stream::install(std::sync::Arc::new(host::Host));
-    audio::install();
+    if let Some(capture) = kasa_cast_host::capture() {
+        kasa_remote::screen_stream::install(capture);
+    }
+    kasa_cast_host::audio::install();
 }
 
 /// `kasaterm.exe --screen-service`·`--screen-agent` 면 Windows 화면 도우미로 돌고 참 — 앱 초기화 전에 부른다.
 #[cfg(windows)]
 pub(crate) fn run_helper(args: &[std::ffi::OsString]) -> bool {
-    win_agent::run(args)
-}
-
-/// 부팅 때 한 번 — Windows 는 DXGI 복제·Media Foundation 하드웨어 인코더로 보낸다(S3).
-#[cfg(windows)]
-pub(crate) fn install() {
-    win::install();
-    audio::install();
+    kasa_cast_host::run_helper(args)
 }
 
 /// 그 기기를 네이티브 칸으로 볼 수 있나 — 이 판이 보고, 그 기기가 보내는 판이고, 카사넷 직통·믿는 중계일 때.
@@ -88,15 +54,6 @@ pub(crate) fn can_view(base: &str) -> bool {
 }
 
 type Rect = (f32, f32, f32, f32);
-
-/// 그 기기 화면 목록(압축 정보 `displays`) — 보는 쪽이 화면 고르기를 세운다. 화면 거울과 같은 번호다.
-#[cfg(target_os = "macos")]
-fn displays_json() -> serde_json::Value {
-    let list = kasa_remote::screen_mirror::installed().map(|s| s.displays()).unwrap_or_default();
-    serde_json::Value::Array(
-        list.iter().map(|d| serde_json::json!({ "id": d.id, "width": d.width, "height": d.height, "main": d.main })).collect(),
-    )
-}
 
 /// 칸 위에 그린 자리(LOGICAL px) — 누름이 어디에 떨어졌는지 가른다.
 #[derive(Clone, Copy)]

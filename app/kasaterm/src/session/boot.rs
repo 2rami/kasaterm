@@ -217,7 +217,11 @@ impl App {
                 // 다른 기계가 `/version` 으로 묻는 빌드 표식 — 앱 build.rs 가 박은
                 // git 리비전. kasa-http 는 자기 것이 없어 여기서 넘긴다.
                 kasa_device::machines::set_build_id(env!("KASATERM_GIT_REV"));
-                crate::screen_capture::install();
+                // 스피커를 끈 표(`stream-muted`)는 설정 폴더에 둔다 — 보내기를 꽂기 전에 알려야 지난 실행의 표를 되켠다.
+                if let Some(dir) = crate::socket::settings_file_path().and_then(|p| p.parent().map(std::path::Path::to_path_buf)) {
+                    kasa_cast_host::set_state_dir(dir);
+                }
+                kasa_remote::screen_mirror::install(kasa_cast_host::jpeg_source());
                 #[cfg(any(target_os = "macos", windows))]
                 crate::screen_stream::install();
                 // 재시작 작업이 이 부팅을 기다리고 있었으면 도착을 적는다 — 빌드 표식이 선 뒤라야 맞는 값이 실린다.

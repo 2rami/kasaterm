@@ -22,6 +22,7 @@ image = { workspace = true }
 kasa-characters = { workspace = true }
 kasa-collab = { workspace = true, features = ["net"] }
 kasa-identity = { workspace = true }
+kasa-cast = { workspace = true }
 kasa-net = { workspace = true }
 kasa-socket = { workspace = true, default-features = true }
 libc = { workspace = true }
