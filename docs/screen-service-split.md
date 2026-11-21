@@ -300,6 +300,8 @@
 - 제어 길은 상태 폴더(`~/Library/Application Support/kasaterm/screen`, 0700)의 `ctl.sock`(0600). 도우미는 붙은 상대가 같은 uid(`getpeereid`)이고 실행 파일이
   같은 번들의 `Contents/MacOS/kasaterm`(`LOCAL_PEERPID` → `proc_pidpath`)인지 본다. 검증 실행은 uid 만 본다.
 - 도우미 안에서 뜨기·압축(SCK·VT)·소리(SCK 소리·스피커 끄기)·조작(CGEvent)·카사넷 노드가 한 프로세스다.
+- 번들에 Mach-O 를 더하면 릴리스 도구의 공증 사전 검사 목록(`tools/release/macsign.py` `HARDENED_SIGNED`)에도 넣는다 — 빠지면 preview 굽기가
+  「hardened 서명 목록 밖」으로 막힌다(2026-11-21 P2–P5 판이 그렇게 한 번 막혔다).
 
 ### 판이 어긋날 때
 
