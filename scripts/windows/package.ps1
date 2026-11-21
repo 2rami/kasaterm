@@ -268,8 +268,9 @@ $wixPdbPath = [IO.Path]::ChangeExtension($msiPath, ".wixpdb")
 if (Test-Path -LiteralPath $wixPdbPath) {
     Remove-Item -LiteralPath $wixPdbPath -Force
 }
+# 방화벽 확장(화면 서비스 예외)은 한국어 문자열이 없다 — 없는 것은 영어로 채운다(ko-kr 만 주면 light LGHT0102).
 Invoke-External -FilePath $lightExe -ArgumentList @(
-    "-nologo", "-spdb", "-ext", $wixUiExtension, "-ext", $wixUtilExtension, "-ext", $wixFirewallExtension, "-cultures:ko-kr",
+    "-nologo", "-spdb", "-ext", $wixUiExtension, "-ext", $wixUtilExtension, "-ext", $wixFirewallExtension, "-cultures:ko-kr;en-us",
     "-loc", (Join-Path $repoRoot "app\kasaterm\wix\ko-kr.wxl"), "-out", $msiPath,
     $mainObj, $aronaObj, $collabObj
 )
