@@ -1187,6 +1187,9 @@ class RealRepoTests(unittest.TestCase):
         self.assertEqual(kinds["mobile"], ["mobile/lib/c.dart"])
         self.assertEqual(kinds["feed"], ["docs/appcast.xml"])
         self.assertEqual(kinds["docs"], ["docs/d.md", "README.md"])
+        packaging = fp.classify(["scripts/windows/package.ps1", "scripts/build-app.sh", "scripts/windows/verify.ps1"])
+        self.assertEqual(packaging["native"], ["scripts/windows/package.ps1", "scripts/build-app.sh"], "굽기 스크립트는 산출물을 바꾼다")
+        self.assertEqual(packaging["infra"], ["scripts/windows/verify.ps1"])
 
     def test_the_real_feed_item_parser_reads_both_appcasts(self):
         mac = feed_item((REPO / "docs/appcast.xml").read_bytes())

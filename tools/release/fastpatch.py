@@ -76,11 +76,18 @@ def remote_versions(repo, remote="origin"):
     return sorted(set(found))
 
 
+# 굽기·서명 스크립트 — scripts/ 아래지만 기기에 가는 번들·MSI 를 바꾼다. 이것만 고친 판이 「플랫폼 없음」으로 정책 밖이 되어
+# v0.2.263 Windows MSI 굽기 고침이 못 나갔다(2026-11-22).
+PACKAGING = ("scripts/build-app.sh", "scripts/kasaterm.entitlements", "scripts/windows/package.ps1")
+
+
 def classify(paths):
     """바뀐 파일 → 어느 배포가 필요한가. 네이티브는 앱 업데이트, 폰은 설치 링크 판, 문서·인프라는 기기에 안 간다."""
     kinds = {"native": [], "mobile": [], "feed": [], "docs": [], "infra": []}
     for p in paths:
-        if re.match(r"docs/appcast[^/]*\.xml$", p):
+        if p in PACKAGING:
+            kinds["native"].append(p)
+        elif re.match(r"docs/appcast[^/]*\.xml$", p):
             kinds["feed"].append(p)
         elif p.startswith("mobile/"):
             kinds["mobile"].append(p)
