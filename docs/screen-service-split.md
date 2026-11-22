@@ -400,6 +400,9 @@
 
 - 제어 규약은 `kasa_cast::service`(`PROTO`·틀·`ask`), 서비스 쪽 처리는 `app/kasaterm-screen/src/ctl.rs`, 파이프는 `win.rs`, 앱 쪽은
   `app/kasaterm/src/screen_service.rs`(2초마다 `allow`(바뀔 때만)·`settings`(바뀔 때만)·`status` → `kasanet::set_screen_node`).
+- 함정(1.3.0 → 1.3.1): 앱은 붙은 파이프의 소유자가 SYSTEM 인지 본다. LocalSystem 이 만든 개체의 기본 소유자는 Administrators 라
+  보안 설명자에 `O:SY` 를 안 적으면 앱이 제어 파이프를 거절하고 「화면 서비스가 없다」로 남는다(허락 목록을 못 넘겨 서비스의 보는 쪽 0).
+  도우미 파이프는 처음부터 `O:SY` 였다. 시험 서비스·탐침은 카사넷으로만 붙어 이 길을 안 지났다 — 설치판에서 처음 드러났다.
 - 보는 쪽 길: `kasanet::learn` 이 `/version` 의 `screen_node` 를 보면 그 노드와 길을 따로 쥔다(`Link::start_alpn` + `kasa/screen-link/1` —
   서비스 노드는 `fwd` 를 안 받는다). `kasanet::connect_screen` 은 그 길이 직통·믿는 중계면 서비스로, 아니면 앱으로 붙는다. `can_view` 는
   `kasanet::screen_path` 를 본다.

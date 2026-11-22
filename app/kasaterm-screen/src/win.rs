@@ -123,9 +123,13 @@ fn drop_old_versions() {
     }
 }
 
+/// 소유자를 SYSTEM 으로 박는다 — LocalSystem 이 만든 개체의 기본 소유자는 Administrators 라, 빼면 앱의
+/// `owned_by_system` 이 이 파이프를 남의 것으로 보고 서비스가 없다고 여긴다.
+const CTL_SDDL: &str = "O:SYD:P(A;;GA;;;SY)(A;;GRGW;;;IU)";
+
 /// 제어 파이프 — SYSTEM 과 대화형 사용자만 열고, 붙은 프로세스가 같은 설치의 앱(`bin\kasaterm.exe`)인지 본다.
 fn listen(service: &Arc<Service>) {
-    let sddl = wide("D:P(A;;GA;;;SY)(A;;GRGW;;;IU)");
+    let sddl = wide(CTL_SDDL);
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(sddl.as_ptr()), SDDL_REVISION_1, &mut descriptor, None) }.is_err() {
         eprintln!("[screen-service] 제어 파이프 보안 설명자를 못 만든다");
@@ -221,4 +225,29 @@ fn lock_down(dir: &Path) {
         }
     }
     let _ = unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetSecurityDescriptorOwner, PSID};
+
+    #[test]
+    fn control_pipe_is_owned_by_system_like_the_agent_pipe() {
+        let sddl = wide(CTL_SDDL);
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(sddl.as_ptr()), SDDL_REVISION_1, &mut descriptor, None) }.unwrap();
+        let (mut owner, mut defaulted) = (PSID::default(), false.into());
+        unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) }.unwrap();
+        assert!(!owner.is_invalid(), "control pipe has no explicit owner");
+        let mut text = PWSTR::null();
+        unsafe { ConvertSidToStringSidW(owner, &mut text) }.unwrap();
+        let sid = unsafe { text.to_string() }.unwrap();
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        }
+        assert_eq!(sid, "S-1-5-18");
+    }
 }
