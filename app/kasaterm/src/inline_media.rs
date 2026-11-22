@@ -69,11 +69,7 @@ pub(crate) fn compose(
     source: Option<&str>,
     proxy: &EventLoopProxy<UserEvent>,
 ) -> Vec<InlineSlot> {
-    let stripes: Vec<_> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(i, row)| crate::inline_result::stripe_for(i, row, "[[km:"))
-        .collect();
+    let stripes = crate::inline_result::stripes_for(rows, "[[km:");
     let mut slots = Vec::new();
     let mut i = 0;
     while let Some(first) = stripes.get(i) {

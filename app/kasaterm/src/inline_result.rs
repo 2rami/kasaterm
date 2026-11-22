@@ -56,8 +56,85 @@ pub(crate) struct Stripe {
     pub total: usize,
 }
 
-fn stripe(row: usize, cells: &[GridCell]) -> Option<Stripe> {
-    stripe_for(row, cells, "[[ki:")
+fn gutter(c: &GridCell) -> bool {
+    matches!(c.ch, ' ' | '\0' | '│' | '┃' | '⏺' | '•' | '●' | '›')
+}
+
+fn empty(c: &GridCell) -> bool {
+    matches!(c.ch, ' ' | '\0' | '│' | '┃')
+}
+
+/// 표식과 다른 바탕으로 덧그린 칸 — 본문이 아니라 위에 얹힌 층이다. Claude Code 전체 화면
+/// 모드는 위로 스크롤하면 맨 아래 줄 가운데에 「Jump to bottom ↓」 알약을 얹는데, 그 줄이
+/// 카드 줄이면 그림 대신 표식 글자가 그대로 보였다.
+fn overlaid(c: &GridCell, marker: &GridCell) -> bool {
+    c.bg != marker.bg || c.inverse != marker.inverse
+}
+
+/// 화면 줄에서 카드 표식 줄을 모두 찾는다. 좁은 칸에서는 알약이 표식 글자 자체를 덮는다 —
+/// 그 줄은 바로 위·아래 카드 줄이 와야 할 표식을 정해 주므로, 가려지지 않은 글자가 그것과
+/// 맞으면 같은 카드의 한 줄로 메운다.
+pub(crate) fn stripes_for(rows: &[Vec<GridCell>], prefix: &str) -> Vec<Stripe> {
+    let direct: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .map(|(r, cells)| stripe_for(r, cells, prefix))
+        .collect();
+    // 메운 줄은 바탕이 알약 색이라 다음 줄의 근거가 못 된다 — 그러면 알약 아래 구분선·입력창까지
+    // 「다른 층」으로 보여 카드 줄로 잡힌다. 근거는 글자로 읽힌 표식 줄뿐이다.
+    let from = |n: usize, r: usize| {
+        let near = direct.get(n)?.as_ref()?;
+        let index = if n < r { near.index + 1 } else { near.index.checked_sub(1)? };
+        covered(r, &rows[r], prefix, near, index, &rows[n][near.col])
+    };
+    let fills: Vec<_> = (0..rows.len())
+        .map(|r| match direct[r] {
+            Some(_) => None,
+            None => r
+                .checked_sub(1)
+                .and_then(|n| from(n, r))
+                .or_else(|| from(r + 1, r)),
+        })
+        .collect();
+    direct
+        .into_iter()
+        .zip(fills)
+        .filter_map(|(hit, fill)| hit.or(fill))
+        .collect()
+}
+
+fn covered(
+    row: usize,
+    cells: &[GridCell],
+    prefix: &str,
+    near: &Stripe,
+    index: usize,
+    marker: &GridCell,
+) -> Option<Stripe> {
+    if index >= near.total {
+        return None;
+    }
+    let expected = format!("{prefix}{}:{index:02}/{:02}]]", near.id, near.total);
+    let span = cells.get(near.col..near.col + expected.len())?;
+    // 하나도 안 가렸는데 stripe_for 가 거절한 줄은 본문이다.
+    if !span.iter().any(|c| overlaid(c, marker)) {
+        return None;
+    }
+    let fits = span
+        .iter()
+        .zip(expected.chars())
+        .all(|(c, ch)| c.ch == ch || overlaid(c, marker))
+        && cells[..near.col].iter().all(|c| gutter(c) || overlaid(c, marker))
+        && cells[near.col + expected.len()..]
+            .iter()
+            .all(|c| empty(c) || overlaid(c, marker));
+    fits.then(|| Stripe {
+        row,
+        col: near.col,
+        id: near.id.clone(),
+        index,
+        total: near.total,
+    })
 }
 
 pub(crate) fn stripe_for(row: usize, cells: &[GridCell], prefix: &str) -> Option<Stripe> {
@@ -65,15 +142,15 @@ pub(crate) fn stripe_for(row: usize, cells: &[GridCell], prefix: &str) -> Option
         .windows(5)
         .position(|w| w.iter().map(|c| c.ch).eq(prefix.chars()))?;
     // 설명이나 명령 속의 표식을 그림으로 바꾸면 실제 본문을 덮는다.
-    let gutter = |c: &GridCell| matches!(c.ch, ' ' | '\0' | '│' | '┃' | '⏺' | '•' | '●' | '›');
     if !cells[..start].iter().all(gutter) {
         return None;
     }
     let text: String = cells[start..].iter().map(|c| c.ch).collect();
     let end = text.find("]]")? + 2;
-    if !text[end..]
-        .chars()
-        .all(|c| matches!(c, ' ' | '\0' | '│' | '┃'))
+    let tail = start + text[..end].chars().count();
+    if !cells[tail..]
+        .iter()
+        .all(|c| empty(c) || overlaid(c, &cells[start]))
     {
         return None;
     }
@@ -164,11 +241,7 @@ fn compose_with(
     cols: usize,
     resolve: impl Fn(&str) -> Option<(PathBuf, u32, u32)>,
 ) -> Vec<InlineSlot> {
-    let stripes: Vec<_> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(r, cells)| stripe(r, cells))
-        .collect();
+    let stripes = stripes_for(rows, "[[ki:");
     let mut slots = Vec::new();
     let mut i = 0;
     while let Some(first) = stripes.get(i) {
@@ -228,6 +301,15 @@ mod tests {
             })
             .collect()
     }
+    fn stripe(row: usize, cells: &[GridCell]) -> Option<Stripe> {
+        stripe_for(row, cells, "[[ki:")
+    }
+    fn pill(row: &mut [GridCell], from: usize, label: &str) {
+        for (cell, ch) in row[from..].iter_mut().zip(label.chars()) {
+            cell.ch = ch;
+            cell.bg = kasa_bridge::screen::Color::Rgb(58, 58, 58);
+        }
+    }
     #[test]
     fn markers_are_short_and_every_row_identifies_its_slice() {
         let block = display_block("0123456789abcdef", 800, 500);
@@ -250,6 +332,61 @@ mod tests {
         ] {
             assert!(stripe(0, &cells(text)).is_none(), "{text}");
         }
+    }
+    #[test]
+    fn overlay_pill_on_a_marker_row_keeps_the_row_but_same_layer_text_does_not() {
+        let mut row = cells("  [[ki:0123456789abcdef:00/12]] Jump to bottom ↓");
+        for cell in &mut row[32..] {
+            cell.bg = kasa_bridge::screen::Color::Rgb(80, 80, 80);
+        }
+        let marker = stripe(0, &row).unwrap();
+        assert_eq!((marker.index, marker.col), (0, 2));
+        let mut inverse = cells("[[ki:0123456789abcdef:03/12]] Jump to bottom ↓");
+        for cell in &mut inverse[30..] {
+            cell.inverse = true;
+        }
+        assert_eq!(stripe(0, &inverse).unwrap().index, 3);
+        let mut code = cells("[[ki:0123456789abcdef:00/12]] explanation");
+        for cell in &mut code {
+            cell.bg = kasa_bridge::screen::Color::Idx(236);
+        }
+        assert!(stripe(0, &code).is_none());
+    }
+    #[test]
+    fn pill_covering_the_marker_in_a_narrow_pane_is_filled_from_the_neighbor_rows() {
+        let id = "0123456789abcdef";
+        let mut rows: Vec<_> = (0..4)
+            .map(|i| cells(&format!("  [[ki:{id}:{i:02}/04]]    ")))
+            .collect();
+        pill(&mut rows[3], 12, " Jump to bottom ↓ ");
+        let found: Vec<_> = stripes_for(&rows, "[[ki:")
+            .iter()
+            .map(|s| (s.row, s.index, s.col))
+            .collect();
+        assert_eq!(found, [(0, 0, 2), (1, 1, 2), (2, 2, 2), (3, 3, 2)]);
+        let mut chrome: Vec<_> = (0..3)
+            .map(|i| cells(&format!("  [[ki:{id}:{i:02}/12]]")))
+            .collect();
+        chrome.push(cells(&format!("  [[ki:{id}:03/12]]")));
+        pill(&mut chrome[3], 0, " Jump to bottom ↓ ");
+        chrome.push(cells(&"─".repeat(40)));
+        chrome.push(cells("❯ "));
+        assert_eq!(stripes_for(&chrome, "[[ki:").len(), 4);
+        let mut top: Vec<_> = (5..7).map(|i| cells(&format!("  [[ki:{id}:{i:02}/12]]"))).collect();
+        pill(&mut top[0], 0, " Jump to bottom ↓ ");
+        assert_eq!(stripes_for(&top, "[[ki:").iter().map(|s| s.index).collect::<Vec<_>>(), [5, 6]);
+        let mut wrong = rows.clone();
+        wrong[3] = cells(&format!("  [[ki:{id}:09/04]]    "));
+        pill(&mut wrong[3], 4, " Jump ");
+        assert_eq!(stripes_for(&wrong, "[[ki:").len(), 3);
+        let mut after = rows[..3].to_vec();
+        after.push(cells("  closing remarks under the card"));
+        pill(&mut after[3], 20, " Jump to bottom ↓ ");
+        assert_eq!(stripes_for(&after, "[[ki:").len(), 3);
+        let mut last = rows.clone();
+        last.push(cells("  "));
+        pill(&mut last[4], 0, " Jump to bottom ↓ ");
+        assert_eq!(stripes_for(&last, "[[ki:").len(), 4);
     }
     #[test]
     fn partial_scrollback_can_start_in_the_middle_of_an_image() {
