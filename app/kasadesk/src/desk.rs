@@ -100,6 +100,7 @@ pub struct Desk {
     pending: Vec<Option<String>>,
     machines: Vec<Machine>,
     paths: Vec<String>,
+    live: Vec<bool>,
     app_alive: bool,
     modifiers: ModifiersState,
     hangul: kasa_ime::Composer,
@@ -122,6 +123,7 @@ impl Desk {
             pending: vec![open],
             machines: Vec::new(),
             paths: Vec::new(),
+            live: Vec::new(),
             app_alive: false,
             modifiers: ModifiersState::empty(),
             hangul: kasa_ime::Composer::new(),
@@ -275,6 +277,8 @@ impl Desk {
     fn paint(&mut self, id: WindowId) {
         let Some(w) = self.windows.get_mut(&id) else { return };
         let (ww, wh) = w.logical();
+        // 글리프 아틀라스 재배치는 이 프레임이 글자 사각형을 하나라도 쌓기 전에만 안전하다 — 쌓인 뒤면 옛 자리를 가리킨다.
+        w.gpu.maintain_atlas();
         w.gpu.clear_chrome();
         self.test.capture(&mut w.gpu);
         let result = if w.label.is_none() {
@@ -287,8 +291,7 @@ impl Desk {
             };
             let foot = format!("보기 앱 {id} · {origin}");
             let (login, cred) = (&mut self.login, self.session.get());
-            let ui = &mut w.ui;
-            w.room.paint(&mut w.gpu, &self.machines, &self.paths, &foot, self.app_alive, |g, size| {
+            w.room.paint(&mut w.gpu, &mut w.ui, &self.machines, &self.paths, &self.live, &foot, self.app_alive, |g, ui, size| {
                 login.paint_chip(g, ui, size.0, cred.as_ref());
                 login.paint_panel(g, ui, size);
             })
@@ -306,21 +309,28 @@ impl Desk {
         if let Err(e) = result {
             eprintln!("[kasadesk] 그리기 실패: {e:#}");
         }
+        // 아틀라스가 차서 빈 글자가 났으면 재배치하고 한 번 더 그린다.
+        if w.gpu.atlas_needs_another_frame() {
+            w.window.request_redraw();
+        }
     }
 
     fn back_to_picker(w: &mut Win, machines: &[Machine]) {
         w.view = None;
-        w.label = None;
+        let label = w.label.take();
         w.display = None;
         w.closed_since = None;
         w.gpu.drop_image(TEXTURE);
         w.window.set_min_inner_size(Some(PICKER_MIN));
         w.room.reflow(w.logical(), machines);
+        if let Some(i) = label.and_then(|l| machines.iter().position(|m| m.label == l)) {
+            w.room.surface(i);
+        }
         w.set_title();
         w.window.request_redraw();
     }
 
-    fn mouse(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: &WindowEvent) {
+    fn mouse(&mut self, id: WindowId, event: &WindowEvent) {
         let mods = key_mods(self.modifiers);
         let modifiers = self.modifiers;
         let Some(w) = self.windows.get_mut(&id) else { return };
@@ -347,7 +357,10 @@ impl Desk {
                         true
                     } else {
                         if let Some(index) = w.room.hit() {
-                            self.open(event_loop, Some(self.machines[index].label.clone()));
+                            if w.room.dive(index) {
+                                w.window.set_cursor(CursorIcon::Default);
+                                w.window.request_redraw();
+                            }
                         }
                         return;
                     }
@@ -433,7 +446,7 @@ impl Desk {
                 return;
             }
             if let Some(code) = code {
-                self.picker_key(event_loop, id, code, event.repeat);
+                self.picker_key(id, code, event.repeat);
             }
             return;
         };
@@ -451,12 +464,14 @@ impl Desk {
         }
     }
 
-    fn picker_key(&mut self, event_loop: &ActiveEventLoop, id: WindowId, code: KeyCode, repeat: bool) {
+    fn picker_key(&mut self, id: WindowId, code: KeyCode, repeat: bool) {
         let Some(w) = self.windows.get_mut(&id).filter(|w| w.label.is_none()) else { return };
         if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
             if !repeat {
                 if let Some(index) = w.room.selected() {
-                    self.open(event_loop, Some(self.machines[index].label.clone()));
+                    if w.room.dive(index) {
+                        w.window.request_redraw();
+                    }
                 }
             }
         } else if w.room.keyboard(code, &self.machines) {
@@ -464,32 +479,32 @@ impl Desk {
         }
     }
 
-    fn pointer_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: &WindowEvent) {
+    fn pointer_event(&mut self, id: WindowId, event: &WindowEvent) {
         if let WindowEvent::CursorMoved { position, .. } = event {
             if let Some(w) = self.windows.get_mut(&id) {
                 let scale = w.gpu.scale.max(0.5);
                 w.cursor = (position.x as f32 / scale, position.y as f32 / scale);
             }
         }
-        self.mouse(event_loop, id, event);
+        self.mouse(id, event);
     }
 
-    fn picker_probe(&mut self, event_loop: &ActiveEventLoop, action: PickerAction) {
+    fn picker_probe(&mut self, action: PickerAction) {
         let Some((&id, w)) = self.windows.iter().find(|(_, w)| w.label.is_none()) else { return };
         let (x, y, click) = match action {
             PickerAction::Hover(x, y) => (x, y, false),
             PickerAction::Click(x, y) => (x, y, true),
             PickerAction::Key(code) => {
-                self.picker_key(event_loop, id, code, false);
+                self.picker_key(id, code, false);
                 return;
             }
         };
         let size = w.window.inner_size();
         let position = PhysicalPosition::new(x * f64::from(size.width), y * f64::from(size.height));
         let device_id = DeviceId::dummy();
-        self.pointer_event(event_loop, id, &WindowEvent::CursorMoved { device_id, position });
+        self.pointer_event(id, &WindowEvent::CursorMoved { device_id, position });
         if click {
-            self.pointer_event(event_loop, id, &WindowEvent::MouseInput {
+            self.pointer_event(id, &WindowEvent::MouseInput {
                 device_id, state: ElementState::Pressed, button: MouseButton::Left,
             });
         }
@@ -536,15 +551,16 @@ impl ApplicationHandler<Ev> for Desk {
             }
             Ev::Revoked => self.redraw_pickers(),
             Ev::Roster { machines, app_alive } => {
-                let paths = machines.iter().map(|m| {
-                    let path = self.net.path_text(&m.label);
-                    if m.fresh { path } else { format!("{path} · 지난 주소") }
-                }).collect::<Vec<_>>();
+                let (paths, live): (Vec<_>, Vec<_>) = machines.iter().map(|m| {
+                    let (path, up) = self.net.path_status(&m.label);
+                    (if m.fresh { path } else { format!("{path} · 지난 주소") }, up)
+                }).unzip();
                 let reflow = machines.len() != self.machines.len() || machines.iter().zip(&self.machines)
                     .any(|(m, old)| m.label != old.label || m.kind != old.kind);
-                let redraw = reflow || paths != self.paths || app_alive != self.app_alive;
+                let redraw = reflow || paths != self.paths || live != self.live || app_alive != self.app_alive;
                 self.machines = machines;
                 self.paths = paths;
+                self.live = live;
                 self.app_alive = app_alive;
                 if redraw {
                     for w in self.windows.values_mut().filter(|w| w.label.is_none()) {
@@ -634,7 +650,7 @@ impl ApplicationHandler<Ev> for Desk {
             | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } => {
                 // On a rig the hardware cursor can leave the window during a scripted hover.
                 if !self.test.drives_picker() || self.windows.get(&id).is_some_and(|w| w.label.is_some()) {
-                    self.pointer_event(event_loop, id, &event);
+                    self.pointer_event(id, &event);
                 }
             }
             _ => {}
@@ -643,7 +659,7 @@ impl ApplicationHandler<Ev> for Desk {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         for action in self.test.take_picker_actions(Instant::now()) {
-            self.picker_probe(event_loop, action);
+            self.picker_probe(action);
         }
         self.sync();
         let mut views: Vec<&mut ScreenView> = self.windows.values_mut().filter_map(|w| w.view.as_mut()).collect();
@@ -660,6 +676,14 @@ impl ApplicationHandler<Ev> for Desk {
             if let Some(w) = self.windows.values().next() {
                 w.window.request_redraw();
             }
+        }
+        let arrived: Vec<String> = self.windows.values_mut()
+            .filter(|w| w.label.is_none())
+            .filter_map(|w| w.room.take_arrival())
+            .filter_map(|i| self.machines.get(i).map(|m| m.label.clone()))
+            .collect();
+        for label in arrived {
+            self.open(event_loop, Some(label));
         }
         for w in self.windows.values().filter(|w| w.label.is_none()) {
             if let Some(at) = w.room.next_frame() {

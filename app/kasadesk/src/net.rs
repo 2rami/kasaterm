@@ -110,9 +110,10 @@ impl Net {
     }
 
     /// 고르기 장면에 표시할 길 — 서비스 노드 길이 서면 그 길, 아니면 앱 노드 길.
-    pub fn path_text(&self, label: &str) -> String {
+    /// (표시할 글, 길이 서 있나) — 서 있으면 고르기 방에서 그 기기 화면이 켜진다.
+    pub fn path_status(&self, label: &str) -> (String, bool) {
         let paths = self.paths.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(p) = paths.get(label) else { return "주소 모름".into() };
+        let Some(p) = paths.get(label) else { return ("주소 모름".into(), false) };
         let show = |l: &Link, who: &str| match l.state() {
             LinkState::Direct { rtt } => Some(format!("{who} 직통 {}ms", rtt.as_millis())),
             LinkState::TrustedRelay { rtt } => Some(format!("{who} 국내 중계 {}ms", rtt.as_millis())),
@@ -122,7 +123,7 @@ impl Net {
             .as_ref()
             .and_then(|l| show(l, "서비스"))
             .or_else(|| p.app.as_ref().filter(|_| p.screen).and_then(|l| show(l, "앱")))
-            .unwrap_or_else(|| short_wait(p).into())
+            .map_or_else(|| (short_wait(p).into(), false), |text| (text, true))
     }
 }
 
