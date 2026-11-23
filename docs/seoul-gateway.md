@@ -276,3 +276,8 @@ DNS 는 같은 Cloudflare 계정에 A `211.233.212.132`(DNS only)로 걸었고, 
 
 아직 옛 이름만: relay-kr(iroh-relay 가 자기 인증서를 받아 이름을 더하려면 relay.toml 손질), geono(로그인 · Access 묶임),
 ssh 의 HostKeyAlias(DNS 를 안 본다 — 이름표일 뿐). 앱 기본 주소(카사텀 관문 · LFS · 폰 앱 webcredentials · 카사브라우저 업데이트)는 각 저장소에서 새 판으로.
+
+⚠️ **로그인(OAuth) 공개 이름은 아직 옛 이름이다.** 관문 env `KASA_OAUTH_PUBLIC_ORIGIN`(`/etc/kasa-relay/env`)이 `https://kasaterm.debimarlene.com`
+이라 새 이름으로 `/relay/oauth/start` 를 불러도 승인 주소는 옛 이름으로 돌아온다(마리가 kasadesk 에서 확인, 2026-11-23).
+관문 공개 이름을 kasaterm.kasa.page 로 옮길 때는 Google · GitHub OAuth 앱의 콜백 등록을 먼저 새 이름으로 더하고, 그다음 env 를 바꾼다 —
+순서가 바뀌면 그 순간 로그인이 막힌다. 「부른 이름과 같은 승인 주소」를 요구하는 클라이언트(폰 · 본 앱)는 그때까지 옛 이름으로 둔다.
