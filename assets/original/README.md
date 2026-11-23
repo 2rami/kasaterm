@@ -26,3 +26,31 @@ The generator used the existing Nacho image entrypoint with an explicitly
 approved per-process adapter for `background=transparent` and PNG output.
 The model was pinned without fallback. Credentials and the adapter's private
 runtime paths are not part of the asset bundle.
+
+## Character canon
+
+Sky and Amber, the umbrella twins, are the KASA characters. New artwork follows
+the identity in `prompts/kasa-twins-identity.prompt.txt`. Two looks are canonical
+and show the same two characters:
+
+| Look | Where it appears | Reference |
+|---|---|---|
+| Outfit A, rainwear (default) | KASA browser new-tab background (`kasabrowser-go` `internal/home/assets/kasa-garden.png`), the mobile app | `mobile/assets/original/twins.png`, `sky.png`, `amber.png` |
+| Outfit B, everyday white blouse, ribbon tie and skirt | Personal site hero illustration | Not in this repository |
+
+`assets/icon_src.png`, the current app icon, predates the twins: Sky alone with
+short twin tails, a wink and a white dress. It is not an identity reference for
+new artwork.
+
+### Writing a prompt
+
+1. Start with the whole identity block from `prompts/kasa-twins-identity.prompt.txt`.
+2. Attach the reference image as an input image. Text alone drifts: hair length,
+   bun shape and the umbrella split change between runs.
+3. Add only the use: scene, framing, pose, outfit A or B, background.
+
+For app icons and other small sizes, generated drafts that stay readable at
+32 px share these traits: a saturated background instead of white, the figures
+filling about 85% of the canvas, outlines about three times thicker than the
+illustration, and a white sticker rim around the figures. Check every draft
+downscaled to 64 px and 32 px before choosing.

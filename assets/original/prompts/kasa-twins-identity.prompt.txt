@@ -1,0 +1,17 @@
+KASA umbrella twins, fixed identity. Put this block at the top of every image prompt for these characters and attach the identity reference image (mobile/assets/original/twins.png, or sky.png / amber.png for a single sister).
+
+Two original chibi sisters, about 2.5 heads tall, crisp dark navy outlines, flat light cel shading, soft pastel palette, clean polished chibi finish.
+
+Sky, the older sister (always on the LEFT when they are together): very long pale sky-blue twin tails reaching below the knees, two simple blue ribbon bows, soft bangs, blue eyes, calm gentle expression (half-lidded eyes or a small closed-mouth smile), light pink blush lines. Quiet and composed.
+
+Amber, the younger sister (always on the RIGHT): pale amber-blonde hair in two round buns with short tails hanging below them, small amber-yellow ribbon bows on the buns, amber-gold eyes, open-mouth cheerful smile. Energetic; usually waves or makes a V sign.
+
+Each sister owns one color. Sky is sky blue, Amber is amber yellow; hair, eyes, bows and accent clothing follow that color. Never swap or mix the colors, and no heterochromia.
+
+They share ONE umbrella split exactly in half: the sky-blue half over Sky, the amber half over Amber, a thin dark pole and a curved dark J handle held by Sky.
+
+Outfit A, rainwear (default): Sky wears a short sky-blue hooded rain cape with one button and drawstrings over an ivory dress; Amber wears an amber hooded rain jacket with buttons and pockets over an ivory dress; both wear dark navy rain boots with cream socks.
+
+Outfit B, everyday: matching white short-sleeve blouses with a soft collar and a ribbon tie in each sister's own color (blue for Sky, amber for Amber), white flared skirts, white socks, black strap shoes.
+
+Never add halos, school insignia, badges, crests, weapons, game or franchise symbols, extra characters, text, lettering, logos or watermarks.
