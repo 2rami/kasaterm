@@ -284,3 +284,5 @@ ssh 의 HostKeyAlias(DNS 를 안 본다 — 이름표일 뿐). 앱 기본 주소
 3. `gateway.sh build`로 만든 바이너리와 전환 전 env·systemd 유닛 백업을 준비한다. `gateway.sh upgrade`에서 관문 연결이 잠시 끊겼다가 다시 붙는다. 계정·기기·봉인 저장소는 기존 서버의 상태를 계속 쓴다.
 4. 두 주소에서 `/relay/health`, `/relay/oauth/providers`, Google·GitHub의 승인 URL과 실제 콜백·기기 토큰 교환을 확인한다. 옛 앱의 확인 코드 경로와 기존 기기의 `/relay/whoami`도 확인한 뒤 데스크톱·폰의 기본 주소를 새 주소로 바꿔 배포한다.
 5. 운영 교체를 되돌릴 때는 백업한 바이너리·env·systemd 유닛을 복구하고 `sudo systemctl daemon-reload`와 `sudo systemctl restart kasa-relay`를 실행한다. 공급자 콜백 등록은 다음 전환에서 다시 쓸 수 있다.
+
+2026-11-23 서울 관문 교체 후 두 주소에서 Google과 GitHub의 콜백 및 기기 토큰 교환을 확인했다. 옛 주소는 확인 코드 방식, 새 주소는 PKCE 리디렉션 방식으로 검증했다. 같은 기존 데스크톱 토큰의 `/relay/whoami`가 두 주소에서 통과했고 기존 데스크톱 네 대가 다시 연결됐다. 폰 기기 기록 네 건도 유지됐다. 이 판부터 새 설정의 기본 주소는 `https://kasaterm.kasa.page`다.

@@ -10,7 +10,7 @@ import 'shared_rooms_model.dart';
 
 const _legacyGateway = 'https://kasaterm.debimarlene.com';
 const _kasaPageGateway = 'https://kasaterm.kasa.page';
-const defaultGateway = _legacyGateway;
+const defaultGateway = _kasaPageGateway;
 
 Uri? parseGateway(String value) {
   final uri = Uri.tryParse(value.trim());

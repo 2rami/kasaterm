@@ -58,10 +58,10 @@ struct FileBody {
     gateway_connect: Option<String>,
 }
 
-/// 기본 관문. 카사텀을 쓰는 사람마다 앱이 여기 붙어 자기 주소를 받는다(uplink.rs 머리말).
 const LEGACY_GATEWAY: &str = "https://kasaterm.debimarlene.com";
 const KASA_PAGE_GATEWAY: &str = "https://kasaterm.kasa.page";
-pub const DEFAULT_GATEWAY: &str = LEGACY_GATEWAY;
+/// 기본 관문. 카사텀을 쓰는 사람마다 앱이 여기 붙어 자기 주소를 받는다(uplink.rs 머리말).
+pub const DEFAULT_GATEWAY: &str = KASA_PAGE_GATEWAY;
 
 pub(crate) fn gateway_scope(gateway: &str) -> &str {
     // Existing settings and vault bindings use the original origin as their key.
