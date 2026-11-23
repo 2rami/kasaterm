@@ -3588,10 +3588,13 @@ fn keychain_ref(text: &str) -> Result<String> {
     Ok(format!("keychain://{bare}"))
 }
 
-/// 앱에 비밀 읽기를 맡기고 폰 허락을 기다린다. 값은 참조 순서대로.
+/// 앱에 비밀 읽기를 맡기고 생체 승인을 기다린다. 값은 참조 순서대로.
 fn secret_values(refs: &[String]) -> Result<Vec<String>> {
     let socket_path = resolve_socket_path()?;
-    eprintln!("kasaterm: 폰에서 Face ID 로 허락하면 이 맥 키체인에서 읽어요(2분 안) — {}", refs.join(", "));
+    #[cfg(target_os = "macos")]
+    eprintln!("kasaterm: 이 맥의 Touch ID 창이나 폰의 비밀 승인 카드를 확인해 주세요 — {}", refs.join(", "));
+    #[cfg(not(target_os = "macos"))]
+    eprintln!("kasaterm: 폰에서 Face ID 로 허락해 주세요 — {}", refs.join(", "));
     let req = Request { id: json!("secret"), method: "op.secret".into(), params: json!({ "op": "read", "refs": refs }) };
     let resp = roundtrip(&socket_path, &req)?;
     if !resp.ok {
@@ -3615,6 +3618,8 @@ fn secret_reason(code: &str) -> String {
         "keychain_denied" => "맥의 키체인 접근 허용 창에서 거절됐어요",
         "not_text" => "그 키체인 값이 글자가 아니에요",
         "denied" => "폰에서 거절했어요",
+        "touch_id_denied" => "맥의 Touch ID 인증에 실패했어요",
+        "approval_busy" => "맥에서 다른 비밀 요청을 승인하고 있어요. 그 요청을 마친 뒤 다시 시도해 주세요",
         "expired" => "2분 안에 허락이 오지 않았어요",
         "cancelled" => "요청이 취소됐어요",
         "not_in_pane" | "requester_unknown" => "kasaterm 칸 안에서만 쓸 수 있어요",

@@ -20,9 +20,9 @@ const FIRST_READ: &str = "처음 꺼내는 항목은 이 맥에 접근 허용 �
 #[cfg(windows)]
 const FIRST_READ: &str = "일반 자격 증명만 읽어요 · cmdkey /generic:서비스 /user:계정 /pass 로 넣어요";
 #[cfg(not(windows))]
-const TRUSTS_FIRST_PHONE: &str = "폰 설정 → 계정 → 비밀 승인에서 「Face ID 로 연결」을 누르면 이 맥이 그 폰을 바로 믿어요.";
+const TRUSTS_FIRST_PHONE: &str = "폰 설정 → 연결 기기 → 비밀 승인에서 「Face ID 로 연결」을 누르면 이 맥이 첫 폰을 바로 믿어요.";
 #[cfg(windows)]
-const TRUSTS_FIRST_PHONE: &str = "폰 설정 → 계정 → 비밀 승인에서 「Face ID 로 연결」을 누르면 이 PC 가 그 폰을 바로 믿어요.";
+const TRUSTS_FIRST_PHONE: &str = "폰 설정 → 연결 기기 → 비밀 승인에서 「Face ID 로 연결」을 누르면 이 PC가 첫 폰을 바로 믿어요.";
 #[cfg(not(windows))]
 const ISOLATED: &str = "검증 실행에서는 키체인을 쓰지 않아요";
 #[cfg(windows)]
@@ -595,7 +595,7 @@ pub(crate) fn paint_phones(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Ve
     if trusted.is_empty() && v.untrusted.is_empty() {
         plain_hint(g, x, y, w, if v.status.is_null() { "확인하는 중…" } else { TRUSTS_FIRST_PHONE });
     } else {
-        plain_hint(g, x, y, w, &format!("학생이 {} {}의 비밀을 쓸 때마다 폰에 Face ID 를 물어요. {FIRST_READ}.", STORE.0, STORE.1));
+        plain_hint(g, x, y, w, &format!("폰에서 Face ID로 이 기기의 비밀 요청을 허락할 수 있어요. {FIRST_READ}."));
     }
     if let Some((message, error)) = &v.message {
         for line in wrap_words(g, message, w, 10.5) {

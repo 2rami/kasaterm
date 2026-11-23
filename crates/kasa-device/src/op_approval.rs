@@ -1,7 +1,7 @@
-//! 키체인 비밀 읽기 — 폰 Face ID 한 번으로(docs/secret-faceid-approval.md). 맥 앱 프로세스 쪽.
+//! 키체인 비밀 읽기 — 맥 Touch ID 또는 폰 Face ID 한 번으로(docs/secret-faceid-approval.md).
 //!
-//! 학생 칸의 `kasaterm-cli secret read|run` → 소켓 → [`read`] → 관문 비밀 요청 → 폰이 Secure Enclave 키로 도전값에
-//! 서명 → 여기서 도전값·믿은 키·관문의 살아 있는 키·서명·nonce·만료를 다시 본 뒤에만 이 맥의 키체인에서 값을 꺼낸다.
+//! 학생 칸의 `kasaterm-cli secret read|run`은 소켓을 거쳐 [`read`]에 닿는다. Touch ID를 쓸 수 없으면 폰이 도전값에 서명하고,
+//! 맥은 믿는 키·살아 있는 키·서명·nonce·만료를 다시 확인한 뒤 키체인에서 값을 꺼낸다.
 //! 값은 소켓으로 요청한 프로세스에만 간다. 처음 꺼내는 항목은 macOS 가 이 맥에 접근 허용 창을 띄운다.
 //!
 //! 이름의 `op` 는 1Password 로 읽던 때(2026-10-06~19)의 것이다 — 폰이 믿은 열쇠가 그때 이름의 키체인 항목에 있어
@@ -21,6 +21,9 @@ use serde_json::{json, Value};
 
 use kasa_identity::approval_text::{key_fingerprint, key_id, mask, signature_ok};
 use crate::device_auth::approvals as gateway;
+
+#[cfg(target_os = "macos")]
+mod touch_id;
 
 const SERVICE: &str = "kasaterm.1password";
 const TRUSTED: &str = "trusted-keys";
@@ -410,9 +413,66 @@ fn check(sent: &Sent, view: &Value, trusted: &[Trusted], live: &[Value], ledger:
 
 // ── 소켓 쪽 ───────────────────────────────────────────────────────────────────
 
-/// 학생 칸의 요청 하나. 폰에서 사람이 Face ID 로 허락하면 참조 순서대로 값을 돌려준다.
+struct ReadAudit(Value);
+
+impl ReadAudit {
+    fn new(id: &str, origin: &Origin, cwd: &str, refs: &[String], route: &str) -> Self {
+        Self(json!({"id": id, "student": origin.student, "pane": origin.pane, "cwd": cwd, "refs": refs, "route": route}))
+    }
+
+    fn event(&self, event: &str, extra: Value) {
+        let mut line = self.0.clone();
+        if let (Some(fields), Value::Object(extra)) = (line.as_object_mut(), extra) {
+            fields.extend(extra);
+        }
+        line["event"] = json!(event);
+        audit(line);
+    }
+
+    fn approved(&self, origin: &Origin, refs: &[String], by: Value) -> anyhow::Result<Vec<String>> {
+        if !(origin.alive)() {
+            self.event("cancelled", json!({"reason": "requester_gone", "by": by}));
+            bail!("cancelled");
+        }
+        let started = Instant::now();
+        match resolve(refs) {
+            Ok(values) => {
+                self.event("resolved", json!({"by": by, "ms": started.elapsed().as_millis() as u64}));
+                Ok(values)
+            }
+            Err(error) => {
+                self.event("failed", json!({"reason": clip(&error.to_string(), 300), "by": by}));
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Both the biometric callback and the phone signature are consumed inside this request.
 pub fn read(refs: &[String], command: &str, cwd: &str, origin: &Origin) -> anyhow::Result<Vec<String>> {
     check_refs(refs)?;
+    let requested = Instant::now();
+    #[cfg(target_os = "macos")]
+    if isolated_dir()?.is_none() {
+        use touch_id::Decision;
+        let audit = ReadAudit::new(&nonce(), origin, cwd, refs, "touch_id");
+        match touch_id::approve(origin, refs) {
+            Decision::Approved => return audit.approved(origin, refs, json!({"label": "Touch ID"})),
+            Decision::Cancelled => {
+                audit.event("cancelled", json!({"reason": "cancelled"}));
+                bail!("cancelled");
+            }
+            Decision::Denied => {
+                audit.event("denied", json!({"reason": "touch_id_denied"}));
+                bail!("touch_id_denied");
+            }
+            Decision::Busy => bail!("approval_busy"),
+            Decision::Phone => {}
+        }
+    }
+    if !(origin.alive)() {
+        bail!("cancelled");
+    }
     let mut trusted = trusted()?;
     if trusted.is_empty() {
         // 폰이 막 「연결」했으면 화면의 1분 주기 전이라도 여기서 믿는다.
@@ -423,34 +483,25 @@ pub fn read(refs: &[String], command: &str, cwd: &str, origin: &Origin) -> anyho
         bail!("no_trusted_key");
     }
     let (account, device) = gateway::identity()?;
-    let exp = now_ms() + TTL_MS;
+    // Keep the total approval window inside the browser's 150 s wait, even after Touch ID.
+    let remaining = Duration::from_millis(TTL_MS).saturating_sub(requested.elapsed());
+    anyhow::ensure!(!remaining.is_zero(), "expired");
+    let exp = now_ms() + remaining.as_millis() as u64;
     let nonce = nonce();
     let text = challenge(&account, &device, &nonce, exp, origin, cwd, command, refs);
     let view = gateway::create_secret_blocking(&text)?;
     let sent = Sent { id: view["id"].as_str().unwrap_or_default().to_string(), challenge: text, nonce, exp };
-    let base = json!({"id": sent.id, "student": origin.student, "pane": origin.pane, "cwd": cwd, "refs": refs});
-    let mut line = base.clone();
-    line["event"] = json!("requested");
-    audit(line);
-    let finish = |event: &str, extra: Value| {
-        let mut line = base.clone();
-        line["event"] = json!(event);
-        if let Value::Object(map) = extra {
-            for (k, v) in map {
-                line[k] = v;
-            }
-        }
-        audit(line);
-    };
+    let audit = ReadAudit::new(&sent.id, origin, cwd, refs, "phone");
+    audit.event("requested", json!({}));
     let mut misses = 0;
     let decided = loop {
         if !(origin.alive)() {
             let _ = gateway::cancel_blocking(&sent.id, "gone");
-            finish("cancelled", json!({"reason": "requester_gone"}));
+            audit.event("cancelled", json!({"reason": "requester_gone"}));
             bail!("cancelled");
         }
         if now_ms() > sent.exp + 5_000 {
-            finish("expired", json!({}));
+            audit.event("expired", json!({}));
             bail!("expired");
         }
         match gateway::wait_one_blocking(&sent.id, 5) {
@@ -462,7 +513,7 @@ pub fn read(refs: &[String], command: &str, cwd: &str, origin: &Origin) -> anyho
                 }
                 misses += 1;
                 if misses > 8 {
-                    finish("failed", json!({"reason": "gateway_unreachable"}));
+                    audit.event("failed", json!({"reason": "gateway_unreachable"}));
                     bail!("gateway_unreachable");
                 }
                 std::thread::sleep(Duration::from_secs(2));
@@ -473,21 +524,10 @@ pub fn read(refs: &[String], command: &str, cwd: &str, origin: &Origin) -> anyho
     let by = json!({"device": decided["by"]["device"], "label": decided["by"]["label"], "key": decided["key"]});
     let checked = check(&sent, &decided, &trusted, &live, &mut LEDGER.lock().unwrap(), now_ms());
     if let Err(reason) = checked {
-        finish(if reason == "denied" { "denied" } else { "refused" }, json!({"reason": reason, "by": by}));
+        audit.event(if reason == "denied" { "denied" } else { "refused" }, json!({"reason": reason, "by": by}));
         bail!("{reason}");
     }
-    let started = Instant::now();
-    match resolve(refs) {
-        Ok(values) => {
-            finish("resolved", json!({"by": by, "ms": started.elapsed().as_millis() as u64}));
-            Ok(values)
-        }
-        Err(error) => {
-            let reason = error.to_string();
-            finish("failed", json!({"reason": clip(&reason, 300), "by": by}));
-            Err(error)
-        }
-    }
+    audit.approved(origin, refs, by)
 }
 
 /// 믿는 폰 열쇠 — 값은 없다. 소켓에도 열려 있다. `token` 은 옛 폰 앱이 「준비됨」으로 읽는 칸이라 늘 참으로 둔다

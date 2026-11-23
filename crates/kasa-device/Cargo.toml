@@ -47,6 +47,11 @@ security-framework = "3"
 # Login sync creates items with a named-app access list, which only the raw Security calls expose.
 core-foundation-sys = "0.8"
 security-framework-sys = "2"
+block2.workspace = true
+objc2.workspace = true
+objc2-core-graphics = { workspace = true, features = ["CGEventSource", "CGEventTypes"] }
+objc2-foundation = { workspace = true, features = ["NSError", "NSString"] }
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LABiometryType", "LAContext", "LAError"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = ["Win32_Security_Credentials"] }

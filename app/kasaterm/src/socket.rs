@@ -3420,7 +3420,7 @@ impl Backend for PtyBackend {
     }
 
     /// 키체인 비밀 읽기(docs/secret-faceid-approval.md). 칸·학생·명령·폴더는 요청 본문이 아니라 소켓 상대
-    /// 프로세스에서 찾는다 — 폰에 보이는 「누가」를 요청한 쪽이 지어내지 못하게. 칸 밖 프로세스는 받지 않는다.
+    /// 프로세스에서 찾는다 — 승인 창의 「누가」를 요청한 쪽이 지어내지 못하게. 칸 밖 프로세스는 받지 않는다.
     fn op_secret(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
         match params["op"].as_str() {
             Some("status") => Ok(kasa_device::op_approval::status()),
