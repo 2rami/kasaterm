@@ -4844,8 +4844,11 @@ impl App {
             }
             // PR 요청 두 개 — 첫 시트가 바로 뜬다(찍기·누르기는 `KASATERM_PR_SHEET_*`).
             "device-work" if crate::verification_run() => {
+                self.device_account.fixture_signed_in(None);
                 self.device_account.work.fixture();
-                self.chrome_dirty = true;
+                self.settings_apply(SettingsAction::DeviceAccount(
+                    crate::native_settings::device_account::Action::ReviewPrRequests,
+                ));
             }
             "device-op" | "device-op-empty" if crate::verification_run() => {
                 self.device_account.op.fixture(std::env::var("KASATERM_AUTOSETTINGS_ACTION").as_deref() == Ok("device-op-empty"));

@@ -29,6 +29,7 @@ const PREVIEW_FEED: &str = "https://2rami.github.io/kasaterm/appcast-preview.xml
 /// 켠 뒤 첫 확인까지. 창이 서고 세션이 돌아온 뒤에 카드가 서게 한다.
 const FIRST_PROBE: Duration = Duration::from_secs(10);
 const PROBE_EVERY: Duration = Duration::from_secs(3600);
+const PROBE_WHILE_BUSY: Duration = Duration::from_secs(30);
 
 /// `SPUUserUpdateChoice`.
 const CHOICE_SKIP: isize = 0;
@@ -455,6 +456,10 @@ impl Updater {
     pub(crate) fn automatic(&self) -> bool {
         self.preview
     }
+
+    pub(crate) fn next_probe(&self) -> Instant {
+        self.next_probe.get()
+    }
 }
 
 /// 주 스레드 루프 턴마다 — preview 의 시간마다 확인.
@@ -465,7 +470,10 @@ pub(crate) fn tick(updater: &Updater) {
     if now < updater.next_probe.get() { return; }
     unsafe {
         let busy: Bool = msg_send![&*updater.updater, sessionInProgress];
-        if busy.as_bool() { return; }
+        if busy.as_bool() {
+            updater.next_probe.set(now + PROBE_WHILE_BUSY);
+            return;
+        }
         updater.next_probe.set(now + PROBE_EVERY);
         // 자동 받기가 꺼져 있어 찾기만 하고, 찾으면 드라이버의 `found` 로 카드가 선다.
         let _: () = msg_send![&*updater.updater, checkForUpdatesInBackground];

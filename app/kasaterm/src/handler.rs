@@ -8385,6 +8385,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // Completion can settle after the last PTY output has stopped waking the window.
                 .chain(self.collab.hub.notification_deadline())
                 .chain(self.remote_completion_deadline())
+                .chain(self.update_deadline())
                 .chain(web_visual_deadline)
                 // 조용한 셸에서도 이사·복원 명령이 제때 발사되어야 한다. 이 만기를
                 // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.

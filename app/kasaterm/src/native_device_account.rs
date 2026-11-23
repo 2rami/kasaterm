@@ -33,6 +33,7 @@ pub(crate) enum Action {
     OpenClaim,
     Signup,
     CancelChoice,
+    ReviewPrRequests,
     Op(op::Act),
     Profile(profile::Act),
 }
@@ -269,7 +270,6 @@ impl State {
                 self.message = Some(("이 KASA 계정에 로그인 방법을 연결했어요".into(), false))
             }
             Ok(Action::Connected { linked, install }) => {
-                self.work.refresh_now();
                 self.profile.refresh_now();
                 let text = match (linked, install) {
                     (true, true) => "로그인과 일 권한을 연결했어요. 열린 GitHub 화면에서 PR 올릴 레포를 골라 주세요",
@@ -410,6 +410,7 @@ impl App {
                 self.native_settings_focus(SettingsInput::DeviceAccountName);
             }
             Action::Cancel => self.device_account.hide(),
+            Action::ReviewPrRequests => self.review_pr_requests(),
             Action::AskLogout => self.device_account.confirm_logout = true,
             Action::OAuth(provider) => {
                 if !provider_enabled(&self.device_account.providers, provider) {
@@ -625,6 +626,18 @@ pub(super) fn paint(
         if v.form {
             password_form(g, s, hits, caret, x, y, w, v, "로그인", Action::Cancel);
         } else if v.profile.form.is_none() {
+            let label = "PR 요청 확인";
+            let bw = (g.measure_chrome_text(&crate::native_strings::text(label), 12.0, false) + 32.0).min(w);
+            button(
+                g,
+                s,
+                hits,
+                (x, *y, bw, CTL_H),
+                label,
+                Target::Setting(SettingsAction::DeviceAccount(Action::ReviewPrRequests)),
+                false,
+            );
+            *y += ROW_H;
             account_buttons(
                 g,
                 s,

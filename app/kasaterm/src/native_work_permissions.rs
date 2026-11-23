@@ -1,9 +1,8 @@
 //! 학생·나쵸가 낸 PR 요청을 사람이 승인하는 확인 창(docs/account-connections.md 「쓰기는 사람 확인을 거친다」).
-//! 설정에는 그리지 않는다. 1분마다 관문의 대기 쓰기를 받아 새 요청을 알리고, 앱이 앞에 있으면(또는 알림을 누르면)
-//! 내용 전부를 보인 결정 시트를 하나씩 띄운다. 승인은 그 시트의 주 단추에서만 나고, 시트가 보인 digest 에 묶인다.
+//! 사용자가 설정에서 검토를 열면 결정 시트를 띄운다. 승인은 시트가 보인 digest 에 묶인다.
 
 use super::*;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 
 const REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
@@ -11,11 +10,6 @@ const REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) const ACTION: &str = "__kasaterm_pr_request__";
 /// 만든 PR 알림을 누르면 그 주소를 연다.
 pub(crate) const OPEN_PR: &str = "__kasaterm_pr_open__";
-/// 「나중에」로 닫은 요청을 다시 띄우기까지. 앱이 앞에 있을 때 다시 뜬다(관문은 24시간 쥔다).
-const LATER_FOR: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-/// 한 번에 이보다 많이 오면 알림을 하나로 묶는다.
-const NOTICE_EACH: usize = 3;
-
 const TITLE: &str = "PR 을 올려도 될까요?";
 /// [주 동작, 기본 동작(Return), 왼쪽 끝].
 const BUTTONS: [&str; 3] = ["PR 만들기", "나중에", "버리기"];
@@ -64,7 +58,6 @@ enum Done {
 struct Notice {
     title: String,
     body: String,
-    dedup: Option<String>,
     route: Option<(&'static str, String)>,
 }
 
@@ -85,12 +78,8 @@ pub(crate) struct State {
     fetch: Option<Receiver<Done>>,
     busy: Option<Receiver<Done>>,
     shown: Option<Shown>,
-    /// 띄울 차례. 알림을 누른 요청은 맨 앞으로 온다.
     queue: VecDeque<String>,
-    /// 이 실행에서 이미 알렸거나 차례에 넣은 요청.
-    seen: HashSet<String>,
-    /// 「나중에」로 닫은 요청과 다시 띄울 때 — 그 전에는 알림을 눌러야 뜬다.
-    later: HashMap<String, std::time::Instant>,
+    review_requested: bool,
     /// 다른 곳에서 끝나 거둘 시트.
     stale: Option<usize>,
     tickets: u64,
@@ -123,19 +112,6 @@ fn readable(error: &str) -> String {
 
 fn text<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
-}
-
-/// 알림 한 줄 — 레포·제목과 브랜치, 요청한 곳.
-fn summary(pending: &serde_json::Value) -> String {
-    let write = &pending["write"];
-    format!(
-        "{} · {}\n{} → {} · {}",
-        text(write, "repo"),
-        text(write, "title"),
-        text(write, "head"),
-        text(write, "base"),
-        text(pending, "device_label"),
-    )
 }
 
 fn known(pending: &serde_json::Value) -> bool {
@@ -174,7 +150,7 @@ impl State {
         self.pending.iter().find(|pending| pending["id"] == id)
     }
 
-    fn refresh_due(&mut self, force: bool, wake: Option<EventLoopProxy<UserEvent>>) {
+    fn refresh_due(&mut self, force: bool, wake: EventLoopProxy<UserEvent>) {
         if self.fetch.is_some() || self.fixture {
             return;
         }
@@ -188,29 +164,19 @@ impl State {
             let result = kasa_device::device_auth::handle(&serde_json::json!({"op":"connections"}))
                 .map_err(|error| error.to_string());
             let _ = tx.send(Done::Listed(result));
-            if let Some(wake) = wake {
-                let _ = wake.send_event(UserEvent::Redraw);
-            }
+            let _ = wake.send_event(UserEvent::Redraw);
         });
     }
 
-    /// A new connection was just made from the account page; look for requests without waiting a minute.
-    pub(crate) fn refresh_now(&mut self) {
-        self.refresh_due(true, None);
-    }
-
-    /// 새 목록. 처음 보는 요청은 차례에 넣고, 앱이 뒤에 있으면 알림으로 알린다. 띄운 시트의 요청이 끝났거나
-    /// 내용이 바뀌었으면 그 시트를 거둔다(바뀐 것은 새 내용으로 다시 띄운다).
-    fn listed(&mut self, data: &serde_json::Value, front: bool) -> Vec<Notice> {
+    /// Refreshes may invalidate an open sheet whose contents are no longer current.
+    fn listed(&mut self, data: &serde_json::Value) {
         self.pending = data["pending"].as_array().cloned().unwrap_or_default();
         self.install_url = data["github_install_url"].as_str().map(str::to_string);
-        let live: HashSet<String> =
-            self.pending.iter().filter_map(|p| p["id"].as_str().map(str::to_string)).collect();
-        self.queue.retain(|id| live.contains(id));
-        self.later.retain(|id, _| live.contains(id));
+        let live: HashSet<&str> = self.pending.iter().filter_map(|p| p["id"].as_str()).collect();
+        self.queue.retain(|id| live.contains(id.as_str()));
         if let Some(shown) = &self.shown {
-            let digest = self.find(&shown.id).map(|p| text(p, "digest").to_string());
-            if digest.as_deref() != Some(shown.digest.as_str()) {
+            let digest = self.find(&shown.id).map(|p| text(p, "digest"));
+            if digest != Some(shown.digest.as_str()) {
                 if digest.is_some() {
                     self.queue.push_front(shown.id.clone());
                 }
@@ -218,37 +184,12 @@ impl State {
                 self.shown = None;
             }
         }
-        let fresh: Vec<serde_json::Value> = self
-            .pending
-            .iter()
-            .filter(|p| p["id"].as_str().is_some_and(|id| !self.seen.contains(id)))
-            .cloned()
+    }
+
+    fn queue_review(&mut self) {
+        self.queue = self.pending.iter()
+            .filter_map(|pending| pending["id"].as_str().map(str::to_owned))
             .collect();
-        for pending in &fresh {
-            let id = text(pending, "id").to_string();
-            self.seen.insert(id.clone());
-            self.queue.push_back(id);
-        }
-        if front || fresh.is_empty() {
-            return Vec::new();
-        }
-        if fresh.len() > NOTICE_EACH {
-            return vec![Notice {
-                title: format!("PR 요청 {}개가 기다려요", fresh.len()),
-                body: "누르면 하나씩 보여 드려요".into(),
-                dedup: None,
-                route: Some((ACTION, text(&fresh[0], "id").to_string())),
-            }];
-        }
-        fresh
-            .iter()
-            .map(|pending| Notice {
-                title: TITLE.into(),
-                body: summary(pending),
-                dedup: Some(format!("work-pending:{}", text(pending, "id"))),
-                route: Some((ACTION, text(pending, "id").to_string())),
-            })
-            .collect()
     }
 
     /// 다음에 띄울 요청. 차례가 비었거나 시트·처리가 이미 있으면 없다.
@@ -256,16 +197,7 @@ impl State {
         if self.shown.is_some() || self.busy.is_some() {
             return None;
         }
-        let now = std::time::Instant::now();
-        let due: Vec<String> = self.later.iter().filter(|(_, at)| **at <= now).map(|(id, _)| id.clone()).collect();
-        for id in due {
-            self.later.remove(&id);
-            self.queue.push_back(id);
-        }
         while let Some(id) = self.queue.pop_front() {
-            if self.later.contains_key(&id) {
-                continue;
-            }
             if let Some(pending) = self.find(&id) {
                 return Some(pending.clone());
             }
@@ -273,7 +205,7 @@ impl State {
         None
     }
 
-    /// 띄운 요청 말고 기다리는 수(「나중에」 것 포함).
+    /// 띄운 요청 말고 기다리는 수.
     fn others(&self, id: &str) -> usize {
         self.pending.iter().filter(|p| p["id"] != id).count()
     }
@@ -290,10 +222,8 @@ impl State {
                     opened: std::time::Instant::now(),
                 })
             }
-            // 시트를 못 띄우는 자리면 틱마다 다시 시도하지 않는다.
-            None => {
-                self.later.insert(id, std::time::Instant::now() + LATER_FOR);
-            }
+            // Let the person reopen review when their window can present a sheet.
+            None => self.queue.clear(),
         }
     }
 
@@ -307,7 +237,7 @@ impl State {
             Choice::Create => Some(Effect::Approve { id: shown.id, digest: shown.digest }),
             Choice::Discard => Some(Effect::Reject { id: shown.id }),
             Choice::Later => {
-                self.later.insert(shown.id, std::time::Instant::now() + LATER_FOR);
+                self.queue.clear();
                 None
             }
         }
@@ -318,7 +248,6 @@ impl State {
         if self.find(id).is_none() || self.shown.as_ref().is_some_and(|shown| shown.id == id) {
             return;
         }
-        self.later.remove(id);
         self.queue.retain(|queued| queued != id);
         self.queue.push_front(id.to_string());
     }
@@ -357,7 +286,6 @@ impl State {
                 let notice = Notice {
                     title: format!("PR #{} 을 만들었어요", value["number"]),
                     body: format!("{} · {}", text(&item["write"], "repo"), text(&item["write"], "title")),
-                    dedup: None,
                     route: url.starts_with("https://github.com/").then(|| (OPEN_PR, url.to_string())),
                 };
                 (vec![notice], None)
@@ -368,10 +296,10 @@ impl State {
             }
             (Effect::Approve { .. }, Err(error)) => {
                 let install = error.starts_with("repo_not_accessible").then(|| self.install_url.clone()).flatten();
-                (vec![Notice { title: "PR 을 만들지 못했어요".into(), body: readable(&error), dedup: None, route: again }], install)
+                (vec![Notice { title: "PR 을 만들지 못했어요".into(), body: readable(&error), route: again }], install)
             }
             (Effect::Reject { .. }, Err(error)) => {
-                (vec![Notice { title: "요청을 버리지 못했어요".into(), body: readable(&error), dedup: None, route: again }], None)
+                (vec![Notice { title: "요청을 버리지 못했어요".into(), body: readable(&error), route: again }], None)
             }
         }
     }
@@ -388,7 +316,7 @@ impl State {
                  "body":format!("이번 판에서 한 일\n\n{body}\n폰 화면은 다음 판에 붙입니다."),"draft":false}},
                 {"id":"pw_b","digest":"d","provider":"github","display":"octo","device_label":"맥미니 · 나쵸",
                  "write":{"kind":"pr","repo":"2rami/kasaterm","base":"main","head":"feat/work","title":"일 권한 화면","body":"","draft":true}}]});
-        self.listed(&data, true);
+        self.listed(&data);
     }
 }
 
@@ -397,33 +325,69 @@ fn post(notice: &Notice) {
         &notice.title,
         &notice.body,
         None,
-        notice.dedup.as_deref(),
+        None,
         notice.route.as_ref().map(|(action, key)| (*action, Some(key.as_str()))),
     );
 }
 
 impl App {
-    /// 목록 받기·알림·시트 답·끝난 처리, 그리고 앱이 앞이면 다음 시트. 설정을 안 열어도 돈다 — 로그인 여부는 뒷실
-    /// 조회가 가린다(로그아웃·격리 실행이면 관문에 닿지 않고 빈 손으로 돌아온다).
+    pub(crate) fn review_pr_requests(&mut self) {
+        let work = &mut self.device_account.work;
+        if work.review_requested || work.shown.is_some() || work.busy.is_some() {
+            return;
+        }
+        if work.fixture {
+            work.queue_review();
+        } else {
+            work.review_requested = true;
+            work.refresh_due(true, self.proxy.clone());
+        }
+    }
+
+    /// Poll the open review to close sheets whose requests have changed on another device.
     pub(crate) fn pr_requests_poll(&mut self) {
         if crate::lite_mode() {
             return;
         }
         let work = &mut self.device_account.work;
-        // 검증 리그는 사람 화면의 초점을 안 뺏으려 뒤에 떠 있을 수 있다 — 가짜 목록이면 앞에 있는 셈 친다.
         let front = self.window_focused || work.fixture;
-        work.refresh_due(false, Some(self.proxy.clone()));
+        if work.shown.is_some() {
+            work.refresh_due(false, self.proxy.clone());
+        }
         let mut notices = Vec::new();
         let mut install = None;
-        if let Some(Ok(Done::Listed(result))) = work.fetch.as_ref().map(Receiver::try_recv) {
-            work.fetch = None;
-            match result {
-                Ok(data) => notices = work.listed(&data, front),
-                Err(error) if error.contains("signed_out") || error.contains("isolated_run") => {
-                    work.listed(&serde_json::Value::Null, front);
+        let mut feedback = None;
+        match work.fetch.as_ref().map(Receiver::try_recv) {
+            Some(Ok(Done::Listed(result))) => {
+                work.fetch = None;
+                let requested = std::mem::take(&mut work.review_requested);
+                match result {
+                    Ok(data) => {
+                        work.listed(&data);
+                        if requested {
+                            work.queue_review();
+                            if work.queue.is_empty() {
+                                feedback = Some(("기다리는 PR 요청이 없어요".into(), false));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if error.contains("signed_out") || error.contains("isolated_run") {
+                            work.listed(&serde_json::Value::Null);
+                        }
+                        if requested {
+                            feedback = Some((readable(&error), true));
+                        }
+                    }
                 }
-                Err(_) => {}
             }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                work.fetch = None;
+                if std::mem::take(&mut work.review_requested) {
+                    feedback = Some(("PR 요청을 가져오지 못했어요. 다시 시도해 주세요".into(), true));
+                }
+            }
+            _ => {}
         }
         if let Some(handle) = work.stale.take() {
             super::op::close_sheet(handle);
@@ -438,6 +402,10 @@ impl App {
             let (done, url) = work.acted(&effect, result);
             notices.extend(done);
             install = url;
+        }
+        if let Some(message) = feedback {
+            self.device_account.message = Some(message);
+            self.chrome_dirty = true;
         }
         for notice in &notices {
             post(notice);
@@ -553,7 +521,8 @@ mod tests {
     #[test]
     fn create_approves_exactly_what_the_sheet_showed() {
         let mut state = State::default();
-        state.listed(&list(&[pending("pw_a", "d1"), pending("pw_b", "d2")]), true);
+        state.listed(&list(&[pending("pw_a", "d1"), pending("pw_b", "d2")]));
+        state.queue_review();
         let (ticket, item) = show(&mut state);
         assert_eq!(item["id"], "pw_a");
         assert!(state.next().is_none(), "two sheets at once");
@@ -572,7 +541,8 @@ mod tests {
     #[test]
     fn discard_rejects_and_later_keeps_it_waiting() {
         let mut state = State::default();
-        state.listed(&list(&[pending("pw_a", "d"), pending("pw_b", "d")]), true);
+        state.listed(&list(&[pending("pw_a", "d"), pending("pw_b", "d")]));
+        state.queue_review();
         let (ticket, _) = show(&mut state);
         assert_eq!(state.answered(ticket, Choice::Discard), Some(Effect::Reject { id: "pw_a".into() }));
         assert_eq!(state.acted(&Effect::Reject { id: "pw_a".into() }, Ok(serde_json::json!({"ok":true}))).0, Vec::new());
@@ -580,20 +550,20 @@ mod tests {
         assert_eq!(item["id"], "pw_b");
         assert_eq!(state.answered(ticket, Choice::Later), None, "later sent something");
         assert!(state.next().is_none(), "a request closed for later came back by itself");
-        state.listed(&list(&[pending("pw_b", "d")]), true);
+        state.listed(&list(&[pending("pw_b", "d")]));
         assert!(state.next().is_none(), "a refresh brought a later request back");
         state.clicked("pw_b");
         let (ticket, item) = show(&mut state);
         assert_eq!(item["id"], "pw_b", "clicking its notification did not reopen it");
         state.answered(ticket, Choice::Later);
-        state.later.insert("pw_b".into(), std::time::Instant::now());
-        assert_eq!(show(&mut state).1["id"], "pw_b", "a later request never came back");
+        state.queue_review();
+        assert_eq!(show(&mut state).1["id"], "pw_b", "a later request could not be reviewed");
     }
 
     #[test]
     fn nothing_approves_without_the_shown_sheet() {
         let mut state = State::default();
-        state.listed(&list(&[pending("pw_a", "d")]), true);
+        state.listed(&list(&[pending("pw_a", "d")]));
         assert_eq!(state.answered(1, Choice::Create), None, "an answer with no sheet open approved");
         state.clicked("pw_a");
         let (ticket, _) = show(&mut state);
@@ -606,37 +576,37 @@ mod tests {
     #[test]
     fn a_request_handled_elsewhere_or_changed_closes_its_sheet() {
         let mut state = State::default();
-        state.listed(&list(&[pending("pw_a", "d1"), pending("pw_b", "d")]), true);
+        state.listed(&list(&[pending("pw_a", "d1"), pending("pw_b", "d")]));
+        state.queue_review();
         let (ticket, _) = show(&mut state);
-        state.listed(&list(&[pending("pw_a", "d2"), pending("pw_b", "d")]), true);
+        state.listed(&list(&[pending("pw_a", "d2"), pending("pw_b", "d")]));
         assert_eq!(state.stale, Some(7));
         assert_eq!(state.answered(ticket, Choice::Create), None, "the closed sheet's answer approved the changed request");
         let (_, item) = show(&mut state);
         assert_eq!((item["id"].as_str(), item["digest"].as_str()), (Some("pw_a"), Some("d2")));
-        state.listed(&list(&[pending("pw_b", "d")]), true);
+        state.listed(&list(&[pending("pw_b", "d")]));
         assert!(state.shown.is_none() && state.stale.is_some());
         assert_eq!(show(&mut state).1["id"], "pw_b");
     }
 
     #[test]
-    fn requests_notify_once_when_the_app_is_behind() {
+    fn polling_never_opens_a_review_by_itself() {
         let mut state = State::default();
-        let notices = state.listed(&list(&[pending("pw_a", "d")]), false);
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].body, "2rami/kasaterm · 주간 정리\nfeat/x → main · Laptop · 케이");
-        assert_eq!(notices[0].route, Some((ACTION, "pw_a".into())));
-        assert!(state.listed(&list(&[pending("pw_a", "d")]), false).is_empty(), "the same request notified twice");
-        assert!(state.listed(&list(&[pending("pw_a", "d"), pending("pw_b", "d")]), true).is_empty(), "notified while in front");
-        let many: Vec<_> = (0..5).map(|n| pending(&format!("pw_{n}"), "d")).collect();
-        let notices = State::default().listed(&list(&many), false);
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].title, "PR 요청 5개가 기다려요");
+        state.listed(&list(&[pending("pw_a", "d")]));
+        assert!(state.next().is_none());
+        state.queue_review();
+        assert_eq!(show(&mut state).1["id"], "pw_a");
+        state.answered(1, Choice::Later);
+        state.listed(&list(&[pending("pw_a", "d"), pending("pw_b", "d")]));
+        assert!(state.next().is_none());
+        state.queue_review();
+        assert_eq!(show(&mut state).1["id"], "pw_a");
     }
 
     #[test]
     fn a_failed_approval_points_back_to_the_request() {
         let mut state = State::default();
-        state.listed(&list(&[pending("pw_a", "d")]), true);
+        state.listed(&list(&[pending("pw_a", "d")]));
         let effect = Effect::Approve { id: "pw_a".into(), digest: "d".into() };
         let (notices, install) = state.acted(&effect, Err("repo_not_accessible".into()));
         assert_eq!(install.as_deref(), Some("https://github.com/apps/kasa-work/installations/new"));

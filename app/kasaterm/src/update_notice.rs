@@ -26,6 +26,7 @@ fn interrupts(busy: &[String], dirty_docs: usize) -> Option<String> {
 const INTERRUPTS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 「내 기기」가 받은 판으로 저절로 다시 켜기 전, 아무도 키보드·마우스를 안 만진 시간.
+#[cfg(any(target_os = "macos", test))]
 const IDLE_BEFORE_RELAUNCH: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// 새 판으로 다시 켠다는 표식 — 다음 실행이 「복원할까요」에서 멈추지 않고 칸·세션을 바로 되살린다.
@@ -55,9 +56,14 @@ pub(crate) fn relaunched_for_update() -> bool {
     fresh
 }
 
-/// 받은 판으로 저절로 다시 켜도 되나 — 끊길 일을 한 번 이상 쟀고, 끊길 것이 없고, 아무도 안 만진 지 오래됐다.
+#[cfg(any(target_os = "macos", test))]
 fn quiet_enough(measured: bool, interrupts: Option<&str>, untouched: std::time::Duration) -> bool {
     measured && interrupts.is_none() && untouched >= IDLE_BEFORE_RELAUNCH
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn idle_recheck_in(untouched: std::time::Duration) -> std::time::Duration {
+    IDLE_BEFORE_RELAUNCH.saturating_sub(untouched).max(INTERRUPTS_EVERY)
 }
 
 /// 이 기기를 아무도 만지지 않은 시간 — 키보드·마우스·트랙패드 어느 것이든.
@@ -70,11 +76,6 @@ fn untouched_for() -> std::time::Duration {
     // kCGEventSourceStateCombinedSessionState · kCGAnyInputEventType
     let seconds = unsafe { CGEventSourceSecondsSinceLastEventType(0, u32::MAX) };
     std::time::Duration::try_from_secs_f64(seconds).unwrap_or_default()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn untouched_for() -> std::time::Duration {
-    std::time::Duration::ZERO
 }
 
 impl App {
@@ -122,23 +123,41 @@ impl App {
         self.rig_update_press(now);
     }
 
-    /// 「내 기기」 — 새 판은 묻지 않고 받고, 맥은 아무도 안 쓰고 끊길 일(일하는 창·저장 안 한 문서)도 없을 때 다시 켠다.
-    /// 끊길 일은 준비된 카드가 2초마다 잰 값을 쓴다 — 아직 한 번도 안 쟀으면 기다린다.
     fn update_on_its_own(&mut self, stage: Option<&Stage>) {
         match stage {
             Some(Stage::Found { version, .. }) if self.update_card.fetched_on_its_own.as_deref() != Some(version.as_str()) => {
                 self.update_card.fetched_on_its_own = Some(version.clone());
                 self.update_card_act(Action::Download);
             }
+            #[cfg(target_os = "macos")]
             Some(Stage::Ready { .. })
-                if crate::update_card::RELAUNCHES_ON_ITS_OWN
-                    && quiet_enough(self.update_card.interrupts_at.is_some(), self.update_card.interrupts.as_deref(), untouched_for()) =>
+                if quiet_enough(
+                    self.update_card.interrupts_at.is_some(),
+                    self.update_card.interrupts.as_deref(),
+                    untouched_for(),
+                ) =>
             {
-                eprintln!("[update] 아무도 안 써서 새 판으로 다시 켬");
-                self.update_card_act(Action::Relaunch);
+                // The card may show a measurement from before a remote input or a shell command started.
+                self.collab.hub.refresh_from_gui();
+                if self.update_interrupts_now().is_none() {
+                    self.update_card_act(Action::Relaunch);
+                }
             }
             _ => {}
         }
+    }
+
+    pub(crate) fn update_deadline(&self) -> Option<std::time::Instant> {
+        #[cfg(target_os = "macos")]
+        if let Some(updater) = self.sparkle_updater.as_ref().filter(|updater| updater.automatic()) {
+            let probe = updater.next_probe();
+            if matches!(crate::update_card::current(), Some(Stage::Ready { .. })) {
+                let retry = std::time::Instant::now() + idle_recheck_in(untouched_for());
+                return Some(probe.min(retry));
+            }
+            return Some(probe);
+        }
+        None
     }
 
     /// 카드의 단추.
@@ -216,10 +235,13 @@ impl App {
         let mut ids: Vec<&String> = self.pty.keys().collect();
         ids.sort();
         let mut busy = Vec::new();
+        if self.restore_progress.is_some() || self.restore_applying.is_some() || !self.pending_restores.is_empty() {
+            busy.push("세션 복원 중".into());
+        }
         for id in ids {
-            let state = self.collab.hub.resolved(id).map(|r| r.state);
-            if let Some(s) = state.filter(|s| s.is_busy() || s.needs_you()) {
-                busy.push(self.pane_character_if_known(id).unwrap_or_else(|| s.board_word().to_string()));
+            let resolved = self.collab.hub.resolved(id);
+            if resolved.is_some_and(|r| r.state.is_busy() || r.state.needs_you() || r.bg_active || !r.questions.is_empty()) {
+                busy.push(self.pane_character_if_known(id).unwrap_or_else(|| id.to_string()));
             } else if let Some(name) = self.pid_busy(id).filter(|n| !HARNESSES.iter().any(|h| n.ends_with(h))) {
                 busy.push(name);
             }
@@ -236,9 +258,17 @@ mod tests {
     fn an_update_relaunches_on_its_own_only_when_nobody_is_there_and_nothing_breaks() {
         let long = IDLE_BEFORE_RELAUNCH + std::time::Duration::from_secs(1);
         assert!(quiet_enough(true, None, long));
-        assert!(!quiet_enough(false, None, long), "끊길 일을 아직 안 쟀다");
-        assert!(!quiet_enough(true, Some("일하는 창: 아리스"), long), "학생이 일하는 중");
-        assert!(!quiet_enough(true, None, std::time::Duration::from_secs(60)), "사람이 방금 만졌다");
+        assert!(!quiet_enough(false, None, long));
+        assert!(!quiet_enough(true, Some("일하는 창: 학생"), long));
+        assert!(!quiet_enough(true, None, std::time::Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn idle_update_wakes_at_the_idle_threshold_and_rechecks_blockers_afterwards() {
+        use std::time::Duration;
+        assert_eq!(idle_recheck_in(Duration::from_secs(60)), Duration::from_secs(540));
+        assert_eq!(idle_recheck_in(IDLE_BEFORE_RELAUNCH), INTERRUPTS_EVERY);
+        assert_eq!(idle_recheck_in(IDLE_BEFORE_RELAUNCH + Duration::from_secs(30)), INTERRUPTS_EVERY);
     }
 
     #[test]
