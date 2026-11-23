@@ -3,6 +3,8 @@
 /// 만지거나 스크롤한 카드. 값 이름은 계정 동기화(`weather` 키)의 JSON 그대로다.
 library;
 
+enum RainStyle { liquid, showers }
+
 enum RainAmount {
   none('없음'),
   drizzle('이슬비'),
@@ -55,6 +57,7 @@ enum Mood {
 class WeatherSettings {
   const WeatherSettings({
     this.enabled = false,
+    this.style = RainStyle.liquid,
     this.amount = RainAmount.drizzle,
     this.windDir = 0,
     this.windStrength = 0,
@@ -69,6 +72,7 @@ class WeatherSettings {
   });
 
   final bool enabled;
+  final RainStyle style;
   final RainAmount amount;
 
   /// −1(왼쪽) ~ 1(오른쪽).
@@ -102,6 +106,7 @@ class WeatherSettings {
 
   WeatherSettings copyWith({
     bool? enabled,
+    RainStyle? style,
     RainAmount? amount,
     double? windDir,
     double? windStrength,
@@ -115,6 +120,7 @@ class WeatherSettings {
     bool? ignoreOs,
   }) => WeatherSettings(
     enabled: enabled ?? this.enabled,
+    style: style ?? this.style,
     amount: amount ?? this.amount,
     windDir: windDir ?? this.windDir,
     windStrength: windStrength ?? this.windStrength,
@@ -139,6 +145,7 @@ class WeatherSettings {
 
   Map<String, Object?> toJson() => {
     'enabled': enabled,
+    if (style != RainStyle.liquid) 'style': style.name,
     'amount': amount.name,
     'wind_dir': windDir,
     'wind_strength': windStrength,
@@ -161,6 +168,7 @@ class WeatherSettings {
     final fx = raw['effects'];
     return WeatherSettings(
       enabled: raw['enabled'] == true,
+      style: raw['style'] == 'showers' ? RainStyle.showers : RainStyle.liquid,
       amount: RainAmount.parse(raw['amount'], d.amount),
       windDir: ranged(raw['wind_dir'], -1, 1, 0),
       windStrength: ranged(raw['wind_strength'], 0, 1, 0),
@@ -267,7 +275,7 @@ class OsMotion {
 /// 판정: [active] 가 거짓이면 날씨를 통째로 건너뛴다(비용 0), [moving] 이 거짓이면 맺힌 것만 남는다.
 ({bool active, bool moving}) verdict(WeatherSettings s, OsMotion os) {
   final osBlocks = !s.ignoreOs && os.reduceTransparency;
-  final active = s.enabled && !osBlocks && s.effects.isNotEmpty;
+  final active = s.enabled && !osBlocks && (s.style == RainStyle.showers || s.effects.isNotEmpty);
   return (active: active, moving: active && (s.ignoreOs || !os.reduceMotion));
 }
 

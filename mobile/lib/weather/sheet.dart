@@ -138,6 +138,18 @@ class WeatherSettingsList extends StatelessWidget {
             value: s.enabled,
             onChanged: (v) => set(s.copyWith(enabled: v)),
           ),
+          _Title('비 표현'),
+          _Pad(
+            SegmentedButton<RainStyle>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: RainStyle.liquid, label: Text('리퀴드 비')),
+                ButtonSegment(value: RainStyle.showers, label: Text('빗줄기와 물보라')),
+              ],
+              selected: {s.style},
+              onSelectionChanged: (v) => set(s.copyWith(style: v.first)),
+            ),
+          ),
           _Title('비 양'),
           _Pad(
             SegmentedButton<RainAmount>(
@@ -180,19 +192,21 @@ class WeatherSettingsList extends StatelessWidget {
               trailing: t == s.target ? const Icon(Icons.check) : null,
               onTap: () => set(s.copyWith(target: t)),
             ),
-          _Title('효과'),
-          for (final e in Effect.values)
-            SwitchListTile(title: Text(e.label), value: s.has(e), onChanged: (v) => set(s.withEffect(e, v))),
-          _Title('젖는 시간'),
-          _Slider(
-            label: '',
-            value: _rewet.indexOf(_nearest(s.rewetSecs)).toDouble(),
-            min: 0,
-            max: (_rewet.length - 1).toDouble(),
-            divisions: _rewet.length - 1,
-            text: rewetLabel(s.rewetSecs),
-            onChanged: (v, commit) => weather.set(s.copyWith(rewetSecs: _rewet[v.round()]), commit: commit),
-          ),
+          if (s.style == RainStyle.liquid) ...[
+            _Title('효과'),
+            for (final e in Effect.values)
+              SwitchListTile(title: Text(e.label), value: s.has(e), onChanged: (v) => set(s.withEffect(e, v))),
+            _Title('젖는 시간'),
+            _Slider(
+              label: '',
+              value: _rewet.indexOf(_nearest(s.rewetSecs)).toDouble(),
+              min: 0,
+              max: (_rewet.length - 1).toDouble(),
+              divisions: _rewet.length - 1,
+              text: rewetLabel(s.rewetSecs),
+              onChanged: (v, commit) => weather.set(s.copyWith(rewetSecs: _rewet[v.round()]), commit: commit),
+            ),
+          ],
           _Title('학생 상태 날씨'),
           SwitchListTile(
             title: const Text('상태마다 비 양'),

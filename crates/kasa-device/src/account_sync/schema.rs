@@ -46,6 +46,7 @@ fn weather(v: &Value) -> bool {
     o.len() <= 16 && o.iter().all(|(key, value)| match key.as_str() {
         "enabled" | "by_status" | "ignore_os" => value.is_boolean(),
         "amount" | "busy" | "your_turn" | "resting" => one_of(value, RAIN),
+        "style" => one_of(value, &["liquid", "showers"]),
         "wind_dir" => number(value, -1.0, 1.0),
         "wind_strength" => number(value, 0.0, 1.0),
         "target" => one_of(value, &["all_windows", "focused_only", "unfocused_only", "picked_only", "background_only"]),
@@ -280,7 +281,8 @@ mod tests {
             "effects":{"streaks":false,"drops":true},"wipe":"on_input","rewet_secs":180,"by_status":true,
             "busy":"drizzle","your_turn":"downpour","resting":"none","ignore_os":false});
         assert!(valid_setting("weather", &good));
-        for bad in [json!({"amount":"hail"}), json!({"rewet_secs":5}), json!({"command":"rm"}), json!({"effects":{"x":true}}), json!("on")] {
+        assert!(valid_setting("weather", &json!({"style":"showers"})));
+        for bad in [json!({"style":"hail"}), json!({"amount":"hail"}), json!({"rewet_secs":5}), json!({"command":"rm"}), json!({"effects":{"x":true}}), json!("on")] {
             assert!(!valid_setting("weather", &bad), "{bad}");
         }
         let mut snapshot = Snapshot::default();

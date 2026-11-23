@@ -31,6 +31,7 @@ pub(crate) struct WeatherState {
     last: Option<Instant>,
     places: Vec<Place>,
     spots: Vec<ButtonSpot>,
+    shower_time: f32,
     ripple_acc: f32,
     ripple_tail: f32,
     /// 설정 화면처럼 창 자리를 다른 것이 덮을 때: 창 유리는 그리지 않는다(물은 그대로 남는다).
@@ -137,6 +138,10 @@ impl WeatherState {
 
     /// Wet places still dripping after the rain stopped keep the frames coming.
     fn busy(&self, v: Verdict) -> bool {
+        if self.settings.style == model::RainStyle::Showers {
+            return v.active && v.moving && (model::background_amount(&self.settings) != RainAmount::None
+                || self.places.iter().any(|p| p.amount != RainAmount::None));
+        }
         v.active
             && v.moving
             && (self.places.iter().any(|p| p.amount != RainAmount::None) || !self.world.settled() || self.ripple_tail > 0.0)
@@ -145,7 +150,7 @@ impl WeatherState {
 
 impl App {
     pub(crate) fn weather_settings_changed(&mut self) {
-        if !self.weather.settings.enabled {
+        if !self.weather.settings.enabled || self.weather.settings.style == model::RainStyle::Showers {
             self.weather.world.clear();
             self.weather.places.clear();
             self.weather.spots.clear();
@@ -300,6 +305,35 @@ impl App {
         let st = &mut self.weather;
         let s = st.settings.clone();
         let (scale, win) = (st.scale, st.win);
+        if s.style == model::RainStyle::Showers {
+            if v.moving {
+                st.shower_time = (st.shower_time + dt) % 3600.0;
+            }
+            let strength = |amount: RainAmount| [0.0, 0.24, 0.62, 1.0][amount.index()];
+            let physical = |rect: [f32; 4]| rect.map(|n| n * scale);
+            let [w, h] = win.map(|n| (n * scale).max(1.0));
+            let mut regions = gpu::PlacesU::zeroed();
+            regions.n = [st.places.len() as f32, strength(model::background_amount(&s)), 0.0, 0.0];
+            for (i, place) in st.places.iter().enumerate() {
+                regions.rect[i] = physical(place.rect);
+                regions.a[i][0] = if place.kind == PlaceKind::Pane { 0.0 } else { 1.0 };
+                regions.a[i][3] = (place.key % 997) as f32;
+                regions.b[i][2] = strength(place.amount);
+                regions.c[i] = place.guard.map_or([0.0; 4], physical);
+            }
+            return gpu::Frame {
+                globals: gpu::Globals {
+                    res: [w, h, 1.0 / w, 1.0 / h],
+                    t: [st.shower_time, dt, scale, 0.0],
+                    rain: [0.0, s.wind() * 0.68, 0.0, if v.moving { 1.0 } else { 0.0 }],
+                    ..Default::default()
+                },
+                places: regions, buttons: gpu::ButtonsU::zeroed(), canvas: win,
+                showers: true, rain: false, glass: false, ripple: false,
+                ripple_dim: [8, 8], ripple_steps: 0, counts: [0; 4],
+                boxes: Vec::new(), ripples: Vec::new(), inst: Vec::new(),
+            };
+        }
         let amount_at = |p: [f32; 2], places: &[Place]| {
             places.iter().find(|pl| sim::inside(p, pl.rect)).map_or(model::background_amount(&s), |pl| pl.amount)
         };
@@ -439,6 +473,7 @@ impl App {
             inst,
             counts: [n_drops, n_droplets, n_dry, n_mist],
             canvas: win,
+            showers: false,
             rain: any_streak && v.moving,
             ripple: ripple_on,
             glass: any_glass && !st.dry && (s.effects.drops || s.effects.mist),

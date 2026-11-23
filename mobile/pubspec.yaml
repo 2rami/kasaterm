@@ -44,6 +44,7 @@ flutter:
   uses-material-design: true
   # 날씨(lib/weather). 쓴 것과 라이선스는 lib/weather/LICENSES.md.
   shaders:
+    - shaders/weather_showers.frag
     - shaders/weather_rain.frag
     - shaders/weather_glass.frag
     - shaders/weather_buttons.frag

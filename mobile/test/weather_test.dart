@@ -51,6 +51,16 @@ void main() {
     });
   });
 
+  test('showers round-trips independently of the liquid effect switches', () {
+    expect(WeatherSettings.fromJson({}).style, RainStyle.liquid);
+    final s = on.copyWith(style: RainStyle.showers, effects: {});
+    expect(WeatherSettings.fromJson(s.toJson()), s);
+    expect(verdict(s, const OsMotion()), (active: true, moving: true));
+    expect(verdict(s, const OsMotion(reduceMotion: true)).moving, false);
+    expect(verdict(s, const OsMotion(reduceTransparency: true)).active, false);
+    expect(verdict(s.copyWith(style: RainStyle.liquid), const OsMotion()).active, false);
+  });
+
   test('「초점 카드만」이면 방금 만진 카드에만 온다', () {
     expect(cardAmount(on, CardWeather.follow, focused: true), RainAmount.drizzle);
     expect(cardAmount(on, CardWeather.follow, focused: false), RainAmount.none);

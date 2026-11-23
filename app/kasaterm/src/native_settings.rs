@@ -4665,6 +4665,11 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     *y += 8.0;
     section_title(g, x, *y, "비", "");
     *y += 54.0;
+    use wm::RainStyle;
+    seg_row(g, s, hits, x, y, w, "비 표현", &[
+        ("리퀴드 비", ws.style == RainStyle::Liquid, act(Change::Style(RainStyle::Liquid))),
+        ("빗줄기와 물보라", ws.style == RainStyle::Showers, act(Change::Style(RainStyle::Showers))),
+    ]);
     seg_row(g, s, hits, x, y, w, "비 양", &amounts(ws.amount, &|a| Change::Amount(a)));
     let dir = wm::quarters(ws.wind_dir);
     let dir_text = match dir {
@@ -4687,17 +4692,19 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     *y += 4.0;
     plain_hint(g, x, y, w, "창 우클릭 「이 창 날씨」로 창마다 따로 정할 수 있고, 그 값이 이 선택보다 먼저입니다. 「고른 창만」은 거기서 고른 창에만 비가 옵니다");
 
-    *y += 8.0;
-    section_title(g, x, *y, "효과", "");
-    *y += 54.0;
-    for e in Effect::ALL {
-        let on = e.get(&ws.effects);
-        toggle_row(g, s, hits, x, y, w, e.label(), on, act(Change::Effect(e, !on)));
+    if ws.style == RainStyle::Liquid {
+        *y += 8.0;
+        section_title(g, x, *y, "효과", "");
+        *y += 54.0;
+        for e in Effect::ALL {
+            let on = e.get(&ws.effects);
+            toggle_row(g, s, hits, x, y, w, e.label(), on, act(Change::Effect(e, !on)));
+        }
+        let at = wm::REWET_STEPS.iter().position(|&v| v >= ws.rewet_secs).unwrap_or(wm::REWET_STEPS.len() - 1);
+        stepper_row(g, s, hits, x, y, w, "젖는 시간", &wm::rewet_label(ws.rewet_secs),
+            act(Change::Rewet(wm::REWET_STEPS[at.saturating_sub(1)])),
+            act(Change::Rewet(wm::REWET_STEPS[(at + 1).min(wm::REWET_STEPS.len() - 1)])));
     }
-    let at = wm::REWET_STEPS.iter().position(|&v| v >= ws.rewet_secs).unwrap_or(wm::REWET_STEPS.len() - 1);
-    stepper_row(g, s, hits, x, y, w, "젖는 시간", &wm::rewet_label(ws.rewet_secs),
-        act(Change::Rewet(wm::REWET_STEPS[at.saturating_sub(1)])),
-        act(Change::Rewet(wm::REWET_STEPS[(at + 1).min(wm::REWET_STEPS.len() - 1)])));
 
     *y += 8.0;
     section_title(g, x, *y, "학생 상태", "");

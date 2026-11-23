@@ -83,6 +83,7 @@ pub(crate) struct Frame {
     pub counts: [u32; 4],
     /// 물 지도 캔버스(논리 px).
     pub canvas: [f32; 2],
+    pub showers: bool,
     pub rain: bool,
     pub ripple: bool,
     pub glass: bool,
@@ -222,6 +223,7 @@ fn draw(rp: &mut wgpu::RenderPass, inst: &wgpu::Buffer, pipe: &wgpu::RenderPipel
 }
 
 struct Pipes {
+    showers: wgpu::RenderPipeline,
     rain: wgpu::RenderPipeline,
     scene: wgpu::RenderPipeline,
     copy: wgpu::RenderPipeline,
@@ -264,6 +266,7 @@ struct Sized {
     mist: Tex,
     quarter: Tex,
     eighth: [Tex; 2],
+    showers_bg: wgpu::BindGroup,
     rain_bg: wgpu::BindGroup,
     scene_bg: wgpu::BindGroup,
     copy_bg: wgpu::BindGroup,
@@ -297,6 +300,7 @@ impl WeatherGpu {
     /// `format` is the surface format; the app frame is copied from and written back to it.
     pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let m_rain = shader(device, include_str!("shaders/rain.wgsl"), "weather rain", true);
+        let showers = shader(device, include_str!("shaders/showers.wgsl"), "weather showers", true);
         let m_panel = shader(device, include_str!("shaders/panel.wgsl"), "weather panel", true);
         let m_ripple = shader(device, include_str!("shaders/ripple.wgsl"), "weather ripple", true);
         let m_gmap = shader(device, include_str!("shaders/glass_map.wgsl"), "weather glass map", false);
@@ -308,6 +312,7 @@ impl WeatherGpu {
         let erase = Some(blend(F::Zero, F::OneMinusSrcAlpha));
         let p = |m, vs, fs, fmt, bl, inst| pipeline(device, m, vs, fs, fmt, bl, inst);
         let pipes = Pipes {
+            showers: p(&showers, "vs_full", "fs_showers", format, None, false),
             rain: p(&m_rain, "vs_full", "fs_rain", MAP_FMT, None, false),
             scene: p(&m_rain, "vs_full", "fs_scene", SCENE_FMT, None, false),
             copy: p(&m_rain, "vs_full", "fs_copy", SCENE_FMT, None, false),
@@ -394,6 +399,7 @@ impl WeatherGpu {
         use Res::*;
         let g = || Buf(&buf.globals);
         let rg = || Buf(&buf.places);
+        let showers_bg = bind(device, &p.showers, &[(0, g()), (1, Samp(samp)), (2, View(&frame.view)), (9, rg())]);
         let rain_bg = bind(device, &p.rain, &[(0, g()), (9, rg())]);
         let scene_bg = bind(device, &p.scene, &[(0, g()), (1, Samp(samp)), (2, View(&frame.view)), (3, View(&rain.view))]);
         let copy_bg = bind(device, &p.copy, &[(1, Samp(samp)), (2, View(&frame.view))]);
@@ -446,6 +452,7 @@ impl WeatherGpu {
             mist,
             quarter,
             eighth,
+            showers_bg,
             rain_bg,
             scene_bg,
             copy_bg,
@@ -496,6 +503,10 @@ impl WeatherGpu {
         }
         queue.write_buffer(&self.buf.globals, 0, bytemuck::bytes_of(&f.globals));
         queue.write_buffer(&self.buf.places, 0, bytemuck::bytes_of(&f.places));
+        if f.showers {
+            full(enc, out, &self.pipes.showers, &s.showers_bg);
+            return;
+        }
         queue.write_buffer(&self.buf.buttons, 0, bytemuck::bytes_of(&f.buttons));
         queue.write_buffer(&self.buf.glass, 0, bytemuck::cast_slice(&[f.canvas[0], f.canvas[1], 1.0 / f.canvas[0], 1.0 / f.canvas[1]]));
         let n_inst = f.inst.len().min(MAX_INST);

@@ -85,6 +85,19 @@ impl WeatherEffects {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RainStyle {
+    Showers,
+    #[default]
+    #[serde(other)]
+    Liquid,
+}
+
+impl RainStyle {
+    fn is_liquid(&self) -> bool { *self == Self::Liquid }
+}
+
 /// 학생 상태 날씨의 세 갈래. 하네스 상태를 여기로 접는 것은 부르는 쪽 일이다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PaneMood {
@@ -99,6 +112,8 @@ pub(crate) enum PaneMood {
 #[serde(default)]
 pub(crate) struct WeatherSettings {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "RainStyle::is_liquid")]
+    pub style: RainStyle,
     pub amount: RainAmount,
     /// −1(왼쪽) ~ 1(오른쪽).
     pub wind_dir: f32,
@@ -120,6 +135,7 @@ impl Default for WeatherSettings {
     fn default() -> Self {
         WeatherSettings {
             enabled: false,
+            style: RainStyle::Liquid,
             amount: RainAmount::Drizzle,
             wind_dir: 0.0,
             wind_strength: 0.0,
@@ -241,6 +257,7 @@ pub(crate) fn rewet_label(secs: u32) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Change {
     Enabled(bool),
+    Style(RainStyle),
     Amount(RainAmount),
     WindDir(i8),
     WindStrength(u8),
@@ -255,6 +272,7 @@ pub(crate) enum Change {
 pub(crate) fn apply(mut s: WeatherSettings, c: Change) -> WeatherSettings {
     match c {
         Change::Enabled(on) => s.enabled = on,
+        Change::Style(style) => s.style = style,
         Change::Amount(a) => s.amount = a,
         Change::WindDir(q) => s.wind_dir = q as f32 / 4.0,
         Change::WindStrength(q) => s.wind_strength = q as f32 / 4.0,
@@ -337,7 +355,7 @@ pub(crate) struct Verdict {
 
 pub(crate) fn verdict(s: &WeatherSettings, os: OsMotion) -> Verdict {
     let os_blocks = !s.ignore_os && os.reduce_transparency;
-    let active = s.enabled && !os_blocks && s.effects.any();
+    let active = s.enabled && !os_blocks && (s.style == RainStyle::Showers || s.effects.any());
     Verdict { active, moving: active && (s.ignore_os || !os.reduce_motion) }
 }
 
@@ -408,6 +426,20 @@ mod tests {
         let mut s = on();
         s.effects = WeatherEffects { streaks: false, drops: false, mist: false, ripples: false, buttons: false };
         assert!(!verdict(&s, OsMotion::default()).active);
+    }
+
+    #[test]
+    fn showers_round_trip_independently_of_liquid_effects() {
+        let mut s = apply(on(), Change::Style(RainStyle::Showers));
+        for effect in Effect::ALL {
+            s = apply(s, Change::Effect(effect, false));
+        }
+        let value = serde_json::to_value(&s).unwrap();
+        assert_eq!(value["style"], "showers");
+        assert_eq!(serde_json::from_value::<WeatherSettings>(value).unwrap(), s);
+        assert!(verdict(&s, OsMotion::default()).moving);
+        assert!(!verdict(&s, OsMotion { reduce_motion: true, reduce_transparency: false }).moving);
+        assert!(!verdict(&apply(s, Change::Style(RainStyle::Liquid)), OsMotion::default()).active);
     }
 
     #[test]

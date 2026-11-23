@@ -60,10 +60,14 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
   DateTime _rainFrom = DateTime.now();
   ({bool active, bool moving}) _v = (active: false, moving: false);
   RainAmount _amount = RainAmount.none;
+  bool _liquid = true;
   bool _dark = true;
 
   @override
   RainAmount get amount => _amount;
+
+  @override
+  String get placeId => widget.id;
 
   @override
   Rect? rectIn(RenderBox scene) {
@@ -117,11 +121,13 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
     final amount = v.active
         ? cardAmount(s, weather.cardOf(widget.id), focused: weather.focused.value == widget.id, mood: widget.mood)
         : RainAmount.none;
-    final changed = v.active != _v.active || amount != _amount || v.moving != _v.moving;
+    final liquid = s.style == RainStyle.liquid;
+    final changed = liquid != _liquid || v.active != _v.active || amount != _amount || v.moving != _v.moving;
     _v = v;
+    _liquid = liquid;
     if (_amount == RainAmount.none && amount != RainAmount.none) _rainFrom = DateTime.now();
     _amount = amount;
-    if (v.active && _glass == null) {
+    if (liquid && v.active && _glass == null) {
       _loadShared().then((_) async {
         final rain = (await RainPainter.program()).fragmentShader();
         if (!mounted) return;
@@ -132,17 +138,20 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
         _sync();
       });
     }
-    final wet = v.active && _glass != null && (amount != RainAmount.none || !_sim.settled);
+    final wet = _wet;
     if (wet && !_ticker.isActive) {
       _last = Duration.zero;
       _ticker.start();
     } else if (!wet && _ticker.isActive) {
       _ticker.stop();
     }
-    if (changed) setState(() {});
+    if (changed) {
+      setState(() {});
+      _scene?.placesChanged();
+    }
   }
 
-  bool get _wet => _v.active && _glass != null && (_amount != RainAmount.none || !_sim.settled);
+  bool get _wet => _liquid && _v.active && _glass != null && (_amount != RainAmount.none || !_sim.settled);
 
   void _tick(Duration now) {
     _acc += _last == Duration.zero ? 1 / 30 : (now - _last).inMicroseconds / 1e6;
@@ -239,7 +248,7 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
   void _onDown(PointerDownEvent e) {
     if (!_v.active) return;
     weather.focus(widget.id);
-    if (weather.settings.value.has(Effect.ripples)) _sim.ripple(e.localPosition);
+    if (_liquid && weather.settings.value.has(Effect.ripples)) _sim.ripple(e.localPosition);
     _sync();
   }
 
