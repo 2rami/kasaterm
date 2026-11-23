@@ -8,6 +8,7 @@ uniform float uSeed;
 uniform float uMoving;
 uniform float uPass;
 uniform float uDark;
+uniform float uOpacity;
 out vec4 fragColor;
 
 float grain(vec2 p) {
@@ -94,8 +95,8 @@ vec4 atmosphere(vec2 p, float t, float amount, float wind, float moving, vec3 in
   vec2 q = p / vec2(148.0, 73.0) - vec2(t * (0.06 + 0.11 * wind), t * 0.012);
   float cloud = 0.58 * haze(q) + 0.29 * haze(q * 2.13 + 11.0) + 0.13 * haze(q * 4.31);
   float canopy = 1.0 - smoothstep(24.0, 330.0, p.y);
-  float shade = (0.10 + 0.22 * amount) * (0.23 + 0.77 * canopy) * smoothstep(0.11, 0.83, cloud);
-  float rain = moving * (falling(p, t, wind, amount, 0.05) +
+  float shade = (0.10 + 0.22 * amount) * (0.23 + 0.77 * canopy) * smoothstep(0.11, 0.83, cloud) * uOpacity;
+  float rain = moving * smoothstep(0.28, 1.0, uOpacity) * (falling(p, t, wind, amount, 0.05) +
       falling(p, t, wind, amount, 0.48) + falling(p, t, wind, amount, 1.0));
   float gleam = min(rain, 0.63);
   vec3 sky = mix(vec3(0.08, 0.14, 0.21), vec3(0.48, 0.59, 0.70), cloud);
@@ -107,12 +108,12 @@ void main() {
   vec2 p = screen - uOrigin;
   vec3 ink = mix(vec3(0.35, 0.48, 0.60), vec3(0.77, 0.87, 0.96), uDark);
   if (uPass > 1.5) {
-    float a = impact(p, uTime, uAmount, uWind, uSeed) * 0.85 * uMoving;
+    float a = impact(p, uTime, uAmount, uWind, uSeed) * 0.85 * uMoving * smoothstep(0.28, 1.0, uOpacity);
     fragColor = vec4(ink * a, a);
   } else {
     vec4 sky = atmosphere(screen, uTime, uAmount, uWind, uMoving, ink);
     vec2 water = vec2(0.0);
-    if (uPass > 0.5) water = bead(p, uAmount, uSeed);
+    if (uPass > 0.5) water = bead(p, uAmount, uSeed) * uOpacity;
     float a = water.x + water.y;
     fragColor = vec4(sky.rgb * (1.0 - a) + vec3(0.81, 0.90, 0.96) * water.y, sky.a * (1.0 - a) + a);
   }

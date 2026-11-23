@@ -134,6 +134,43 @@ void main() {
     expect(weather.reduceMotion.value, isFalse);
   });
 
+  testWidgets('work rain replaces the outline and stops ticking after it clears', (tester) async {
+    weather.settings.value = on.copyWith(style: RainStyle.showers);
+    final working = ValueNotifier(false);
+    addTearDown(working.dispose);
+    addTearDown(() => weather.settings.value = const WeatherSettings());
+    await tester.pumpWidget(MaterialApp(
+      home: WeatherScene(
+        child: ValueListenableBuilder(
+          valueListenable: working,
+          builder: (_, active, _) => WorkWeather(
+            id: 'pane',
+            working: active,
+            radius: BorderRadius.zero,
+            builder: (replaces) => SizedBox(width: 120, height: 60, child: Text(replaces ? 'rain' : 'outline')),
+          ),
+        ),
+      ),
+    ));
+    await tester.pump();
+    expect(find.text('outline'), findsOneWidget);
+    expect(tester.binding.transientCallbackCount, 0);
+    working.value = true;
+    await tester.pump();
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    expect(find.text('rain'), findsOneWidget);
+    working.value = false;
+    await tester.pump();
+    expect(find.text('outline'), findsOneWidget);
+    expect(tester.binding.transientCallbackCount, greaterThan(0));
+    for (var i = 0; i < 43; i++) {
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    expect(tester.binding.transientCallbackCount, 0);
+  });
+
   testWidgets('날씨가 꺼져 있으면 카드와 화면 층은 아무것도 더 그리지 않는다', (tester) async {
     weather.settings.value = const WeatherSettings();
     await tester.pumpWidget(

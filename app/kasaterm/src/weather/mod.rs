@@ -31,6 +31,7 @@ pub(crate) struct WeatherState {
     last: Option<Instant>,
     places: Vec<Place>,
     spots: Vec<ButtonSpot>,
+    showers: HashMap<u64, ShowerFade>,
     shower_time: f32,
     ripple_acc: f32,
     ripple_tail: f32,
@@ -38,6 +39,22 @@ pub(crate) struct WeatherState {
     dry: bool,
     scale: f32,
     win: [f32; 2],
+}
+
+struct ShowerFade {
+    amount: RainAmount,
+    opacity: f32,
+}
+
+impl ShowerFade {
+    fn step(&mut self, amount: RainAmount, dt: f32, moving: bool) {
+        if amount != RainAmount::None {
+            self.amount = amount;
+            self.opacity = if moving { (self.opacity + dt / 0.35).min(1.0) } else { 1.0 };
+        } else {
+            self.opacity = if moving { (self.opacity - dt / 1.6).max(0.0) } else { 0.0 };
+        }
+    }
 }
 
 fn key_of(id: &str) -> u64 {
@@ -136,11 +153,15 @@ impl WeatherState {
         self.overrides.get(pane).copied().unwrap_or_default()
     }
 
+    pub(crate) fn replaces_work_outline(&self, id: &str) -> bool {
+        self.settings.style == model::RainStyle::Showers && model::verdict(&self.settings, self.os).moving
+            && self.places.iter().any(|p| p.kind == PlaceKind::Pane && p.key == key_of(id) && p.amount != RainAmount::None)
+    }
+
     /// Wet places still dripping after the rain stopped keep the frames coming.
     fn busy(&self, v: Verdict) -> bool {
         if self.settings.style == model::RainStyle::Showers {
-            return v.active && v.moving && (model::background_amount(&self.settings) != RainAmount::None
-                || self.places.iter().any(|p| p.amount != RainAmount::None));
+            return v.moving && !self.showers.is_empty();
         }
         v.active
             && v.moving
@@ -154,6 +175,9 @@ impl App {
             self.weather.world.clear();
             self.weather.places.clear();
             self.weather.spots.clear();
+        }
+        if !self.weather.settings.enabled || self.weather.settings.style != model::RainStyle::Showers {
+            self.weather.showers.clear();
         }
         self.chrome_dirty = true;
         if let Some(w) = &self.window {
@@ -238,17 +262,31 @@ impl App {
     ) -> Option<gpu::Frame> {
         let v = self.weather.verdict();
         if !v.active {
+            self.weather.showers.clear();
+            self.weather.places.clear();
             return None;
         }
         let s = self.weather.settings.clone();
-        let bg = model::background_amount(&s);
+        let showers = s.style == model::RainStyle::Showers;
         // The settings page stands where the panes are; keep it dry and readable.
         let settings_open = self.settings_room_active();
+        if showers && settings_open {
+            self.weather.showers.clear();
+            self.weather.places.clear();
+            return None;
+        }
         let mut places = Vec::new();
-        for (id, x, y, w, h) in panes {
+        for (id, x, y, w, h) in panes.iter().take(gpu::MAX_PLACES) {
             let focused = active == Some(id.as_str());
-            let m = if s.by_status { mood(&self.agent_state(id)) } else { PaneMood::Unknown };
-            let amount = if settings_open { RainAmount::None } else { model::pane_amount(&s, self.weather.pane_override(id), focused, m) };
+            let over = self.weather.pane_override(id);
+            let amount = if showers {
+                model::work_rain_amount(&s, over, self.agent_state(id).is_busy())
+            } else if settings_open {
+                RainAmount::None
+            } else {
+                let m = if s.by_status { mood(&self.agent_state(id)) } else { PaneMood::Unknown };
+                model::pane_amount(&s, over, focused, m)
+            };
             places.push(Place {
                 key: key_of(id),
                 kind: PlaceKind::Pane,
@@ -258,6 +296,15 @@ impl App {
                 guard: if focused { guard } else { None },
             });
         }
+        if showers {
+            self.weather.showers.retain(|key, _| places.iter().any(|p| p.key == *key));
+            self.weather.places = places;
+            self.weather.scale = scale;
+            self.weather.win = win;
+            let frame = self.weather_step(v);
+            return (!self.weather.showers.is_empty()).then_some(frame);
+        }
+        let bg = model::background_amount(&s);
         let title = crate::TITLE_HEIGHT;
         let body_h = (win[1] - title - self.status_h()).max(0.0);
         let columns = [
@@ -313,14 +360,21 @@ impl App {
             let physical = |rect: [f32; 4]| rect.map(|n| n * scale);
             let [w, h] = win.map(|n| (n * scale).max(1.0));
             let mut regions = gpu::PlacesU::zeroed();
-            regions.n = [st.places.len() as f32, strength(model::background_amount(&s)), 0.0, 0.0];
+            regions.n[0] = st.places.len() as f32;
             for (i, place) in st.places.iter().enumerate() {
                 regions.rect[i] = physical(place.rect);
-                regions.a[i][0] = if place.kind == PlaceKind::Pane { 0.0 } else { 1.0 };
-                regions.a[i][3] = (place.key % 997) as f32;
-                regions.b[i][2] = strength(place.amount);
                 regions.c[i] = place.guard.map_or([0.0; 4], physical);
+                if place.amount != RainAmount::None {
+                    st.showers.entry(place.key).or_insert(ShowerFade { amount: place.amount, opacity: 0.0 });
+                }
+                if let Some(shower) = st.showers.get_mut(&place.key) {
+                    shower.step(place.amount, dt, v.moving);
+                    regions.a[i][3] = (place.key % 997) as f32;
+                    regions.b[i][2] = strength(shower.amount);
+                    regions.b[i][3] = shower.opacity;
+                }
             }
+            st.showers.retain(|_, shower| shower.opacity > 0.0);
             return gpu::Frame {
                 globals: gpu::Globals {
                     res: [w, h, 1.0 / w, 1.0 / h],
@@ -509,6 +563,26 @@ impl App {
             Err(e) => eprintln!("[weather] redraw: {e:?}"),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn work_rain_clears_and_resumes_from_its_current_opacity() {
+    let mut fade = ShowerFade { amount: RainAmount::Rain, opacity: 0.0 };
+    fade.step(RainAmount::Rain, 0.35, true);
+    assert_eq!(fade.opacity, 1.0);
+    fade.step(RainAmount::None, 0.8, true);
+    assert_eq!(fade.opacity, 0.5);
+    assert_eq!(fade.amount, RainAmount::Rain);
+    fade.step(RainAmount::Downpour, 0.09, true);
+    assert!(fade.opacity > 0.5 && fade.opacity < 1.0);
+    assert_eq!(fade.amount, RainAmount::Downpour);
+    fade.step(RainAmount::None, 1.6, true);
+    assert_eq!(fade.opacity, 0.0);
+    fade.step(RainAmount::Rain, 0.0, false);
+    assert_eq!(fade.opacity, 1.0);
+    fade.step(RainAmount::None, 0.0, false);
+    assert_eq!(fade.opacity, 0.0);
 }
 
 #[cfg(all(test, windows))]

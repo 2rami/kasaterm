@@ -63,7 +63,8 @@ class CardWeatherRow extends StatelessWidget {
     listenable: weather.changes,
     builder: (context, _) {
       final id = weather.focused.value;
-      if (!weather.settings.value.enabled || id == null) return const SizedBox.shrink();
+      final settings = weather.settings.value;
+      if (!settings.enabled || settings.style != RainStyle.liquid || id == null) return const SizedBox.shrink();
       return ListTile(
         leading: const Icon(Icons.umbrella_outlined),
         title: const Text('이 카드 날씨'),
@@ -150,6 +151,8 @@ class WeatherSettingsList extends StatelessWidget {
               onSelectionChanged: (v) => set(s.copyWith(style: v.first)),
             ),
           ),
+          if (s.style == RainStyle.showers)
+            _Pad(Text('일하는 칸에 비가 내리고, 작업이 끝나면 맑아져요.', style: TextStyle(color: dim))),
           _Title('비 양'),
           _Pad(
             SegmentedButton<RainAmount>(
@@ -180,19 +183,19 @@ class WeatherSettingsList extends StatelessWidget {
             text: '${(s.windStrength * 100).round()}%',
             onChanged: (v, commit) => weather.set(s.copyWith(windStrength: v), commit: commit),
           ),
-          _Title('어디에'),
-          for (final t in WeatherTarget.values)
-            ListTile(
-              title: Text(t.label),
-              subtitle: t == WeatherTarget.focusedOnly
-                  ? const Text('방금 만지거나 스크롤한 카드')
-                  : t == WeatherTarget.pickedOnly
-                  ? const Text('카드를 길게 눌러 「이 카드도 비」로 고른 것')
-                  : null,
-              trailing: t == s.target ? const Icon(Icons.check) : null,
-              onTap: () => set(s.copyWith(target: t)),
-            ),
           if (s.style == RainStyle.liquid) ...[
+            _Title('어디에'),
+            for (final t in WeatherTarget.values)
+              ListTile(
+                title: Text(t.label),
+                subtitle: t == WeatherTarget.focusedOnly
+                    ? const Text('방금 만지거나 스크롤한 카드')
+                    : t == WeatherTarget.pickedOnly
+                    ? const Text('카드를 길게 눌러 「이 카드도 비」로 고른 것')
+                    : null,
+                trailing: t == s.target ? const Icon(Icons.check) : null,
+                onTap: () => set(s.copyWith(target: t)),
+              ),
             _Title('효과'),
             for (final e in Effect.values)
               SwitchListTile(title: Text(e.label), value: s.has(e), onChanged: (v) => set(s.withEffect(e, v))),
@@ -206,31 +209,31 @@ class WeatherSettingsList extends StatelessWidget {
               text: rewetLabel(s.rewetSecs),
               onChanged: (v, commit) => weather.set(s.copyWith(rewetSecs: _rewet[v.round()]), commit: commit),
             ),
+            _Title('학생 상태 날씨'),
+            SwitchListTile(
+              title: const Text('상태마다 비 양'),
+              subtitle: const Text('비 양만 바꾸고 「어디에」는 그대로 따른다'),
+              value: s.byStatus,
+              onChanged: (v) => set(s.copyWith(byStatus: v)),
+            ),
+            if (s.byStatus)
+              for (final m in Mood.values) ...[
+                _Pad(
+                  Text(
+                    m.label,
+                    style: TextStyle(color: dim, fontSize: Look.sub),
+                  ),
+                ),
+                _Pad(
+                  SegmentedButton<RainAmount>(
+                    showSelectedIcon: false,
+                    segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(a.label))],
+                    selected: {s.moodAmount(m)},
+                    onSelectionChanged: (v) => set(s.withMood(m, v.first)),
+                  ),
+                ),
+              ],
           ],
-          _Title('학생 상태 날씨'),
-          SwitchListTile(
-            title: const Text('상태마다 비 양'),
-            subtitle: const Text('비 양만 바꾸고 「어디에」는 그대로 따른다'),
-            value: s.byStatus,
-            onChanged: (v) => set(s.copyWith(byStatus: v)),
-          ),
-          if (s.byStatus)
-            for (final m in Mood.values) ...[
-              _Pad(
-                Text(
-                  m.label,
-                  style: TextStyle(color: dim, fontSize: Look.sub),
-                ),
-              ),
-              _Pad(
-                SegmentedButton<RainAmount>(
-                  showSelectedIcon: false,
-                  segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(a.label))],
-                  selected: {s.moodAmount(m)},
-                  onSelectionChanged: (v) => set(s.withMood(m, v.first)),
-                ),
-              ),
-            ],
           _Title('접근성'),
           SwitchListTile(
             title: const Text('OS 설정 무시'),

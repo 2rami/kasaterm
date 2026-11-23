@@ -4357,7 +4357,7 @@ impl App {
                     // 손을 기다리는 칸(아래 깜빡임)과는 상태가 배타적이라 같이 서지 않는다.
                     let activity = self.pane_activity.get(fid).and_then(|a| {
                         if a.state.is_busy() {
-                            Some(theme::Activity::Working)
+                            (!self.weather.replaces_work_outline(fid)).then_some(theme::Activity::Working)
                         } else if a.bg_active {
                             Some(theme::Activity::Background)
                         } else {

@@ -6,7 +6,6 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
-import '../look.dart';
 import 'model.dart';
 import 'rain.dart';
 import 'store.dart';
@@ -16,6 +15,26 @@ abstract interface class WeatherPlace {
   Rect? rectIn(RenderBox scene);
   RainAmount get amount;
   String get placeId;
+}
+
+abstract interface class WorkWeatherPlace implements WeatherPlace {
+  BorderRadius get corners;
+}
+
+class _ShowerFade {
+  _ShowerFade(this.amount);
+
+  RainAmount amount;
+  double opacity = 0;
+
+  void step(RainAmount target, double dt, bool moving) {
+    if (target != RainAmount.none) {
+      amount = target;
+      opacity = moving ? math.min(1.0, opacity + dt / 0.35) : 1;
+    } else {
+      opacity = moving ? math.max(0.0, opacity - dt / 1.6) : 0;
+    }
+  }
 }
 
 /// 날씨가 이 화면에서 켜져 있는지와 움직이는지. 카드·층이 같은 답을 본다.
@@ -31,9 +50,10 @@ abstract interface class WeatherPlace {
 /// 물방울. 단추는 화면을 훑어 찾는다(데스크톱이 그 장에 그려진 조작을 모으는 것과 같다) — 화면마다
 /// 단추를 따로 감싸지 않는다. 날씨가 꺼져 있으면 훑기·틱·셰이더가 없다.
 class WeatherScene extends StatefulWidget {
-  const WeatherScene({super.key, required this.child});
+  const WeatherScene({super.key, required this.child, this.workOnly = false});
 
   final Widget child;
+  final bool workOnly;
 
   static WeatherSceneState? maybeOf(BuildContext context) =>
       context.getInheritedWidgetOfExactType<_SceneScope>()?.state;
@@ -70,6 +90,8 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
   static ui.FragmentShader? _rainShader;
 
   final _places = <WeatherPlace>{};
+  final _workPlaces = <WorkWeatherPlace>{};
+  final _workFades = <WorkWeatherPlace, _ShowerFade>{};
   final _spots = <Element, _Spot>{};
   final _guards = <RenderBox>[];
   final _repaint = ValueNotifier<int>(0);
@@ -88,22 +110,29 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
   ({bool active, bool moving}) _v = (active: false, moving: false);
   bool _current = true;
 
-  void register(WeatherPlace p) {
-    _places.add(p);
-    placesChanged();
+  void register(WeatherPlace p) => _places.add(p);
+
+  void unregister(WeatherPlace p) => _places.remove(p);
+
+  void registerWork(WorkWeatherPlace p) {
+    _workPlaces.add(p);
+    workChanged();
   }
 
-  void unregister(WeatherPlace p) {
-    _places.remove(p);
-    placesChanged();
+  void unregisterWork(WorkWeatherPlace p) {
+    _workPlaces.remove(p);
+    _workFades.remove(p);
+    workChanged();
   }
 
-  void placesChanged() {
+  void workChanged() {
     if (!_showerStyle || _placesPending) return;
     _placesPending = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _placesPending = false;
       if (!mounted) return;
+      if (!_v.moving) _advanceShowers(0);
+      _updateScan();
       _kick();
       _repaint.value++;
     });
@@ -154,26 +183,52 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
 
   void _sync() {
     if (!mounted) return;
-    final v = weatherVerdictOf(context);
+    final v = widget.workOnly && !_showerStyle
+        ? (active: false, moving: false)
+        : weatherVerdictOf(context);
     _v = v;
     if (v.active && _showerStyle) {
       _loadingShowers ??= _loadShowers();
     } else if (v.active && _buttons == null) {
       _load();
     }
-    final s = weather.settings.value;
-    final wantsButtons = v.active && _current && (_showerStyle || s.has(Effect.buttons));
-    if (wantsButtons && _scan == null) {
-      _scan = Timer.periodic(const Duration(milliseconds: 300), (_) => _collect());
-      _collect();
-    } else if (!wantsButtons && _scan != null) {
-      _scan?.cancel();
-      _scan = null;
-      _spots.clear();
+    if (!v.active || !_showerStyle) {
+      _workFades.clear();
+    } else if (!v.moving) {
+      _advanceShowers(0);
     }
+    _updateScan();
     _kick();
     setState(() {});
     _repaint.value++;
+  }
+
+  bool get _wetWork => _workFades.isNotEmpty || _workPlaces.any((p) => p.amount != RainAmount.none);
+
+  void _updateScan() {
+    final wantsScan = _v.active && _current &&
+        (_showerStyle ? _wetWork : weather.settings.value.has(Effect.buttons));
+    if (wantsScan && _scan == null) {
+      _scan = Timer.periodic(const Duration(milliseconds: 300), (_) => _collect());
+      _collect();
+    } else if (!wantsScan && _scan != null) {
+      _scan?.cancel();
+      _scan = null;
+      _spots.clear();
+      _guards.clear();
+    }
+  }
+
+  void _advanceShowers(double dt) {
+    if (!_v.active || !_showerStyle) return;
+    for (final p in _workPlaces) {
+      final target = p.amount;
+      if (target != RainAmount.none) _workFades.putIfAbsent(p, () => _ShowerFade(target));
+      final fade = _workFades[p];
+      if (fade == null) continue;
+      fade.step(target, dt, _v.moving);
+      if (fade.opacity == 0) _workFades.remove(p);
+    }
   }
 
   bool get _raining =>
@@ -181,14 +236,13 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
       backgroundAmount(weather.settings.value) != RainAmount.none;
 
   void _kick() {
-    final wetScene = _showerStyle
-        ? backgroundAmount(weather.settings.value) != RainAmount.none || _places.any((p) => p.amount != RainAmount.none)
-        : _raining || _spots.values.any((s) => s.busy);
+    final wetScene = _showerStyle ? _wetWork : _raining || _spots.values.any((s) => s.busy);
     final want = _v.moving && _current && wetScene;
-    if (want && !_ticker.isActive) {
+    final ticking = _made?.isActive ?? false;
+    if (want && !ticking) {
       _last = Duration.zero;
       _ticker.start();
-    } else if (!want && _ticker.isActive) {
+    } else if (!want && ticking) {
       _ticker.stop();
     }
   }
@@ -197,6 +251,10 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
     final dt = _last == Duration.zero ? 1 / 60 : math.min(0.05, (now - _last).inMicroseconds / 1e6);
     _last = now;
     _time.value = (_time.value + dt) % 1000;
+    if (_showerStyle) {
+      _advanceShowers(dt);
+      if (!_wetWork) _updateScan();
+    }
     for (final s in _spots.values) {
       final steps = (dt * 480).ceil().clamp(1, 64);
       final h = dt / steps;
@@ -376,7 +434,7 @@ class _ShowersPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final box = scene._sceneBox;
-    if (box == null) return;
+    if (box == null || scene._workFades.isEmpty) return;
     final bounds = Offset.zero & size;
     final settings = weather.settings.value;
     final moving = scene._v.moving;
@@ -387,13 +445,14 @@ class _ShowersPainter extends CustomPainter {
       ..setFloat(6, moving ? 1 : 0)
       ..setFloat(8, dark ? 1 : 0);
 
-    void draw(Rect area, Offset origin, RainAmount amount, double seed, double pass) {
+    void draw(Rect area, Offset origin, _ShowerFade fade, double seed, double pass) {
       shader
         ..setFloat(0, origin.dx)
         ..setFloat(1, origin.dy)
-        ..setFloat(3, const [0.0, 0.24, 0.62, 1.0][amount.index])
+        ..setFloat(3, const [0.0, 0.24, 0.62, 1.0][fade.amount.index])
         ..setFloat(5, seed)
-        ..setFloat(7, pass);
+        ..setFloat(7, pass)
+        ..setFloat(9, fade.opacity);
       canvas.drawRect(area, paint..shader = shader);
     }
 
@@ -405,33 +464,18 @@ class _ShowersPainter extends CustomPainter {
         canvas.clipRect(rect.inflate(6), clipOp: ui.ClipOp.difference);
       }
     }
-    final cards = <(WeatherPlace, Rect)>[];
-    for (final place in scene._places) {
+    for (final MapEntry(key: place, value: fade) in scene._workFades.entries) {
       final rect = place.rectIn(box);
-      if (rect != null && !rect.isEmpty && rect.overlaps(bounds)) cards.add((place, rect));
-    }
-    final background = backgroundAmount(settings);
-    if (background != RainAmount.none) {
-      canvas.save();
-      final holes = Path();
-      for (final (_, rect) in cards) {
-        holes.addRRect(Look.cardCorners.toRRect(rect));
-      }
-      canvas.clipPath(Path.combine(PathOperation.difference, Path()..addRect(bounds), holes));
-      draw(bounds, Offset.zero, background, 0, 0);
-      canvas.restore();
-    }
-    // Draw the spray outside the card's own ClipRRect, but inside the scrolled scene.
-    for (final (place, rect) in cards) {
-      if (place.amount == RainAmount.none) continue;
+      if (rect == null || rect.isEmpty || !rect.overlaps(bounds)) continue;
       final seed = (place.placeId.hashCode % 997).toDouble();
       canvas.save();
-      canvas.clipRRect(Look.cardCorners.toRRect(rect));
-      draw(rect, rect.topLeft, place.amount, seed, 1);
+      canvas.clipRRect(place.corners.toRRect(rect));
+      draw(rect, rect.topLeft, fade, seed, 1);
       canvas.restore();
-      if (moving && rect.width > 16) {
+      // The splash clears the clip on the top edge without crossing the scene's input guards.
+      if (moving && fade.opacity > 0.28 && rect.width > 16) {
         draw(Rect.fromLTRB(rect.left + 8, rect.top - 32, rect.right - 8, rect.top + 2),
-            rect.topLeft, place.amount, seed, 2);
+            rect.topLeft, fade, seed, 2);
       }
     }
     canvas.restore();

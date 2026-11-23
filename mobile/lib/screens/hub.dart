@@ -444,7 +444,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
                 delayIndex: i,
                 child: s.online
                     ? _wrapPane(p, _PaneTile(server: widget.server, pane: p, onTap: () => _tapPane(p)), online: true)
-                    : _PaneTile(server: widget.server, pane: p, onTap: () => _openFrozen(p)),
+                    : _PaneTile(server: widget.server, pane: p, online: false, onTap: () => _openFrozen(p)),
               ),
             );
           }
@@ -1343,15 +1343,22 @@ class _MiniCellState extends State<_MiniCell> {
             ),
           ),
         );
-        // 작업 중은 학생색 빛 조각이 칸 윤곽을 한 바퀴씩 돈다 — 바닥에 흐르던 막대를 걷었다(2026-10-07).
-        // 기다림의 고정 테(상태색)와는 상태가 배타적이라 같이 서지 않는다.
-        final cell = OrbitEdge(
-          live: (busy && !waiting) || childrenRunning || behind,
+        Widget buildEdge(bool raining) => OrbitEdge(
+          live: (!raining && (busy || childrenRunning)) || behind,
           dashed: behind,
           color: childrenRunning ? StatusStyle.success : accent,
           radius: Look.smallCorners,
           child: front,
         );
+        final cell = p != null && widget.wrapPane != null
+            ? WorkWeather(
+                key: ValueKey(p.viewKey),
+                id: p.viewKey,
+                working: busy,
+                radius: Look.smallCorners,
+                builder: buildEdge,
+              )
+            : buildEdge(false);
         Widget wrap(Widget child) => p == null ? child : widget.wrapPane?.call(p, child) ?? child;
         if (!tabbed) return wrap(cell);
         // 좌우로 쓸면 다음·이전 탭. 겹친 뒷장은 두지 않는다 — 몇째인지는 밑의 점이
@@ -1516,11 +1523,13 @@ class _PaneTile extends StatelessWidget {
     required this.server,
     required this.pane,
     this.onTap,
+    this.online = true,
   });
 
   final Server server;
   final Pane pane;
   final VoidCallback? onTap;
+  final bool online;
 
   @override
   Widget build(BuildContext context) {
@@ -1535,8 +1544,8 @@ class _PaneTile extends StatelessWidget {
     // 얼굴이, 상태는 띠와 도는 윤곽이 말한다.
     final time = st.live ? elapsedLabel(pane.busySecs) : null;
     final behind = !st.live && !st.needsYou && !pane.hasRunningSubagents && pane.bgActive;
-    return OrbitEdge(
-      live: st.live || pane.hasRunningSubagents || behind,
+    Widget edge(bool raining) => OrbitEdge(
+      live: (!raining && (st.live || pane.hasRunningSubagents)) || behind,
       dashed: behind,
       color: pane.hasRunningSubagents ? StatusStyle.success : scheme.primary,
       radius: Look.smallCorners,
@@ -1636,6 +1645,12 @@ class _PaneTile extends StatelessWidget {
           ),
         ),
       ),
+    );
+    return WorkWeather(
+      id: pane.viewKey,
+      working: online && st.live,
+      radius: Look.smallCorners,
+      builder: edge,
     );
   }
 }

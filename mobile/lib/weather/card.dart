@@ -21,6 +21,76 @@ Mood weatherMood(PaneMood m) => switch (m) {
   _ => Mood.resting,
 };
 
+class WorkWeather extends StatefulWidget {
+  const WorkWeather({
+    super.key,
+    required this.id,
+    required this.working,
+    required this.radius,
+    required this.builder,
+  });
+
+  final String id;
+  final bool working;
+  final BorderRadius radius;
+  final Widget Function(bool replacesOutline) builder;
+
+  @override
+  State<WorkWeather> createState() => _WorkWeatherState();
+}
+
+class _WorkWeatherState extends State<WorkWeather> implements WorkWeatherPlace {
+  WeatherSceneState? _scene;
+  final _boxKey = GlobalKey();
+
+  @override
+  String get placeId => widget.id;
+
+  @override
+  BorderRadius get corners => widget.radius;
+
+  @override
+  RainAmount get amount => widget.working ? weather.settings.value.amount : RainAmount.none;
+
+  @override
+  Rect? rectIn(RenderBox scene) {
+    final box = _boxKey.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero, ancestor: scene) & box.size;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final scene = WeatherScene.maybeOf(context);
+    if (identical(scene, _scene)) return;
+    _scene?.unregisterWork(this);
+    _scene = scene?..registerWork(this);
+  }
+
+  @override
+  void didUpdateWidget(WorkWeather oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.working != widget.working) _scene?.workChanged();
+  }
+
+  @override
+  void dispose() {
+    _scene?.unregisterWork(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: weather.changes,
+    builder: (context, _) {
+      final replaces = _scene != null && weather.settings.value.style == RainStyle.showers &&
+          amount != RainAmount.none && weatherVerdictOf(context).moving;
+      return KeyedSubtree(key: _boxKey, child: widget.builder(replaces));
+    },
+  );
+}
+
 /// 제 유리를 가진 카드(허브 방·작업 줄). 날씨가 꺼져 있으면 [child] 그대로다 — 틱·그림·셰이더 없음.
 ///
 /// 켜져 있으면 이 카드에 오는 비 양(설정·초점·카드별 덮어쓰기·학생 상태)만큼 유리에 물이 맺혀
@@ -147,7 +217,6 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
     }
     if (changed) {
       setState(() {});
-      _scene?.placesChanged();
     }
   }
 
@@ -246,7 +315,7 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
   }
 
   void _onDown(PointerDownEvent e) {
-    if (!_v.active) return;
+    if (!_v.active || !_liquid) return;
     weather.focus(widget.id);
     if (_liquid && weather.settings.value.has(Effect.ripples)) _sim.ripple(e.localPosition);
     _sync();
@@ -265,7 +334,7 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
       behavior: HitTestBehavior.translucent,
       onPointerDown: _onDown,
       child: GestureDetector(
-        onLongPress: () => showCardWeatherSheet(context, widget.id),
+        onLongPress: _liquid ? () => showCardWeatherSheet(context, widget.id) : null,
         child: Stack(
           key: _boxKey,
           children: [

@@ -392,6 +392,17 @@ pub(crate) fn pane_amount(s: &WeatherSettings, over: PaneWeather, focused: bool,
     }
 }
 
+pub(crate) fn work_rain_amount(s: &WeatherSettings, over: PaneWeather, working: bool) -> RainAmount {
+    if !working {
+        return RainAmount::None;
+    }
+    match over {
+        PaneWeather::Clear => RainAmount::None,
+        PaneWeather::Fixed(amount) => amount,
+        PaneWeather::Follow | PaneWeather::Picked => s.amount,
+    }
+}
+
 /// 창 밖(사이드바·옆 열·머리줄·하단바)에 오는 비 양.
 pub(crate) fn background_amount(s: &WeatherSettings) -> RainAmount {
     match s.target {
@@ -406,6 +417,15 @@ mod tests {
 
     fn on() -> WeatherSettings {
         WeatherSettings { enabled: true, ..Default::default() }
+    }
+
+    #[test]
+    fn work_rain_requires_work_even_with_a_fixed_amount() {
+        let s = WeatherSettings { target: WeatherTarget::BackgroundOnly, amount: RainAmount::Rain, ..on() };
+        assert_eq!(work_rain_amount(&s, PaneWeather::Follow, true), RainAmount::Rain);
+        assert_eq!(work_rain_amount(&s, PaneWeather::Follow, false), RainAmount::None);
+        assert_eq!(work_rain_amount(&s, PaneWeather::Fixed(RainAmount::Downpour), false), RainAmount::None);
+        assert_eq!(work_rain_amount(&s, PaneWeather::Clear, true), RainAmount::None);
     }
 
     #[test]

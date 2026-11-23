@@ -313,6 +313,7 @@ fn english(value: &str) -> Option<&'static str> {
         "비 표현" => "Rain style",
         "리퀴드 비" => "Liquid rain",
         "빗줄기와 물보라" => "Rain and splashes",
+        "일하는 칸에 비가 내리고, 작업이 끝나면 맑아집니다" => "Working panes get rain. It clears when the work ends.",
         "PR 요청 확인" => "Review PR requests",
         "기다리는 PR 요청이 없어요" => "No pending PR requests",
         "PR 요청을 가져오지 못했어요. 다시 시도해 주세요" => "Could not load PR requests. Try again.",

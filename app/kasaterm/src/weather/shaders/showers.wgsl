@@ -82,12 +82,12 @@ fn bead(p: vec2f, amount: f32, seed: f32) -> vec2f {
   return mask * vec2f(0.025 + 0.19 * smoothstep(0.0, 0.83, -q.y + 0.22 * q.x), rim * 0.52 + glint * 0.32);
 }
 
-fn atmosphere(p: vec2f, t: f32, amount: f32, wind: f32, moving: f32, ink: vec3f) -> vec4f {
+fn atmosphere(p: vec2f, t: f32, amount: f32, wind: f32, moving: f32, opacity: f32, ink: vec3f) -> vec4f {
   let q = p / vec2f(148.0, 73.0) - vec2f(t * (0.06 + 0.11 * wind), t * 0.012);
   let cloud = 0.58 * haze(q) + 0.29 * haze(q * 2.13 + 11.0) + 0.13 * haze(q * 4.31);
   let canopy = 1.0 - smoothstep(24.0, 330.0, p.y);
-  let shade = (0.10 + 0.22 * amount) * (0.23 + 0.77 * canopy) * smoothstep(0.11, 0.83, cloud);
-  let rain = moving * (falling(p, t, wind, amount, 0.05) +
+  let shade = (0.10 + 0.22 * amount) * (0.23 + 0.77 * canopy) * smoothstep(0.11, 0.83, cloud) * opacity;
+  let rain = moving * smoothstep(0.28, 1.0, opacity) * (falling(p, t, wind, amount, 0.05) +
       falling(p, t, wind, amount, 0.48) + falling(p, t, wind, amount, 1.0));
   let gleam = min(rain, 0.63);
   let sky = mix(vec3f(0.08, 0.14, 0.21), vec3f(0.48, 0.59, 0.70), cloud);
@@ -101,29 +101,27 @@ fn fs_showers(in: VOut) -> @location(0) vec4f {
     let luminance = dot(base, vec3f(0.21, 0.72, 0.07));
     let ink = mix(vec3f(0.77, 0.87, 0.96), vec3f(0.35, 0.48, 0.60), smoothstep(0.38, 0.85, luminance));
     let owner = region_any(px);
-    var amount = rg.n.y;
-    var water = vec2f(0.0);
+    var col = base;
     if (owner >= 0) {
         if (guarded(px, owner)) { return vec4f(base, 1.0); }
-        amount = rg.b[owner].z;
-        if (rg.a[owner].x == 0.0 && amount > 0.0) {
-            water = bead((px - rg.rect[owner].xy) / g.t.z, amount, rg.a[owner].w);
+        let amount = rg.b[owner].z;
+        let opacity = rg.b[owner].w;
+        if (opacity > 0.0) {
+            let water = bead((px - rg.rect[owner].xy) / g.t.z, amount, rg.a[owner].w) * opacity;
+            let sky = atmosphere(px / g.t.z, g.t.x, amount, g.rain.y, g.rain.w, opacity, ink);
+            col = base * (1.0 - sky.a) + sky.rgb;
+            col = col * (1.0 - water.x - water.y) + vec3f(0.81, 0.90, 0.96) * water.y;
         }
-    }
-    var col = base;
-    if (amount > 0.0) {
-        let sky = atmosphere(px / g.t.z, g.t.x, amount, g.rain.y, g.rain.w, ink);
-        col = col * (1.0 - sky.a) + sky.rgb;
-        col = col * (1.0 - water.x - water.y) + vec3f(0.81, 0.90, 0.96) * water.y;
     }
     if (g.rain.w > 0.0) {
         for (var i = 0; i < i32(rg.n.x); i++) {
+            let dropAlpha = smoothstep(0.28, 1.0, rg.b[i].w);
             let r = rg.rect[i];
             let local = (px - r.xy) / g.t.z;
-            if (rg.a[i].x != 0.0 || rg.b[i].z <= 0.0 || local.y < -32.0 || local.y > 2.0 ||
+            if (dropAlpha <= 0.0 || local.y < -32.0 || local.y > 2.0 ||
                 local.x < 8.0 || local.x > r.z / g.t.z - 8.0) { continue; }
             let hit = impact(local, g.t.x, rg.b[i].z, g.rain.y, rg.a[i].w);
-            col = mix(col, ink, hit * 0.85);
+            col = mix(col, ink, hit * 0.85 * dropAlpha);
         }
     }
     return vec4f(col, 1.0);
