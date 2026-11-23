@@ -61,8 +61,18 @@ async fn body<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|_| json_err(StatusCode::BAD_REQUEST, "bad_request"))
 }
 
-async fn providers(State(gate): State<Gate>) -> axum::response::Response {
-    axum::Json(gate.oauth.config.providers(gate.oauth.storage_ready())).into_response()
+pub(super) fn browser_origin<'a>(gate: &'a Gate, headers: &axum::http::HeaderMap) -> Option<&'a str> {
+    let host = headers.get(header::HOST).and_then(|value| value.to_str().ok());
+    gate.oauth.config.browser_origin(host)
+}
+
+pub(super) fn request_origin<'a>(gate: &'a Gate, headers: &axum::http::HeaderMap) -> &'a str {
+    browser_origin(gate, headers).unwrap_or(&gate.oauth.config.origin)
+}
+
+async fn providers(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let origin = request_origin(&gate, &headers);
+    axum::Json(gate.oauth.config.providers(gate.oauth.storage_ready(), origin)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -191,7 +201,8 @@ async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         .filter(|c| !c.is_control())
         .take(60)
         .collect();
-    match gate.oauth.start(device, label, link, native, input.choose, connect) {
+    let origin = request_origin(&gate, &headers);
+    match gate.oauth.start(device, label, link, native, input.choose, connect, origin) {
         Ok(value) => axum::Json(value).into_response(),
         Err(error) => json_err(StatusCode::SERVICE_UNAVAILABLE, error),
     }
@@ -200,8 +211,12 @@ async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
 async fn authorize(
     State(gate): State<Gate>,
     AxPath(id): AxPath<String>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    match gate.oauth.redirect(&id) {
+    let Some(origin) = browser_origin(&gate, &headers) else {
+        return json_err(StatusCode::BAD_REQUEST, "invalid_request");
+    };
+    match gate.oauth.redirect(&id, origin) {
         Ok(Some((cookie, url))) => {
             return (
                 StatusCode::SEE_OTHER,
@@ -212,7 +227,7 @@ async fn authorize(
         Ok(None) => {}
         Err(error) => return json_err(StatusCode::BAD_REQUEST, error),
     }
-    match gate.oauth.browser(&id) {
+    match gate.oauth.browser(&id, origin) {
         Ok(confirmation) => (
             [(header::SET_COOKIE, confirmation.cookie.clone())],
             axum::response::Html(device_confirmation(&id, &confirmation)),
@@ -251,11 +266,14 @@ async fn confirm(
     AxPath(id): AxPath<String>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
+    let Some(origin) = browser_origin(&gate, req.headers()) else {
+        return json_err(StatusCode::FORBIDDEN, "invalid_confirmation");
+    };
     if req
         .headers()
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
-        != Some(gate.oauth.config.origin.as_str())
+        != Some(origin)
     {
         return json_err(StatusCode::FORBIDDEN, "invalid_confirmation");
     }
@@ -301,7 +319,7 @@ async fn confirm(
     let (Some(csrf), Some(code)) = (fields.get("csrf"), fields.get("user_code")) else {
         return json_err(StatusCode::BAD_REQUEST, "bad_request");
     };
-    match gate.oauth.confirm(&id, &cookies, csrf, code) {
+    match gate.oauth.confirm(&id, origin, &cookies, csrf, code) {
         Ok(url) => (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response(),
         Err(error) => json_err(StatusCode::BAD_REQUEST, error),
     }
@@ -329,6 +347,9 @@ async fn callback(
     Query(input): Query<Callback>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
+    let Some(origin) = browser_origin(&gate, &headers) else {
+        return json_err(StatusCode::BAD_REQUEST, "invalid_state");
+    };
     if input.state.len() > 128 {
         return json_err(StatusCode::BAD_REQUEST, "invalid_state");
     }
@@ -336,7 +357,7 @@ async fn callback(
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let (request, exchange) = match gate.oauth.callback(provider, &input.state, cookies) {
+    let (request, exchange) = match gate.oauth.callback(provider, origin, &input.state, cookies) {
         Ok(exchange) => exchange,
         Err(error) => return json_err(StatusCode::BAD_REQUEST, error),
     };

@@ -65,7 +65,7 @@ class PhoneThemeSync {
     _api = account == null ? null : _factory(account);
     _snapshot = null;
     _prefs = ThemePrefs(
-      scope: account == null ? '' : '${account.origin}|${account.account}',
+      scope: account == null ? '' : account.scope,
     );
     phoneThemeMode.value = ThemeMode.system;
     final edit = _edit;

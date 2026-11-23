@@ -490,7 +490,7 @@ impl Service {
     }
 
     async fn revoke(&self, connection: &Connection) -> bool {
-        let Some((id, secret)) = self.config.credentials(Provider::Github, true) else {
+        let Some((id, secret)) = self.config.credentials(Provider::Github, true, &self.config.origin) else {
             return false;
         };
         self.http
@@ -558,7 +558,7 @@ impl Service {
         let refresh = connection.refresh_token.as_deref().ok_or(Error::Reconnect)?;
         let (id, secret) = self
             .config
-            .credentials(connection.provider, true)
+            .credentials(connection.provider, true, &self.config.origin)
             .ok_or(Error::Setup)?;
         let response = self
             .http

@@ -277,7 +277,10 @@ DNS 는 같은 Cloudflare 계정에 A `211.233.212.132`(DNS only)로 걸었고, 
 아직 옛 이름만: relay-kr(iroh-relay 가 자기 인증서를 받아 이름을 더하려면 relay.toml 손질), geono(로그인 · Access 묶임),
 ssh 의 HostKeyAlias(DNS 를 안 본다 — 이름표일 뿐). 앱 기본 주소(카사텀 관문 · LFS · 폰 앱 webcredentials · 카사브라우저 업데이트)는 각 저장소에서 새 판으로.
 
-⚠️ **로그인(OAuth) 공개 이름은 아직 옛 이름이다.** 관문 env `KASA_OAUTH_PUBLIC_ORIGIN`(`/etc/kasa-relay/env`)이 `https://kasaterm.debimarlene.com`
-이라 새 이름으로 `/relay/oauth/start` 를 불러도 승인 주소는 옛 이름으로 돌아온다(마리가 kasadesk 에서 확인, 2026-11-23).
-관문 공개 이름을 kasaterm.kasa.page 로 옮길 때는 Google · GitHub OAuth 앱의 콜백 등록을 먼저 새 이름으로 더하고, 그다음 env 를 바꾼다 —
-순서가 바뀌면 그 순간 로그인이 막힌다. 「부른 이름과 같은 승인 주소」를 요구하는 클라이언트(폰 · 본 앱)는 그때까지 옛 이름으로 둔다.
+### 계정 관문과 OAuth
+
+1. Google 웹 클라이언트의 승인된 리디렉션 URI에 `https://kasaterm.kasa.page/relay/oauth/google/callback`을 더한다. 새 주소용 GitHub OAuth App의 콜백은 `https://kasaterm.kasa.page/relay/oauth/github/callback`이다. 기존 GitHub 작업 권한 App에도 이 콜백을 더한다. 두 공급자와 작업 권한 App의 옛 콜백은 기존 기기가 계속 사용한다.
+2. 서울 `/etc/kasa-relay/env`의 `KASA_OAUTH_PUBLIC_ORIGIN=https://kasaterm.debimarlene.com`과 기존 공급자 설정을 유지하며, `KASA_OAUTH_SECONDARY_ORIGIN=https://kasaterm.kasa.page`와 새 OAuth App의 `KASA_OAUTH_SECONDARY_GITHUB_CLIENT_ID`, `KASA_OAUTH_SECONDARY_GITHUB_CLIENT_SECRET`을 더한다. Google과 GitHub 작업 권한 App은 각자의 기존 자격을 두 주소에서 함께 쓴다. 상세 설정은 [account-oauth.md](account-oauth.md)에 있다.
+3. `gateway.sh build`로 만든 바이너리와 전환 전 env·systemd 유닛 백업을 준비한다. `gateway.sh upgrade`에서 관문 연결이 잠시 끊겼다가 다시 붙는다. 계정·기기·봉인 저장소는 기존 서버의 상태를 계속 쓴다.
+4. 두 주소에서 `/relay/health`, `/relay/oauth/providers`, Google·GitHub의 승인 URL과 실제 콜백·기기 토큰 교환을 확인한다. 옛 앱의 확인 코드 경로와 기존 기기의 `/relay/whoami`도 확인한 뒤 데스크톱·폰의 기본 주소를 새 주소로 바꿔 배포한다.
+5. 운영 교체를 되돌릴 때는 백업한 바이너리·env·systemd 유닛을 복구하고 `sudo systemctl daemon-reload`와 `sudo systemctl restart kasa-relay`를 실행한다. 공급자 콜백 등록은 다음 전환에서 다시 쓸 수 있다.

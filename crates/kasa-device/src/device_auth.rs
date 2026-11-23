@@ -13,6 +13,8 @@ use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::mobile::same_gateway;
+
 #[path = "device_oauth.rs"]
 mod oauth;
 #[path = "device_connections.rs"]
@@ -52,7 +54,7 @@ impl std::fmt::Debug for Stamp {
 impl Stamp {
     fn accepts(&self, credential: &DeviceCred, gateway: Option<&str>, epoch: u64) -> bool {
         self.epoch == epoch && self.identity == identity(credential)
-            && gateway.is_some_and(|gateway| gateway.trim_end_matches('/') == credential.relay.trim_end_matches('/'))
+            && gateway.is_some_and(|gateway| same_gateway(gateway, &credential.relay))
     }
 }
 
@@ -167,7 +169,7 @@ pub fn current() -> Option<DeviceCred> {
 
 /// 지금 관문에 쓸 수 있는 로그인 — 다른 관문에서 받은 토큰은 안 낸다.
 pub fn for_gateway(gateway: &str) -> Option<DeviceCred> {
-    current().filter(|c| c.relay.trim_end_matches('/') == gateway.trim_end_matches('/'))
+    current().filter(|c| same_gateway(&c.relay, gateway))
 }
 
 fn save(c: &DeviceCred) -> anyhow::Result<()> {
@@ -304,7 +306,7 @@ pub fn status() -> Value {
 
 fn status_from(cred: Option<&DeviceCred>, gateway: Option<&str>, up: &crate::uplink::Status, rejected: bool) -> Value {
     let matching = cred.zip(gateway).is_some_and(|(c, gateway)| {
-        c.relay.trim_end_matches('/') == gateway.trim_end_matches('/')
+        same_gateway(&c.relay, gateway)
     });
     let auth_error = up.auth_error.as_deref().or(rejected.then_some("authentication_expired"));
     let authenticated = matching && up.connected && auth_error.is_none()

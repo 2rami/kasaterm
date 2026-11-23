@@ -360,6 +360,37 @@ void main() {
     expect(opened, [Uri.parse('$origin/relay/oauth/authorize/req-1')]);
   });
 
+  test('공식 관문 두 주소에서 저장한 기기와 승인 경로를 다시 쓴다', () async {
+    final former = Uri.parse('https://kasaterm.debimarlene.com');
+    final gateway = Uri.parse('https://kasaterm.kasa.page');
+    final saved = AccountSession(origin: former, account: 'fixture', deviceId: 'd', token: 'kdt_x');
+    final current = AccountSession(origin: gateway, account: 'fixture', deviceId: 'd', token: 'kdt_x');
+    expect(saved.scope, current.scope);
+    final api = RelayAccountApi(
+      gateway,
+      session: saved,
+      client: MockClient((req) async {
+        expect(req.url.origin, gateway.origin);
+        expect(req.headers['authorization'], 'Bearer kdt_x');
+        if (req.url.path == '/relay/whoami') {
+          return http.Response('{"ok":true,"account":"fixture","device_id":"d","kind":"phone"}', 200);
+        }
+        return http.Response(jsonEncode({
+          'ok': true,
+          'request_id': 'r',
+          'poll_token': 'p',
+          'user_code': 'C',
+          'expires_in': 600,
+          'authorization_url': '$former/relay/oauth/authorize/r',
+        }), 200);
+      }),
+    );
+    await api.verify(saved);
+    final flow = await api.oauthStart(OAuthProvider.google, installId, link: true);
+    expect(flow.authorization, former.resolve('/relay/oauth/authorize/r'));
+    expect(() => RelayAccountApi(origin, session: saved), throwsA(isA<AccountException>()));
+  });
+
   test('관문 밖으로 보내는 확인 화면 주소는 받지 않는다', () async {
     final api = RelayAccountApi(
       origin,

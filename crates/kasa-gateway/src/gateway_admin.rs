@@ -439,10 +439,10 @@ fn dashboard(admin: &str, rows: &[Row]) -> String {
     body
 }
 
-fn login_page(gate: &Gate) -> String {
+fn login_page(gate: &Gate, origin: Option<&str>) -> String {
     let buttons: String = [Provider::Google, Provider::Github]
         .into_iter()
-        .filter(|provider| gate.oauth.config.enabled(*provider))
+        .filter(|provider| origin.is_some_and(|origin| gate.oauth.config.enabled(*provider, origin)))
         .map(|provider| {
             format!(
                 "<form method=post action=\"/relay/admin/login/{}\"><button type=submit>{} 로 로그인</button></form>",
@@ -463,7 +463,7 @@ async fn home(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum:
     }
     match gate.admin_of(&headers) {
         Some(admin) => html_page(StatusCode::OK, &(dashboard(&admin, &rows(&gate)) + &install::admin_section(&gate))),
-        None => html_page(StatusCode::OK, &login_page(&gate)),
+        None => html_page(StatusCode::OK, &login_page(&gate, oauth::browser_origin(&gate, &headers))),
     }
 }
 
@@ -477,15 +477,16 @@ async fn accounts_json(State(gate): State<Gate>, headers: axum::http::HeaderMap)
     axum::Json(serde_json::json!({ "ok": true, "generated": now_secs(), "accounts": rows(&gate) })).into_response()
 }
 
-fn same_origin_form(gate: &Gate, headers: &axum::http::HeaderMap) -> bool {
-    let origin = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok());
-    !gate.oauth.config.origin.is_empty()
-        && origin == Some(gate.oauth.config.origin.as_str())
+fn form_origin<'a>(gate: &'a Gate, headers: &axum::http::HeaderMap) -> Option<&'a str> {
+    let origin = oauth::browser_origin(gate, headers)?;
+    let supplied = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok());
+    (supplied == Some(origin)
         && headers
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
-            == Some("application/x-www-form-urlencoded")
+            == Some("application/x-www-form-urlencoded"))
+        .then_some(origin)
 }
 
 async fn login(
@@ -496,13 +497,13 @@ async fn login(
     if !gate.admins.enabled() {
         return json_err(StatusCode::NOT_FOUND, "not_found");
     }
-    if !same_origin_form(&gate, req.headers()) {
+    let Some(origin) = form_origin(&gate, req.headers()) else {
         return json_err(StatusCode::FORBIDDEN, "invalid_request");
-    }
+    };
     if gate.limiter.allow("oauth-admin", &client_ip(&req)).is_err() {
         return json_err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
     }
-    match gate.oauth.start_admin(provider) {
+    match gate.oauth.start_admin(provider, origin) {
         Ok((url, cookie)) => (StatusCode::SEE_OTHER, [(header::LOCATION, url), (header::SET_COOKIE, cookie)]).into_response(),
         Err(error) => json_err(StatusCode::SERVICE_UNAVAILABLE, error),
     }
@@ -512,7 +513,7 @@ async fn logout(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axu
     if !gate.admins.enabled() {
         return json_err(StatusCode::NOT_FOUND, "not_found");
     }
-    if !same_origin_form(&gate, &headers) {
+    if form_origin(&gate, &headers).is_none() {
         return json_err(StatusCode::FORBIDDEN, "invalid_request");
     }
     gate.admins.end(&headers);

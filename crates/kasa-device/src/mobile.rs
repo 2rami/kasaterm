@@ -59,7 +59,21 @@ struct FileBody {
 }
 
 /// 기본 관문. 카사텀을 쓰는 사람마다 앱이 여기 붙어 자기 주소를 받는다(uplink.rs 머리말).
-pub const DEFAULT_GATEWAY: &str = "https://kasaterm.debimarlene.com";
+const LEGACY_GATEWAY: &str = "https://kasaterm.debimarlene.com";
+const KASA_PAGE_GATEWAY: &str = "https://kasaterm.kasa.page";
+pub const DEFAULT_GATEWAY: &str = LEGACY_GATEWAY;
+
+pub(crate) fn gateway_scope(gateway: &str) -> &str {
+    // Existing settings and vault bindings use the original origin as their key.
+    match gateway.trim_end_matches('/') {
+        KASA_PAGE_GATEWAY => LEGACY_GATEWAY,
+        gateway => gateway,
+    }
+}
+
+pub(crate) fn same_gateway(a: &str, b: &str) -> bool {
+    gateway_scope(a) == gateway_scope(b)
+}
 
 /// 쓰기는 한 번에 하나 — 읽고-고치고-쓰기 사이에 다른 요청이 끼면 유저가 사라진다.
 static WRITE: Mutex<()> = Mutex::new(());

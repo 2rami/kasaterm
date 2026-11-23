@@ -1,5 +1,5 @@
 use super::*;
-use kasa_identity::oauth_accounts::{Identity, OAuth};
+use kasa_identity::oauth_accounts::{Identity, OAuth, testing::ORIGIN};
 use serde_json::Value;
 
 fn fixture() -> (Gate, std::path::PathBuf) {
@@ -109,13 +109,14 @@ async fn mocked_browser_flow_only_returns_device_token_to_bound_poll() {
     .unwrap();
     let browser = gate
         .oauth
-        .browser(response["request_id"].as_str().unwrap())
+        .browser(response["request_id"].as_str().unwrap(), ORIGIN)
         .unwrap();
     let cookie = browser.cookie;
     let authorize_url = gate
         .oauth
         .confirm(
             response["request_id"].as_str().unwrap(),
+            ORIGIN,
             &cookie,
             &browser.csrf,
             response["user_code"].as_str().unwrap(),
@@ -196,7 +197,7 @@ async fn missing_config_and_forged_link_do_not_start() {
         StatusCode::UNAUTHORIZED
     );
     gate.oauth = Arc::new(OAuth::new(Some(dir.join("other.json")), Default::default()));
-    let response = providers(State(gate)).await;
+    let response = providers(State(gate), axum::http::HeaderMap::new()).await;
     let value: Value = serde_json::from_slice(
         &axum::body::to_bytes(response.into_body(), 8192)
             .await
@@ -796,4 +797,55 @@ async fn held_sign_in_respects_disabled_signup_and_existing_links() {
         .unwrap();
     assert_eq!(claim(State(closed), request).await.status(), StatusCode::CONFLICT);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn each_host_uses_its_github_client_and_rejects_the_other_hosts_callback() {
+    use kasa_identity::oauth_accounts::testing::{SECONDARY, config};
+
+    let (mut gate, dir) = fixture();
+    Arc::get_mut(&mut gate.oauth).unwrap().config = config(true);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, routes().with_state(gate).into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    for (origin, other, expected_client) in [(ORIGIN, SECONDARY, "fixture-id"), (SECONDARY, ORIGIN, "secondary-id")] {
+        let host = origin.trim_start_matches("https://");
+        let other_host = other.trim_start_matches("https://");
+        let start = client.post(format!("{base}/relay/oauth/start"))
+            .header("host", host)
+            .header("x-forwarded-host", other_host)
+            .json(&json!({
+                "provider":"github","kind":"desktop","machine_id":"machine-one","label":"Fixture",
+                "code_challenge":"A".repeat(43),"code_challenge_method":"S256",
+                "redirect_uri":"http://127.0.0.1:12345/ok"
+            }))
+            .send().await.unwrap().error_for_status().unwrap().json::<Value>().await.unwrap();
+        let path = format!("/relay/oauth/authorize/{}", start["request_id"].as_str().unwrap());
+        assert_eq!(start["authorization_url"], format!("{origin}{path}"));
+        let wrong = client.get(format!("{base}{path}")).header("host", other_host).send().await.unwrap();
+        assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+        let authorized = client.get(format!("{base}{path}")).header("host", host).send().await.unwrap();
+        assert_eq!(authorized.status(), StatusCode::SEE_OTHER);
+        let url = reqwest::Url::parse(authorized.headers()["location"].to_str().unwrap()).unwrap();
+        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["client_id"], expected_client);
+        assert_eq!(query["redirect_uri"], format!("{origin}/relay/oauth/github/callback"));
+        let cookie = authorized.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap();
+        let callback = format!("{base}/relay/oauth/github/callback?state={}&error=access_denied", query["state"]);
+        let wrong = client.get(&callback).header("host", other_host).header("cookie", cookie).send().await.unwrap();
+        assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+        let right = client.get(&callback).header("host", host).header("cookie", cookie).send().await.unwrap();
+        assert_eq!(right.status(), StatusCode::SEE_OTHER);
+    }
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -58,6 +58,8 @@ pub struct ClientConfig {
 pub struct Config {
     pub origin: String,
     clients: HashMap<Provider, ClientConfig>,
+    secondary_origin: Option<String>,
+    secondary_github: Option<ClientConfig>,
     allow_signup: bool,
     /// GitHub App that grants pull-request work permissions; sign-in keeps the OAuth App.
     github_app: Option<ClientConfig>,
@@ -89,9 +91,19 @@ impl Config {
                 clients.insert(provider, config);
             }
         }
+        let origin = origin.trim_end_matches('/').to_owned();
+        let secondary_origin = get("KASA_OAUTH_SECONDARY_ORIGIN")
+            .filter(|value| valid_origin(value))
+            .map(|value| value.trim_end_matches('/').to_owned())
+            .filter(|value| !value.eq_ignore_ascii_case(&origin));
         Self {
-            origin: origin.trim_end_matches('/').into(),
+            origin,
             clients,
+            secondary_origin,
+            secondary_github: client(
+                "KASA_OAUTH_SECONDARY_GITHUB_CLIENT_ID",
+                "KASA_OAUTH_SECONDARY_GITHUB_CLIENT_SECRET",
+            ),
             allow_signup: get("KASA_OAUTH_ALLOW_SIGNUP").as_deref() == Some("1"),
             github_app: client("KASA_GITHUB_APP_CLIENT_ID", "KASA_GITHUB_APP_CLIENT_SECRET"),
             github_app_slug: get("KASA_GITHUB_APP_SLUG").filter(|slug| {
@@ -101,17 +113,27 @@ impl Config {
         }
     }
 
-    /// Whether work permissions for this provider can be connected. Only GitHub has any, through
-    /// the separate GitHub App; Google stays a sign-in identity.
-    pub fn connect_enabled(&self, provider: Provider) -> bool {
-        provider == Provider::Github && self.github_app.is_some()
+    pub fn browser_origin(&self, host: Option<&str>) -> Option<&str> {
+        let Some(secondary) = self.secondary_origin.as_deref() else {
+            return (!self.origin.is_empty()).then_some(self.origin.as_str());
+        };
+        let host = host?;
+        let host = host.strip_suffix(":443").unwrap_or(host);
+        [self.origin.as_str(), secondary].into_iter().find(|origin| {
+            origin.strip_prefix("https://").is_some_and(|known| known.eq_ignore_ascii_case(host))
+        })
     }
 
-    pub fn credentials(&self, provider: Provider, connect: bool) -> Option<(&str, &str)> {
-        let client = if connect && provider == Provider::Github {
-            self.github_app.as_ref()
-        } else {
-            self.clients.get(&provider)
+    pub fn credentials(&self, provider: Provider, connect: bool, origin: &str) -> Option<(&str, &str)> {
+        let secondary = self.secondary_origin.as_deref() == Some(origin);
+        if !secondary && origin != self.origin {
+            return None;
+        }
+        let client = match (provider, connect, secondary) {
+            (Provider::Github, true, _) => self.github_app.as_ref(),
+            (Provider::Github, false, true) => self.secondary_github.as_ref(),
+            (_, false, _) => self.clients.get(&provider),
+            (_, true, _) => None,
         }?;
         Some((client.id.as_str(), client.secret.as_str()))
     }
@@ -120,22 +142,20 @@ impl Config {
         self.github_app_slug.as_deref()
     }
 
-    pub fn enabled(&self, provider: Provider) -> bool {
-        self.clients.contains_key(&provider)
+    pub fn enabled(&self, provider: Provider, origin: &str) -> bool {
+        self.credentials(provider, false, origin).is_some()
     }
-    pub fn callback(&self, provider: Provider) -> String {
-        format!("{}/relay/oauth/{}/callback", self.origin, provider.name())
-    }
+
     pub fn signup_enabled(&self) -> bool {
         self.allow_signup
     }
-    pub fn providers(&self, storage_ready: bool) -> Value {
+    pub fn providers(&self, storage_ready: bool, origin: &str) -> Value {
         let providers = [Provider::Google, Provider::Github].map(|provider| {
-            let enabled = storage_ready && self.enabled(provider);
+            let enabled = storage_ready && self.enabled(provider, origin);
             json!({"id":provider.name(),"enabled":enabled,"reason":if enabled { "" } else { "setup_required" }})
         });
         json!({"ok":true,"signup_enabled":self.allow_signup,"redirect_login":true,"choose_account":true,"providers":providers,
-            "connect":{"google":storage_ready && self.connect_enabled(Provider::Google),"github":storage_ready && self.connect_enabled(Provider::Github)}})
+            "connect":{"google":false,"github":storage_ready && self.credentials(Provider::Github, true, origin).is_some()}})
     }
 }
 
@@ -241,12 +261,19 @@ pub struct Link {
 #[derive(Clone)]
 pub struct Exchange {
     pub provider: Provider,
+    origin: String,
     verifier: String,
     nonce: String,
     /// Relay-administrator browser sign-in: it never creates accounts or device credentials.
     pub admin: bool,
     /// Work permissions asked for; the provider's tokens are kept instead of only the identity.
     pub connect: Option<Vec<Feature>>,
+}
+
+impl Exchange {
+    fn callback_url(&self) -> String {
+        format!("{}/relay/oauth/{}/callback", self.origin, self.provider.name())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -461,11 +488,9 @@ impl OAuth {
         native: Option<Native>,
         choose: bool,
         connect: Option<Vec<Feature>>,
+        origin: &str,
     ) -> Result<Value, &'static str> {
-        let enabled = match &connect {
-            Some(_) => self.config.connect_enabled(device.provider),
-            None => self.config.enabled(device.provider),
-        };
+        let enabled = self.config.credentials(device.provider, connect.is_some(), origin).is_some();
         if !enabled || !self.storage_ready() {
             return Err("setup_required");
         }
@@ -486,13 +511,14 @@ impl OAuth {
         };
         let exchange = Exchange {
             provider: device.provider,
+            origin: origin.into(),
             verifier: secret(),
             nonce: secret(),
             admin: false,
             connect,
         };
         let authorization_url =
-            format!("{}/relay/oauth/authorize/{request_id}", self.config.origin);
+            format!("{origin}/relay/oauth/authorize/{request_id}");
         let mut response = json!({"ok":true,"request_id":request_id,"expires_in":TTL.as_secs(),"authorization_url":authorization_url});
         if native.is_none() {
             response["poll_token"] = json!(poll_token);
@@ -528,11 +554,11 @@ impl OAuth {
 
     /// Browser entry of a redirect flow: binds this browser to the request and goes straight to the
     /// provider. Returns `None` for code-confirmation flows. Re-opening rebinds to the newest browser.
-    pub fn redirect(&self, request_id: &str) -> Result<Option<(String, String)>, &'static str> {
+    pub fn redirect(&self, request_id: &str, origin: &str) -> Result<Option<(String, String)>, &'static str> {
         let mut pending = self.pending.lock().map_err(|_| "unavailable")?;
         let request = pending
             .get_mut(request_id)
-            .filter(|r| r.created.elapsed() < TTL)
+            .filter(|r| r.exchange.origin == origin && r.created.elapsed() < TTL)
             .ok_or("expired")?;
         if request.native.is_none() {
             return Ok(None);
@@ -583,11 +609,11 @@ impl OAuth {
         })
     }
 
-    pub fn browser(&self, request_id: &str) -> Result<BrowserConfirmation, &'static str> {
+    pub fn browser(&self, request_id: &str, origin: &str) -> Result<BrowserConfirmation, &'static str> {
         let mut pending = self.pending.lock().map_err(|_| "unavailable")?;
         let request = pending
             .get_mut(request_id)
-            .filter(|r| r.created.elapsed() < TTL)
+            .filter(|r| r.exchange.origin == origin && r.created.elapsed() < TTL)
             .ok_or("expired")?;
         if request.native.is_some() {
             return Err("invalid_request");
@@ -612,6 +638,7 @@ impl OAuth {
     pub fn confirm(
         &self,
         request_id: &str,
+        origin: &str,
         cookies: &str,
         csrf: &str,
         user_code: &str,
@@ -619,7 +646,7 @@ impl OAuth {
         let mut pending = self.pending.lock().map_err(|_| "unavailable")?;
         let request = pending
             .get_mut(request_id)
-            .filter(|r| r.created.elapsed() < TTL)
+            .filter(|r| r.exchange.origin == origin && r.created.elapsed() < TTL)
             .ok_or("expired")?;
         if request.native.is_some()
             || !matches!(request.outcome, Outcome::Waiting)
@@ -644,12 +671,12 @@ impl OAuth {
         let provider = exchange.provider;
         let (client_id, _) = self
             .config
-            .credentials(provider, exchange.connect.is_some())
+            .credentials(provider, exchange.connect.is_some(), &exchange.origin)
             .ok_or("setup_required")?;
         let mut url = reqwest::Url::parse(provider.authorize_url()).map_err(|_| "unavailable")?;
         url.query_pairs_mut().extend_pairs([
             ("client_id", client_id),
-            ("redirect_uri", &self.config.callback(provider)),
+            ("redirect_uri", &exchange.callback_url()),
             ("response_type", "code"),
             ("state", state),
             ("code_challenge", &challenge(&exchange.verifier)),
@@ -677,8 +704,8 @@ impl OAuth {
     /// Browser sign-in to the relay admin page. The browser that starts it is also the one that
     /// receives the result, so the state cookie binds the callback and no app code is involved.
     /// Returns the provider URL and the state cookie.
-    pub fn start_admin(&self, provider: Provider) -> Result<(String, String), &'static str> {
-        if !self.config.enabled(provider) || !self.storage_ready() {
+    pub fn start_admin(&self, provider: Provider, origin: &str) -> Result<(String, String), &'static str> {
+        if !self.config.enabled(provider, origin) || !self.storage_ready() {
             return Err("setup_required");
         }
         let mut pending = self.pending.lock().map_err(|_| "unavailable")?;
@@ -690,6 +717,7 @@ impl OAuth {
         let cookie = secret();
         let exchange = Exchange {
             provider,
+            origin: origin.into(),
             verifier: secret(),
             nonce: secret(),
             admin: true,
@@ -753,6 +781,7 @@ impl OAuth {
     pub fn callback(
         &self,
         provider: Provider,
+        origin: &str,
         state: &str,
         cookies: &str,
     ) -> Result<(String, Exchange), &'static str> {
@@ -761,7 +790,8 @@ impl OAuth {
             .iter_mut()
             .find(|(_, request)| request.state == state && request.device.provider == provider)
             .ok_or("invalid_state")?;
-        if request.created.elapsed() >= TTL
+        if request.exchange.origin != origin
+            || request.created.elapsed() >= TTL
             || !matches!(request.outcome, Outcome::Confirmed)
             || !browser_matches(request, cookies)
         {
@@ -1121,7 +1151,7 @@ impl OAuth {
         }
         let (client_id, client_secret) = self
             .config
-            .credentials(exchange.provider, exchange.connect.is_some())
+            .credentials(exchange.provider, exchange.connect.is_some(), &exchange.origin)
             .ok_or("setup_required")?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
@@ -1137,7 +1167,7 @@ impl OAuth {
                     ("client_id", client_id),
                     ("client_secret", client_secret),
                     ("code", code),
-                    ("redirect_uri", &self.config.callback(exchange.provider)),
+                    ("redirect_uri", &exchange.callback_url()),
                     ("code_verifier", &exchange.verifier),
                     ("grant_type", "authorization_code"),
                 ])

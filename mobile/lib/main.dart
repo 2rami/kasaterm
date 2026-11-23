@@ -698,7 +698,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       return;
     }
     final account = _connection.account;
-    final scope = account != null ? '${account.origin}|${account.account}' : _connection.server?.resumeScope;
+    final scope = account != null ? account.scope : _connection.server?.resumeScope;
     if (scope == null || scope == _hubScope) return;
     _hubScope = scope;
     _hubLoaded = null;
@@ -733,7 +733,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   }
 
   HubPrefs _hubPrefs(AccountSession? account) =>
-      HubPrefs(scope: account == null ? '' : '${account.origin}|${account.account}');
+      HubPrefs(scope: account == null ? '' : account.scope);
 
   @override
   Widget build(BuildContext context) {

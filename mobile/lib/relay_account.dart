@@ -8,7 +8,9 @@ import 'package:http/http.dart' as http;
 import 'archive_model.dart';
 import 'shared_rooms_model.dart';
 
-const defaultGateway = 'https://kasaterm.debimarlene.com';
+const _legacyGateway = 'https://kasaterm.debimarlene.com';
+const _kasaPageGateway = 'https://kasaterm.kasa.page';
+const defaultGateway = _legacyGateway;
 
 Uri? parseGateway(String value) {
   final uri = Uri.tryParse(value.trim());
@@ -27,6 +29,19 @@ Uri? parseGateway(String value) {
 
 bool sameOrigin(Uri a, Uri b) =>
     a.scheme == b.scheme && a.host == b.host && _port(a) == _port(b);
+
+String _gatewayScope(Uri uri) => switch (uri.origin) {
+  _kasaPageGateway => _legacyGateway,
+  final origin => origin,
+};
+
+bool _sameGateway(Uri a, Uri b) =>
+    sameOrigin(a, b) ||
+    (a.scheme == 'https' &&
+        b.scheme == 'https' &&
+        a.hasAuthority &&
+        b.hasAuthority &&
+        _gatewayScope(a) == _gatewayScope(b));
 
 /// dart:io 의 소켓 악수는 `wss://` 주소를 `https://` 로 바꿀 때 포트를 `wss` 기준으로 읽는다. Uri 는 wss 의 기본
 /// 포트를 몰라 0 이 넘어오고, 그대로 비교하면 기본 포트 관문(443)으로 가는 계정 화면 소켓이 전부 「주소가 바뀌었다」로
@@ -63,6 +78,7 @@ class AccountSession {
   /// Google·GitHub 로 가입한 계정은 이름이 `oauth_<hex>` 라 사람에게는 이 값(메일·로그인 이름)을 보인다.
   final String? displayName;
   String get label => displayName?.isNotEmpty == true ? displayName! : account;
+  String get scope => '${_gatewayScope(origin)}|$account';
   Uri get root => origin.resolve('/relay/account/');
   List<String> get protocols => ['kasa-relay-account', 'kasa-auth.$token'];
 
@@ -533,7 +549,7 @@ class RelayAccountApi {
   RelayAccountApi(this.origin, {http.Client? client, AccountSession? session})
     : _client = OriginClient(origin, client: client, token: session?.token) {
     if (parseGateway(origin.toString()) == null ||
-        (session != null && !sameOrigin(origin, session.origin))) {
+        (session != null && !_sameGateway(origin, session.origin))) {
       _client.close();
       throw const AccountException('안전한 서버 주소를 입력해 주세요.');
     }
@@ -700,8 +716,13 @@ class RelayAccountApi {
     final (id, poll, code, ttl) = (json['request_id'], json['poll_token'], json['user_code'], json['expires_in']);
     // 확인 화면은 관문 자신의 주소여야 한다 — 다른 곳으로 보내는 응답은 따르지 않는다.
     if (url == null ||
-        !sameOrigin(url, origin) ||
         id is! String ||
+        !RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(id) ||
+        !_sameGateway(url, origin) ||
+        url.userInfo.isNotEmpty ||
+        url.hasQuery ||
+        url.hasFragment ||
+        url.path != '/relay/oauth/authorize/$id' ||
         ttl is! int ||
         (r == null && (poll is! String || code is! String))) {
       throw const AccountException('로그인 요청 응답을 확인하지 못했어요.');

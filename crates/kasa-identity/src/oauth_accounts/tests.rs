@@ -1,9 +1,9 @@
 use super::*;
-use super::testing::{fixture, start, VERIFIER, LOOPBACK, native_start, native_code, redeem};
+use super::testing::{fixture, start, ORIGIN, VERIFIER, LOOPBACK, native_start, native_code, redeem};
 
 #[test]
 fn unconfigured_and_malformed_origins_are_disabled() {
-    assert!(!Config::default().enabled(Provider::Google));
+    assert!(!Config::default().enabled(Provider::Google, ORIGIN));
     for value in [
         "http://relay.example",
         "https://user:secret@relay.example",
@@ -20,13 +20,13 @@ fn unconfigured_and_malformed_origins_are_disabled() {
     assert!(
         !oauth
             .config
-            .providers(true)
+            .providers(true, ORIGIN)
             .to_string()
             .contains("fixture-secret")
     );
     let broken = OAuth::new(None, oauth.config);
     assert_eq!(
-        broken.config.providers(broken.storage_ready())["providers"][0]["enabled"],
+        broken.config.providers(broken.storage_ready(), ORIGIN)["providers"][0]["enabled"],
         false
     );
     let _ = std::fs::remove_dir_all(dir);
@@ -36,19 +36,20 @@ fn unconfigured_and_malformed_origins_are_disabled() {
 fn state_cookie_pkce_provider_and_replay_are_bound() {
     let (oauth, dir) = fixture();
     let (started, input) = start(&oauth);
-    let browser = oauth.browser(&input.request_id).unwrap();
+    let browser = oauth.browser(&input.request_id, ORIGIN).unwrap();
     let cookie = browser.cookie;
     let state = oauth.pending.lock().unwrap()[&input.request_id]
         .state
         .clone();
     assert!(
-        oauth.callback(Provider::Google, &state, &cookie).is_err(),
+        oauth.callback(Provider::Google, ORIGIN, &state, &cookie).is_err(),
         "GET did not require explicit confirmation"
     );
     assert!(
         oauth
             .confirm(
                 &input.request_id,
+                ORIGIN,
                 "",
                 &browser.csrf,
                 started["user_code"].as_str().unwrap()
@@ -59,6 +60,7 @@ fn state_cookie_pkce_provider_and_replay_are_bound() {
         oauth
             .confirm(
                 &input.request_id,
+                ORIGIN,
                 &cookie,
                 "wrong",
                 started["user_code"].as_str().unwrap()
@@ -67,12 +69,13 @@ fn state_cookie_pkce_provider_and_replay_are_bound() {
     );
     assert!(
         oauth
-            .confirm(&input.request_id, &cookie, &browser.csrf, "wrong-code")
+            .confirm(&input.request_id, ORIGIN, &cookie, &browser.csrf, "wrong-code")
             .is_err()
     );
     let url = oauth
         .confirm(
             &input.request_id,
+            ORIGIN,
             &cookie,
             &browser.csrf,
             started["user_code"].as_str().unwrap(),
@@ -84,34 +87,35 @@ fn state_cookie_pkce_provider_and_replay_are_bound() {
     assert_eq!(query["code_challenge"].len(), 43);
     assert!(query.contains_key("nonce"));
     assert!(!url.to_string().contains(&input.poll_token));
-    assert!(oauth.browser(&input.request_id).is_err());
+    assert!(oauth.browser(&input.request_id, ORIGIN).is_err());
     assert!(
         oauth
             .confirm(
                 &input.request_id,
+                ORIGIN,
                 &cookie,
                 &browser.csrf,
                 started["user_code"].as_str().unwrap()
             )
             .is_err()
     );
-    assert!(oauth.callback(Provider::Google, "wrong", &cookie).is_err());
+    assert!(oauth.callback(Provider::Google, ORIGIN, "wrong", &cookie).is_err());
     assert!(
         oauth
-            .callback(Provider::Github, &query["state"], &cookie)
+            .callback(Provider::Github, ORIGIN, &query["state"], &cookie)
             .is_err()
     );
     assert!(
         oauth
-            .callback(Provider::Google, &query["state"], "")
+            .callback(Provider::Google, ORIGIN, &query["state"], "")
             .is_err()
     );
     let (id, _) = oauth
-        .callback(Provider::Google, &query["state"], &cookie)
+        .callback(Provider::Google, ORIGIN, &query["state"], &cookie)
         .unwrap();
     assert!(
         oauth
-            .callback(Provider::Google, &query["state"], &cookie)
+            .callback(Provider::Google, ORIGIN, &query["state"], &cookie)
             .is_err()
     );
     oauth.finish(
@@ -160,7 +164,7 @@ fn expiration_cancel_and_failed_exchange_are_terminal() {
         .get_mut(&input.request_id)
         .unwrap()
         .created = Instant::now() - TTL;
-    assert!(oauth.browser(&input.request_id).is_err());
+    assert!(oauth.browser(&input.request_id, ORIGIN).is_err());
     assert!(oauth.poll(&input, false).is_err());
     let (_, input) = start(&oauth);
     assert!(oauth.poll(&input, true).unwrap().is_none());
@@ -178,11 +182,12 @@ fn expiration_cancel_and_failed_exchange_are_terminal() {
     );
     assert!(oauth.poll(&input, false).is_err());
     let (started, input) = start(&oauth);
-    let browser = oauth.browser(&input.request_id).unwrap();
+    let browser = oauth.browser(&input.request_id, ORIGIN).unwrap();
     let cookie = browser.cookie;
     let url = oauth
         .confirm(
             &input.request_id,
+            ORIGIN,
             &cookie,
             &browser.csrf,
             started["user_code"].as_str().unwrap(),
@@ -190,7 +195,7 @@ fn expiration_cancel_and_failed_exchange_are_terminal() {
         .unwrap();
     let url = reqwest::Url::parse(&url).unwrap();
     let state = url.query_pairs().find(|(key, _)| key == "state").unwrap().1;
-    let (id, _) = oauth.callback(Provider::Google, &state, &cookie).unwrap();
+    let (id, _) = oauth.callback(Provider::Google, ORIGIN, &state, &cookie).unwrap();
     oauth.finish(&id, Err("cancelled"));
     assert_eq!(oauth.poll(&input, false).err(), Some("cancelled"));
     assert_eq!(oauth.poll(&input, false).err(), Some("expired"));
@@ -202,13 +207,14 @@ fn device_confirmation_codes_are_flow_specific_and_attempt_limited() {
     let (oauth, dir) = fixture();
     let (_, one) = start(&oauth);
     let (other, _) = start(&oauth);
-    let browser = oauth.browser(&one.request_id).unwrap();
+    let browser = oauth.browser(&one.request_id, ORIGIN).unwrap();
     assert_eq!(other["user_code"].as_str().unwrap().len(), 9);
     for _ in 0..5 {
         assert!(
             oauth
                 .confirm(
                     &one.request_id,
+                    ORIGIN,
                     &browser.cookie,
                     &browser.csrf,
                     other["user_code"].as_str().unwrap()
@@ -216,7 +222,7 @@ fn device_confirmation_codes_are_flow_specific_and_attempt_limited() {
                 .is_err()
         );
     }
-    assert!(oauth.browser(&one.request_id).is_err());
+    assert!(oauth.browser(&one.request_id, ORIGIN).is_err());
     assert_eq!(oauth.poll(&one, false).err(), Some("invalid_confirmation"));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -396,13 +402,13 @@ fn redirect_flow_needs_no_typed_code_but_only_the_verifier_redeems() {
     let (oauth, dir) = fixture();
     let id = native_start(&oauth);
     assert!(
-        oauth.browser(&id).is_err(),
+        oauth.browser(&id, ORIGIN).is_err(),
         "redirect flow showed a code page"
     );
-    assert!(oauth.confirm(&id, "", "", "").is_err());
+    assert!(oauth.confirm(&id, ORIGIN, "", "", "").is_err());
     let code = native_code(&oauth, &id);
     assert!(
-        oauth.redirect(&id).is_err(),
+        oauth.redirect(&id, ORIGIN).is_err(),
         "browser re-entered after callback"
     );
     let other = "other-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
@@ -466,13 +472,13 @@ fn redirect_flow_cannot_be_polled_and_codes_expire() {
 
     let id = native_start(&oauth);
     oauth.pending.lock().unwrap().get_mut(&id).unwrap().created = Instant::now() - TTL;
-    assert_eq!(oauth.redirect(&id).err(), Some("expired"));
+    assert_eq!(oauth.redirect(&id, ORIGIN).err(), Some("expired"));
 
     let id = native_start(&oauth);
-    let (cookie, url) = oauth.redirect(&id).unwrap().unwrap();
+    let (cookie, url) = oauth.redirect(&id, ORIGIN).unwrap().unwrap();
     let url = reqwest::Url::parse(&url).unwrap();
     let state = url.query_pairs().find(|(key, _)| key == "state").unwrap().1;
-    let (request, _) = oauth.callback(Provider::Google, &state, &cookie).unwrap();
+    let (request, _) = oauth.callback(Provider::Google, ORIGIN, &state, &cookie).unwrap();
     let back = oauth.finish(&request, Err("cancelled")).unwrap();
     assert_eq!(
         back,

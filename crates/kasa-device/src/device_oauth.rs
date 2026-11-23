@@ -211,7 +211,7 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
             anyhow::ensure!(
                 previous
                     .as_ref()
-                    .is_some_and(|cred| cred.relay.trim_end_matches('/') == gateway),
+                    .is_some_and(|cred| same_gateway(&cred.relay, &gateway)),
                 "unauthorized"
             );
         }
@@ -279,7 +279,7 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
         .filter(|id| opaque(id))
         .ok_or_else(|| anyhow::anyhow!("invalid_oauth_response"))?;
     anyhow::ensure!(
-        authorization_url == format!("{gateway}/relay/oauth/authorize/{request_id}"),
+        authorization_at_gateway(authorization_url, &gateway, request_id),
         "invalid_oauth_response"
     );
     let (request, user_code, listener, loopback) = match loopback {
@@ -362,6 +362,11 @@ fn verification_code(value: &str) -> bool {
             .all(|(index, byte)| index == 4 || byte.is_ascii_hexdigit())
 }
 
+fn authorization_at_gateway(url: &str, gateway: &str, request_id: &str) -> bool {
+    url.strip_suffix(&format!("/relay/oauth/authorize/{request_id}"))
+        .is_some_and(|origin| !origin.ends_with('/') && same_gateway(origin, gateway))
+}
+
 fn safe_code(value: &Value) -> &'static str {
     match value["error"].as_str() {
         Some("setup_required") => "setup_required",
@@ -385,7 +390,7 @@ fn attempt_current(
 ) -> bool {
     attempt.epoch == epoch
         && attempt.previous.as_ref() == credential
-        && gateway.is_some_and(|gateway| gateway.trim_end_matches('/') == attempt.gateway)
+        && gateway.is_some_and(|gateway| same_gateway(gateway, &attempt.gateway))
 }
 
 /// The attempt named by `flow_id`, if this device's credential and gateway have not changed since.
@@ -687,6 +692,25 @@ pub(super) async fn cancel(params: &Value) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authorization_urls_are_bound_to_the_gateway_and_request() {
+        let gateway = "https://kasaterm.kasa.page";
+        let former = "https://kasaterm.debimarlene.com";
+        let path = "/relay/oauth/authorize/abc";
+        assert!(authorization_at_gateway(&format!("{former}{path}"), gateway, "abc"));
+        assert!(authorization_at_gateway(&format!("{gateway}{path}"), former, "abc"));
+        for url in [
+            format!("http://kasaterm.debimarlene.com{path}"),
+            format!("{former}:444{path}"),
+            format!("{former}.example{path}"),
+            format!("{former}/{path}"),
+            format!("{former}{path}?next=elsewhere"),
+        ] {
+            assert!(!authorization_at_gateway(&url, gateway, "abc"));
+        }
+        assert!(!authorization_at_gateway(&format!("{former}{path}"), "https://relay.example", "abc"));
+    }
+
     #[test]
     fn delayed_oauth_response_never_overwrites_new_account_or_gateway() {
         let credential = DeviceCred {

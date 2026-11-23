@@ -114,7 +114,7 @@ async fn list(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum:
         Err(refusal) => return refusal,
     };
     let result = service.list(&who.account).await.map(|mut value| {
-        value["available"] = gate.oauth.config.providers(gate.oauth.storage_ready())["connect"].clone();
+        value["available"] = gate.oauth.config.providers(gate.oauth.storage_ready(), oauth::request_origin(&gate, &headers))["connect"].clone();
         value["github_install_url"] = json!(service.github_install_url());
         value
     });

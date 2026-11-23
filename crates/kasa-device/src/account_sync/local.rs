@@ -98,7 +98,7 @@ pub struct Bindings {
 }
 
 pub fn account_key(relay: &str, account: &str) -> String {
-    format!("{:x}", Sha256::digest(format!("{}\0{account}", relay.trim_end_matches('/')).as_bytes()))
+    format!("{:x}", Sha256::digest(format!("{}\0{account}", crate::mobile::gateway_scope(relay)).as_bytes()))
 }
 
 pub fn load_bindings(path: &Path) -> Result<Bindings, String> {

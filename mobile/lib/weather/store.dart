@@ -62,7 +62,7 @@ class WeatherStore with WidgetsBindingObserver {
     _api?.close();
     _api = account == null || _forced.isNotEmpty ? null : _factory(account);
     _snapshot = null;
-    _scope = account == null ? '' : '${account.origin}|${account.account}';
+    _scope = account == null ? '' : account.scope;
     unawaited(_watchOs());
     if (_forced.isNotEmpty) {
       settings.value = WeatherSettings.fromJson(jsonDecode(_forced));
