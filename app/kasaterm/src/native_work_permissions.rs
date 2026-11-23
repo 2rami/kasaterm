@@ -256,7 +256,8 @@ impl State {
         self.queue.push_front(id.to_string());
     }
 
-    fn run(&mut self, effect: Effect, wake: EventLoopProxy<UserEvent>) {
+    fn run(&mut self, effect: Effect, wake: &EventLoopProxy<UserEvent>) {
+        let wake = wake.clone();
         let (tx, rx) = mpsc::channel();
         self.busy = Some(rx);
         let fixture = self.fixture;
@@ -398,7 +399,7 @@ impl App {
         }
         if let Some((ticket, choice)) = ANSWER.lock().ok().and_then(|mut answer| answer.take()) {
             if let Some(effect) = work.answered(ticket, choice) {
-                work.run(effect, self.proxy.clone());
+                work.run(effect, &self.proxy);
             }
         }
         if let Some(Ok(Done::Acted(effect, result))) = work.busy.as_ref().map(Receiver::try_recv) {
@@ -484,6 +485,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// macOS winit 의 proxy 복제는 런루프를 깨운다(`EventLoopProxy::new` 의 `CFRunLoopWakeUp`). 루프 턴마다 도는 길에서
+    /// 복제하면 그 복제가 다음 턴을 불러 앱이 쉬지 못한다 — 일을 띄우는 함수가 &EventLoopProxy 를 받아 그 안에서만 복제한다.
+    #[test]
+    fn per_turn_paths_never_clone_the_event_loop_proxy() {
+        for (source, start) in [
+            (include_str!("handler.rs"), "fn about_to_wait("),
+            (include_str!("native_settings.rs"), "fn native_settings_tick("),
+            (include_str!("native_device_account.rs"), "fn device_account_poll("),
+            (include_str!("native_work_permissions.rs"), "fn pr_requests_poll("),
+            (include_str!("native_onboarding.rs"), "fn pump_native_onboarding("),
+        ] {
+            let body = source.split_once(start).unwrap_or_else(|| panic!("{start} is gone")).1;
+            let body = body.split_once("\n    }\n").unwrap().0;
+            assert!(!body.contains(concat!("self.proxy", ".clone()")), "{start} clones the event loop proxy every turn");
+        }
+    }
 
     fn pending(id: &str, digest: &str) -> serde_json::Value {
         serde_json::json!({"id":id,"digest":digest,"provider":"github","display":"octo",
