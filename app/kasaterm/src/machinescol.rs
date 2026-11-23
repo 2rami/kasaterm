@@ -634,21 +634,51 @@ impl App {
     }
 
     /// 그 기기 화면을 따로 띄우는 보기 앱(KasaDesk)으로 연다 — 이 앱이 다시 떠도 화면이 이어진다(docs/screen-service-split.md
-    /// 「보기 앱」). 보기 앱이 없는 실행(개발 판)만 이 창의 화면 칸으로 연다(`screen_stream`, docs/screen-stream.md). 지금 못
-    /// 붙으면 보기가 까닭을 띄우고 길이 서면 붙는다.
+    /// 「보기 앱」). 보기 앱이 안 깔렸으면 공식 피드에서 받아 깔고 연다. 깔 수 없는 실행(검증·리그)이나 깔기·띄우기가 실패하면
+    /// 이 창의 화면 칸으로 연다(`screen_stream`, docs/screen-stream.md).
     fn open_screen_mirror(&mut self, label: &str) {
         self.info.machine_menu = None;
-        let Some(machine) = kasa_device::machines::find(label) else {
+        if kasa_device::machines::find(label).is_none() {
             self.set_toast(format!("{label} 을(를) 기기 명부에서 못 찾았어요"));
             return;
-        };
+        }
+        if crate::screen_stream::desk_path().is_none() && crate::screen_stream::can_install_desk() {
+            let (proxy, target) = (self.proxy.clone(), label.to_string());
+            let spawned = std::thread::Builder::new().name("kasadesk-install".into()).spawn(move || {
+                let result = crate::screen_stream::install_desk();
+                let _ = proxy.send_event(UserEvent::DeskInstalled { label: target, result });
+            });
+            if spawned.is_ok() {
+                self.set_toast(format!("화면 보기 앱 KasaDesk 를 받아 깔고 있어요 — 다 깔리면 {label} 화면을 열어요"));
+                return;
+            }
+        }
         match crate::screen_stream::open_in_desk(label) {
             Ok(()) => return,
             Err(e) => eprintln!("[screen-stream] 보기 앱으로 못 열어 화면 칸으로: {e}"),
         }
+        self.open_screen_tab(label);
+    }
+
+    fn open_screen_tab(&mut self, label: &str) {
+        let Some(machine) = kasa_device::machines::find(label) else { return };
         if !self.open_screen_pane(label, &machine.base) {
             self.set_toast("화면 칸을 못 열었어요".to_string());
         }
+    }
+
+    /// 보기 앱 깔기가 끝났다 — 그 기기를 보기 앱으로 열고, 못 깔았거나 못 띄우면 화면 칸으로.
+    pub(crate) fn desk_installed(&mut self, label: &str, result: Result<String, String>) {
+        match result.and_then(|version| crate::screen_stream::open_in_desk(label).map(|()| version)) {
+            Ok(version) => self.set_toast(format!("KasaDesk {version} 를 깔았어요 — 화면 보기는 이제 KasaDesk 로 떠요")),
+            Err(e) => {
+                eprintln!("[screen-stream] 보기 앱 깔기·띄우기 실패 — 화면 칸으로: {e}");
+                self.set_toast(format!("KasaDesk 를 못 열었어요 — {e}. 이번엔 화면 칸으로 열어요"));
+                self.open_screen_tab(label);
+            }
+        }
+        self.chrome_dirty = true;
+        self.render_frame();
     }
 
     /// 메뉴 항목 하나를 실행한다. 학생 줄 우클릭 메뉴(보내기·데려오기)도 여기로

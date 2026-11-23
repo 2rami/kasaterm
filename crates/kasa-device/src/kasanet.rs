@@ -201,6 +201,9 @@ pub async fn start(mcp_port: u16) {
         }
     }
     tokio::spawn(sweep_phones());
+    if !loopback_rig {
+        tokio::spawn(report_ids());
+    }
     if let Some(n) = NODE.get().filter(|_| !loopback_rig) {
         tokio::spawn(kasa_net::portmap::keep_swept(n.endpoint.clone(), |s| {
             eprintln!("[kasanet] 공유기 UPnP 매핑 정리 — 이 기기 것 {}칸 중 {}칸 지움", s.mine, s.removed);
@@ -222,6 +225,58 @@ pub async fn start(mcp_port: u16) {
                 let _ = n.router.shutdown().await;
             }
         });
+    }
+}
+
+/// 관문 계정에 알릴 이 기기의 카사넷 id — 앱 노드·보기 앱·화면 서비스 노드, 그리고 관문으로 주인을 확인해 받은 폰·보기 앱.
+/// 관문은 이 목록을 국내 중계 허용 파일로 내놓는다(`kasa-gateway` `gateway_kasanet.rs`). 관문 상한(기기당 16)을 넘지 않게 자른다.
+fn reportable_ids() -> Vec<String> {
+    let Some(n) = NODE.get() else { return Vec::new() };
+    let mut ids = vec![n.endpoint.id().to_string()];
+    ids.extend(local_view_id().map(|id| id.to_string()));
+    let screen = SCREEN_NODE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|v| v.get("id")?.as_str().map(str::to_string));
+    ids.extend(screen);
+    let now = Instant::now();
+    for list in [&n.phones, &n.account_views] {
+        ids.extend(list.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(_, until)| **until > now).map(|(id, _)| id.to_string()));
+    }
+    ids.sort();
+    ids.dedup();
+    ids.truncate(16);
+    ids
+}
+
+/// 관문 로그인이 있으면 이 기기 카사넷 id 를 알린다 — 손으로 `relay.sh allow` 하지 않아도 국내 중계를 쓴다. 목록이 바뀌었을 때와
+/// 한 시간마다(관문이 다시 떠 잃었을 때). 옛 관문(404)이면 다음 시간까지 묻지 않는다.
+async fn report_ids() {
+    const EVERY: Duration = Duration::from_secs(60);
+    const REFRESH: Duration = Duration::from_secs(3600);
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).build() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let mut last: Option<(Vec<String>, String, Instant)> = None;
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    loop {
+        let ids = reportable_ids();
+        if let Some((cred, _)) = crate::device_auth::capture().filter(|_| !ids.is_empty()) {
+            let relay = cred.relay.trim_end_matches('/').to_string();
+            let due = last.as_ref().is_none_or(|(sent, to, at)| *sent != ids || *to != relay || at.elapsed() >= REFRESH);
+            if due {
+                let sent = client.post(format!("{relay}/relay/kasanet/ids")).bearer_auth(&cred.token)
+                    .json(&serde_json::json!({ "ids": ids })).send().await;
+                match sent.map(|r| r.status().as_u16()) {
+                    Ok(200..=299) => {
+                        eprintln!("[kasanet] 관문에 카사넷 id {}개 알림", ids.len());
+                        last = Some((ids, relay, Instant::now()));
+                    }
+                    Ok(404) => last = Some((ids, relay, Instant::now())),
+                    Ok(code) => eprintln!("[kasanet] 관문이 카사넷 id 알림을 {code} 로 거절"),
+                    Err(e) => eprintln!("[kasanet] 관문에 카사넷 id 를 못 알림: {e}"),
+                }
+            }
+        }
+        tokio::time::sleep(EVERY).await;
     }
 }
 

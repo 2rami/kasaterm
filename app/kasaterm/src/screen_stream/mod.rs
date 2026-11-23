@@ -11,7 +11,7 @@ mod input;
 mod pane;
 mod window;
 
-pub(crate) use desk::open_in_desk;
+pub(crate) use desk::{can_install as can_install_desk, desk_path, install as install_desk, open_in_desk};
 
 pub(crate) use pane::paint;
 pub(crate) use window::ScreenWindow;

@@ -50,7 +50,17 @@ case "${1:-}" in
   upgrade)
     relay_bin="${2:?kasa-relay 리눅스 바이너리 경로}"
     scp -q "$relay_bin" "$SEOUL:/tmp/kasa-relay.new"
-    seoul 'sudo install -m 0755 /tmp/kasa-relay.new /usr/local/bin/kasa-relay && rm /tmp/kasa-relay.new && sudo systemctl restart kasa-relay && sleep 2 && systemctl is-active kasa-relay'
+    scp -q "$HERE/kasa-relay.service" "$SEOUL:/tmp/kasa-relay.service"
+    # 바이너리와 서비스 파일을 같이 올린다 — 서비스 파일의 env·쓰기 자리(계정 기기 중계 허용 파일)가 새 판과 짝이다.
+    seoul 'set -e
+      bak=/usr/local/bin/kasa-relay.bak-$(date +%Y%m%d-%H%M%S)
+      sudo cp -a /usr/local/bin/kasa-relay "$bak" && echo "백업 $bak"
+      sudo install -d -m 0755 -o kasa-relay -g kasa-relay /var/lib/kasanet-accounts
+      sudo install -m 0755 /tmp/kasa-relay.new /usr/local/bin/kasa-relay
+      sudo install -m 0644 /tmp/kasa-relay.service /etc/systemd/system/kasa-relay.service
+      rm -f /tmp/kasa-relay.new /tmp/kasa-relay.service
+      sudo systemctl daemon-reload
+      sudo systemctl restart kasa-relay && sleep 2 && systemctl is-active kasa-relay'
     ;;
   install)
     relay_bin="${2:?kasa-relay 리눅스 바이너리 경로}"

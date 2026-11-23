@@ -47,6 +47,8 @@ mod profile;
 mod chains;
 #[path = "gateway_push_alert.rs"]
 mod push_alert;
+#[path = "gateway_kasanet.rs"]
+mod kasanet;
 #[path = "gateway_conversations.rs"]
 mod conversations;
 #[path = "gateway_shared_rooms.rs"]
@@ -268,6 +270,8 @@ pub struct Gate {
     push_faces: Arc<push_alert::Faces>,
     /// 닉네임·올린 프사(`gateway_profile.rs`).
     profiles: Arc<profile::Profiles>,
+    /// 기기들이 알린 카사넷 id — 국내 중계 허용 파일로 내놓는다(`gateway_kasanet.rs`).
+    kasanet_ids: Arc<kasanet::Ids>,
     auth_changes: tokio::sync::watch::Sender<u64>,
     state_path: Option<PathBuf>,
     state_write: Arc<Mutex<()>>,
@@ -343,7 +347,7 @@ impl Gate {
             .map(|p| load_state(p, now_secs()))
             .unwrap_or_default();
         let oauth_config = kasa_identity::oauth_accounts::Config::from_env();
-        Self {
+        let gate = Self {
             by_slug: Arc::new(Mutex::new(HashMap::new())),
             keys: Arc::new(Mutex::new(keys)),
             live: Arc::new(Mutex::new(HashMap::new())),
@@ -380,11 +384,15 @@ impl Gate {
             push_alerts: Arc::default(),
             push_faces: Arc::new(push_alert::Faces::open(state_path.as_deref())),
             profiles: Arc::new(profile::Profiles::open(state_path.as_deref())),
+            kasanet_ids: Arc::new(kasanet::Ids::open(state_path.as_deref())),
             auth_changes: tokio::sync::watch::channel(0).0,
             state_path,
             state_write: Arc::new(Mutex::new(())),
             seq: Arc::new(AtomicU64::new(1)),
-        }
+        };
+        // 꺼진 사이 폐기된 기기·꺼진 계정이 허용 파일에 남지 않게 켤 때 한 번 다시 쓴다.
+        gate.export_kasanet_ids();
+        gate
     }
 
     /// 임시 파일에 쓰고 fsync 뒤 이름을 바꾼다(0600) — 쓰다 죽어도 반쪽 파일이 남지 않는다.
@@ -463,6 +471,7 @@ impl Gate {
                 }
             }
             self.persist();
+            self.export_kasanet_ids();
         }
         done
     }
@@ -532,6 +541,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(conversations::routes())
         .merge(shared_rooms::routes())
         .merge(login_vault::routes())
+        .merge(kasanet::routes())
         .merge(login_vault::store_routes("/relay/browser-sync", |gate| &gate.browser_sync))
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
@@ -2162,6 +2172,33 @@ mod tests {
             assert_eq!(open["slug"], SLUG);
             assert_eq!(open["path"], path);
         }
+    }
+
+    #[tokio::test]
+    async fn reported_kasanet_ids_reach_the_relay_allow_file_until_the_device_is_revoked() {
+        let dir = std::env::temp_dir().join(format!("kasa-kasanet-ids-{}", uuid::Uuid::new_v4()));
+        let mut gate = account_gate(&dir);
+        let allow = dir.join("account-allowlist");
+        gate.kasanet_ids = Arc::new(kasanet::Ids::exporting_to(&allow));
+        let addr = spawn_relay(gate).await;
+        let (_, device) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"tester","password":"correct horse","machine_id":"work-mac"
+        })).await;
+        let token = device["token"].as_str().unwrap().to_string();
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        assert_eq!(post(addr, "/relay/kasanet/ids", None, serde_json::json!({"ids":[a]})).await.0, 401);
+        assert_eq!(post(addr, "/relay/kasanet/ids", Some(&token), serde_json::json!({"ids":["nothex"]})).await.0, 400);
+        let many: Vec<String> = (0..17).map(|i| format!("{i:064x}")).collect();
+        assert_eq!(post(addr, "/relay/kasanet/ids", Some(&token), serde_json::json!({"ids":many})).await.0, 413);
+        let (status, body) = post(addr, "/relay/kasanet/ids", Some(&token), serde_json::json!({"ids":[b.to_uppercase(), a, a]})).await;
+        assert_eq!((status, body["ids"].as_u64()), (200, Some(2)));
+        let lines = |path: &std::path::Path| -> Vec<String> {
+            std::fs::read_to_string(path).unwrap_or_default().lines().filter(|l| !l.starts_with('#')).map(str::to_string).collect()
+        };
+        assert_eq!(lines(&allow), vec![a.clone(), b.clone()]);
+        assert_eq!(post(addr, "/relay/logout", Some(&token), serde_json::json!({})).await.0, 200);
+        assert!(lines(&allow).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

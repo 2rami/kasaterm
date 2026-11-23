@@ -2068,6 +2068,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::DeskInstalled { label, result } => {
+                self.desk_installed(label, result.clone());
+                return;
+            }
             UserEvent::BgAgentsChanged => {
                 // agents/attach 뷰 pane 재바인딩을 board 폴링에만 맡기지 않는다 — 웹뷰/
                 // CLI 가 board 를 안 부르는 세션에선 rebind 가 영영 안 돌아 pane 이 스폰

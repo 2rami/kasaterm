@@ -3758,6 +3758,8 @@ enum UserEvent {
     /// (SocketSessionBound) 시점엔 맵이 비어 상속을 놓친다 → 맵이 채워지면 이
     /// 이벤트로 pane_claude_sid 를 다시 훑어 뒤늦게 부모를 물려준다.
     BgAgentsChanged,
+    /// 보기 앱(KasaDesk)을 깔고 났다 — 그 기기 화면을 보기 앱으로 연다(실패면 화면 칸으로). Ok 는 깐 판.
+    DeskInstalled { label: String, result: Result<String, String> },
     /// Windows 세션이 끝나 간다(`session_end.rs`) — 칸이 살아 있을 때 저장하고 `Sender` 로 끝났다고 알린다.
     #[cfg(windows)]
     SessionEnding(std::sync::mpsc::Sender<()>),
