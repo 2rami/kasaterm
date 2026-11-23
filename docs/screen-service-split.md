@@ -489,8 +489,66 @@
 8. 폰 JPEG — **P5 에서 서비스로 옮긴다.**
 9. 서비스 판이 바뀌었는데 누가 보고 있으면 — **보는 사람이 다 떠날 때까지 미룬다.**
 
-## 그 뒤: 보는 쪽 작은 실행 파일(선택)
+## 보기 앱 KasaDesk
 
-같은 워크스페이스에서 보는 칸만 담은 작은 실행 파일을 굽는 길이다. 보는 쪽 코드(`view.rs`·풀기·`kasa-cast` 의 `watch`)는 P1 뒤 이미 앱 밖
-크레이트에 있어 창 하나(wgpu)와 기기 고르기만 더하면 된다. 그 실행 파일도 자기 카사넷 id 가 있어야 하고 보내는 쪽 허용 목록에 들어야 하므로,
-명부에 「보기 전용 기기」로 올리는 길이 먼저다. 문서 보기 앱 KasaViewer 와는 다른 것이다.
+보는 쪽도 앱 밖으로 뺐다. 보내는 쪽이 서비스로 빠져 그 기기 앱이 다시 떠도 화면이 이어지지만, 보는 칸이 본 앱 안이면 **이쪽** 앱이
+다시 뜰 때 끊긴다. KasaDesk 는 본 앱과 따로 도는 작은 앱이다(문서 보기 앱 KasaViewer·맥 화면 서비스 도우미 KasatermScreen 과
+다른 것). 창 하나에 기기 하나, 기기를 안 골랐으면 고르기 화면이다.
+
+### 신원 — 보기 앱 키와 「보기 전용」
+
+- 자기 카사넷 키 `kasanet-view.key`(기기 키 옆, `kasa_net::identity::view_key_path`, 격리 리그는 `KASATERM_VIEW_KEY`). 본 앱 키를 빌리지
+  않는다 — 같은 id 두 프로세스는 홈 중계에서 부딪고, 보기 앱이 본 앱 신원으로 fwd 를 열 수 있게 된다.
+- 본 앱이 그 키를 없으면 만들어 `/version` 의 `kasanet.view_id` 로 알린다(처음 띄우기 전부터 다른 기기가 허용해 두게). 격리 인스턴스는
+  `KASATERM_VIEW_KEY` 를 줬을 때만 알린다.
+- 보내는 쪽 앱은 루프백 base 로 물은 `/version` 의 `view_id` 를 기기 id 와 같은 근거로 믿되 **화면만** 내준다: 포트 돌리기 표를 빈 채로 걸어
+  (`FwdServer::redirect(id, [])`) 어느 포트도 못 열고, `ScreenAccept` 와 화면 서비스 허락 목록(`screen_viewers` 의 기기 줄)에만 든다.
+  돌리기를 허용 목록보다 먼저 건다 — 먼저 들면 그 틈에 붙은 연결이 HTTP 포트로 샌다.
+- 국내 중계: 보기 앱 id 도 허용 목록에 넣어야 국내 중계를 홈으로 쓴다(`relay.sh allow <id> <기기>-view`, `relay.sh ids` 가 「보기 앱」 줄로 보인다).
+  없으면 n0 를 홈으로 쓰고 데이터는 직통으로만 간다.
+
+### 명부와 붙기
+
+- 명부는 이 기기 본 앱에 묻는다(`/machines`, 기기마다 루프백 base 의 `/version`) — 5초마다. 본 앱이 없거나 그 기기 길이 끊기면 상태 폴더의 지난
+  명부(`roster.json`, 공개키·주소뿐)로 보인다. 주소가 바뀌었어도 같은 중계를 홈으로 쓰면 중계 신호로 찾는다.
+- 기기마다 화면 서비스 노드(`screen_node`, `SCREEN_LINK_ALPN`)와 앱 노드(fwd ALPN 으로 길만 — 돌리기가 비어 스트림은 못 연다)로 길을 쥐고,
+  서비스 길이 데이터를 실을 길(직통·국내 중계)이면 서비스로, 아니면 화면을 받는 판의 앱으로 붙는다 — 본 앱 `kasanet::connect_screen` 과 같은 판정.
+- 보기는 본 앱 화면 탭과 같은 `kasa-castview` 다 — 풀기·소리·조작 판정(맥→Windows 키 자리·⌘→Alt·⌥→Windows 키·⌥만 → 시작 메뉴·Caps Lock →
+  한/영)·HUD·키 메뉴·화면 고르기가 둘에서 같다. HUD 에 「기기」(고르기로)·「전체 화면」을 더 얹는다. 창 닫기·붙여넣기는 본 앱 꺼낸 화면 창과
+  같은 손가락(맥 ⌘W·⌘V, Windows Ctrl+Shift+W·Ctrl+V), 맥은 ⌃⌘F 도 전체 화면이다.
+- 하나만 띄운다: 상태 폴더의 유닉스 소켓(맥 `~/Library/Application Support/kasaterm/desk/kasadesk.sock`)·이름 파이프(Windows, 상태 폴더 해시).
+  이미 떠 있으면 새로 띄운 것이 `{"open": "<기기>"}` 한 줄을 넘기고 끝난다. 기록은 상태 폴더 `kasadesk.log`.
+
+### 본 앱 「화면 보기」
+
+- 기기 메뉴 「화면 보기」는 KasaDesk 를 그 기기로 띄운다(`screen_stream/desk.rs`). 맥은 `open -n -a` 로 LaunchServices 가 띄워 본 앱의
+  자식이 아니다 — 본 앱이 다시 떠도 산다. Windows 는 떼어 낸 프로세스(작업 개체에서 빠져나가기)로 띄운다.
+- 보기 앱이 없는 실행(개발 판·`cargo run`)만 지금처럼 화면 탭으로 연다. 탭을 걷지 않은 까닭: 검증 리그(`KASATERM_TEST_SCREEN_LABEL`)와
+  번들 없는 개발 실행이 그 길을 쓰고, 보기 코드가 같은 크레이트라 둘이 갈리지 않는다.
+
+### 싣기
+
+- 맥: `kasaterm.app/Contents/Applications/KasaDesk.app`(번들 id `com.kasa.kasaterm.desk`, 앱 판과 같은 판). 안쪽 앱으로 따로 서명하고
+  (`build-app.sh`·`tools/release/macsign.py` `HARDENED_SIGNED`) 번들째 Sparkle 로 바뀐다. Spotlight·Dock 에서 보이고, Launchpad 는 번들 안
+  앱을 안 보여 준다 — `/Applications` 에 사본을 두면 업데이트가 안 닿아 낡는다.
+- Windows: 같은 MSI 가 `bin\kasadesk.exe` 와 시작 메뉴 「KasaDesk」 바로가기, 들어오는 UDP 방화벽 예외를 건다(사람 권한 프로세스라 묻기 창이
+  사람 앞에 뜨고 답하기 전엔 같은 망 직통이 막힌다).
+
+### 검증 리그
+
+- 보기 앱 env: `KASATERM_VIEW_KEY`(보기 앱 키)·`KASATERM_VIEW_STATE`(상태 폴더 — 소켓·지난 명부·기록)·`KASATERM_VIEW_APP` 또는 `--app`
+  (명부를 물을 본 앱)·`KASATERM_KASANET_BIND`·`KASATERM_VIEW_STDERR`(기록 파일로 안 돌림). 리그 손잡이(`rig.rs`): `KASATERM_VIEW_TEST_LOG`
+  (보기마다 1초에 한 줄 JSON)·`_QUIT_MS`·`_CAPTURE=ms:경로`(창 자체 뜨기)·`_INPUT="ms:key:KeyA:0;ms:text:가;ms:click:fx,fy"`(누름은 그 기기 화면 안
+  비율, 보내기를 바로 부른다 — winit 키 판정은 안 거친다)·`_INPUT_GATE=<파일>`(키·글은 그 파일이 생긴 뒤에만 — 리그가 시험 창이 맨 앞인 것을 확인하고 만든다)·
+  `KASATERM_TEST_SCREEN_AUDIO_SILENT`.
+- 원본은 격리 리그 앱 하나, 그 리그의 명부에는 `view_id` 를 보기 앱 키로 알리는 가짜 기기(닿지 않는 주소), 보기 앱의 본 앱 자리에는 리그 앱
+  base 를 명부로 내주는 가짜 본 앱을 둔다 — 리그 앱 둘을 카사넷으로 잇지 않는다(「S3 리그」의 포트 공유 함정).
+- 실측(2026-11-23, 맥, release, 리그 원본 = 화면 서비스 없는 리그 앱): 리그 앱이 가짜 기기의 `view_id` 를 「보기 앱 허용 — 화면만」으로 배웠고,
+  보기 앱이 그 앱 노드에 직통으로 붙어 3024×1964 장을 복사 없이 받았다(화면→풀림 p50 17~31ms, 정지 화면이라 새 캡처 초당 1장·다듬은 장 포함
+  초당 30장 남짓). 소리 덩이가 흘러 출력이 열렸다. 22초에 보기 앱의 명부 출처(가짜 본 앱)를 껐는데 장이 끊김 없이 이어졌다. 알리지 않은
+  키의 보기 앱은 「그 기기 카사텀이 이 보기 앱을 아직 몰라요」에 머물렀다. 고르기 화면은 본 앱 없이 지난 명부로 떴다.
+- 실측(2026-11-23, 집 PC, release, 시험 서비스 1.3.2 + 리그 앱 + Windows 보기 앱): 리그 앱 `/version` 에 `view_id`·`screen_node`, 서비스
+  허락 목록에 보기 앱 id. 보기 앱이 서비스에 직통으로 붙어 3840×1600 을 복사 없이 57fps·화면→풀림 6ms, 소리 덩이 5775개(30초). 12초에 리그
+  앱을 끝냈는데 30초까지 초당 57장으로 이어졌다. 콘솔이 쉴 때 맨 위에 띄운 시험 창에 원격 누름과 키(`KeyA`·Shift+`KeyB`·글 「가」·Enter)를
+  넣어 그대로 받았다 — 키는 시험 창이 맨 앞인 것을 확인한 뒤(`KASATERM_VIEW_TEST_INPUT_GATE`)에만 보냈다. 넣은 조작도 콘솔 입력으로 세여
+  다음 리그는 유휴 시간을 다시 기다린다.

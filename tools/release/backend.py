@@ -28,7 +28,7 @@ REPO_SLUG = "2rami/kasaterm"
 TEST_PACKAGES = (
     "kasaterm", "kasa-http", "kasa-identity", "kasa-characters", "kasa-wire", "kasa-device",
     "kasa-backend", "kasa-students", "kasa-remote", "kasa-browser", "kasa-git", "kasa-gateway",
-    "kasa-serve", "kasa-socket", "kasa-cast", "kasa-cast-host", "kasaterm-screen",
+    "kasa-serve", "kasa-socket", "kasa-cast", "kasa-cast-host", "kasaterm-screen", "kasa-castview", "kasadesk",
 )
 VERIFY_TIMEOUT = 7200
 TESTS = (["cargo", "test", *[arg for package in TEST_PACKAGES for arg in ("-p", package)], "--release"],)

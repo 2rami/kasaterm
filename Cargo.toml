@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "app/kasaterm",
     "app/kasaterm-screen",
+    "app/kasadesk",
     "crates/kasa-socket",
     "crates/kasa-identity",
     "crates/kasa-characters",
@@ -31,6 +32,7 @@ members = [
     "crates/kasa-net-ffi",
     "crates/kasa-cast",
     "crates/kasa-cast-host",
+    "crates/kasa-castview",
     # 실험(spikes/)은 제품이 아니다. 아무도 의존하지 않고, 루트에서 `-p` 없이 부르는
     # cargo 명령에도 들지 않는다(아래 default-members). 굽기는 `--workspace` 나 `-p` 로.
     "spikes/iced-term",
@@ -44,6 +46,7 @@ members = [
 default-members = [
     "app/kasaterm",
     "app/kasaterm-screen",
+    "app/kasadesk",
     "crates/kasa-socket",
     "crates/kasa-identity",
     "crates/kasa-characters",
@@ -71,6 +74,7 @@ default-members = [
     "crates/kasa-net-ffi",
     "crates/kasa-cast",
     "crates/kasa-cast-host",
+    "crates/kasa-castview",
 ]
 
 # 이 표의 `version` 줄이 파일의 첫 `version = ` 줄이어야 한다 — 굽기·릴리스 도구가
@@ -121,6 +125,7 @@ kasa-http = { path = "crates/kasa-http" }
 kasa-net = { path = "crates/kasa-net" }
 kasa-cast = { path = "crates/kasa-cast" }
 kasa-cast-host = { path = "crates/kasa-cast-host" }
+kasa-castview = { path = "crates/kasa-castview" }
 kasa-pty = { path = "crates/kasa-pty", default-features = false }
 kasa-screen = { path = "crates/kasa-screen" }
 kasa-socket = { path = "crates/kasa-socket", default-features = false }

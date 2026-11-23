@@ -3,14 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{Layout, ScreenView, Surface};
+use super::{ScreenView, Surface};
 use crate::{gpu, theme, App, PaneContent, PaneTab, ScreenPane, UserEvent};
 
-const STATUS_FONT: f32 = 13.0;
-const HUD_FONT: f32 = 11.0;
-const HUD_PAD: f32 = 6.0;
-const EDGE: f32 = 2.0;
-const KEY_LABEL: &str = "키";
 /// 안 보인 지 이만큼이면 연결을 닫는다 — 탭을 잠깐 넘겨 보는 동안 다시 붙느라 키프레임을 기다리지 않게.
 const HIDDEN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// 보이는 칸의 연결이 닫히면 이만큼 뒤 다시 붙는다 — 그 기기 재시작·직통이 늦게 서는 경우.
@@ -20,10 +15,8 @@ fn texture_key(view: u64) -> String {
     format!("screen:{view}")
 }
 
-/// 새로 풀린 장을 올리고 칸 본문 안에 비율을 지켜 그린다. 아직 장이 없으면 상태 글을 가운데에, 장이 흐르면 오른쪽
-/// 위에 「조작」 단추와 `fps · 지연 · 길` 을 작게 얹고, 확대했으면 그 왼쪽에 배율(누르면 맞춤으로)을 둔다. 장은 그 기기의 기기색 테로 두른다 — 이 기기 화면과 다른 기기
-/// 화면이 한눈에 갈리게(사이드바 기기 묶음 둘레선과 같은 색). 조작은 열면 늘 켜져 있어 테 색으로 가르지 않고 「조작 중」 알약이 말한다. 조작을 못
-/// 넣으면 그 까닭을 아래에 띄운다. 그린 자리는 누름 판정에 쓰도록 보기에 적어 둔다.
+/// 칸마다 보기 하나를 그린다(`kasa_castview::paint`) — 글자는 이 앱 크롬 글꼴, 장 둘레는 그 기기 기기색(사이드바 기기 묶음
+/// 둘레선과 같은 색)이다.
 pub(crate) fn paint(
     g: &mut gpu::GpuRenderer,
     views: &mut HashMap<u64, ScreenView>,
@@ -31,118 +24,27 @@ pub(crate) fn paint(
     on: Surface,
     cursor: (f32, f32),
 ) {
-    let white = [255, 255, 255, 235];
-    let dim = [0, 0, 0, 150];
-    let opts = |font_size, color| gpu::DrawOpts { font_size, color, bold: false, italic: false };
-    for (view_id, (x, y, w, h)) in slots {
+    for (view_id, slot) in slots {
         let Some(view) = views.get_mut(view_id) else { continue };
-        let key = texture_key(*view_id);
-        view.surface = on;
-        // 칸을 다른 창으로 옮기면 그 창 렌더러에는 장이 없다 — 멈춘 화면이면 새 장이 안 오니 마지막 장을 다시 올린다.
-        let fresh = view.new_surface().or_else(|| if g.has_image(&key) { None } else { view.current_surface() });
-        if let Some((surface, surface_key, fw, fh)) = fresh {
-            let started = std::time::Instant::now();
-            // 복사 없이 디코더 표면(IOSurface·D3D11 공유 텍스처)을 텍스처로. 못 하면(다른 백엔드 등) 장을 CPU 로 한 번 올린다.
-            #[cfg(target_os = "macos")]
-            let zero_copy = {
-                let _ = surface_key;
-                unsafe { g.set_image_iosurface(&key, surface, fw, fh) }
-            };
-            #[cfg(windows)]
-            let zero_copy = unsafe { g.set_image_d3d11(&key, surface, surface_key, fw, fh) };
-            #[cfg(not(any(target_os = "macos", windows)))]
-            let zero_copy = {
-                let _ = (surface, surface_key, fw, fh);
-                false
-            };
-            if !zero_copy {
-                view.copy_latest(|bgra, w, h, stride| g.update_image_bgra(&key, bgra, w, h, stride));
-            }
-            view.note_upload(started.elapsed(), zero_copy);
-        }
-        let edge = crate::render::pane_identity::device_section_border(theme::panel_bg(), &view.label);
-        if !view.has_frame() {
-            view.layout = None;
-            view.audio.pill = None;
-            g.round_rect_stroke(*x, *y, *w, *h, 0.0, EDGE, edge);
-            let text = view.status();
-            let tw = g.measure_chrome_text(&text, STATUS_FONT, false);
-            g.draw_text(x + (w - tw) / 2.0, y + (h - STATUS_FONT) / 2.0, &text, opts(STATUS_FONT, theme::text_mute()));
-            continue;
-        }
-        let slot = (*x, *y, *w, *h);
-        let frame = view.frame_size();
-        let (image, uv) = super::zoomed(slot, frame, view.zoom, view.focus);
-        g.push_clip(*x, *y, *w, *h);
-        g.queue_image_region(&key, image, uv);
-        g.pop_clip();
-        let box_h = HUD_FONT + HUD_PAD * 1.5;
-        let hud = view.hud();
-        let hw = g.measure_chrome_text(&hud, HUD_FONT, false) + HUD_PAD * 2.0;
-        let hud_box = (x + w - hw - HUD_PAD, y + HUD_PAD, hw, box_h);
-        let label = if view.control { "조작 중" } else { "조작" };
-        let tw = g.measure_chrome_text(label, HUD_FONT, false) + HUD_PAD * 2.0;
-        let toggle = (hud_box.0 - HUD_PAD - tw, y + HUD_PAD, tw, box_h);
-        g.round_rect_stroke(image.0, image.1, image.2, image.3, 0.0, EDGE, edge);
-        let key_button = view.control.then(|| {
-            let kw = g.measure_chrome_text(KEY_LABEL, HUD_FONT, false) + HUD_PAD * 2.0;
-            let b = (toggle.0 - HUD_PAD - kw, y + HUD_PAD, kw, box_h);
-            g.round_rect_fill(b.0, b.1, b.2, b.3, 4.0, if view.key_menu.is_some() { theme::accent() } else { dim });
-            g.draw_text(b.0 + HUD_PAD, b.1 + HUD_PAD * 0.75, KEY_LABEL, opts(HUD_FONT, white));
-            b
-        });
-        if !view.control {
-            view.key_menu = None;
-        }
-        let mut left_of = key_button.unwrap_or(toggle).0;
-        let mut chip = |g: &mut gpu::GpuRenderer, text: &str, color: [u8; 4]| {
-            let cw = g.measure_chrome_text(text, HUD_FONT, false) + HUD_PAD * 2.0;
-            let r = (left_of - HUD_PAD - cw, y + HUD_PAD, cw, box_h);
-            g.round_rect_fill(r.0, r.1, r.2, r.3, 4.0, dim);
-            g.draw_text(r.0 + HUD_PAD, r.1 + HUD_PAD * 0.75, text, opts(HUD_FONT, color));
-            left_of = r.0;
-            r
+        let style = kasa_castview::Style {
+            accent: theme::accent(),
+            mute: theme::text_mute(),
+            edge: crate::render::pane_identity::device_section_border(theme::panel_bg(), &view.label),
+            extra: &[],
         };
-        let display_chip = view.display_cycle().map(|(at, n, _)| chip(g, &format!("화면 {at}/{n}"), white));
-        let zoom_chip = (view.zoom > 1.001).then(|| chip(g, &format!("{:.0}%", view.zoom * 100.0), white));
-        let audio_text = view.audio.shown().then(|| (view.audio.text(), if view.audio.on { white } else { [255, 255, 255, 150] }));
-        view.audio.pill = audio_text.map(|(text, color)| chip(g, text, color));
-        g.round_rect_fill(toggle.0, toggle.1, toggle.2, toggle.3, 4.0, if view.control { theme::accent() } else { dim });
-        g.draw_text(toggle.0 + HUD_PAD, toggle.1 + HUD_PAD * 0.75, label, opts(HUD_FONT, white));
-        g.round_rect_fill(hud_box.0, hud_box.1, hud_box.2, hud_box.3, 4.0, dim);
-        g.draw_text(hud_box.0 + HUD_PAD, hud_box.1 + HUD_PAD * 0.75, &hud, opts(HUD_FONT, white));
-        if view.control && !view.preedit.is_empty() {
-            let pw = g.measure_chrome_text(&view.preedit, STATUS_FONT, false) + HUD_PAD * 2.0;
-            let ph = STATUS_FONT + HUD_PAD * 1.5;
-            let (px, py) = (image.0 + HUD_PAD, image.1 + image.3 - ph - HUD_PAD);
-            g.round_rect_fill(px, py, pw, ph, 4.0, dim);
-            g.draw_text(px + HUD_PAD, py + HUD_PAD * 0.75, &view.preedit, opts(STATUS_FONT, white));
-            g.rect(px + HUD_PAD, py + ph - HUD_PAD * 0.5, pw - HUD_PAD * 2.0, 1.0, white);
-        }
-        if let Some(note) = view.input_note().filter(|_| view.control) {
-            let nw = g.measure_chrome_text(&note, HUD_FONT, false) + HUD_PAD * 2.0;
-            let (nx, ny) = (x + (w - nw) / 2.0, y + h - box_h - HUD_PAD);
-            g.round_rect_fill(nx, ny, nw, box_h, 4.0, dim);
-            g.draw_text(nx + HUD_PAD, ny + HUD_PAD * 0.75, &note, opts(HUD_FONT, white));
-        }
-        if let (Some(b), Some(_)) = (key_button, view.key_menu.as_ref()) {
-            let keys = view.special_keys();
-            let row_h = STATUS_FONT + HUD_PAD * 2.0;
-            let mw = keys.iter().map(|(t, _, _)| g.measure_chrome_text(t, STATUS_FONT, false)).fold(0.0, f32::max) + HUD_PAD * 4.0;
-            let (mx, my) = ((b.0 + b.2 - mw).max(*x + HUD_PAD), b.1 + b.3 + 4.0);
-            g.round_rect_fill(mx, my, mw, row_h * keys.len() as f32 + HUD_PAD, 6.0, [0, 0, 0, 210]);
-            let mut rows = Vec::with_capacity(keys.len());
-            for (i, (text, _, _)) in keys.iter().enumerate() {
-                let r = (mx, my + HUD_PAD / 2.0 + row_h * i as f32, mw, row_h);
-                if super::contains(r, (f64::from(cursor.0), f64::from(cursor.1))) {
-                    g.round_rect_fill(r.0 + 3.0, r.1, r.2 - 6.0, r.3, 4.0, theme::accent());
-                }
-                g.draw_text(r.0 + HUD_PAD * 2.0, r.1 + HUD_PAD, text, opts(STATUS_FONT, white));
-                rows.push((r, i));
-            }
-            view.key_menu = Some(rows);
-        }
-        view.layout = Some(Layout { image, uv, slot, frame, toggle, zoom_chip, key_button, display_chip });
+        kasa_castview::paint(g, view, &texture_key(*view_id), *slot, on, cursor, &style);
+    }
+}
+
+impl kasa_castview::Canvas for gpu::GpuRenderer {
+    fn grid(&mut self) -> &mut kasa_gridview::GridRenderer {
+        &mut self.grid
+    }
+    fn measure(&mut self, text: &str, size: f32) -> f32 {
+        self.measure_chrome_text(text, size, false)
+    }
+    fn text(&mut self, x: f32, y: f32, text: &str, size: f32, color: [u8; 4]) {
+        self.draw_text(x, y, text, gpu::DrawOpts { font_size: size, color, bold: false, italic: false });
     }
 }
 
@@ -175,7 +77,7 @@ impl App {
         };
         let proxy = self.proxy.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || drop(proxy.send_event(UserEvent::Redraw)));
-        let Some(view) = ScreenView::open(label, base, self.screen_fit(), None, wake) else {
+        let Some(view) = ScreenView::open(label, self.screen_fit(), None, super::silent_audio(), super::start(base), wake) else {
             return false;
         };
         let view_id = self.screen_view_seq;
@@ -270,7 +172,7 @@ impl App {
             let proxy = self.proxy.clone();
             let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || drop(proxy.send_event(UserEvent::Redraw)));
             let display = self.screen_display.get(&view_id).copied();
-            if let Some(view) = ScreenView::open(&label, &machine.base, self.screen_fit(), display, wake) {
+            if let Some(view) = ScreenView::open(&label, self.screen_fit(), display, super::silent_audio(), super::start(&machine.base), wake) {
                 if let Some((_, previous)) = retry.iter().find(|(v, _)| *v == view_id) {
                     view.carry_status(previous);
                 }

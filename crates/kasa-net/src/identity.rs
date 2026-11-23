@@ -10,6 +10,20 @@ pub const KEY_FILE: &str = "kasanet.key";
 /// 격리 인스턴스(검증 앱·시험)가 본판과 같은 키로 뜨면 상대가 두 기기를 한 기기로 본다 — 경로를 가를 창구.
 pub const KEY_PATH_ENV: &str = "KASATERM_KASANET_KEY";
 
+/// 그 기기 보기 앱(`app/kasadesk`)의 신원 — 기기 키와 따로다. 보내는 쪽은 이 id 에 화면만 내준다(`docs/screen-service-split.md`
+/// 「보기 앱」).
+pub const VIEW_KEY_FILE: &str = "kasanet-view.key";
+/// 격리 인스턴스(검증 리그)의 보기 앱 키 자리.
+pub const VIEW_KEY_PATH_ENV: &str = "KASATERM_VIEW_KEY";
+
+/// 보기 앱 키 자리 — env 가 있으면 그것, 아니면 기기 키 옆. 본 앱(알리는 쪽)과 보기 앱(쓰는 쪽)이 같은 자리를 본다.
+pub fn view_key_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(VIEW_KEY_PATH_ENV).filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    Some(default_key_path()?.with_file_name(VIEW_KEY_FILE))
+}
+
 pub fn default_key_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os(KEY_PATH_ENV).filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));

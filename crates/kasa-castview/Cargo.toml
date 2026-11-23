@@ -1,0 +1,21 @@
+[package]
+name = "kasa-castview"
+description = "Viewer side of the screen stream: decode worker, sound, input mapping and the HUD drawn over the frame. The app's screen tab and the standalone KasaDesk viewer share it."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kasa-cast = { workspace = true }
+kasa-cast-host = { workspace = true }
+kasa-gridview = { workspace = true }
+kasa-ime = { workspace = true }
+serde_json = { workspace = true }
+winit = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { workspace = true, features = ["NSEvent", "block2"] }
+block2 = { workspace = true }
+
+[lints]
+workspace = true

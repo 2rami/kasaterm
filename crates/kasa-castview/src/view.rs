@@ -6,11 +6,27 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-use kasa_remote::screen_stream::{self, Config, Event, Frame, Keyframes, Watch};
+use kasa_cast::{Config, Event, Frame, Keyframes, Watch};
 use serde_json::json;
 
-use super::platform::{Picture, VideoDecoder};
-use super::{contains, Layout, Surface};
+use crate::platform::{Picture, VideoDecoder};
+use crate::{contains, Layout, Surface};
+
+/// 길이 아직 없을 때 칸에 띄우는 글 — 보는 쪽이 어느 노드로 붙든 같다.
+pub const WAITING_PATH: &str = "카사넷 직통을 기다리는 중 — 길이 서면 바로 붙어요";
+/// 그 기기가 화면 스트림을 모르는 판.
+pub const OLD_SENDER: &str = "그 기기 카사텀이 화면 스트림을 모르는 판이에요 — 그 기기를 업데이트하면 보여요";
+
+/// 사건 받기 — 연결 스레드에서 불린다.
+pub type OnEvent = Box<dyn Fn(Event) + Send + Sync>;
+
+/// 어떻게 붙나. 어느 카사넷 노드(본 앱·보기 앱)로 이을지는 부르는 쪽 몫이다.
+pub enum Start {
+    /// 이 연결로 붙는다 — 설정과 사건 받기를 받아 `Watch` 를 돌려준다. 못 세우면(런타임이 없다 등) None.
+    Connect(Box<dyn FnOnce(Config, OnEvent) -> Option<Watch>>),
+    /// 아직 못 붙는다 — 칸에 띄울 까닭. 길이 서면 부르는 쪽이 다시 연다.
+    Wait(String),
+}
 
 /// GPU 에 넘긴 뒤 쥐고 있을 장 수 — 60fps 에서 50ms. 그려지는 동안 디코더가 그 버퍼에 다음 장을 풀지 않게.
 const HELD: usize = 3;
@@ -43,7 +59,7 @@ struct Shared {
 }
 
 
-pub(crate) struct ScreenView {
+pub struct ScreenView {
     pub label: String,
     shared: Arc<Shared>,
     watch: Option<Watch>,
@@ -79,15 +95,19 @@ pub(crate) struct ScreenView {
     /// 연결이 닫힌 때 — 보이는 동안 잠시 뒤 다시 붙는다(`pane.rs sync_screen_views`).
     pub closed_since: Option<std::time::Instant>,
     /// 그 기기 시스템 소리(`audio.rs`).
-    pub audio: super::audio::ViewAudio,
+    pub audio: crate::audio::ViewAudio,
+    /// 부르는 쪽이 HUD 에 더 얹은 단추를 그린 자리(`Style::extra` 차례) — 칠할 때 채운다.
+    pub extra: Vec<crate::Rect>,
 }
 
 impl ScreenView {
-    /// 그 기기(base) 화면을 본다. 새 장이 풀릴 때마다 `wake` 를 부른다 — GUI 를 깨워 다시 그리게.
-    /// 그 기기가 화면 스트림을 모르는 판이거나 카사넷 직통이 아니면 연결 없이 까닭만 들고 연다 — 칸은 그대로 두고
-    /// 길이 서면 다시 붙는다.
-    /// `fit` 은 이 기기가 그릴 수 있는 가장 큰 픽셀 크기 — 그 기기는 이 안에 들도록 줄여 보낸다.
-    pub(crate) fn open(label: &str, base: &str, fit: (u32, u32), display: Option<u32>, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
+    /// 그 기기 화면을 본다. 새 장이 풀릴 때마다 `wake` 를 부른다 — GUI 를 깨워 다시 그리게. `Start::Wait` 면 연결 없이 까닭만
+    /// 들고 연다 — 칸은 그대로 두고 길이 서면 부르는 쪽이 다시 연다. `fit` 은 이 기기가 그릴 수 있는 가장 큰 픽셀 크기 — 그 기기는
+    /// 이 안에 들도록 줄여 보낸다. `silent` 는 검증 리그 — 받은 소리를 장치로 내되 소리 없음으로 낸다.
+    pub fn open(label: &str, fit: (u32, u32), display: Option<u32>, silent: bool, start: Start, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
+        if !crate::SUPPORTED {
+            return None;
+        }
         let shared = Arc::new(Shared {
             latest: Mutex::new(None),
             serial: AtomicU64::new(0),
@@ -97,7 +117,7 @@ impl ScreenView {
             windows: AtomicBool::new(false),
             displays: Mutex::new((Vec::new(), None)),
         });
-        let audio = super::audio::ViewAudio::new(label);
+        let audio = crate::audio::ViewAudio::new(label, silent);
         let config = Config { codec: VideoDecoder::CODEC.into(), max_w: fit.0, max_h: fit.1, display, audio: audio.on, ..Config::default() };
         let (tx, rx) = mpsc::channel::<Incoming>();
         let keyframes: Arc<Mutex<Option<Keyframes>>> = Arc::new(Mutex::new(None));
@@ -141,16 +161,16 @@ impl ScreenView {
                 }
             }
         };
-        let watch = if kasa_device::kasanet::screen_capable(base) {
-            let watch = screen_stream::watch(base.to_string(), config.clone(), on)?;
-            *keyframes.lock().unwrap_or_else(|e| e.into_inner()) = Some(watch.keyframes());
-            Some(watch)
-        } else {
-            *shared.status.lock().unwrap_or_else(|e| e.into_inner()) = match kasa_device::kasanet::path(base) {
-                Some((p, _)) if p != "ssh" => "그 기기 카사텀이 화면 스트림을 모르는 판이에요 — 그 기기를 업데이트하면 보여요".into(),
-                _ => "카사넷 직통을 기다리는 중 — 길이 서면 바로 붙어요".into(),
-            };
-            None
+        let watch = match start {
+            Start::Connect(connect) => {
+                let watch = connect(config, Box::new(on))?;
+                *keyframes.lock().unwrap_or_else(|e| e.into_inner()) = Some(watch.keyframes());
+                Some(watch)
+            }
+            Start::Wait(why) => {
+                *shared.status.lock().unwrap_or_else(|e| e.into_inner()) = why;
+                None
+            }
         };
         let worker_shared = shared.clone();
         std::thread::Builder::new()
@@ -179,13 +199,14 @@ impl ScreenView {
             surface: Surface::Main,
             closed_since: None,
             audio,
+            extra: Vec::new(),
         };
         view.set_control(true);
         Some(view)
     }
 
     /// 조작을 켜면 그 기기 커서를 장에서 뺀다 — 이 기기 포인터가 곧 커서가 되어 영상 지연 없이 따라온다(Parsec 처럼).
-    pub(crate) fn set_control(&mut self, on: bool) {
+    pub fn set_control(&mut self, on: bool) {
         self.control = on;
         if let Some(w) = &self.watch {
             w.set_cursor_hidden(on);
@@ -193,18 +214,18 @@ impl ScreenView {
     }
 
     /// 「소리」 알약 — 이쪽 틀기를 멈추고 그 기기에도 그만 보내라고 알린다.
-    pub(crate) fn toggle_audio(&mut self) {
+    pub fn toggle_audio(&mut self) {
         let on = !self.audio.on;
         self.audio.set(on, self.watch.as_ref());
     }
 
     /// 연결이 없거나 닫혔다.
-    pub(crate) fn closed(&self) -> bool {
+    pub fn closed(&self) -> bool {
         self.watch.as_ref().is_none_or(Watch::is_closed)
     }
 
     /// 다시 붙을 때 이전 까닭을 이어 보인다 — 붙는 중 글로 덮으면 왜 안 되는지가 깜빡이며 사라진다.
-    pub(crate) fn carry_status(&self, previous: &str) {
+    pub fn carry_status(&self, previous: &str) {
         let mut status = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
         if *status == "카사넷으로 붙는 중" {
             *status = previous.to_string();
@@ -213,7 +234,7 @@ impl ScreenView {
 
     /// 지난번에 가져간 뒤 새로 풀린 장이 있으면 복사 없이 텍스처로 삼을 표면(macOS IOSurface·Windows D3D11 공유 핸들, 없으면
     /// null)·그 표면의 번호·크기를 내준다. 장은 `held` 에 쥔다.
-    pub(crate) fn new_surface(&mut self) -> Option<(*mut std::ffi::c_void, u64, u32, u32)> {
+    pub fn new_surface(&mut self) -> Option<(*mut std::ffi::c_void, u64, u32, u32)> {
         let serial = self.shared.serial.load(Ordering::Acquire);
         if serial == self.uploaded {
             return None;
@@ -223,7 +244,7 @@ impl ScreenView {
     }
 
     /// 새 장을 기다리지 않고 마지막 장을 다시 낸다 — 칸을 다른 창으로 옮겨 그 창 렌더러가 아직 장을 안 가졌을 때.
-    pub(crate) fn current_surface(&mut self) -> Option<(*mut std::ffi::c_void, u64, u32, u32)> {
+    pub fn current_surface(&mut self) -> Option<(*mut std::ffi::c_void, u64, u32, u32)> {
         if self.uploaded == 0 {
             return None;
         }
@@ -243,54 +264,54 @@ impl ScreenView {
     }
 
     /// 마지막 장을 BGRA 바이트(가로·세로·줄 간격)로 — 표면을 텍스처로 못 삼을 때.
-    pub(crate) fn copy_latest(&self, f: impl FnOnce(&[u8], u32, u32, u32)) {
+    pub fn copy_latest(&self, f: impl FnOnce(&[u8], u32, u32, u32)) {
         if let Some(px) = self.held.back() {
             px.with_bgra(f);
         }
     }
 
-    pub(crate) fn note_upload(&mut self, took: std::time::Duration, zero_copy: bool) {
+    pub fn note_upload(&mut self, took: std::time::Duration, zero_copy: bool) {
         self.upload_ms = took.as_secs_f64() * 1000.0;
         self.uploads += 1;
         self.zero_copy = zero_copy;
-        super::platform::zero_copy_result(zero_copy);
+        crate::platform::zero_copy_result(zero_copy);
     }
 
-    pub(crate) fn has_new_frame(&self) -> bool {
+    pub fn has_new_frame(&self) -> bool {
         self.shared.serial.load(Ordering::Acquire) != self.uploaded
     }
 
-    pub(crate) fn has_frame(&self) -> bool {
+    pub fn has_frame(&self) -> bool {
         self.uploaded != 0
     }
 
-    pub(crate) fn frame_size(&self) -> (u32, u32) {
+    pub fn frame_size(&self) -> (u32, u32) {
         self.frame
     }
 
-    pub(crate) fn input_note(&self) -> Option<String> {
+    pub fn input_note(&self) -> Option<String> {
         self.shared.input_note.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    pub(crate) fn on_toggle(&self, p: (f64, f64)) -> bool {
+    pub fn on_toggle(&self, p: (f64, f64)) -> bool {
         self.layout.is_some_and(|l| contains(l.toggle, p))
     }
 
-    pub(crate) fn on_image(&self, p: (f64, f64)) -> bool {
+    pub fn on_image(&self, p: (f64, f64)) -> bool {
         self.layout.is_some_and(|l| contains(l.image, p))
     }
 
-    pub(crate) fn on_key_button(&self, p: (f64, f64)) -> bool {
+    pub fn on_key_button(&self, p: (f64, f64)) -> bool {
         self.layout.and_then(|l| l.key_button).is_some_and(|r| contains(r, p))
     }
 
     /// 열린 키 메뉴에서 `p` 의 줄.
-    pub(crate) fn key_row_at(&self, p: (f64, f64)) -> Option<usize> {
+    pub fn key_row_at(&self, p: (f64, f64)) -> Option<usize> {
         self.key_menu.as_ref()?.iter().find(|(r, _)| contains(*r, p)).map(|(_, i)| *i)
     }
 
     /// 화면 고르기 — (지금 몇 번째, 모두 몇 개, 다음 화면 번호). 하나뿐이면 없다.
-    pub(crate) fn display_cycle(&self) -> Option<(usize, usize, u32)> {
+    pub fn display_cycle(&self) -> Option<(usize, usize, u32)> {
         let (ids, now) = self.shared.displays.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if ids.len() < 2 {
             return None;
@@ -299,22 +320,22 @@ impl ScreenView {
         Some((at + 1, ids.len(), ids[(at + 1) % ids.len()]))
     }
 
-    pub(crate) fn on_display_chip(&self, p: (f64, f64)) -> bool {
+    pub fn on_display_chip(&self, p: (f64, f64)) -> bool {
         self.layout.and_then(|l| l.display_chip).is_some_and(|r| contains(r, p))
     }
 
-    pub(crate) fn remote_windows(&self) -> bool {
+    pub fn remote_windows(&self) -> bool {
         self.shared.windows.load(Ordering::Relaxed)
     }
 
     /// 맥에서 Windows 를 조작하나 — 그러면 글이 아니라 누른 키 자리를 보낸다(`input.rs screen_raw_key`). 한글은 그 기기
     /// 입력기가 조합하고, 글자로 넣는 유니코드는 게임처럼 키보드를 직접 읽는 앱이 못 받는다.
-    pub(crate) fn raw_keys(&self) -> bool {
+    pub fn raw_keys(&self) -> bool {
         cfg!(target_os = "macos") && self.remote_windows()
     }
 
     /// 이 기기 키보드로 못 보내는 키 — (메뉴 글, 키, 손가락). 손가락은 그 기기 것 그대로다(`remote_mods` 를 안 거친다).
-    pub(crate) fn special_keys(&self) -> &'static [(&'static str, &'static str, u8)] {
+    pub fn special_keys(&self) -> &'static [(&'static str, &'static str, u8)] {
         if self.remote_windows() {
             &[
                 ("Ctrl+Alt+Del", "Delete", 2 | 4),
@@ -330,7 +351,7 @@ impl ScreenView {
 
     /// 이 기기 손가락(1 shift·2 control·4 option·8 command)을 그 기기 것으로 — 맥에서 Windows 를 볼 때는 키보드 자리대로
     /// ⌘ 가 Alt, ⌥ 가 Windows 키다(2026-11-19 「커맨드가 알트, 옵션이 윈도우」). 맥의 Ctrl 은 그대로 Ctrl 이다.
-    pub(crate) fn remote_mods(&self, mods: u8) -> u8 {
+    pub fn remote_mods(&self, mods: u8) -> u8 {
         if cfg!(target_os = "macos") && self.remote_windows() {
             windows_mods(mods)
         } else {
@@ -338,7 +359,7 @@ impl ScreenView {
         }
     }
 
-    pub(crate) fn on_zoom_chip(&self, p: (f64, f64)) -> bool {
+    pub fn on_zoom_chip(&self, p: (f64, f64)) -> bool {
         self.layout.and_then(|l| l.zoom_chip).is_some_and(|r| contains(r, p))
     }
 
@@ -355,9 +376,9 @@ impl ScreenView {
     }
 
     /// `p` 아래 장 자리를 그대로 둔 채 배율을 `factor` 배로. 칸 밖이면 가운데를 축으로.
-    pub(crate) fn zoom_by(&mut self, p: Option<(f64, f64)>, factor: f32) {
+    pub fn zoom_by(&mut self, p: Option<(f64, f64)>, factor: f32) {
         let Some(l) = self.layout else { return };
-        let zoom = (self.zoom * factor).clamp(1.0, super::MAX_ZOOM);
+        let zoom = (self.zoom * factor).clamp(1.0, crate::MAX_ZOOM);
         let center = (f64::from(l.slot.0 + l.slot.2 / 2.0), f64::from(l.slot.1 + l.slot.3 / 2.0));
         let p = p.filter(|p| contains(l.slot, *p)).unwrap_or(center);
         let Some(under) = self.at(p) else { return };
@@ -365,21 +386,21 @@ impl ScreenView {
         let scale = f64::from((l.slot.2 / l.frame.0.max(1) as f32).min(l.slot.3 / l.frame.1.max(1) as f32) * zoom);
         let focus = (under.0 - (p.0 - center.0) / scale / fw, under.1 - (p.1 - center.1) / scale / fh);
         self.zoom = zoom;
-        self.focus = super::clamp_focus(l.slot, l.frame, zoom, focus);
+        self.focus = crate::clamp_focus(l.slot, l.frame, zoom, focus);
     }
 
     /// 확대한 장을 칸 위 px 만큼 민다(휠·끌기와 같은 쪽 — 내용이 손가락을 따라온다).
-    pub(crate) fn pan_by(&mut self, dx: f64, dy: f64) {
+    pub fn pan_by(&mut self, dx: f64, dy: f64) {
         let Some(l) = self.layout else { return };
         let scale = f64::from((l.slot.2 / l.frame.0.max(1) as f32).min(l.slot.3 / l.frame.1.max(1) as f32) * self.zoom);
         let focus = (
             self.focus.0 - dx / scale / f64::from(l.frame.0.max(1)),
             self.focus.1 - dy / scale / f64::from(l.frame.1.max(1)),
         );
-        self.focus = super::clamp_focus(l.slot, l.frame, self.zoom, focus);
+        self.focus = crate::clamp_focus(l.slot, l.frame, self.zoom, focus);
     }
 
-    pub(crate) fn zoom_reset(&mut self) {
+    pub fn zoom_reset(&mut self) {
         self.zoom = 1.0;
         self.focus = (0.5, 0.5);
     }
@@ -391,36 +412,36 @@ impl ScreenView {
     }
 
     /// 단추 상태 통째(1 왼쪽·2 오른쪽·4 가운데) — 그 기기가 직전 상태와 견줘 누름·뗌·끌기를 가른다.
-    pub(crate) fn pointer(&mut self, p: (f64, f64), buttons: u8, mods: u8) {
+    pub fn pointer(&mut self, p: (f64, f64), buttons: u8, mods: u8) {
         let Some((x, y)) = self.at(p) else { return };
         self.buttons = buttons;
         self.send(json!({ "t": "pointer", "x": x, "y": y, "b": buttons, "m": mods }));
     }
 
     /// 양수 dy 는 위로 굴림(내용이 내려온다) — 그 기기 화면 포인트 단위.
-    pub(crate) fn scroll(&self, p: (f64, f64), dx: f64, dy: f64) {
+    pub fn scroll(&self, p: (f64, f64), dx: f64, dy: f64) {
         let Some((x, y)) = self.at(p) else { return };
         self.send(json!({ "t": "scroll", "x": x, "y": y, "dx": dx.round() as i64, "dy": dy.round() as i64 }));
     }
 
     /// 이름 붙은 키(웹 `KeyboardEvent.code`)를 눌렀다 뗀다.
-    pub(crate) fn key(&self, code: &str, mods: u8) {
+    pub fn key(&self, code: &str, mods: u8) {
         self.send(json!({ "t": "key", "k": code, "m": mods }));
     }
 
     /// 이 기기 입력기가 조합을 끝낸 글 — 그 기기 입력기를 다시 거치지 않게 글자째 넣는다.
-    pub(crate) fn text(&self, s: &str) {
+    pub fn text(&self, s: &str) {
         if !s.is_empty() {
             self.send(json!({ "t": "text", "s": s }));
         }
     }
 
-    pub(crate) fn status(&self) -> String {
+    pub fn status(&self) -> String {
         self.shared.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 칸 위 작은 표시 — `60fps · 24ms · 직통`.
-    pub(crate) fn hud(&self) -> String {
+    pub fn hud(&self) -> String {
         let s = self.shared.stats.lock().unwrap_or_else(|e| e.into_inner());
         let mut lat: Vec<f64> = s.window.iter().map(|w| w.1).collect();
         lat.sort_by(|a, b| a.total_cmp(b));
@@ -461,7 +482,7 @@ fn closed_text(why: &str) -> String {
     if let Some(reason) = why.strip_prefix("거절: ") {
         denied_text(reason).into()
     } else if why.contains("직통도 믿는 중계도 아니다") || why.contains("이은 길이 없다") {
-        "카사넷 직통을 기다리는 중 — 길이 서면 바로 붙어요".into()
+        WAITING_PATH.into()
     } else if why.contains("주소를 아직 모른다") {
         "그 기기를 찾는 중".into()
     } else {
@@ -538,7 +559,7 @@ fn decode_loop(
                 }
             }
             asked_key = false;
-            let t_done = screen_stream::now();
+            let t_done = kasa_cast::now();
             if last_cap != Some(f.frame.cap_id) {
                 last_cap = Some(f.frame.cap_id);
                 let latency = ((t_done + f.offset) - f.frame.t_cap) * 1000.0;
@@ -550,7 +571,7 @@ fn decode_loop(
         }
         if decoded {
             shared.serial.fetch_add(1, Ordering::Release);
-            let now = screen_stream::now();
+            let now = kasa_cast::now();
             let mut s = shared.stats.lock().unwrap_or_else(|e| e.into_inner());
             while s.window.front().is_some_and(|w| now - w.0 > 1.0) {
                 s.window.pop_front();

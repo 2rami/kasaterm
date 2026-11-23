@@ -119,8 +119,11 @@
   자리는 `kasa-remote/src/screen_stream.rs`(입구·`serve_ws`·base 로 보기)·`kasa-device/src/kasanet.rs`(입구 `SCREEN_ALPN`·`connect`·`screen_capable`).
   OS 부분은 `crates/kasa-cast-host`(macOS: `capture.rs` SCK·`codec.rs` VT 압축·풀기·`host.rs` 보내는 세션과 정지 화면 다듬기·`scroll_probe.rs` 검증 스크롤;
   Windows: `win.rs` DXGI 복제(입력 데스크톱 따라가기)·MF 하드웨어 압축·`win_agent.rs` SYSTEM 화면 도우미 서비스와 파이프(UAC·잠금 화면, 설치기 `wix/main.wxs` 가 서비스 등록)·`win_view.rs` MF 풀기와 D3D11
-  공유 텍스처·`annexb.rs` Annex-B↔길이 머리 NAL; 소리 `audio*.rs`·스피커 끄기 `source_mute.rs`). 앱 `screen_stream/` 은 보는 칸이다 — `view.rs` 풀기 일꾼·`pane.rs` 화면 칸 여닫기·그리기·
-  `input.rs` 조작(누름·휠·키·한글·⌘V)·`window.rs` 별도 창·`audio.rs` 「소리」 알약, 칸 들여오기는 `GpuRenderer::set_image_d3d11`). 폰은 `/screen/ws` 영상 방식(`screen_stream::serve_ws`)을
+  공유 텍스처·`annexb.rs` Annex-B↔길이 머리 NAL; 소리 `audio*.rs`·스피커 끄기 `source_mute.rs`). 보기 하나는 `crates/kasa-castview` 다 — `view.rs` 풀기 일꾼·
+  `input.rs` 조작 판정(누름·휠·키·한글·맥→Windows 키 자리)·`paint.rs` 장·「조작」·HUD·키 메뉴(글자는 `Canvas`)·`audio.rs` 「소리」 알약. 본 앱 `screen_stream/` 은
+  그것을 칸 탭으로 쓴다 — `pane.rs` 화면 칸 여닫기·`input.rs` 어느 보기로 갈지·`window.rs` 별도 창·`desk.rs` 「화면 보기」를 보기 앱으로 넘기기. 따로 띄우는
+  보기 앱은 `app/kasadesk`(KasaDesk — `net.rs` 보기 앱 키 노드·`roster.rs` 본 앱 명부와 지난 명부·`desk.rs` 창과 고르기·`ipc.rs` 하나만 띄우기·`rig.rs` 리그 손잡이,
+  [screen-service-split.md](screen-service-split.md) 「보기 앱」). 폰은 `/screen/ws` 영상 방식(`screen_stream::serve_ws`)을
   `mobile/lib/screen_video.dart`·`ios/Runner/ScreenVideo.swift`(VT 풀기 → `FlutterTexture`)로 본다. 칸 탭은
   `PaneContent::Screen`, 연결은 `App.screen_views`. 계약·실측 [screen-stream.md](screen-stream.md)
 - `kasa-wire/src/terminal_wire.rs` — PC 터미널 미러의 협상된 무손실 압축·64KiB 해제 상한. `http/socket.rs`가 보내고 `remote.rs`가 VT 파서 앞에서 푼다. 구판 연결은 원문 바이트를 유지한다.

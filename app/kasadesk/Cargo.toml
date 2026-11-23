@@ -1,0 +1,30 @@
+[package]
+name = "kasadesk"
+description = "KasaDesk: a standalone viewer for another machine's screen over kasanet. It keeps the picture while the kasaterm app restarts."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+arboard = { workspace = true }
+kasa-cast = { workspace = true }
+kasa-castview = { workspace = true }
+kasa-gridview = { workspace = true }
+kasa-ime = { workspace = true }
+kasa-net = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+winit = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }
+
+[lints]
+workspace = true

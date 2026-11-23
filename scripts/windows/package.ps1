@@ -151,13 +151,15 @@ if (-not $SkipBuild) {
     Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasa-socket", "--bin", "kasaterm-cli")
     Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasa-acp", "--bin", "kasa-acp")
     Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasaterm-screen")
+    Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasadesk")
 }
 
 $appExe = Join-Path $releaseRoot "kasaterm.exe"
 $cliExe = Join-Path $releaseRoot "kasaterm-cli.exe"
 $acpExe = Join-Path $releaseRoot "kasa-acp.exe"
 $screenExe = Join-Path $releaseRoot "kasaterm-screen.exe"
-foreach ($artifact in @($appExe, $cliExe, $acpExe, $screenExe)) {
+$deskExe = Join-Path $releaseRoot "kasadesk.exe"
+foreach ($artifact in @($appExe, $cliExe, $acpExe, $screenExe, $deskExe)) {
     if (-not (Test-Path -LiteralPath $artifact)) {
         throw "build artifact is missing: $artifact"
     }
@@ -276,7 +278,7 @@ Invoke-External -FilePath $lightExe -ArgumentList @(
 )
 
 $portableStage = Reset-Directory -Path (Join-Path $workRoot "portable\kasaterm") -AllowedRoot $targetRoot
-Copy-Item -LiteralPath $appExe, $cliExe, $acpExe -Destination $portableStage -Force
+Copy-Item -LiteralPath $appExe, $cliExe, $acpExe, $deskExe -Destination $portableStage -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\kasaterm\wix\License.rtf") -Destination $portableStage -Force
 $portableFonts = Join-Path $portableStage "fonts"
 New-Item -ItemType Directory -Path $portableFonts -Force | Out-Null
@@ -302,7 +304,7 @@ Invoke-External -FilePath $darkExe -ArgumentList @(
     "-nologo", "-x", $verifyFiles, "-o", $verifyWxs, $msiPath
 )
 $requiredFiles = @(
-    "kasaterm.exe", "kasaterm-cli.exe", "kasa-acp.exe", "conpty.dll", "OpenConsole.exe", "index.html",
+    "kasaterm.exe", "kasaterm-cli.exe", "kasa-acp.exe", "kasadesk.exe", "conpty.dll", "OpenConsole.exe", "index.html",
     "characters.json", "kasacollab.py",
     "NotoSansKR-Variable.ttf", "OFL-NotoSansKR.txt", "OFL-D2Coding.txt"
 )

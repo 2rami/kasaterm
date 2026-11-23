@@ -60,6 +60,7 @@ kasa-device.workspace = true
 kasa-backend.workspace = true
 kasa-cast.workspace = true
 kasa-cast-host.workspace = true
+kasa-castview.workspace = true
 kasa-remote.workspace = true
 kasa-students.workspace = true
 kasa-git.workspace = true

@@ -27,7 +27,8 @@ DEVID = "Developer ID Application: "
 WORKFLOW_MARKERS = ("Verify locally signed DMG", "source=Notarized Developer ID", "stapler validate", "VERIFIED_SHA")
 # build-app.sh 의 KASATERM_SIGN_HARDENED=1 이 하나씩 서명하는 자리(안쪽부터). 이 밖의 Mach-O 는 공증에서 거절된다.
 HARDENED_SIGNED = ("Contents/Frameworks/Sparkle.framework", "Contents/MacOS/kasaterm-cli", "Contents/MacOS/kasa-acp",
-                   "Contents/MacOS/kasaterm", "Contents/Library/LoginItems/KasatermScreen.app")
+                   "Contents/MacOS/kasaterm", "Contents/Library/LoginItems/KasatermScreen.app",
+                   "Contents/Applications/KasaDesk.app")
 _MACHO = {b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 _RUNTIME = 0x10000
 

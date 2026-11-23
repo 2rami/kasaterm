@@ -335,6 +335,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_empty_redirect_opens_no_port() {
+        let server = FwdServer::new(DEFAULT_PORTS);
+        let viewer = iroh::SecretKey::generate().public();
+        let machine = iroh::SecretKey::generate().public();
+        server.redirect(viewer, []);
+        assert!(DEFAULT_PORTS.iter().all(|p| server.target(&viewer, true, *p).is_none()), "보기 전용 id 는 어느 포트도 못 연다");
+        assert_eq!(server.target(&machine, false, 8765), Some(8765), "다른 기기는 그대로");
+    }
+
+    #[test]
     fn a_stream_is_bulk_only_while_it_keeps_sending_a_lot() {
         let start = Instant::now();
         let mut meter = BulkMeter::new(start);

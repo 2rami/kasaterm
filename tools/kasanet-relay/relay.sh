@@ -121,10 +121,16 @@ def kid(v):
 def sid(v):
     return (((v or {}).get("kasanet") or {}).get("screen_node") or {}).get("id")
 
+# 보기 앱(docs/screen-service-split.md 「보기 앱」) — 그 기기 보기 앱 자기 키(`allow <id> <기기>-view`).
+def vid(v):
+    return ((v or {}).get("kasanet") or {}).get("view_id")
+
 def show(name, v):
     print(f"{name}: {kid(v) or '꺼짐·옛 판·안 닿음'}")
     if sid(v):
         print(f"{name} 화면 서비스: {sid(v)}")
+    if vid(v):
+        print(f"{name} 보기 앱: {vid(v)}")
 
 show("이 맥", get('http://127.0.0.1:8765/version'))
 ms = get("http://127.0.0.1:8765/machines") or []

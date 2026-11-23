@@ -47,6 +47,8 @@ struct Node {
     bases: Mutex<HashMap<String, (EndpointId, bool)>>,
     /// base → 그 기기 화면 서비스 노드와의 길(`/version` 의 `screen_node`). 앱이 다시 떠도 이 길의 화면은 이어진다.
     screens: Mutex<HashMap<String, Link>>,
+    /// base → 그 기기 보기 앱 id(`/version` 의 `view_id`). 화면만 받고 포트는 하나도 못 연다(`docs/screen-service-split.md` 「보기 앱」).
+    views: Mutex<HashMap<String, EndpointId>>,
     /// 등록된 폰 → 수명이 끝나는 때.
     phones: Mutex<HashMap<EndpointId, Instant>>,
 }
@@ -82,6 +84,7 @@ impl ProtocolHandler for ScreenAccept {
         let known = NODE.get().is_some_and(|n| {
             n.links.lock().is_ok_and(|l| l.contains_key(&peer))
                 || n.phones.lock().is_ok_and(|p| p.contains_key(&peer))
+                || n.views.lock().is_ok_and(|v| v.values().any(|id| *id == peer))
         });
         match SCREEN.get() {
             Some(handler) if known => handler(conn).await,
@@ -182,6 +185,7 @@ pub async fn start(mcp_port: u16) {
         routes: Mutex::new(HashMap::new()),
         bases: Mutex::new(HashMap::new()),
         screens: Mutex::new(HashMap::new()),
+        views: Mutex::new(HashMap::new()),
         phones: Mutex::new(HashMap::new()),
     };
     if NODE.set(node).is_err() {
@@ -237,6 +241,25 @@ pub fn set_screen_node(node: Option<Value>) {
     *SCREEN_NODE.lock().unwrap_or_else(|e| e.into_inner()) = node;
 }
 
+/// 이 기기 보기 앱의 id — 보기 앱 키(`identity::view_key_path`)를 없으면 만들어 읽는다. 처음 띄우기 전부터 알려야 다른 기기가 미리
+/// 허용해 둔다. 격리 인스턴스는 보기 앱 키 자리를 따로 줬을 때만(본판 보기 앱 id 를 알리지 않게).
+fn local_view_id() -> Option<EndpointId> {
+    static VIEW_ID: OnceLock<Option<EndpointId>> = OnceLock::new();
+    *VIEW_ID.get_or_init(|| {
+        let own_path = std::env::var_os(identity::VIEW_KEY_PATH_ENV).is_some_and(|p| !p.is_empty());
+        if cfg!(any(test, feature = "test-isolation")) || (!own_path && std::env::var_os(identity::KEY_PATH_ENV).is_none() && isolated()) {
+            return None;
+        }
+        match identity::load_or_create(&identity::view_key_path()?) {
+            Ok(key) => Some(key.public()),
+            Err(e) => {
+                eprintln!("[kasanet] 보기 앱 키를 못 읽어 알리지 않는다: {e}");
+                None
+            }
+        }
+    })
+}
+
 /// `/version` 에 싣는 이 기기의 카사넷 주소. 엔드포인트가 없으면 None — 옛 판과 같은 모양이 된다.
 pub fn info() -> Option<Value> {
     let n = NODE.get()?;
@@ -251,14 +274,20 @@ pub fn info() -> Option<Value> {
     if let Some(node) = SCREEN_NODE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         v["screen_node"] = node;
     }
+    if let Some(id) = local_view_id() {
+        v["view_id"] = id.to_string().into();
+    }
     Some(v)
 }
 
-/// 화면 서비스가 받을 보는 쪽 — 명부로 배운 기기 id 와 등록된 주인 폰 id·만료(유닉스 초). 앱의 입구(`ScreenAccept`)와 같은 범위다.
+/// 화면 서비스가 받을 보는 쪽 — 명부로 배운 기기 id·그 기기 보기 앱 id 와 등록된 주인 폰 id·만료(유닉스 초). 앱의 입구
+/// (`ScreenAccept`)와 같은 범위다. 서비스 노드는 화면만 받으니 보기 앱 id 를 기기와 같은 줄에 넣는다.
 pub fn screen_viewers() -> (Vec<String>, Vec<(String, u64)>) {
     let Some(n) = NODE.get() else { return (Vec::new(), Vec::new()) };
     let mut machines: Vec<String> = n.links.lock().map(|l| l.keys().map(|id| id.to_string()).collect()).unwrap_or_default();
+    machines.extend(n.views.lock().map(|v| v.values().map(|id| id.to_string()).collect::<Vec<_>>()).unwrap_or_default());
     machines.sort();
+    machines.dedup();
     let now = Instant::now();
     let unix = unix_now();
     let mut phones: Vec<(String, u64)> = n
@@ -352,6 +381,7 @@ pub fn learn(base: &str, kasanet: &Value) {
         bases.insert(key(base), (link.id(), screen));
     }
     learn_screen_node(n, base, kasanet.get("screen_node"));
+    learn_view(n, base, kasanet.get("view_id"));
     if fresh {
         eprintln!(
             "[kasanet] {base} = {} 허용·연결 시작",
@@ -385,6 +415,46 @@ fn learn_screen_node(n: &Node, base: &str, node: Option<&Value>) {
             screens.remove(&key(base));
         }
     }
+}
+
+/// 그 base 의 보기 앱 id 를 배운다 — 기기 id 와 같은 근거(루프백 base 로 물은 `/version`)로 믿되 화면만 내준다.
+fn learn_view(n: &Node, base: &str, id: Option<&Value>) {
+    let id = id
+        .and_then(Value::as_str)
+        .and_then(|s| EndpointId::from_str(s.trim()).ok())
+        .filter(|id| *id != n.endpoint.id())
+        .filter(|id| !n.links.lock().is_ok_and(|l| l.contains_key(id)) && !n.phones.lock().is_ok_and(|p| p.contains_key(id)));
+    let Ok(mut views) = n.views.lock() else { return };
+    if let Some(id) = apply_view(&mut views, &n.allow, &n.fwd, base, id) {
+        eprintln!("[kasanet] {base} 보기 앱 {} 허용 — 화면만", id.fmt_short());
+    }
+}
+
+/// 보기 앱 표 한 칸을 바꾼다. 포트 돌리기(빈 표 — 어느 포트도 못 연다)를 허용 목록보다 먼저 건다 — 먼저 들면 그 틈에 붙은
+/// 연결이 HTTP 포트로 샌다. 다른 base 가 같은 id 를 쥐고 있지 않으면 옛 id 는 걷는다. 새로 든 id 를 돌려준다.
+fn apply_view(
+    views: &mut HashMap<String, EndpointId>,
+    allow: &AllowList,
+    fwd: &FwdServer,
+    base: &str,
+    id: Option<EndpointId>,
+) -> Option<EndpointId> {
+    let before = views.get(&key(base)).copied();
+    if before == id {
+        return None;
+    }
+    if let Some(old) = before {
+        views.remove(&key(base));
+        if !views.values().any(|v| *v == old) {
+            allow.remove(&old);
+            fwd.forget(&old);
+        }
+    }
+    let id = id?;
+    fwd.redirect(id, []);
+    allow.insert(id);
+    views.insert(key(base), id);
+    Some(id)
 }
 
 /// 배운 화면 서비스 노드를 키 옆에 남긴다 — 그 기기 앱이 꺼져 `/version` 이 안 와도(앱을 안 띄운 맥미니·앱 재시작 중) 다음 실행이
@@ -439,7 +509,10 @@ pub fn allow_phone(id: &str) -> Result<Duration, &'static str> {
     let ingress = *PHONE_INGRESS.get().ok_or("phone_ingress_off")?;
     let id = EndpointId::from_str(id.trim()).map_err(|_| "bad_id")?;
     // 기기로 배운 id 를 폰으로 덮으면 그 기기의 거울 길이 폰 입구로 돌아가 버린다.
-    if id == n.endpoint.id() || n.links.lock().is_ok_and(|l| l.contains_key(&id)) {
+    if id == n.endpoint.id()
+        || n.links.lock().is_ok_and(|l| l.contains_key(&id))
+        || n.views.lock().is_ok_and(|v| v.values().any(|view| *view == id))
+    {
         return Err("id_taken");
     }
     // 돌리기를 먼저 건다 — 허용 목록에 먼저 들면 그 틈에 붙은 연결이 HTTP 포트로 샌다.
@@ -659,6 +732,23 @@ pub fn path(base: &str) -> Option<(&'static str, Option<u64>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_app_id_is_allowed_for_screens_only_and_swapped_cleanly() {
+        let (allow, fwd) = (AllowList::default(), FwdServer::new([8765, 8777]));
+        let mut views = HashMap::new();
+        let (a, b) = (SecretKey::generate().public(), SecretKey::generate().public());
+        assert_eq!(apply_view(&mut views, &allow, &fwd, "http://127.0.0.1:18795", Some(a)), Some(a));
+        assert!(allow.contains(&a));
+        assert_eq!(apply_view(&mut views, &allow, &fwd, "http://127.0.0.1:18795/", Some(a)), None, "같은 id 는 그대로");
+        assert_eq!(apply_view(&mut views, &allow, &fwd, "http://127.0.0.1:18795", Some(b)), Some(b));
+        assert!(!allow.contains(&a) && allow.contains(&b), "키를 갈면 옛 id 는 걷는다");
+        assert_eq!(apply_view(&mut views, &allow, &fwd, "http://127.0.0.1:18796", Some(b)), Some(b));
+        apply_view(&mut views, &allow, &fwd, "http://127.0.0.1:18795", None);
+        assert!(allow.contains(&b), "다른 기기 칸이 같은 id 를 쥐고 있으면 남긴다");
+        apply_view(&mut views, &allow, &fwd, "http://127.0.0.1:18796", None);
+        assert!(!allow.contains(&b) && views.is_empty());
+    }
 
     #[test]
     fn only_loopback_bases_are_trusted() {

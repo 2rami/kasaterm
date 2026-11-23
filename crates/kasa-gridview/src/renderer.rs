@@ -695,6 +695,45 @@ impl GridRenderer {
 
     // One analytic shape avoids rounded-quad seams at fractional UI scales and
     // keeps geometry cost independent of the corner radius and display scale.
+    /// 격자 글꼴(font=0)로 그린 글 한 줄 — 크롬 글꼴이 따로 없는 호스트(보기 앱)의 단추·상태 글. 그린 폭(LOGICAL px)을 돌려준다.
+    pub fn draw_label(&mut self, x: f32, y: f32, text: &str, size: f32, rgba_u8: [u8; 4]) -> f32 {
+        self.label(Some((x, y, rgba_u8)), text, size)
+    }
+
+    /// [`draw_label`](Self::draw_label) 이 그릴 폭(LOGICAL px).
+    pub fn measure_label(&mut self, text: &str, size: f32) -> f32 {
+        self.label(None, text, size)
+    }
+
+    fn label(&mut self, at: Option<(f32, f32, [u8; 4])>, text: &str, size: f32) -> f32 {
+        let s = self.scale;
+        let size_px = (size * s).round().max(1.0) as u32;
+        let space = self.shaper.cell_advance(size_px as f32);
+        let origin = at.map_or(0.0, |(x, _, _)| x * s);
+        let baseline = at.map_or(0.0, |(_, y, _)| y * s + size_px as f32 * 0.78);
+        let fg = at.map(|(_, _, c)| srgb_rgba_to_linear(c));
+        let mut pen = origin;
+        for ch in text.chars() {
+            if ch == ' ' {
+                pen += space;
+                continue;
+            }
+            let key = GlyphKey { ch, bold: false, italic: false, size_px, font: 0 };
+            let Some(entry) = self.atlas.get_or_bake(&self.device, &self.queue, &mut self.shaper, key) else { continue };
+            if let Some(fg_rgba) = fg.filter(|_| entry.px_w > 0 && entry.px_h > 0) {
+                self.chrome.push(CellInstance {
+                    cell_px: [pen + entry.bearing_x as f32, baseline - entry.bearing_y as f32, entry.px_w as f32, entry.px_h as f32],
+                    uv_min: entry.uv_min,
+                    uv_max: entry.uv_max,
+                    fg_rgba,
+                    ..Default::default()
+                });
+            }
+            pen += pen_step(ch, entry.advance, size_px as f32);
+        }
+        (pen - origin) / s
+    }
+
     pub fn round_rect_fill(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
         self.rounded_shape((x, y, w, h), r, 0.0, col);
     }
@@ -2642,6 +2681,16 @@ pub fn cell_cols(text: &str) -> usize {
     text.chars()
         .map(|c| 1 + usize::from(is_wide_char(c)))
         .sum()
+}
+
+/// 비례 배치 글에서 글자 하나가 펜을 미는 거리(px) — 넓은 글자(CJK)는 전각 한 칸(1em) 고정이다. 글자마다 잉크 폭으로 좁히면
+/// 잉크가 좁은 글자 뒤는 붙고 넓은 글자 뒤는 떠서 낱말이 제멋대로 끊겨 보인다(「개인사이오닉」이 `개인사 이오 닉`).
+pub fn pen_step(ch: char, advance: f32, size_px: f32) -> f32 {
+    if is_wide_char(ch) {
+        size_px
+    } else {
+        advance
+    }
 }
 
 pub fn is_wide_char(ch: char) -> bool {

@@ -799,11 +799,7 @@ impl GpuRenderer {
     /// 실측 버그가 정확히 그것이었다(측정 쪽만 폰트 원시 advance 를 썼다).
     /// `measure_chrome_text` 도 이 함수를 부른다.
     fn pen_step(ch: char, _px_w: f32, advance: f32, size_px: f32) -> f32 {
-        if is_wide_char(ch) {
-            size_px
-        } else {
-            advance
-        }
+        kasa_gridview::renderer::pen_step(ch, advance, size_px)
     }
 
     /// `draw_text` 가 이 글자에서 펜을 미는 거리(논리 px).

@@ -1,13 +1,14 @@
-//! 화면 칸 소리 — 그 기기 시스템 소리를 칸에서 튼다(`docs/screen-stream.md` 「S4 소리」). 틀·허브·지터 버퍼는
-//! `kasa_cast::audio`, OS 의 뜨기·틀기는 `kasa_cast_host::audio`, 여기는 칸의 「소리」 알약과 출력을 잇는다.
+//! 보기 소리 — 그 기기 시스템 소리를 튼다(`docs/screen-stream.md` 「S4 소리」). 틀·허브·지터 버퍼는
+//! `kasa_cast::audio`, OS 의 뜨기·틀기는 `kasa_cast_host::audio`, 여기는 「소리」 알약과 출력을 잇는다.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kasa_remote::screen_stream::audio::{Chunk, Jitter};
-use kasa_remote::screen_stream::Watch;
+use kasa_cast::audio::{Chunk, Jitter};
+use kasa_cast::Watch;
 
-use super::{contains, Rect};
+use crate::platform::Output;
+use crate::{contains, Rect};
 
 /// 이 앱이 떠 있는 동안 소리를 끈 기기 — 칸을 넘겼다 돌아와 다시 붙어도 꺼진 채로 둔다.
 static MUTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -24,16 +25,13 @@ fn remember(label: &str, on: bool) {
     }
 }
 
-/// 검증 리그는 받은 소리를 장치로 내되 소리 없음으로 낸다 — 같은 맥 리그 둘이면 보는 쪽이 튼 소리를 보내는 쪽이 다시
-/// 떠 되먹임이 돈다(보내는 쪽은 제 소리만 뺀다). 사람 귀에도 두 번 들리지 않는다.
-fn silent() -> bool {
-    crate::verification_run() && std::env::var_os("KASATERM_TEST_SCREEN_AUDIO_SILENT").is_some()
-}
-
 /// 칸 하나의 소리. 받은 덩이를 지터 버퍼에 모으고, 첫 덩이가 오면 OS 출력을 열어 거기서 꺼내 튼다.
-pub(crate) struct Player {
+pub struct Player {
     jitter: Arc<Mutex<Jitter>>,
-    output: Mutex<Option<kasa_cast_host::audio::Output>>,
+    output: Mutex<Option<Output>>,
+    /// 검증 리그는 받은 소리를 장치로 내되 소리 없음으로 낸다 — 같은 기기 리그 둘이면 보는 쪽이 튼 소리를 보내는 쪽이 다시
+    /// 떠 되먹임이 돈다(보내는 쪽은 제 소리만 뺀다). 사람 귀에도 두 번 들리지 않는다.
+    silent: bool,
     enabled: AtomicBool,
     /// 그 기기가 소리를 보낼 수 있다 — 압축 정보의 `audio`. 옛 판이면 알약을 안 그린다.
     remote: AtomicBool,
@@ -45,12 +43,12 @@ pub(crate) struct Player {
 }
 
 impl Player {
-    pub(crate) fn set_remote(&self, can: bool) {
+    pub fn set_remote(&self, can: bool) {
         self.remote.store(can, Ordering::Relaxed);
     }
 
     /// 받은 덩이 하나(연결 스레드). 출력 열기는 장치를 기다릴 수 있어 따로 스레드에서 한다.
-    pub(crate) fn push(self: &Arc<Self>, chunk: Chunk, t_recv: f64, offset: f64) {
+    pub fn push(self: &Arc<Self>, chunk: Chunk, t_recv: f64, offset: f64) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
@@ -67,7 +65,7 @@ impl Player {
         }
         let me = self.clone();
         let spawned = std::thread::Builder::new().name("screen-audio-open".into()).spawn(move || {
-            let opened = kasa_cast_host::audio::Output::start(me.jitter.clone(), silent());
+            let opened = Output::start(me.jitter.clone(), me.silent);
             let mut slot = me.output.lock().unwrap_or_else(|e| e.into_inner());
             match opened {
                 Ok(out) if me.enabled.load(Ordering::Relaxed) => *slot = Some(out),
@@ -97,7 +95,7 @@ impl Player {
 }
 
 /// 화면 보기의 소리 — `ScreenView.audio`. 끄면 이쪽 틀기를 멈추고 그 기기에도 그만 보내라고 알린다.
-pub(crate) struct ViewAudio {
+pub struct ViewAudio {
     label: String,
     pub on: bool,
     player: Arc<Player>,
@@ -106,11 +104,12 @@ pub(crate) struct ViewAudio {
 }
 
 impl ViewAudio {
-    pub(crate) fn new(label: &str) -> Self {
+    pub fn new(label: &str, silent: bool) -> Self {
         let on = !muted(label);
         let player = Arc::new(Player {
             jitter: Arc::new(Mutex::new(Jitter::default())),
             output: Mutex::new(None),
+            silent,
             enabled: AtomicBool::new(on),
             remote: AtomicBool::new(false),
             opening: AtomicBool::new(false),
@@ -121,16 +120,16 @@ impl ViewAudio {
     }
 
     /// 연결 사건을 받는 쪽이 쥐는 손잡이.
-    pub(crate) fn player(&self) -> Arc<Player> {
+    pub fn player(&self) -> Arc<Player> {
         self.player.clone()
     }
 
     /// 알약을 그릴지 — 그 기기가 소리를 보낼 수 있는 판일 때만.
-    pub(crate) fn shown(&self) -> bool {
+    pub fn shown(&self) -> bool {
         self.player.remote.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn text(&self) -> &'static str {
+    pub fn text(&self) -> &'static str {
         if self.on {
             "소리"
         } else {
@@ -138,11 +137,11 @@ impl ViewAudio {
         }
     }
 
-    pub(crate) fn on_pill(&self, p: (f64, f64)) -> bool {
+    pub fn on_pill(&self, p: (f64, f64)) -> bool {
         self.pill.is_some_and(|r| contains(r, p))
     }
 
-    pub(crate) fn set(&mut self, on: bool, watch: Option<&Watch>) {
+    pub fn set(&mut self, on: bool, watch: Option<&Watch>) {
         self.on = on;
         remember(&self.label, on);
         self.player.set_enabled(on);
@@ -152,7 +151,7 @@ impl ViewAudio {
     }
 
     /// 검증 리그 로그 — 받은 덩이·버린 덩이·모아 둔 양·받은 소리 크기(지난번 뒤 가장 큰 진폭).
-    pub(crate) fn stats(&self) -> String {
+    pub fn stats(&self) -> String {
         let (s, buffered, peak) = {
             let mut j = self.player.jitter.lock().unwrap_or_else(|e| e.into_inner());
             (j.stats, j.buffered_ms(), j.take_peak())
@@ -186,26 +185,24 @@ impl Drop for ViewAudio {
     }
 }
 
-// ---------------------------------------------------------------- 형식 바꾸기
-
 #[cfg(test)]
 mod tests {
-    use kasa_remote::screen_stream::audio::{CHANNELS, CHUNK_FRAMES};
+    use kasa_cast::audio::{CHANNELS, CHUNK_FRAMES};
 
     use super::*;
 
     #[test]
     fn muting_a_machine_is_remembered_until_it_is_turned_back_on() {
-        let mut a = ViewAudio::new("rig-audio-test");
+        let mut a = ViewAudio::new("rig-audio-test", true);
         assert!(a.on && a.text() == "소리");
         a.set(false, None);
         assert_eq!(a.text(), "소리 끔");
         drop(a);
-        let mut b = ViewAudio::new("rig-audio-test");
+        let mut b = ViewAudio::new("rig-audio-test", true);
         assert!(!b.on, "다시 붙어도 꺼진 채로");
         b.player().push(Chunk { seq: 0, t_cap: 0.0, pcm: vec![1; CHUNK_FRAMES * CHANNELS] }, 0.0, 0.0);
         assert_eq!(b.player.jitter.lock().unwrap().stats.received, 0, "끈 동안 받은 덩이는 모으지 않는다");
         b.set(true, None);
-        assert!(ViewAudio::new("rig-audio-test").on);
+        assert!(ViewAudio::new("rig-audio-test", true).on);
     }
 }
