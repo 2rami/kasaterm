@@ -7,6 +7,19 @@ use super::auth::{ViaPhone, ViaUplink};
 /// 자격으로 온 것만 받는다: 관문이 기기 토큰(또는 주인 주소)을 확인하고 업링크로 내려보낸 길이다. 카사넷으로 온
 /// 등록은 받지 않는다 — 관문에서 폐기된 폰이 직통으로 제 등록을 이어 가면 안 된다.
 pub async fn kasanet_phone_handler(req: axum::extract::Request) -> axum::response::Response {
+    register(req, crate::kasanet::allow_phone).await
+}
+
+/// `POST /kasanet/view` body `{id}` — 관문 계정으로 로그인한 보기 앱(KasaDesk)이 제 카사넷 id 를 등록한다
+/// (`kasanet::allow_viewer`, 화면만). 자격은 폰 등록과 같다 — 관문을 거친 주인 자격만.
+pub async fn kasanet_view_handler(req: axum::extract::Request) -> axum::response::Response {
+    register(req, crate::kasanet::allow_viewer).await
+}
+
+async fn register(
+    req: axum::extract::Request,
+    allow: fn(&str) -> Result<std::time::Duration, &'static str>,
+) -> axum::response::Response {
     let ext = req.extensions();
     let owner_phone = ext.get::<ViaUplink>().is_some()
         && ext.get::<ViaPhone>().is_none()
@@ -21,7 +34,7 @@ pub async fn kasanet_phone_handler(req: axum::extract::Request) -> axum::respons
         .ok()
         .and_then(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_string))
         .unwrap_or_default();
-    match crate::kasanet::allow_phone(&id) {
+    match allow(&id) {
         Ok(ttl) => Json(serde_json::json!({"ok": true, "ttl_secs": ttl.as_secs()})).into_response(),
         Err(code) => {
             let status = if code == "bad_id" || code == "id_taken" { axum::http::StatusCode::BAD_REQUEST } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
@@ -155,6 +168,7 @@ async fn mobile_users_delete(req: axum::extract::Request) -> axum::response::Res
 pub fn routes() -> axum::Router {
     axum::Router::new()
         .route("/kasanet/phone", axum::routing::post(kasanet_phone_handler))
+        .route("/kasanet/view", axum::routing::post(kasanet_view_handler))
         // 폰 허브·유저별 주소 관리·다른 기계로 넘기는 문(mobile.rs 머리말).
         .route("/hub", get(hub_page))
         .route("/app", get(app_page))

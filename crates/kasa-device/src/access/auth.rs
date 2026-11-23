@@ -496,6 +496,7 @@ mod tests {
                 format!("{} {} {owner} {cookie}", e.get::<ViaUplink>().is_some(), e.get::<ViaPhone>().is_some())
             }))
             .route("/kasanet/phone", axum::routing::post(kasanet_phone_handler))
+            .route("/kasanet/view", axum::routing::post(super::phone::kasanet_view_handler))
             .layer(axum::middleware::from_fn(origin_guard_mw));
         let app = tower::ServiceBuilder::new().layer(axum::middleware::from_fn(mobile_prefix_mw)).service(inner);
         let bind = || async { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap() };
@@ -522,6 +523,15 @@ mod tests {
         // 관문(주인 주소)으로 온 등록은 자격을 통과한다 — 시험에는 카사넷이 없어 503.
         let ok = reg(format!("{up}{}{}", crate::mobile::PREFIX, owner.slug)).await;
         assert_eq!(ok.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ok.json::<serde_json::Value>().await.unwrap()["error"], "kasanet_off");
+        // 계정 보기 앱 등록도 같은 자격이다.
+        let view = |base: String| {
+            let c = c.clone();
+            async move { c.post(format!("{base}/kasanet/view")).body(r#"{"id":"x"}"#).send().await.unwrap() }
+        };
+        assert_eq!(view(phone.clone()).await.status(), StatusCode::FORBIDDEN, "카사넷으로 온 보기 앱 등록은 받지 않는다");
+        assert_eq!(view(direct.clone()).await.status(), StatusCode::FORBIDDEN, "관문을 안 거친 보기 앱 등록은 받지 않는다");
+        let ok = view(format!("{up}{}{}", crate::mobile::PREFIX, owner.slug)).await;
         assert_eq!(ok.json::<serde_json::Value>().await.unwrap()["error"], "kasanet_off");
         for t in tasks {
             t.abort();

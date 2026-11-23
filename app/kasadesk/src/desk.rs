@@ -14,6 +14,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId};
 
+use crate::account::{self, Credential, Session};
+use crate::login::{Action, Login};
 use crate::net::Net;
 use crate::rig::PickerAction;
 use crate::roster::Machine;
@@ -35,6 +37,12 @@ pub enum Ev {
     /// 그 기기를 연다(None 이면 고르기 창).
     Open(Option<String>),
     Roster { machines: Vec<Machine>, app_alive: bool },
+    /// 로그인이 끝났다(성공이면 자격).
+    Login(Result<Credential, String>),
+    /// 관문이 켠 로그인 방법.
+    Providers(Vec<String>),
+    /// 관문이 자격을 거절했다(폐기·다른 곳에서 로그아웃) — 명부 일꾼이 이미 지웠다.
+    Revoked,
     /// 맥 Caps Lock — winit 이 키로 안 넘겨 AppKit 감시가 보낸다.
     #[cfg(target_os = "macos")]
     CapsLock,
@@ -95,11 +103,17 @@ pub struct Desk {
     hangul: kasa_ime::Composer,
     focused: Option<WindowId>,
     test: crate::rig::Rig,
+    session: Arc<Session>,
+    state: std::path::PathBuf,
+    login: Login,
 }
 
 impl Desk {
-    pub fn new(proxy: EventLoopProxy<Ev>, net: Arc<Net>, open: Option<String>) -> Self {
-        Self {
+    pub fn new(proxy: EventLoopProxy<Ev>, net: Arc<Net>, open: Option<String>, session: Arc<Session>, state: std::path::PathBuf) -> Self {
+        let test = crate::rig::Rig::from_env();
+        let mut login = Login::default();
+        login.open = test.login_panel;
+        let desk = Self {
             proxy,
             net,
             windows: HashMap::new(),
@@ -110,8 +124,60 @@ impl Desk {
             modifiers: ModifiersState::empty(),
             hangul: kasa_ime::Composer::new(),
             focused: None,
-            test: crate::rig::Rig::from_env(),
+            test,
+            session,
+            state,
+            login,
+        };
+        if desk.login.open {
+            desk.fetch_providers();
         }
+        desk
+    }
+
+    fn fetch_providers(&self) {
+        let proxy = self.proxy.clone();
+        self.net.handle.spawn(async move {
+            let list = account::providers(&account::client(), &account::gateway()).await;
+            let _ = proxy.send_event(Ev::Providers(list));
+        });
+    }
+
+    fn redraw_pickers(&self) {
+        for w in self.windows.values().filter(|w| w.label.is_none()) {
+            w.window.request_redraw();
+        }
+    }
+
+    /// 로그인 판이 부른 일 — 관문 일은 카사넷 런타임에서 돌리고 결과를 창 사건으로 받는다.
+    fn login_action(&mut self, action: Action) {
+        match action {
+            Action::None => return,
+            Action::Redraw => {}
+            Action::Opened => self.fetch_providers(),
+            Action::Logout => {
+                if let Some(cred) = self.session.get() {
+                    self.net.handle.spawn(async move { account::logout(&account::client(), &cred).await });
+                }
+                account::clear(&self.state);
+                self.session.set(None);
+            }
+            Action::Provider(provider) => {
+                let (proxy, machine) = (self.proxy.clone(), account::install_id(&self.state));
+                self.net.handle.spawn(async move {
+                    let r = account::oauth_login(&account::client(), &account::gateway(), &provider, &machine, account::open_browser).await;
+                    let _ = proxy.send_event(Ev::Login(r));
+                });
+            }
+            Action::Password(id, pw) => {
+                let (proxy, machine) = (self.proxy.clone(), account::install_id(&self.state));
+                self.net.handle.spawn(async move {
+                    let r = account::password_login(&account::client(), &account::gateway(), &id, &pw, &machine).await;
+                    let _ = proxy.send_event(Ev::Login(r));
+                });
+            }
+        }
+        self.redraw_pickers();
     }
 
     /// 그 기기를 연다 — 이미 보는 창이 있으면 그 창을 앞으로, 고르기 창이 있으면 거기서, 없으면 새 창.
@@ -211,9 +277,18 @@ impl Desk {
         self.test.capture(&mut w.gpu);
         let result = if w.label.is_none() {
             let id = self.net.id().fmt_short();
-            let origin = if self.app_alive { "카사텀에서 명부를 받는 중" } else { "카사텀이 꺼져 있어 지난 명부로 보여요" };
+            let origin = match (self.app_alive, self.session.get().is_some()) {
+                (true, true) => "카사텀과 계정에서 기기를 받는 중",
+                (true, false) => "카사텀에서 명부를 받는 중",
+                (false, true) => "계정으로 기기를 받는 중",
+                (false, false) => "카사텀이 꺼져 있어 지난 명부로 보여요 — 로그인하면 계정 기기도 보여요",
+            };
             let foot = format!("보기 앱 {id} · {origin}");
-            w.room.paint(&mut w.gpu, &self.machines, &self.paths, &foot, self.app_alive)
+            let (login, cred) = (&mut self.login, self.session.get());
+            w.room.paint(&mut w.gpu, &self.machines, &self.paths, &foot, self.app_alive, |g, size| {
+                login.paint_chip(g, size.0, cred.as_ref());
+                login.paint_panel(g, size);
+            })
         } else {
             w.gpu.rect(0.0, 0.0, ww, wh, BG);
             let fullscreen = w.fullscreen();
@@ -248,6 +323,16 @@ impl Desk {
         let p = (f64::from(w.cursor.0), f64::from(w.cursor.1));
         let Some(view) = w.view.as_mut() else {
             if w.label.is_some() {
+                return;
+            }
+            if let WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } = event {
+                let action = self.login.click(p, self.session.get().is_some());
+                if !matches!(action, Action::None) || self.login.open {
+                    self.login_action(action);
+                    return;
+                }
+            }
+            if self.login.open {
                 return;
             }
             let redraw = match event {
@@ -334,6 +419,12 @@ impl Desk {
             return;
         }
         let Some(view) = w.view.as_mut() else {
+            if w.label.is_none() {
+                if let Some(action) = self.login.key(event) {
+                    self.login_action(action);
+                    return;
+                }
+            }
             if !pressed || w.label.is_some() || m.super_key() || m.control_key() || m.alt_key() {
                 return;
             }
@@ -412,6 +503,9 @@ impl ApplicationHandler<Ev> for Desk {
         for open in std::mem::take(&mut self.pending) {
             self.open(event_loop, open);
         }
+        if let Some((id, pw)) = self.test.login.take() {
+            self.login_action(Action::Password(id, pw));
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Ev) {
@@ -422,6 +516,21 @@ impl ApplicationHandler<Ev> for Desk {
                 }
             }
             Ev::Open(label) => self.open(event_loop, label),
+            Ev::Login(result) => {
+                let result = result.and_then(|c| {
+                    account::save(&self.state, &c).map_err(|e| format!("로그인 정보를 못 남겼어요: {e}"))?;
+                    eprintln!("[kasadesk] 계정 {} 로그인", c.account);
+                    self.session.set(Some(c));
+                    Ok(())
+                });
+                self.login.done(result);
+                self.redraw_pickers();
+            }
+            Ev::Providers(list) => {
+                self.login.providers = list;
+                self.redraw_pickers();
+            }
+            Ev::Revoked => self.redraw_pickers(),
             Ev::Roster { machines, app_alive } => {
                 let paths = machines.iter().map(|m| {
                     let path = self.net.path_text(&m.label);
@@ -503,8 +612,18 @@ impl ApplicationHandler<Ev> for Desk {
                 self.key(event_loop, id, &event);
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                if let Some(view) = self.windows.get(&id).and_then(|w| w.view.as_ref()) {
-                    view.commit(text);
+                match self.windows.get(&id) {
+                    Some(w) if w.label.is_none() => {
+                        if self.login.commit(text) {
+                            w.window.request_redraw();
+                        }
+                    }
+                    Some(w) => {
+                        if let Some(view) = w.view.as_ref() {
+                            view.commit(text);
+                        }
+                    }
+                    None => {}
                 }
             }
             WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::MouseInput { .. }

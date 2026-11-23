@@ -6,20 +6,31 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod account;
 mod desk;
 mod ipc;
+mod login;
 mod net;
 mod rig;
 mod roster;
 mod scene;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use winit::event_loop::EventLoop;
 
 /// 명부를 다시 묻는 간격.
 const ROSTER_EVERY: Duration = Duration::from_secs(5);
+/// 관문 계정 기기를 다시 묻는 간격 — 기기마다 `/version` 이 관문을 지나므로 본 앱 명부보다 드물게.
+const GATEWAY_EVERY: Duration = Duration::from_secs(30);
+/// 이 보기 앱 등록을 되풀이하는 간격 — 데스크톱의 등록 수명(15분)의 3분의 1.
+const REGISTER_EVERY: Duration = Duration::from_secs(5 * 60);
+/// 등록이 안 됐을 때(옛 판·길 끊김) 다시 해 보는 간격.
+const REGISTER_RETRY: Duration = Duration::from_secs(60);
 /// 기록이 이보다 크면 띄울 때 비운다.
 const LOG_MAX: u64 = 2 << 20;
 
@@ -87,17 +98,61 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let net = net::Net::start(rt.handle().clone())?;
+    let session = Arc::new(account::Session::default());
+    session.set(account::load(&state));
     {
-        let (net, proxy, cache) = (net.clone(), proxy.clone(), state.join("roster.json"));
+        let (net, proxy, cache, session, state) = (net.clone(), proxy.clone(), state.join("roster.json"), session.clone(), state.clone());
+        let handle = rt.handle().clone();
         std::thread::Builder::new().name("kasadesk-roster".into()).spawn(move || {
+            let client = account::client();
+            let me = net.id().to_string();
             let mut known = roster::load(&cache);
+            let mut gateway: Vec<roster::Machine> = Vec::new();
+            let mut gateway_at: Option<Instant> = None;
+            // 관문 기기 id → (마지막 시도, 등록됐나).
+            let mut registered: HashMap<String, (Instant, bool)> = HashMap::new();
             loop {
-                let snap = roster::merge(roster::fetch(&app), &known);
-                net.follow(&snap.machines);
+                let mut snap = roster::merge(roster::fetch(&app), &known);
                 if snap.app_alive && snap.machines != known {
                     roster::save(&cache, &snap.machines);
                 }
                 known = snap.machines.clone();
+                let asked = session.refresh.swap(false, Ordering::AcqRel);
+                match session.get() {
+                    Some(cred) => {
+                        if asked || gateway_at.is_none_or(|t| t.elapsed() >= GATEWAY_EVERY) {
+                            match handle.block_on(account::machines(&client, &cred, &me)) {
+                                Ok(list) => {
+                                    gateway = list;
+                                    gateway_at = Some(Instant::now());
+                                }
+                                Err(account::Revoked) => {
+                                    eprintln!("[kasadesk] 관문이 로그인을 거절했다 — 로그아웃한다");
+                                    account::clear(&state);
+                                    session.set(None);
+                                    gateway.clear();
+                                    registered.clear();
+                                    let _ = proxy.send_event(desk::Ev::Revoked);
+                                }
+                            }
+                        }
+                        roster::with_account(&mut snap, gateway.clone());
+                        for gw in snap.machines.iter().filter_map(|m| m.account.clone()) {
+                            let due = registered.get(&gw).is_none_or(|(at, ok)| at.elapsed() >= if *ok { REGISTER_EVERY } else { REGISTER_RETRY });
+                            if due {
+                                let ok = handle.block_on(account::register(&client, &cred, &gw, &me)).is_some();
+                                registered.insert(gw, (Instant::now(), ok));
+                            }
+                        }
+                    }
+                    None if asked => {
+                        gateway.clear();
+                        gateway_at = None;
+                        registered.clear();
+                    }
+                    None => {}
+                }
+                net.follow(&snap.machines);
                 if proxy.send_event(desk::Ev::Roster { machines: snap.machines, app_alive: snap.app_alive }).is_err() {
                     return;
                 }
@@ -105,7 +160,7 @@ fn main() -> anyhow::Result<()> {
             }
         })?;
     }
-    let mut desk = desk::Desk::new(proxy, net, open);
+    let mut desk = desk::Desk::new(proxy, net, open, session, state);
     event_loop.run_app(&mut desk)?;
     Ok(())
 }

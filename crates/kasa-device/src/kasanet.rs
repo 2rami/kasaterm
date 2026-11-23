@@ -49,6 +49,8 @@ struct Node {
     screens: Mutex<HashMap<String, Link>>,
     /// base → 그 기기 보기 앱 id(`/version` 의 `view_id`). 화면만 받고 포트는 하나도 못 연다(`docs/screen-service-split.md` 「보기 앱」).
     views: Mutex<HashMap<String, EndpointId>>,
+    /// 관문 계정으로 로그인한 보기 앱(`POST /kasanet/view`) → 수명이 끝나는 때. 폰처럼 다시 등록해야 산다.
+    account_views: Mutex<HashMap<EndpointId, Instant>>,
     /// 등록된 폰 → 수명이 끝나는 때.
     phones: Mutex<HashMap<EndpointId, Instant>>,
 }
@@ -85,6 +87,7 @@ impl ProtocolHandler for ScreenAccept {
             n.links.lock().is_ok_and(|l| l.contains_key(&peer))
                 || n.phones.lock().is_ok_and(|p| p.contains_key(&peer))
                 || n.views.lock().is_ok_and(|v| v.values().any(|id| *id == peer))
+                || n.account_views.lock().is_ok_and(|v| v.contains_key(&peer))
         });
         match SCREEN.get() {
             Some(handler) if known => handler(conn).await,
@@ -186,6 +189,7 @@ pub async fn start(mcp_port: u16) {
         bases: Mutex::new(HashMap::new()),
         screens: Mutex::new(HashMap::new()),
         views: Mutex::new(HashMap::new()),
+        account_views: Mutex::new(HashMap::new()),
         phones: Mutex::new(HashMap::new()),
     };
     if NODE.set(node).is_err() {
@@ -290,11 +294,12 @@ pub fn screen_viewers() -> (Vec<String>, Vec<(String, u64)>) {
     machines.dedup();
     let now = Instant::now();
     let unix = unix_now();
-    let mut phones: Vec<(String, u64)> = n
-        .phones
-        .lock()
-        .map(|p| p.iter().map(|(id, until)| (id.to_string(), unix + until.saturating_duration_since(now).as_secs())).collect())
-        .unwrap_or_default();
+    let lease = |m: &HashMap<EndpointId, Instant>| -> Vec<(String, u64)> {
+        m.iter().map(|(id, until)| (id.to_string(), unix + until.saturating_duration_since(now).as_secs())).collect()
+    };
+    // 계정 보기 앱은 폰과 같은 꼴(만료 있는 id)이라 서비스가 수명대로 걷게 폰 줄에 싣는다.
+    let mut phones: Vec<(String, u64)> = n.phones.lock().map(|p| lease(&p)).unwrap_or_default();
+    phones.extend(n.account_views.lock().map(|v| lease(&v)).unwrap_or_default());
     phones.sort();
     (machines, phones)
 }
@@ -445,7 +450,8 @@ fn apply_view(
     }
     if let Some(old) = before {
         views.remove(&key(base));
-        if !views.values().any(|v| *v == old) {
+        let leased = NODE.get().is_some_and(|n| n.account_views.lock().is_ok_and(|v| v.contains_key(&old)));
+        if !views.values().any(|v| *v == old) && !leased {
             allow.remove(&old);
             fwd.forget(&old);
         }
@@ -531,6 +537,32 @@ pub fn allow_phone(id: &str) -> Result<Duration, &'static str> {
     Ok(PHONE_TTL)
 }
 
+/// 관문 계정으로 로그인한 보기 앱의 등록(`POST /kasanet/view`, 관문을 거친 주인 자격). 기기 명부로 배운 보기 앱처럼
+/// 화면만 내주되(빈 포트 돌리기) 폰처럼 수명이 있다 — 관문에서 그 기기를 폐기하면 다시 등록을 못 해 수명 안에 빠진다.
+/// 폰 등록 길을 빌리지 않는다 — 폰 앱이 있다는 표식(`note_phone_app`)이 켜져 「폰 보여 주기」 길이 바뀐다.
+pub fn allow_viewer(id: &str) -> Result<Duration, &'static str> {
+    let n = NODE.get().ok_or("kasanet_off")?;
+    let id = EndpointId::from_str(id.trim()).map_err(|_| "bad_id")?;
+    if id == n.endpoint.id()
+        || n.links.lock().is_ok_and(|l| l.contains_key(&id))
+        || n.phones.lock().is_ok_and(|p| p.contains_key(&id))
+    {
+        return Err("id_taken");
+    }
+    n.fwd.redirect(id, []);
+    n.allow.insert(id);
+    let fresh = n
+        .account_views
+        .lock()
+        .map_err(|_| "busy")?
+        .insert(id, Instant::now() + PHONE_TTL)
+        .is_none();
+    if fresh {
+        eprintln!("[kasanet] 계정 보기 앱 {} 허용 — 화면만", id.fmt_short());
+    }
+    Ok(PHONE_TTL)
+}
+
 /// 앱 안에서(Safari 화면) 데스크톱 localhost 를 여는 폰 앱이 있다고 보는 기간. 그런 판만 카사넷 등록을 하므로 마지막 등록
 /// 시각으로 판을 가른다 — 등록 수명(15분)으로 가르면 폰 앱이 잠든 사이 보여 주기가 임시 터널로 떨어진다.
 const PHONE_APP_FRESH: Duration = Duration::from_secs(30 * 24 * 3600);
@@ -612,6 +644,25 @@ async fn sweep_phones() {
             n.allow.remove(&id);
             n.fwd.forget(&id);
             eprintln!("[kasanet] 폰 {} 등록 만료 — 끊는다", id.fmt_short());
+        }
+        let lapsed: Vec<EndpointId> = match n.account_views.lock() {
+            Ok(mut v) => {
+                let gone: Vec<_> = v.iter().filter(|(_, t)| **t <= now).map(|(id, _)| *id).collect();
+                for id in &gone {
+                    v.remove(id);
+                }
+                gone
+            }
+            Err(_) => continue,
+        };
+        for id in lapsed {
+            // 같은 보기 앱이 명부로도 배운 것이면(그 기기 본 앱이 알린 view_id) 그 길로 계속 받는다.
+            if n.views.lock().is_ok_and(|v| v.values().any(|x| *x == id)) {
+                continue;
+            }
+            n.allow.remove(&id);
+            n.fwd.forget(&id);
+            eprintln!("[kasanet] 계정 보기 앱 {} 등록 만료 — 끊는다", id.fmt_short());
         }
     }
 }

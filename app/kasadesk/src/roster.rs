@@ -37,7 +37,7 @@ impl DeviceKind {
         }
     }
 
-    fn classify(label: &str, version: &Value) -> Self {
+    pub fn classify(label: &str, version: &Value) -> Self {
         [version.get("model"), version.get("os"), version.get("platform")]
             .into_iter()
             .flatten()
@@ -65,6 +65,8 @@ pub struct Machine {
     pub kasanet: Value,
     /// 이번에 본 앱에서 새로 배웠다 — 아니면 지난 명부 그대로다.
     pub fresh: bool,
+    /// 관문 계정으로도 보이는 기기의 관문 기기 id — 이 보기 앱 id 를 그 기기에 등록할 때 쓴다(`account::register`).
+    pub account: Option<String>,
 }
 
 /// 이번에 배운 것.
@@ -116,7 +118,7 @@ pub fn fetch(app: &str) -> Option<Snapshot> {
             let kind = DeviceKind::classify(&label, &version);
             let kasanet = version.get("kasanet")?.clone();
             let id = kasanet.get("id").and_then(Value::as_str);
-            (id.is_some() && id != own_id.as_deref()).then_some(Machine { label, kind, kasanet, fresh: true })
+            (id.is_some() && id != own_id.as_deref()).then_some(Machine { label, kind, kasanet, fresh: true, account: None })
         })
         .collect();
     Some(Snapshot { machines, app_alive: true, listed })
@@ -138,6 +140,23 @@ pub fn merge(fresh: Option<Snapshot>, cached: &[Machine]) -> Snapshot {
     snap
 }
 
+/// 관문 계정 기기를 덧댄다 — 본 앱 명부에도 있는 기기(같은 카사넷 id)는 그 줄에 관문 id 만 달고, 없는 기기는 관문 이름으로
+/// 더한다. 이름이 겹치면 관문 쪽에 「· 계정」을 붙여 가른다(보기 창은 이름으로 기기를 찾는다).
+pub fn with_account(snap: &mut Snapshot, account: Vec<Machine>) {
+    let id = |m: &Machine| m.kasanet.get("id").and_then(Value::as_str).map(str::to_string);
+    for mut a in account {
+        if let Some(local) = snap.machines.iter_mut().find(|m| id(m).is_some() && id(m) == id(&a)) {
+            local.account = a.account;
+            continue;
+        }
+        if snap.machines.iter().any(|m| m.label == a.label) {
+            a.label = format!("{} · 계정", a.label);
+        }
+        snap.machines.push(a);
+    }
+    snap.machines.sort_by(|a, b| a.label.cmp(&b.label));
+}
+
 pub fn load(path: &PathBuf) -> Vec<Machine> {
     let Some(v) = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
         return Vec::new();
@@ -149,7 +168,7 @@ pub fn load(path: &PathBuf) -> Vec<Machine> {
             let label = m.get("label")?.as_str()?.to_string();
             let kind = m.get("kind").and_then(Value::as_str).and_then(DeviceKind::hint)
                 .unwrap_or_else(|| DeviceKind::classify(&label, &Value::Null));
-            Some(Machine { label, kind, kasanet: m.get("kasanet")?.clone(), fresh: false })
+            Some(Machine { label, kind, kasanet: m.get("kasanet")?.clone(), fresh: false, account: None })
         })
         .collect()
 }
@@ -168,7 +187,7 @@ mod tests {
     use super::*;
 
     fn m(label: &str, fresh: bool) -> Machine {
-        Machine { label: label.into(), kind: DeviceKind::Mini, kasanet: json!({ "id": label }), fresh }
+        Machine { label: label.into(), kind: DeviceKind::Mini, kasanet: json!({ "id": label }), fresh, account: None }
     }
 
     #[test]
@@ -176,6 +195,15 @@ mod tests {
         assert_eq!(DeviceKind::classify("Studio", &json!({"os": "windows"})), DeviceKind::Desktop);
         assert_eq!(DeviceKind::classify("현장 맥북", &Value::Null), DeviceKind::Laptop);
         assert_eq!(DeviceKind::classify("Studio", &Value::Null), DeviceKind::Mini);
+    }
+
+    #[test]
+    fn account_machines_join_the_roster_by_kasanet_id() {
+        let mut snap = Snapshot { machines: vec![m("미니", true), m("집", true)], app_alive: true, listed: Vec::new() };
+        let acct = |label: &str, id: &str, gw: &str| Machine { kasanet: json!({ "id": id }), account: Some(gw.into()), ..m(label, true) };
+        with_account(&mut snap, vec![acct("nachoneko", "미니", "g1"), acct("집", "다른 집", "g2"), acct("노트북", "노트북", "g3")]);
+        let rows: Vec<(&str, Option<&str>)> = snap.machines.iter().map(|m| (m.label.as_str(), m.account.as_deref())).collect();
+        assert_eq!(rows, [("노트북", Some("g3")), ("미니", Some("g1")), ("집", None), ("집 · 계정", Some("g2"))]);
     }
 
     #[test]

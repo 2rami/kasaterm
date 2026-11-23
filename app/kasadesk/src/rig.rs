@@ -58,6 +58,10 @@ pub struct Rig {
     /// 키·글은 이 파일이 생긴 뒤에만 보낸다 — 리그가 시험 창이 맨 앞인 것을 확인하고 만든다(사람 앱으로 키가 새지 않게).
     gate: Option<PathBuf>,
     pub silent_audio: bool,
+    /// 띄우자마자 로그인 판을 연다 — 판 모양을 뜨는 리그.
+    pub login_panel: bool,
+    /// 띄우자마자 이 아이디·비밀번호로 로그인한다(`아이디:비밀번호`) — 로그인 판의 「로그인」과 같은 길.
+    pub login: Option<(String, String)>,
 }
 
 fn ms(v: &str) -> Option<Duration> {
@@ -114,6 +118,8 @@ impl Rig {
             picker_input,
             gate: env("KASATERM_VIEW_TEST_INPUT_GATE").map(PathBuf::from),
             silent_audio: env("KASATERM_TEST_SCREEN_AUDIO_SILENT").is_some(),
+            login_panel: env("KASATERM_VIEW_TEST_LOGIN_PANEL").is_some(),
+            login: env("KASATERM_VIEW_TEST_LOGIN").and_then(|v| v.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))),
         }
     }
 

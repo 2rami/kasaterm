@@ -351,6 +351,7 @@ impl Room {
         paths: &[String],
         foot: &str,
         app_alive: bool,
+        overlay: impl FnOnce(&mut GridRenderer, (f32, f32)),
     ) -> anyhow::Result<usize> {
         self.animate(Instant::now());
         let Some(layout) = &self.layout else { return g.render(0.0, true, |_, _, _, _, _, _| {}) };
@@ -371,7 +372,7 @@ impl Room {
         }
 
         if machines.is_empty() {
-            let text = if app_alive { "카사텀 명부에 기기를 추가하세요" } else { "카사텀을 띄우면 기기 명부를 받아요" };
+            let text = if app_alive { "카사텀 명부에 기기를 추가하세요" } else { "카사텀을 띄우거나 로그인하면 기기가 보여요" };
             draw_center(g, width * 0.5, footer_top - 54.0, text, 14.0, MUTE, width - PAD * 2.0);
         }
         for slot in &layout.slots {
@@ -394,6 +395,7 @@ impl Room {
             draw_center(g, (left.0 + right.0 + right.2) * 0.5, left.1 + 8.0, &pages, 12.0, MUTE, 59.0);
         }
 
+        overlay(g, (width, height));
         let gpu = &mut self.gpu;
         g.render_with_underlay(0.0, true, |device, queue, encoder, texture, view, format| {
             gpu.get_or_insert_with(|| gpu::RoomGpu::new(device, format))
@@ -458,6 +460,7 @@ mod tests {
             kind: [DeviceKind::Mini, DeviceKind::Laptop, DeviceKind::Desktop][i % 3],
             kasanet: serde_json::Value::Null,
             fresh: false,
+            account: None,
         }).collect()
     }
 
