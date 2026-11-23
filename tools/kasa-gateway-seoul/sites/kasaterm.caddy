@@ -1,3 +1,4 @@
-kasaterm.debimarlene.com {
+# 새 주소 kasaterm.kasa.page 는 2026-11-23 더했다 — 깔린 앱이 옛 주소로 붙으니 둘 다 받는다.
+kasaterm.debimarlene.com, kasaterm.kasa.page {
 	import gateway
 }

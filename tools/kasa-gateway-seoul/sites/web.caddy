@@ -26,3 +26,29 @@ https:// {
 geono.debimarlene.com {
 	import tunneled 18892
 }
+
+# 새 도메인으로 옮긴 이름(2026-11-23). 뒤의 미니 Caddy·미리보기 문지기는 옛 이름으로 가르니 Host 를 옛 이름으로 바꿔 넘긴다.
+# 미리보기 <이름>-<4자>.2rami.dev 는 위 `https://` 가 받고 문지기가 두 도메인을 같은 미리보기로 본다.
+(tunneled_as) {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:{args[0]} {
+		header_up Host {args[1]}
+		header_up CF-Connecting-IP {remote_host}
+		flush_interval -1
+	}
+}
+
+nacho.2rami.dev {
+	import tunneled_as 18890 nacho.debimarlene.com
+}
+
+mm.2rami.dev {
+	import tunneled_as 18890 mm.debimarlene.com
+}
+
+# 카사브라우저 업데이트 — 미리보기 kasabrowser-update 를 고정 주소로.
+update.kasa.page {
+	import tunneled_as 18891 kasabrowser-update-zmpf.debimarlene.com
+}
