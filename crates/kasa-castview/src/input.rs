@@ -104,6 +104,9 @@ impl ScreenView {
     /// 마우스 단추(1 왼쪽·2 오른쪽·4 가운데)를 누르거나 뗐다. 끌던 단추가 있으면 단추 판정 없이 그 기기로 — 칸 밖에서 떼도
     /// 그 기기에 뗌이 가야 단추가 눌린 채 남지 않는다.
     pub fn click(&mut self, p: (f64, f64), bit: u8, pressed: bool, mods: u8) -> Click {
+        if pressed {
+            self.forget_alone();
+        }
         let left = pressed && bit == 1;
         if self.buttons == 0 {
             if let Some(i) = self.extra.iter().position(|r| contains(*r, p)) {
@@ -146,7 +149,6 @@ impl ScreenView {
             }
         }
         let buttons = if pressed { self.buttons | bit } else { self.buttons & !bit };
-        self.option_alone &= !pressed;
         let mods = self.remote_mods(mods);
         self.pointer(p, buttons, mods);
         if pressed { Click::Pressed } else { Click::Handled }
@@ -167,6 +169,7 @@ impl ScreenView {
 
     /// 휠 — 확대 손가락이면 확대, 조작 중이면 그 기기로, 확대해 둔 장이면 민다. 장 밖이거나 할 일이 없으면 false.
     pub fn wheel(&mut self, p: (f64, f64), delta: &MouseScrollDelta, m: ModifiersState) -> bool {
+        self.forget_alone();
         if !self.on_image(p) {
             return false;
         }
@@ -188,6 +191,7 @@ impl ScreenView {
 
     /// 핀치 — 장 위에서만 확대.
     pub fn pinch(&mut self, p: (f64, f64), delta: f64) -> bool {
+        self.forget_alone();
         if !self.on_image(p) {
             return false;
         }
@@ -275,6 +279,7 @@ impl ScreenView {
         }
         let option = matches!(code, KeyCode::AltLeft | KeyCode::AltRight);
         self.option_alone = option && !event.repeat;
+        self.command_alone = matches!(code, KeyCode::SuperLeft | KeyCode::SuperRight) && !event.repeat && mods & !8 == 0;
         // 손가락 키 자체는 안 보낸다 — 다음 키에 손가락 비트로 실려 그 자리에서 눌렀다 뗀다. 따로 눌러 두면 이 앱 단축키
         // (⌘W 등)가 가로챈 뒤 그 기기에 손가락이 눌린 채 남는다.
         if option || is_modifier(code) {
@@ -290,15 +295,18 @@ impl ScreenView {
         repaint
     }
 
-    /// 뗌 — ⌥ 만 눌렀다 떼면 Windows 키 한 번(시작 메뉴). 다른 키는 누를 때 눌렀다 떼서 보낼 것이 없다.
+    /// 뗌 — ⌥ 만 눌렀다 떼면 Windows 키 한 번(시작 메뉴), ⌘ 만 눌렀다 떼면 Alt 한 번(메뉴 막대). 다른 키는 누를 때
+    /// 눌렀다 떼서 보낼 것이 없다.
     fn key_up(&mut self, event: &KeyEvent) {
         if !(self.control && self.raw_keys()) {
             return;
         }
-        if matches!(event.physical_key, PhysicalKey::Code(KeyCode::AltLeft | KeyCode::AltRight)) && self.option_alone {
-            self.key("MetaLeft", 0);
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::AltLeft | KeyCode::AltRight) if self.option_alone => self.key("MetaLeft", 0),
+            PhysicalKey::Code(KeyCode::SuperLeft | KeyCode::SuperRight) if self.command_alone => self.key("AltLeft", 0),
+            _ => {}
         }
-        self.option_alone = false;
+        self.forget_alone();
     }
 
     /// Caps Lock — 맥에서 Windows 를 조작 중이면 그 기기 한/영.

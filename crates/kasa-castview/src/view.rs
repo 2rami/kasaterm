@@ -79,6 +79,10 @@ pub struct ScreenView {
     pub preedit: String,
     /// ⌥ 를 누른 뒤 다른 키가 없었다 — 그대로 떼면 Windows 키 한 번(시작 메뉴)이다.
     pub option_alone: bool,
+    /// ⌘ 만 누른 뒤 다른 키·클릭·휠이 없었다 — 그대로 떼면 Windows Alt 한 번(메뉴 막대)이다.
+    pub command_alone: bool,
+    /// 마지막으로 보낸 포인터 자리(그 화면 안 비율) — 창을 떠날 때 눌린 단추를 그 자리에서 뗀다.
+    last_at: (f64, f64),
     frame: (u32, u32),
     /// GPU 에 넘긴 최근 장들 — 복사 없이 IOSurface 를 텍스처로 쓰므로 GPU 가 다 그릴 때까지 디코더가 같은 버퍼를 다시 못
     /// 쓰게 쥐고 있는다. 마지막 것은 텍스처를 못 만들 때 CPU 로 올리는 밑감이다.
@@ -192,6 +196,8 @@ impl ScreenView {
             buttons: 0,
             preedit: String::new(),
             option_alone: false,
+            command_alone: false,
+            last_at: (0.5, 0.5),
             frame: (0, 0),
             held: VecDeque::new(),
             zero_copy: false,
@@ -415,7 +421,25 @@ impl ScreenView {
     pub fn pointer(&mut self, p: (f64, f64), buttons: u8, mods: u8) {
         let Some((x, y)) = self.at(p) else { return };
         self.buttons = buttons;
+        self.last_at = (x, y);
         self.send(json!({ "t": "pointer", "x": x, "y": y, "b": buttons, "m": mods }));
+    }
+
+    /// 이 창이 포커스를 잃었다 — 그사이 뗀 단추·손가락은 이 창에 안 온다. 혼자 누른 손가락은 잊고, 눌린 단추는 마지막 자리에서
+    /// 뗀다(그 기기에 단추가 눌린 채 남으면 그 앞의 사람이 마우스를 못 쓴다).
+    pub fn focus_lost(&mut self) {
+        self.forget_alone();
+        if self.buttons != 0 {
+            let (x, y) = self.last_at;
+            self.buttons = 0;
+            self.send(json!({ "t": "pointer", "x": x, "y": y, "b": 0, "m": 0 }));
+        }
+    }
+
+    /// 손가락을 혼자 누른 게 아니게 됐다(클릭·휠·이 앱이 가로챈 단축키) — 떼도 그 기기 키를 안 보낸다.
+    pub fn forget_alone(&mut self) {
+        self.option_alone = false;
+        self.command_alone = false;
     }
 
     /// 양수 dy 는 위로 굴림(내용이 내려온다) — 그 기기 화면 포인트 단위.

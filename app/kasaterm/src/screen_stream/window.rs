@@ -176,6 +176,12 @@ impl App {
             WindowEvent::Focused(f) => {
                 w.focused = *f;
                 w.window.request_redraw();
+                if !*f {
+                    let view_id = w.view_id;
+                    if let Some(view) = self.screen_views.get_mut(&view_id) {
+                        view.focus_lost();
+                    }
+                }
                 return;
             }
             WindowEvent::RedrawRequested => {

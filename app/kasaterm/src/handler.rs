@@ -3614,7 +3614,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if !focused && self.room_rename.editing.is_some() {
                     crate::lineedit::pointer_release(crate::chrome::ROOM_FIELD);
                 }
-                if !focused { self.info_split_release(); }
+                if !focused {
+                    self.info_split_release();
+                    self.screen_focus_lost(crate::screen_stream::Surface::Main);
+                }
                 if focused {
                     // 앱으로 돌아온 사람은 지금 방을 본다 — 그 방 칸들의 깜빡임을 멈춘다.
                     self.quiet_room_blinks(self.active_window);

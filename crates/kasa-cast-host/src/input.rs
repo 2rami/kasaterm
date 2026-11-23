@@ -19,6 +19,20 @@ pub fn known_key(code: &str) -> bool {
     key_of(code).is_some()
 }
 
+/// Alt+클릭·Ctrl+끌기 — 처음 누를 때의 손가락을 단추를 다 뗄 때까지 쥔다. 떼는 손가락은 쥔 것 그대로다(그사이 보는 쪽에서
+/// 손가락을 먼저 떼도 그 기기에 눌린 채 남지 않게). (단추보다 먼저 누를 것, 단추 뒤에 뗄 것, 이제 쥔 것) — 손가락 비트는
+/// 1 shift·2 control·4 alt·8 windows.
+#[cfg(any(windows, test))]
+fn click_mods(prev: u8, buttons: u8, mods: u8, held: u8) -> (u8, u8, u8) {
+    if buttons == 0 {
+        (0, held, 0)
+    } else if prev == 0 {
+        (mods & !held, 0, held | mods)
+    } else {
+        (0, 0, held)
+    }
+}
+
 /// 웹 `KeyboardEvent.code` 이름 → (macOS 가상 키, Windows VK, Windows 확장 키인가).
 fn key_of(code: &str) -> Option<(u16, u16, bool)> {
     const LETTERS: [u16; 26] = [
@@ -56,6 +70,7 @@ fn key_of(code: &str) -> Option<(u16, u16, bool)> {
         "Space" => (49, 0x20, false),
         "Delete" => (117, 0x2E, true),
         "MetaLeft" | "MetaRight" => (55, 0x5B, true),
+        "AltLeft" => (58, 0x12, false),
         "Home" => (115, 0x24, true),
         "End" => (119, 0x23, true),
         "PageUp" => (116, 0x21, true),
@@ -300,6 +315,7 @@ mod os {
 #[cfg(windows)]
 mod os {
     use super::{key_of, Denied, Input};
+    use std::sync::atomic::{AtomicU8, Ordering};
     use windows::Win32::Foundation::{LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -338,6 +354,9 @@ mod os {
             SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
         }
     }
+
+    /// 단추를 누르는 동안 쥔 손가락(1 shift·2 control·4 alt·8 windows).
+    static CLICK_MODS: AtomicU8 = AtomicU8::new(0);
 
     fn mouse(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
         INPUT {
@@ -398,9 +417,12 @@ mod os {
 
     pub(super) fn put(display: u32, input: &Input) -> Result<(), Denied> {
         match input {
-            Input::Pointer { x, y, buttons, prev, .. } => {
+            Input::Pointer { x, y, buttons, prev, mods } => {
                 let Some(go) = move_to(display, *x, *y) else { return Err(Denied::Unavailable) };
                 let mut out = vec![go];
+                let (down, up, now) = super::click_mods(*prev, *buttons, *mods, CLICK_MODS.load(Ordering::Relaxed));
+                CLICK_MODS.store(now, Ordering::Relaxed);
+                out.extend(modifiers(down).iter().map(|(m, ext)| press(*m, *ext, false)));
                 let changed = buttons ^ prev;
                 for (mask, down, up) in [
                     (1u8, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
@@ -411,6 +433,7 @@ mod os {
                         out.push(mouse(0, 0, 0, if buttons & mask != 0 { down } else { up }));
                     }
                 }
+                out.extend(modifiers(up).iter().rev().map(|(m, ext)| press(*m, *ext, true)));
                 send(&out);
             }
             Input::Scroll { x, y, dx, dy } => {
@@ -484,6 +507,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn click_modifiers_are_held_from_the_press_until_every_button_is_up() {
+        assert_eq!(click_mods(0, 1, 4, 0), (4, 0, 4), "⌘(Alt)+누름 — Alt 를 먼저 누른다");
+        assert_eq!(click_mods(1, 1, 0, 4), (0, 0, 4), "끄는 동안 이쪽 손가락을 떼도 쥔 채");
+        assert_eq!(click_mods(1, 3, 0, 4), (0, 0, 4), "두 번째 단추는 손가락을 다시 안 누른다");
+        assert_eq!(click_mods(3, 0, 0, 4), (0, 4, 0), "단추를 다 떼면 쥔 손가락을 뗀다");
+        assert_eq!(click_mods(0, 1, 0, 0), (0, 0, 0), "손가락 없는 클릭");
+        assert_eq!(click_mods(0, 0, 4, 0), (0, 0, 0), "손가락만 쥐고 움직이기 — 누르지 않는다");
+        assert_eq!(click_mods(0, 1, 6, 2), (4, 0, 6), "남은 손가락은 다시 안 누르고 함께 쥔다");
+    }
+
+    #[test]
     fn web_key_names_map_to_both_platforms() {
         assert_eq!(key_of("KeyA"), Some((0, 0x41, false)));
         assert_eq!(key_of("KeyZ"), Some((6, 0x5A, false)));
@@ -492,7 +526,8 @@ mod tests {
         assert_eq!(key_of("Digit5"), Some((23, 0x35, false)));
         assert_eq!(key_of("F12"), Some((111, 0x7B, false)));
         assert_eq!(key_of("Enter"), Some((36, 0x0D, false)));
-        assert_eq!(key_of("MetaLeft"), Some((55, 0x5B, true)), "키 메뉴의 Windows 키·⌘ 혼자 누르기");
+        assert_eq!(key_of("MetaLeft"), Some((55, 0x5B, true)), "키 메뉴의 Windows 키·⌥ 혼자 누르기");
+        assert_eq!(key_of("AltLeft"), Some((58, 0x12, false)), "⌘ 혼자 누르기 — Windows Alt");
         assert_eq!(key_of("ArrowUp"), Some((126, 0x26, true)));
         assert_eq!(key_of("Lang1"), Some((104, 0x15, false)), "맥 Caps Lock 이 보내는 Windows 한/영");
         assert_eq!(key_of("Numpad7"), Some((89, 0x67, false)));

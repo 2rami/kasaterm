@@ -69,6 +69,13 @@ impl App {
         }
     }
 
+    /// 창이 포커스를 잃었다 — 그 표면의 보기들이 혼자 누른 손가락을 잊고 눌린 단추를 뗀다.
+    pub(crate) fn screen_focus_lost(&mut self, on: Surface) {
+        for view in self.screen_views.values_mut().filter(|v| v.surface == on) {
+            view.focus_lost();
+        }
+    }
+
     /// 앞에 있는 화면 탭 — 키·글을 받을 보기.
     fn active_screen_view(&self) -> Option<u64> {
         self.ws.lock().unwrap().active().and_then(|p| p.screen().map(|s| s.view_id))
@@ -120,9 +127,8 @@ impl App {
     }
 
     pub(crate) fn screen_paste_for(&mut self, id: u64) -> bool {
-        if !self.screen_views.get(&id).is_some_and(|v| v.control) {
-            return true;
-        }
+        let Some(view) = self.screen_views.get_mut(&id).filter(|v| v.control) else { return true };
+        view.forget_alone();
         let text = match crate::shell_edit::verification_clipboard() {
             Some(clipboard) => Some(clipboard.load()),
             None => arboard::Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok()),
