@@ -259,3 +259,20 @@ whoami·login-vault·browser-sync 401(전후 같음), 맥미니·2R4MI 재접속
 2. 서울 상태를 미니로: 서울 관문을 내리고(`sudo systemctl stop kasa-relay`) `/var/lib/kasa-relay` 의 같은 파일들을 미니
    `~/.config/kasaterm/` 로(봉인 저장소·account-sync 는 소유자·0700/0600). 전환 직전 미니 상태는 `relay-backup-20261002-seoul.tar`.
 3. 미니 plist 를 `com.geono.kasa-relay.plist.bak-20261002-seoul` 로 되돌리고 `launchctl bootout` → `bootstrap`.
+
+## 새 도메인 (2026-11-23)
+
+debimarlene.com 은 뎁마 봇 몫으로 남기고, 카사 쪽은 `kasa.page`, 개발·미리보기·기계 쪽은 `2rami.dev` 로 옮기는 중이다.
+DNS 는 같은 Cloudflare 계정에 A `211.233.212.132`(DNS only)로 걸었고, 서울 앞단은 새 이름을 **옛 이름과 같은 곳으로** 받는다 — 깔린 앱이 옛 주소로 붙으니 옛 이름은 지우지 않는다.
+
+| 옛 | 새 | 앞단 |
+|---|---|---|
+| kasaterm.debimarlene.com | kasaterm.kasa.page | `sites/kasaterm.caddy` 같은 사이트 |
+| gw-kr.debimarlene.com | gw-kr.kasa.page | `sites/gw-kr.caddy` 같은 사이트 |
+| face.debimarlene.com | face.kasa.page | nginx SNI → 19443(kasa-face-edge, 원본은 l2d-style-bench `studio/relay/deploy`) |
+| nacho·mm.debimarlene.com | nacho·mm.2rami.dev | `web.caddy` `tunneled_as` — Host 를 옛 이름으로 바꿔 미니 Caddy 로 |
+| kasabrowser-update-zmpf.debimarlene.com | update.kasa.page | `web.caddy` `tunneled_as` — 문지기 미리보기로 |
+| `<이름>-<4자>.debimarlene.com` | `<이름>-<4자>.2rami.dev` | `https://` 사이트 + 문지기가 앞 이름으로 둘 다 찾는다 |
+
+아직 옛 이름만: relay-kr(iroh-relay 가 자기 인증서를 받아 이름을 더하려면 relay.toml 손질), geono(로그인 · Access 묶임),
+ssh 의 HostKeyAlias(DNS 를 안 본다 — 이름표일 뿐). 앱 기본 주소(카사텀 관문 · LFS · 폰 앱 webcredentials · 카사브라우저 업데이트)는 각 저장소에서 새 판으로.
