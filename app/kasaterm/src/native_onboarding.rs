@@ -257,12 +257,13 @@ impl State {
             .any(|choice| choice.path.eq_ignore_ascii_case(path))
     }
 
-    pub(crate) fn request_load(&mut self, proxy: EventLoopProxy<UserEvent>) {
+    /// 부르는 쪽은 루프 턴마다 부른다 — proxy 는 조회를 띄울 때만 복제한다(`refresh_due` 의 같은 함정).
+    pub(crate) fn request_load(&mut self, proxy: &EventLoopProxy<UserEvent>) {
         if self.loading || self.loaded {
             return;
         }
         self.loading = true;
-        self.load_generation = Some(request_data(proxy));
+        self.load_generation = Some(request_data(proxy.clone()));
     }
 
     fn apply_loaded(&mut self, data: Data) {
@@ -322,7 +323,7 @@ impl State {
         self.notice = Some((true, "브라우저에서 로그인을 마쳐 주세요".to_string()));
     }
 
-    fn poll_auth(&mut self, proxy: EventLoopProxy<UserEvent>) -> bool {
+    fn poll_auth(&mut self, proxy: &EventLoopProxy<UserEvent>) -> bool {
         let Some((provider, due, left, waiting_login)) = self.auth_poll else {
             return false;
         };
@@ -354,7 +355,7 @@ impl State {
         if std::time::Instant::now() < due {
             return false;
         }
-        self.auth_generation = Some((request_auth_data(proxy, provider), provider));
+        self.auth_generation = Some((request_auth_data(proxy.clone(), provider), provider));
         false
     }
 
@@ -537,7 +538,7 @@ impl App {
             }
             self.settings_scene
                 .onboarding_mut()
-                .request_load(self.proxy.clone());
+                .request_load(&self.proxy);
         }
     }
 
@@ -550,7 +551,7 @@ impl App {
         }
         self.settings_scene
             .onboarding_mut()
-            .request_load(self.proxy.clone());
+            .request_load(&self.proxy);
         let loaded = self
             .settings_scene
             .onboarding()
@@ -562,7 +563,7 @@ impl App {
         } else {
             self.settings_scene
                 .onboarding_mut()
-                .poll_auth(self.proxy.clone())
+                .poll_auth(&self.proxy)
         };
         if changed {
             self.chrome_dirty = true;

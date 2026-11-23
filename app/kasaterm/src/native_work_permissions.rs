@@ -150,7 +150,10 @@ impl State {
         self.pending.iter().find(|pending| pending["id"] == id)
     }
 
-    fn refresh_due(&mut self, force: bool, wake: EventLoopProxy<UserEvent>) {
+    /// `wake` 는 실제로 조회를 띄울 때만 복제한다. macOS winit 은 proxy 를 복제할 때마다 런루프 소스를 붙이고
+    /// 메인 런루프를 깨운다(`CFRunLoopWakeUp`). 그래서 루프 턴마다 복제하면 그 복제가 다음 턴을 불러 앱이
+    /// 쉬지 못했다. 격리 리그(방 12·칸 29)에서 턴이 초당 약 6만 번, CPU 98% 였고, 고친 뒤 98번·5% 다(2026-11-23).
+    fn refresh_due(&mut self, force: bool, wake: &EventLoopProxy<UserEvent>) {
         if self.fetch.is_some() || self.fixture {
             return;
         }
@@ -158,6 +161,7 @@ impl State {
             return;
         }
         self.fetched = Some(std::time::Instant::now());
+        let wake = wake.clone();
         let (tx, rx) = mpsc::channel();
         self.fetch = Some(rx);
         std::thread::spawn(move || {
@@ -340,7 +344,7 @@ impl App {
             work.queue_review();
         } else {
             work.review_requested = true;
-            work.refresh_due(true, self.proxy.clone());
+            work.refresh_due(true, &self.proxy);
         }
     }
 
@@ -352,7 +356,7 @@ impl App {
         let work = &mut self.device_account.work;
         let front = self.window_focused || work.fixture;
         if work.shown.is_some() {
-            work.refresh_due(false, self.proxy.clone());
+            work.refresh_due(false, &self.proxy);
         }
         let mut notices = Vec::new();
         let mut install = None;
