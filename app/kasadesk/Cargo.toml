@@ -12,6 +12,7 @@ base64 = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 kasa-cast = { workspace = true }
+kasa-cells = { workspace = true }
 kasa-castview = { workspace = true }
 kasa-gridview = { workspace = true }
 kasa-ime = { workspace = true }

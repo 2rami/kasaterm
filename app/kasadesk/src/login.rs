@@ -7,6 +7,7 @@ use winit::event::{ElementState, KeyEvent};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::account::Credential;
+use crate::text::Ui;
 
 const TEXT: [u8; 4] = [236, 240, 246, 255];
 const MUTE: [u8; 4] = [150, 160, 175, 255];
@@ -63,21 +64,21 @@ fn provider_name(p: &str) -> &str {
 
 impl Login {
     /// 오른쪽 위 단추 — 고르기 머리 줄 높이에 둔다.
-    pub fn paint_chip(&mut self, g: &mut GridRenderer, width: f32, cred: Option<&Credential>) {
+    pub fn paint_chip(&mut self, g: &mut GridRenderer, ui: &mut Ui, width: f32, cred: Option<&Credential>) {
         self.hits.clear();
         let text = match cred {
             Some(c) => format!("{} · 로그아웃", c.display),
             None => "로그인".to_string(),
         };
-        let w = g.measure_label(&text, 12.0) + 24.0;
+        let w = ui.measure(g, &text, 12.0, false) + 24.0;
         let r = (width - PAD - w, 24.0, w, 28.0);
         g.round_rect_fill(r.0, r.1, r.2, r.3, 6.0, if cred.is_some() { CHIP } else { ACCENT });
-        g.draw_label(r.0 + 12.0, r.1 + 7.0, &text, 12.0, TEXT);
+        ui.draw(g, r.0 + 12.0, r.1 + 7.0, &text, 12.0, TEXT, false);
         self.hits.push((r, Hit::Chip));
     }
 
     /// 로그인 판 — 열려 있을 때만. 단추 자리는 판정에 쓰도록 남긴다.
-    pub fn paint_panel(&mut self, g: &mut GridRenderer, (w, h): (f32, f32)) {
+    pub fn paint_panel(&mut self, g: &mut GridRenderer, ui: &mut Ui, (w, h): (f32, f32)) {
         if !self.open {
             return;
         }
@@ -89,23 +90,23 @@ impl Login {
         let (cx, cy) = (((w - CARD_W) / 2.0).max(8.0), ((h - card_h) / 2.0).max(8.0));
         g.round_rect_fill(cx, cy, CARD_W, card_h, 12.0, CARD);
         g.round_rect_stroke(cx, cy, CARD_W, card_h, 12.0, 1.0, EDGE);
-        g.draw_label(cx + PAD, cy + 24.0, "카사텀 계정으로 로그인", 18.0, TEXT);
-        g.draw_label(cx + PAD, cy + 52.0, "카사텀이 없는 컴퓨터에서도 내 기기를 고르고 볼 수 있어요", 11.0, MUTE);
+        ui.draw(g, cx + PAD, cy + 24.0, "카사텀 계정으로 로그인", 18.0, TEXT, true);
+        ui.draw(g, cx + PAD, cy + 52.0, "카사텀이 없는 컴퓨터에서도 내 기기를 고르고 볼 수 있어요", 11.0, MUTE, false);
         let close = (cx + CARD_W - 40.0, cy + 16.0, 28.0, 28.0);
-        g.draw_label(close.0 + 9.0, close.1 + 5.0, "×", 16.0, MUTE);
+        ui.draw(g, close.0 + 9.0, close.1 + 5.0, "×", 16.0, MUTE, false);
         self.hits.push((close, Hit::Close));
         let mut y = cy + 84.0;
         for p in self.providers.clone() {
             let r = (cx + PAD, y, inner, ROW);
             g.round_rect_fill(r.0, r.1, r.2, r.3, 8.0, CHIP);
             let text = format!("{} 로 계속", provider_name(&p));
-            let tw = g.measure_label(&text, 13.0);
-            g.draw_label(r.0 + (r.2 - tw) / 2.0, r.1 + 10.0, &text, 13.0, TEXT);
+            let tw = ui.measure(g, &text, 13.0, false);
+            ui.draw(g, r.0 + (r.2 - tw) / 2.0, r.1 + 10.0, &text, 13.0, TEXT, false);
             self.hits.push((r, Hit::Provider(p)));
             y += ROW + 10.0;
         }
         if rows > 0.0 {
-            g.draw_label(cx + PAD, y + 2.0, "또는 아이디로", 11.0, MUTE);
+            ui.draw(g, cx + PAD, y + 2.0, "또는 아이디로", 11.0, MUTE, false);
             y += 26.0;
         }
         let masked = "•".repeat(self.pw.chars().count());
@@ -114,12 +115,12 @@ impl Login {
             g.round_rect_fill(r.0, r.1, r.2, r.3, 8.0, FIELD);
             g.round_rect_stroke(r.0, r.1, r.2, r.3, 8.0, 1.0, if self.field == i { ACCENT } else { EDGE });
             if value.is_empty() {
-                g.draw_label(r.0 + 12.0, r.1 + 10.0, hint, 13.0, MUTE);
+                ui.draw(g, r.0 + 12.0, r.1 + 10.0, hint, 13.0, MUTE, false);
             } else {
-                g.draw_label(r.0 + 12.0, r.1 + 10.0, &value, 13.0, TEXT);
+                ui.draw(g, r.0 + 12.0, r.1 + 10.0, &value, 13.0, TEXT, false);
             }
             if self.field == i && self.busy.is_none() {
-                let x = r.0 + 12.0 + if value.is_empty() { 0.0 } else { g.measure_label(&value, 13.0) } + 1.0;
+                let x = r.0 + 12.0 + if value.is_empty() { 0.0 } else { ui.measure(g, &value, 13.0, false) } + 1.0;
                 g.rect(x, r.1 + 9.0, 1.5, 18.0, TEXT);
             }
             self.hits.push((r, Hit::Field(i)));
@@ -128,11 +129,11 @@ impl Login {
         let r = (cx + PAD, y, inner, ROW);
         g.round_rect_fill(r.0, r.1, r.2, r.3, 8.0, if self.busy.is_some() { CHIP } else { ACCENT });
         let label = self.busy.unwrap_or("로그인");
-        let tw = g.measure_label(label, 13.0);
-        g.draw_label(r.0 + (r.2 - tw) / 2.0, r.1 + 10.0, label, 13.0, TEXT);
+        let tw = ui.measure(g, label, 13.0, false);
+        ui.draw(g, r.0 + (r.2 - tw) / 2.0, r.1 + 10.0, label, 13.0, TEXT, false);
         self.hits.push((r, Hit::Submit));
         if let Some(e) = &self.error {
-            g.draw_label(cx + PAD, y + ROW + 12.0, e, 11.0, WARN);
+            ui.draw(g, cx + PAD, y + ROW + 12.0, e, 11.0, WARN, false);
         }
     }
 

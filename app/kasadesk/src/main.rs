@@ -14,6 +14,7 @@ mod net;
 mod rig;
 mod roster;
 mod scene;
+mod text;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

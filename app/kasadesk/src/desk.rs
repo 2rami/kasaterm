@@ -20,6 +20,7 @@ use crate::net::Net;
 use crate::rig::PickerAction;
 use crate::roster::Machine;
 use crate::scene::Room;
+use crate::text::{Pen, Ui};
 
 /// 보는 창의 연결이 닫히면 이만큼 뒤 다시 붙는다 — 그 기기 재시작·직통이 늦게 서는 경우. 본 앱 화면 탭과 같은 값.
 const RETRY_AFTER: Duration = Duration::from_secs(3);
@@ -60,6 +61,7 @@ struct Win {
     closed_since: Option<Instant>,
     cursor: (f32, f32),
     room: Room,
+    ui: Ui,
 }
 
 impl Win {
@@ -224,7 +226,7 @@ impl Desk {
         };
         let mut win = Win {
             gpu, window, label, view: None, display: None, closed_since: None,
-            cursor: (0.0, 0.0), room: Room::default(),
+            cursor: (0.0, 0.0), room: Room::default(), ui: Ui::new(),
         };
         if win.label.is_none() {
             win.room.reflow(win.logical(), &self.machines);
@@ -285,9 +287,10 @@ impl Desk {
             };
             let foot = format!("보기 앱 {id} · {origin}");
             let (login, cred) = (&mut self.login, self.session.get());
+            let ui = &mut w.ui;
             w.room.paint(&mut w.gpu, &self.machines, &self.paths, &foot, self.app_alive, |g, size| {
-                login.paint_chip(g, size.0, cred.as_ref());
-                login.paint_panel(g, size);
+                login.paint_chip(g, ui, size.0, cred.as_ref());
+                login.paint_panel(g, ui, size);
             })
         } else {
             w.gpu.rect(0.0, 0.0, ww, wh, BG);
@@ -295,7 +298,8 @@ impl Desk {
             if let Some(view) = w.view.as_mut() {
                 let extra = ["기기", if fullscreen { "창으로" } else { "전체 화면" }];
                 let style = Style { accent: ACCENT, mute: MUTE, edge: EDGE, extra: &extra };
-                kasa_castview::paint(&mut w.gpu, view, TEXTURE, (0.0, 0.0, ww, wh), Surface::Window(id), w.cursor, &style);
+                let mut pen = Pen { g: &mut w.gpu, ui: &mut w.ui };
+                kasa_castview::paint(&mut pen, view, TEXTURE, (0.0, 0.0, ww, wh), Surface::Window(id), w.cursor, &style);
             }
             w.gpu.render(0.0, true, |_, _, _, _, _, _| {})
         };
