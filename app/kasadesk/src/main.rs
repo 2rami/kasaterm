@@ -11,6 +11,7 @@ mod ipc;
 mod net;
 mod rig;
 mod roster;
+mod scene;
 
 use std::path::PathBuf;
 use std::time::Duration;

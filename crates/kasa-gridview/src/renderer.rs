@@ -17,6 +17,11 @@ use crate::fonts::{attach_fallback_chain, default_font_path, primary_bold_font_p
 use crate::macos::{apply_p3_via_hal, install_root_p3_layer, patch_metal_layer_gravity, promote_metal_layer_to_root, reapply_p3};
 use crate::palette::Palette;
 
+enum PassLayer {
+    UnderChrome,
+    OverChrome,
+}
+
 /// 호스트가 넘기는 글꼴. 엔진은 글꼴 파일을 싣지 않는다 — cargo git 의존이 LFS 를 안 풀기 때문이다.
 pub struct GridFonts {
     /// 주 고정폭 글꼴 경로. 없거나 비면 플랫폼 기본(`fonts::default_font_path`).
@@ -2119,6 +2124,41 @@ impl GridRenderer {
             wgpu::TextureFormat,
         ),
     ) -> Result<usize> {
+        self.render_layered(time_secs, chrome_changed, PassLayer::OverChrome, overlay)
+    }
+
+    /// 호스트가 그린 배경 위에도 기존 크롬·글자와 자기 캡처를 쓸 수 있게 한다.
+    /// 배경 패스가 그 장의 표면을 초기화한다.
+    pub fn render_with_underlay(
+        &mut self,
+        time_secs: f32,
+        chrome_changed: bool,
+        underlay: impl FnOnce(
+            &wgpu::Device,
+            &wgpu::Queue,
+            &mut wgpu::CommandEncoder,
+            &wgpu::Texture,
+            &wgpu::TextureView,
+            wgpu::TextureFormat,
+        ),
+    ) -> Result<usize> {
+        self.render_layered(time_secs, chrome_changed, PassLayer::UnderChrome, underlay)
+    }
+
+    fn render_layered(
+        &mut self,
+        time_secs: f32,
+        chrome_changed: bool,
+        layer: PassLayer,
+        scene: impl FnOnce(
+            &wgpu::Device,
+            &wgpu::Queue,
+            &mut wgpu::CommandEncoder,
+            &wgpu::Texture,
+            &wgpu::TextureView,
+            wgpu::TextureFormat,
+        ),
+    ) -> Result<usize> {
         // Re-apply P3 colorspace before every drawable. wgpu's Metal HAL
         // doesn't touch this, but in practice the byte we read off the
         // panel ended up matching plain sRGB (255,0,0 measured as
@@ -2179,6 +2219,13 @@ impl GridRenderer {
             }
         }
 
+        let scene = match layer {
+            PassLayer::UnderChrome => {
+                scene(&self.device, &self.queue, &mut encoder, &frame.texture, &view, self.config.format);
+                None
+            }
+            PassLayer::OverChrome => Some(scene),
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kasaterm gpu pass"),
@@ -2187,17 +2234,19 @@ impl GridRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear({
+                        load: if matches!(layer, PassLayer::UnderChrome) {
+                            wgpu::LoadOp::Load
+                        } else {
                             // Raw sRGB bytes → non-sRGB target = shown
                             // verbatim, matching cells::default_bg().
                             let b = self.palette.bg;
-                            wgpu::Color {
+                            wgpu::LoadOp::Clear(wgpu::Color {
                                 r: b[0] as f64 / 255.0,
                                 g: b[1] as f64 / 255.0,
                                 b: b[2] as f64 / 255.0,
                                 a: 1.0,
-                            }
-                        }),
+                            })
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -2316,7 +2365,9 @@ impl GridRenderer {
                 );
             }
         }
-        overlay(&self.device, &self.queue, &mut encoder, &frame.texture, &view, self.config.format);
+        if let Some(scene) = scene {
+            scene(&self.device, &self.queue, &mut encoder, &frame.texture, &view, self.config.format);
+        }
         // Self-capture: copy the just-rendered frame into a buffer before
         // present, then read it back to a PNG. No OS screen-record permission
         // needed (screencapture is blocked in headless runs).

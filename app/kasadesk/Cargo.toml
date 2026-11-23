@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 arboard = { workspace = true }
+bytemuck = { workspace = true }
+glam = { workspace = true }
 kasa-cast = { workspace = true }
 kasa-castview = { workspace = true }
 kasa-gridview = { workspace = true }
@@ -15,6 +17,7 @@ kasa-ime = { workspace = true }
 kasa-net = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+wgpu = { workspace = true }
 winit = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

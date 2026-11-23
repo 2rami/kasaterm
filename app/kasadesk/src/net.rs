@@ -109,7 +109,7 @@ impl Net {
         }))
     }
 
-    /// 고르기 줄의 길 — 서비스 노드 길이 서면 그 길, 아니면 앱 노드 길.
+    /// 고르기 장면에 표시할 길 — 서비스 노드 길이 서면 그 길, 아니면 앱 노드 길.
     pub fn path_text(&self, label: &str) -> String {
         let paths = self.paths.lock().unwrap_or_else(|e| e.into_inner());
         let Some(p) = paths.get(label) else { return "주소 모름".into() };

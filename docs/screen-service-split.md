@@ -495,6 +495,12 @@
 다시 뜰 때 끊긴다. KasaDesk 는 본 앱과 따로 도는 작은 앱이다(문서 보기 앱 KasaViewer·맥 화면 서비스 도우미 KasatermScreen 과
 다른 것). 창 하나에 기기 하나, 기기를 안 골랐으면 고르기 화면이다.
 
+기기를 고를 때는 코드로 만든 맥미니·맥북·Windows 데스크톱 모형을 3D 방에 줄지어 보여 준다. 명부 이름과 `/version` 에서 종류를 알 수 없는
+기기는 맥미니 모형으로 표시한다. 각 모형 아래에 기기 이름과 접속 경로, 지난 주소 여부를 표시한다. 모형에 포인터를 올리면 살짝 들리고
+윤곽이 밝아지며, 클릭하거나 방향키로 골라 Enter 를 누르면 그 기기의 화면을 연다. 창에 한 번에 담을 수 있는 수를 넘으면 페이지를 나눈다.
+`scene.rs` 는 광선으로 모형을 고르고, `GridRenderer` 의 크롬 앞 wgpu 패스로 방을 그린다. 명부·경로·선택이 바뀌거나 들어 올리는
+애니메이션이 도는 동안에만 새 장을 요청한다.
+
 ### 신원 — 보기 앱 키와 「보기 전용」
 
 - 자기 카사넷 키 `kasanet-view.key`(기기 키 옆, `kasa_net::identity::view_key_path`, 격리 리그는 `KASATERM_VIEW_KEY`). 본 앱 키를 빌리지
@@ -510,7 +516,7 @@
 ### 명부와 붙기
 
 - 명부는 이 기기 본 앱에 묻는다(`/machines`, 기기마다 루프백 base 의 `/version`) — 5초마다. 본 앱이 없거나 그 기기 길이 끊기면 상태 폴더의 지난
-  명부(`roster.json`, 공개키·주소뿐)로 보인다. 주소가 바뀌었어도 같은 중계를 홈으로 쓰면 중계 신호로 찾는다.
+  명부(`roster.json`, 기기 종류·공개키·주소)로 보인다. 주소가 바뀌었어도 같은 중계를 홈으로 쓰면 중계 신호로 찾는다.
 - 기기마다 화면 서비스 노드(`screen_node`, `SCREEN_LINK_ALPN`)와 앱 노드(fwd ALPN 으로 길만 — 돌리기가 비어 스트림은 못 연다)로 길을 쥐고,
   서비스 길이 데이터를 실을 길(직통·국내 중계)이면 서비스로, 아니면 화면을 받는 판의 앱으로 붙는다 — 본 앱 `kasanet::connect_screen` 과 같은 판정.
 - 보기는 본 앱 화면 탭과 같은 `kasa-castview` 다 — 풀기·소리·조작 판정(맥→Windows 키 자리·⌘→Alt·⌥→Windows 키·⌥만 → 시작 메뉴·Caps Lock →
@@ -540,7 +546,8 @@
   (명부를 물을 본 앱)·`KASATERM_KASANET_BIND`·`KASATERM_VIEW_STDERR`(기록 파일로 안 돌림). 리그 손잡이(`rig.rs`): `KASATERM_VIEW_TEST_LOG`
   (보기마다 1초에 한 줄 JSON)·`_QUIT_MS`·`_CAPTURE=ms:경로`(창 자체 뜨기)·`_INPUT="ms:key:KeyA:0;ms:text:가;ms:click:fx,fy"`(누름은 그 기기 화면 안
   비율, 보내기를 바로 부른다 — winit 키 판정은 안 거친다)·`_INPUT_GATE=<파일>`(키·글은 그 파일이 생긴 뒤에만 — 리그가 시험 창이 맨 앞인 것을 확인하고 만든다)·
-  `KASATERM_TEST_SCREEN_AUDIO_SILENT`.
+  `KASATERM_TEST_SCREEN_AUDIO_SILENT`. 고르기 리그는 격리 키·상태 폴더를 줄 때
+  `KASATERM_VIEW_TEST_PICKER_INPUT="ms:hover:fx,fy;ms:click:fx,fy;ms:key:Right;ms:key:Enter"` 로 창 안 비율의 포인터와 방향키·Enter 를 받는다.
 - 원본은 격리 리그 앱 하나, 그 리그의 명부에는 `view_id` 를 보기 앱 키로 알리는 가짜 기기(닿지 않는 주소), 보기 앱의 본 앱 자리에는 리그 앱
   base 를 명부로 내주는 가짜 본 앱을 둔다 — 리그 앱 둘을 카사넷으로 잇지 않는다(「S3 리그」의 포트 공유 함정).
 - 실측(2026-11-23, 맥, release, 리그 원본 = 화면 서비스 없는 리그 앱): 리그 앱이 가짜 기기의 `view_id` 를 「보기 앱 허용 — 화면만」으로 배웠고,

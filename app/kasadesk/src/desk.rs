@@ -5,31 +5,29 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kasa_castview::{contains, key_mods, Click, Rect, ScreenView, Style, Surface};
+use kasa_castview::{key_mods, Click, ScreenView, Style, Surface};
 use kasa_gridview::{GridFonts, GridRenderer};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::event::{DeviceId, ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
-use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::net::Net;
+use crate::rig::PickerAction;
 use crate::roster::Machine;
+use crate::scene::Room;
 
 /// 보는 창의 연결이 닫히면 이만큼 뒤 다시 붙는다 — 그 기기 재시작·직통이 늦게 서는 경우. 본 앱 화면 탭과 같은 값.
 const RETRY_AFTER: Duration = Duration::from_secs(3);
 const FONT_SIZE: f32 = 13.0;
+const PICKER_MIN: LogicalSize<f64> = LogicalSize::new(360.0, 300.0);
 const BG: [u8; 4] = [24, 24, 27, 255];
-const TEXT: [u8; 4] = [236, 236, 240, 255];
 const MUTE: [u8; 4] = [150, 150, 160, 255];
 const ACCENT: [u8; 4] = [86, 132, 245, 255];
-const HOVER: [u8; 4] = [255, 255, 255, 18];
 const EDGE: [u8; 4] = [255, 255, 255, 40];
 const TEXTURE: &str = "kasadesk:screen";
-const PAD: f32 = 24.0;
-const ROW_H: f32 = 44.0;
-const LIST_TOP: f32 = 84.0;
 
 pub enum Ev {
     /// 새 장·상태 — 다시 그린다.
@@ -53,8 +51,7 @@ struct Win {
     display: Option<u32>,
     closed_since: Option<Instant>,
     cursor: (f32, f32),
-    /// 고르기 화면에서 줄마다 그린 자리.
-    rows: Vec<(Rect, String)>,
+    room: Room,
 }
 
 impl Win {
@@ -62,6 +59,14 @@ impl Win {
         let s = self.window.inner_size();
         let scale = self.gpu.scale.max(0.5);
         (s.width as f32 / scale, s.height as f32 / scale)
+    }
+
+    fn room_cursor(&self, count: usize) {
+        self.window.set_cursor(if self.room.pointer_on_device() || self.room.pointer_on_page(count) {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        });
     }
 
     fn set_title(&self) {
@@ -84,6 +89,7 @@ pub struct Desk {
     windows: HashMap<WindowId, Win>,
     pending: Vec<Option<String>>,
     machines: Vec<Machine>,
+    paths: Vec<String>,
     app_alive: bool,
     modifiers: ModifiersState,
     hangul: kasa_ime::Composer,
@@ -99,6 +105,7 @@ impl Desk {
             windows: HashMap::new(),
             pending: vec![open],
             machines: Vec::new(),
+            paths: Vec::new(),
             app_alive: false,
             modifiers: ModifiersState::empty(),
             hangul: kasa_ime::Composer::new(),
@@ -121,12 +128,18 @@ impl Desk {
         }
         if let Some(w) = self.windows.values_mut().find(|w| w.label.is_none()) {
             w.label = label;
+            w.room.suspend();
+            w.window.set_min_inner_size(None::<LogicalSize<f64>>);
+            w.window.set_cursor(CursorIcon::Default);
             w.set_title();
             w.window.focus_window();
             w.window.request_redraw();
             return;
         }
-        let attrs = WindowAttributes::default().with_title("KasaDesk").with_inner_size(LogicalSize::new(1280.0, 800.0));
+        let attrs = WindowAttributes::default()
+            .with_title("KasaDesk")
+            .with_inner_size(LogicalSize::new(1280.0, 800.0));
+        let attrs = if label.is_none() { attrs.with_min_inner_size(PICKER_MIN) } else { attrs };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -143,7 +156,13 @@ impl Desk {
                 return;
             }
         };
-        let win = Win { gpu, window, label, view: None, display: None, closed_since: None, cursor: (0.0, 0.0), rows: Vec::new() };
+        let mut win = Win {
+            gpu, window, label, view: None, display: None, closed_since: None,
+            cursor: (0.0, 0.0), room: Room::default(),
+        };
+        if win.label.is_none() {
+            win.room.reflow(win.logical(), &self.machines);
+        }
         win.set_title();
         win.window.request_redraw();
         self.windows.insert(win.window.id(), win);
@@ -186,47 +205,70 @@ impl Desk {
     }
 
     fn paint(&mut self, id: WindowId) {
-        let (machines, app_alive, net) = (&self.machines, self.app_alive, self.net.clone());
         let Some(w) = self.windows.get_mut(&id) else { return };
         let (ww, wh) = w.logical();
         w.gpu.clear_chrome();
-        w.gpu.rect(0.0, 0.0, ww, wh, BG);
-        let fullscreen = w.fullscreen();
-        if let Some(view) = w.view.as_mut() {
-            let extra = ["기기", if fullscreen { "창으로" } else { "전체 화면" }];
-            let style = Style { accent: ACCENT, mute: MUTE, edge: EDGE, extra: &extra };
-            kasa_castview::paint(&mut w.gpu, view, TEXTURE, (0.0, 0.0, ww, wh), Surface::Window(id), w.cursor, &style);
-        } else {
-            w.rows = picker(&mut w.gpu, (ww, wh), w.cursor, machines, app_alive, &net);
-        }
         self.test.capture(&mut w.gpu);
-        if let Err(e) = w.gpu.render(0.0, true, |_, _, _, _, _, _| {}) {
+        let result = if w.label.is_none() {
+            let id = self.net.id().fmt_short();
+            let origin = if self.app_alive { "카사텀에서 명부를 받는 중" } else { "카사텀이 꺼져 있어 지난 명부로 보여요" };
+            let foot = format!("보기 앱 {id} · {origin}");
+            w.room.paint(&mut w.gpu, &self.machines, &self.paths, &foot, self.app_alive)
+        } else {
+            w.gpu.rect(0.0, 0.0, ww, wh, BG);
+            let fullscreen = w.fullscreen();
+            if let Some(view) = w.view.as_mut() {
+                let extra = ["기기", if fullscreen { "창으로" } else { "전체 화면" }];
+                let style = Style { accent: ACCENT, mute: MUTE, edge: EDGE, extra: &extra };
+                kasa_castview::paint(&mut w.gpu, view, TEXTURE, (0.0, 0.0, ww, wh), Surface::Window(id), w.cursor, &style);
+            }
+            w.gpu.render(0.0, true, |_, _, _, _, _, _| {})
+        };
+        if let Err(e) = result {
             eprintln!("[kasadesk] 그리기 실패: {e:#}");
         }
     }
 
-    fn back_to_picker(w: &mut Win) {
+    fn back_to_picker(w: &mut Win, machines: &[Machine]) {
         w.view = None;
         w.label = None;
         w.display = None;
+        w.closed_since = None;
         w.gpu.drop_image(TEXTURE);
+        w.window.set_min_inner_size(Some(PICKER_MIN));
+        w.room.reflow(w.logical(), machines);
         w.set_title();
         w.window.request_redraw();
     }
 
-    fn mouse(&mut self, id: WindowId, event: &WindowEvent) {
+    fn mouse(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: &WindowEvent) {
         let mods = key_mods(self.modifiers);
         let modifiers = self.modifiers;
         let Some(w) = self.windows.get_mut(&id) else { return };
         let p = (f64::from(w.cursor.0), f64::from(w.cursor.1));
         let Some(view) = w.view.as_mut() else {
-            if let WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } = event {
-                if let Some((_, label)) = w.rows.iter().find(|(r, _)| contains(*r, p)) {
-                    w.label = Some(label.clone());
-                    w.set_title();
-                }
+            if w.label.is_some() {
+                return;
             }
-            w.window.request_redraw();
+            let redraw = match event {
+                WindowEvent::CursorMoved { .. } => w.room.pointer(Some(w.cursor)),
+                WindowEvent::CursorLeft { .. } => w.room.pointer(None),
+                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                    if w.room.click_page(&self.machines) {
+                        true
+                    } else {
+                        if let Some(index) = w.room.hit() {
+                            self.open(event_loop, Some(self.machines[index].label.clone()));
+                        }
+                        return;
+                    }
+                }
+                _ => return,
+            };
+            w.room_cursor(self.machines.len());
+            if redraw {
+                w.window.request_redraw();
+            }
             return;
         };
         let redraw = match event {
@@ -250,7 +292,7 @@ impl Desk {
                             true
                         }
                         Click::Extra(0) => {
-                            Self::back_to_picker(w);
+                            Self::back_to_picker(w, &self.machines);
                             true
                         }
                         Click::Extra(_) => {
@@ -291,7 +333,15 @@ impl Desk {
             w.toggle_fullscreen();
             return;
         }
-        let Some(view) = w.view.as_mut() else { return };
+        let Some(view) = w.view.as_mut() else {
+            if !pressed || w.label.is_some() || m.super_key() || m.control_key() || m.alt_key() {
+                return;
+            }
+            if let Some(code) = code {
+                self.picker_key(event_loop, id, code, event.repeat);
+            }
+            return;
+        };
         let paste = pressed && code == Some(KeyCode::KeyV) && (host || (cfg!(windows) && m.control_key() && !m.alt_key()));
         if paste {
             if !event.repeat && view.control {
@@ -305,37 +355,50 @@ impl Desk {
             w.window.request_redraw();
         }
     }
-}
 
-/// 고르기 화면 — 명부 기기마다 한 줄(이름·길). 줄을 누르면 그 기기를 이 창에서 본다.
-fn picker(g: &mut GridRenderer, (w, h): (f32, f32), cursor: (f32, f32), machines: &[Machine], app_alive: bool, net: &Net) -> Vec<(Rect, String)> {
-    g.draw_label(PAD, PAD, "KasaDesk", 20.0, TEXT);
-    g.draw_label(PAD, PAD + 30.0, "화면을 볼 기기를 고르세요 — 이 앱은 카사텀을 다시 띄워도 화면이 이어져요", 13.0, MUTE);
-    let mut rows = Vec::with_capacity(machines.len());
-    if machines.is_empty() {
-        let text = if app_alive { "볼 기기가 없어요 — 카사텀 기기 명부에 기기를 더하면 여기 보여요" } else { "카사텀을 띄우면 기기 명부를 배워요" };
-        g.draw_label(PAD, LIST_TOP + 12.0, text, 14.0, MUTE);
-    }
-    for (i, m) in machines.iter().enumerate() {
-        let r = (PAD - 8.0, LIST_TOP + ROW_H * i as f32, (w - PAD * 2.0 + 16.0).max(0.0), ROW_H - 4.0);
-        if contains(r, (f64::from(cursor.0), f64::from(cursor.1))) {
-            g.round_rect_fill(r.0, r.1, r.2, r.3, 6.0, HOVER);
+    fn picker_key(&mut self, event_loop: &ActiveEventLoop, id: WindowId, code: KeyCode, repeat: bool) {
+        let Some(w) = self.windows.get_mut(&id).filter(|w| w.label.is_none()) else { return };
+        if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+            if !repeat {
+                if let Some(index) = w.room.selected() {
+                    self.open(event_loop, Some(self.machines[index].label.clone()));
+                }
+            }
+        } else if w.room.keyboard(code, &self.machines) {
+            w.window.request_redraw();
         }
-        g.draw_label(PAD, r.1 + 12.0, &m.label, 15.0, TEXT);
-        let path = net.path_text(&m.label);
-        let path = if m.fresh { path } else { format!("{path} · 지난 주소") };
-        let pw = g.measure_label(&path, 12.0);
-        g.draw_label(r.0 + r.2 - 8.0 - pw, r.1 + 14.0, &path, 12.0, MUTE);
-        rows.push((r, m.label.clone()));
     }
-    let id = net.id().to_string();
-    let foot = format!(
-        "보기 앱 {} · {}",
-        &id[..id.len().min(10)],
-        if app_alive { "카사텀에서 명부를 받는 중" } else { "카사텀이 꺼져 있어 지난 명부로 보여요" }
-    );
-    g.draw_label(PAD, h - PAD - 12.0, &foot, 11.0, MUTE);
-    rows
+
+    fn pointer_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: &WindowEvent) {
+        if let WindowEvent::CursorMoved { position, .. } = event {
+            if let Some(w) = self.windows.get_mut(&id) {
+                let scale = w.gpu.scale.max(0.5);
+                w.cursor = (position.x as f32 / scale, position.y as f32 / scale);
+            }
+        }
+        self.mouse(event_loop, id, event);
+    }
+
+    fn picker_probe(&mut self, event_loop: &ActiveEventLoop, action: PickerAction) {
+        let Some((&id, w)) = self.windows.iter().find(|(_, w)| w.label.is_none()) else { return };
+        let (x, y, click) = match action {
+            PickerAction::Hover(x, y) => (x, y, false),
+            PickerAction::Click(x, y) => (x, y, true),
+            PickerAction::Key(code) => {
+                self.picker_key(event_loop, id, code, false);
+                return;
+            }
+        };
+        let size = w.window.inner_size();
+        let position = PhysicalPosition::new(x * f64::from(size.width), y * f64::from(size.height));
+        let device_id = DeviceId::dummy();
+        self.pointer_event(event_loop, id, &WindowEvent::CursorMoved { device_id, position });
+        if click {
+            self.pointer_event(event_loop, id, &WindowEvent::MouseInput {
+                device_id, state: ElementState::Pressed, button: MouseButton::Left,
+            });
+        }
+    }
 }
 
 impl ApplicationHandler<Ev> for Desk {
@@ -354,16 +417,30 @@ impl ApplicationHandler<Ev> for Desk {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Ev) {
         match event {
             Ev::Wake => {
-                for w in self.windows.values() {
+                for w in self.windows.values().filter(|w| w.label.is_some()) {
                     w.window.request_redraw();
                 }
             }
             Ev::Open(label) => self.open(event_loop, label),
             Ev::Roster { machines, app_alive } => {
+                let paths = machines.iter().map(|m| {
+                    let path = self.net.path_text(&m.label);
+                    if m.fresh { path } else { format!("{path} · 지난 주소") }
+                }).collect::<Vec<_>>();
+                let reflow = machines.len() != self.machines.len() || machines.iter().zip(&self.machines)
+                    .any(|(m, old)| m.label != old.label || m.kind != old.kind);
+                let redraw = reflow || paths != self.paths || app_alive != self.app_alive;
                 self.machines = machines;
+                self.paths = paths;
                 self.app_alive = app_alive;
-                for w in self.windows.values().filter(|w| w.view.is_none()) {
-                    w.window.request_redraw();
+                if redraw {
+                    for w in self.windows.values_mut().filter(|w| w.label.is_none()) {
+                        if reflow {
+                            w.room.reflow(w.logical(), &self.machines);
+                            w.room_cursor(self.machines.len());
+                        }
+                        w.window.request_redraw();
+                    }
                 }
             }
             #[cfg(target_os = "macos")]
@@ -387,15 +464,29 @@ impl ApplicationHandler<Ev> for Desk {
             WindowEvent::Resized(size) => {
                 if let Some(w) = self.windows.get_mut(&id) {
                     w.gpu.resize(size.width, size.height);
+                    if w.label.is_none() {
+                        w.room.reflow(w.logical(), &self.machines);
+                        w.room_cursor(self.machines.len());
+                    }
                     w.window.request_redraw();
                 }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(w) = self.windows.get_mut(&id) {
+                    let old_scale = w.gpu.scale.max(0.5);
                     w.gpu.set_scale(w.window.scale_factor() as f32);
+                    let ratio = old_scale / w.gpu.scale.max(0.5);
+                    w.cursor = (w.cursor.0 * ratio, w.cursor.1 * ratio);
+                    if w.label.is_none() {
+                        w.room.rescale_pointer(ratio);
+                    }
                     w.gpu.set_font_size(FONT_SIZE);
                     let size = w.window.inner_size();
                     w.gpu.resize(size.width, size.height);
+                    if w.label.is_none() {
+                        w.room.reflow(w.logical(), &self.machines);
+                        w.room_cursor(self.machines.len());
+                    }
                     w.window.request_redraw();
                 }
             }
@@ -416,24 +507,52 @@ impl ApplicationHandler<Ev> for Desk {
                     view.commit(text);
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                if let Some(w) = self.windows.get_mut(&id) {
-                    let scale = w.gpu.scale.max(0.5);
-                    w.cursor = (position.x as f32 / scale, position.y as f32 / scale);
+            WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } => {
+                // On a rig the hardware cursor can leave the window during a scripted hover.
+                if !self.test.drives_picker() || self.windows.get(&id).is_some_and(|w| w.label.is_some()) {
+                    self.pointer_event(event_loop, id, &event);
                 }
-                self.mouse(id, &event);
             }
-            WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } => self.mouse(id, &event),
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        for action in self.test.take_picker_actions(Instant::now()) {
+            self.picker_probe(event_loop, action);
+        }
         self.sync();
         let mut views: Vec<&mut ScreenView> = self.windows.values_mut().filter_map(|w| w.view.as_mut()).collect();
         if self.test.tick(&mut views) {
             event_loop.exit();
+            return;
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(500)));
+        let now = Instant::now();
+        let mut next = self.test.next_wake(now);
+        if self.windows.values().any(|w| w.label.is_some()) {
+            schedule(&mut next, now + Duration::from_millis(500));
+        }
+        if self.test.capture_due(now) {
+            if let Some(w) = self.windows.values().next() {
+                w.window.request_redraw();
+            }
+        }
+        for w in self.windows.values().filter(|w| w.label.is_none()) {
+            if let Some(at) = w.room.next_frame() {
+                if at <= now {
+                    w.window.request_redraw();
+                } else {
+                    schedule(&mut next, at);
+                }
+            }
+        }
+        event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+}
+
+fn schedule(next: &mut Option<Instant>, at: Instant) {
+    if next.is_none_or(|t| at < t) {
+        *next = Some(at);
     }
 }

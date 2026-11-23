@@ -8,12 +8,43 @@ use std::time::{Duration, Instant};
 use kasa_castview::ScreenView;
 use kasa_gridview::GridRenderer;
 use serde_json::json;
+use winit::keyboard::KeyCode;
 
 enum Action {
     Key(String, u8),
     Text(String),
     /// 그 기기 화면 안 비율(0–1) — 보이는 장 자리로 옮겨 누른다.
     Click(f64, f64),
+}
+
+pub enum PickerAction {
+    Hover(f64, f64),
+    Click(f64, f64),
+    Key(KeyCode),
+}
+
+impl PickerAction {
+    fn parse(action: &str, argument: &str) -> Option<Self> {
+        match action {
+            "hover" | "click" => {
+                let (x, y) = argument.split_once(',')?;
+                let (x, y) = (x.parse::<f64>().ok()?, y.parse::<f64>().ok()?);
+                if !(0.0..1.0).contains(&x) || !(0.0..1.0).contains(&y) {
+                    return None;
+                }
+                Some(if action == "hover" { Self::Hover(x, y) } else { Self::Click(x, y) })
+            }
+            "key" => Some(Self::Key(match argument {
+                "Left" => KeyCode::ArrowLeft,
+                "Right" => KeyCode::ArrowRight,
+                "Up" => KeyCode::ArrowUp,
+                "Down" => KeyCode::ArrowDown,
+                "Enter" => KeyCode::Enter,
+                _ => return None,
+            })),
+            _ => None,
+        }
+    }
 }
 
 pub struct Rig {
@@ -23,6 +54,7 @@ pub struct Rig {
     quit_at: Option<Instant>,
     capture: Option<(Instant, String)>,
     input: Vec<(Instant, Action)>,
+    picker_input: Option<Vec<(Instant, PickerAction)>>,
     /// 키·글은 이 파일이 생긴 뒤에만 보낸다 — 리그가 시험 창이 맨 앞인 것을 확인하고 만든다(사람 앱으로 키가 새지 않게).
     gate: Option<PathBuf>,
     pub silent_audio: bool,
@@ -64,6 +96,14 @@ impl Rig {
                     .collect()
             })
             .unwrap_or_default();
+        let picker_input = env("KASATERM_VIEW_TEST_PICKER_INPUT")
+            .filter(|_| env("KASATERM_VIEW_STATE").is_some() && env("KASATERM_VIEW_KEY").is_some())
+            .map(|v| v.split(';').filter_map(|step| {
+                let mut parts = step.splitn(3, ':');
+                let at = started + ms(parts.next()?)?;
+                let action = PickerAction::parse(parts.next()?, parts.next()?)?;
+                Some((at, action))
+            }).collect());
         Self {
             started,
             log: env("KASATERM_VIEW_TEST_LOG").map(PathBuf::from),
@@ -71,6 +111,7 @@ impl Rig {
             quit_at: env("KASATERM_VIEW_TEST_QUIT_MS").and_then(|v| ms(&v)).map(|d| started + d),
             capture,
             input,
+            picker_input,
             gate: env("KASATERM_VIEW_TEST_INPUT_GATE").map(PathBuf::from),
             silent_audio: env("KASATERM_TEST_SCREEN_AUDIO_SILENT").is_some(),
         }
@@ -144,6 +185,28 @@ impl Rig {
             }
         }
         self.quit_at.is_some_and(|at| now >= at)
+    }
+
+    pub fn next_wake(&self, now: Instant) -> Option<Instant> {
+        [self.quit_at, self.capture.as_ref().map(|(at, _)| *at)]
+            .into_iter().flatten().filter(|at| *at > now)
+            .chain(self.picker_input.iter().flatten().map(|(at, _)| *at)).min()
+    }
+
+    pub fn drives_picker(&self) -> bool {
+        self.picker_input.is_some()
+    }
+
+    pub fn take_picker_actions(&mut self, now: Instant) -> Vec<PickerAction> {
+        let Some(input) = &mut self.picker_input else { return Vec::new() };
+        let (ready, later): (Vec<_>, Vec<_>) =
+            std::mem::take(input).into_iter().partition(|(at, _)| *at <= now);
+        *input = later;
+        ready.into_iter().map(|(_, action)| action).collect()
+    }
+
+    pub fn capture_due(&self, now: Instant) -> bool {
+        self.capture.as_ref().is_some_and(|(at, _)| now >= *at)
     }
 
     /// 정한 때가 지난 첫 장을 PNG 로 — 렌더러가 그린 그대로(권한 없는 자기 뜨기).

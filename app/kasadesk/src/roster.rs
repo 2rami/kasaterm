@@ -13,10 +13,54 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 /// 응답 상한 — 명부·`/version` 은 몇 KB 다.
 const BODY_MAX: u64 = 1 << 20;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceKind {
+    Mini,
+    Laptop,
+    Desktop,
+}
+
+impl DeviceKind {
+    fn hint(name: &str) -> Option<Self> {
+        let name = name.to_lowercase();
+        let words = name.split(|c: char| !c.is_alphanumeric());
+        if name.contains("windows") || name.contains("windesk") || name.contains("윈도우")
+            || words.clone().any(|word| matches!(word, "win" | "win11" | "win10" | "desktop"))
+        {
+            Some(Self::Desktop)
+        } else if name.contains("macbook") || name.contains("맥북") || name == "laptop" {
+            Some(Self::Laptop)
+        } else if name.contains("macmini") || name.contains("mac mini") || name.contains("맥미니") || name == "mini" {
+            Some(Self::Mini)
+        } else {
+            None
+        }
+    }
+
+    fn classify(label: &str, version: &Value) -> Self {
+        [version.get("model"), version.get("os"), version.get("platform")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .find_map(Self::hint)
+            .or_else(|| Self::hint(label))
+            .unwrap_or(Self::Mini)
+    }
+
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Mini => "mini",
+            Self::Laptop => "laptop",
+            Self::Desktop => "desktop",
+        }
+    }
+}
+
 /// 명부 한 줄.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Machine {
     pub label: String,
+    pub kind: DeviceKind,
     /// 그 기기 `/version` 의 `kasanet`(`id`·`relay`·`addrs`·`screen`·`screen_node`).
     pub kasanet: Value,
     /// 이번에 본 앱에서 새로 배웠다 — 아니면 지난 명부 그대로다.
@@ -68,9 +112,11 @@ pub fn fetch(app: &str) -> Option<Snapshot> {
         .filter_map(|m| {
             let label = m.get("label")?.as_str()?.to_string();
             let base = m.get("base")?.as_str()?;
-            let kasanet = get(base, "/version")?.get("kasanet")?.clone();
+            let version = get(base, "/version")?;
+            let kind = DeviceKind::classify(&label, &version);
+            let kasanet = version.get("kasanet")?.clone();
             let id = kasanet.get("id").and_then(Value::as_str);
-            (id.is_some() && id != own_id.as_deref()).then_some(Machine { label, kasanet, fresh: true })
+            (id.is_some() && id != own_id.as_deref()).then_some(Machine { label, kind, kasanet, fresh: true })
         })
         .collect();
     Some(Snapshot { machines, app_alive: true, listed })
@@ -99,13 +145,18 @@ pub fn load(path: &PathBuf) -> Vec<Machine> {
     v.as_array()
         .into_iter()
         .flatten()
-        .filter_map(|m| Some(Machine { label: m.get("label")?.as_str()?.to_string(), kasanet: m.get("kasanet")?.clone(), fresh: false }))
+        .filter_map(|m| {
+            let label = m.get("label")?.as_str()?.to_string();
+            let kind = m.get("kind").and_then(Value::as_str).and_then(DeviceKind::hint)
+                .unwrap_or_else(|| DeviceKind::classify(&label, &Value::Null));
+            Some(Machine { label, kind, kasanet: m.get("kasanet")?.clone(), fresh: false })
+        })
         .collect()
 }
 
-/// 공개키·주소뿐이라 비밀이 아니다.
+/// 기기 이름·종류와 공개키·주소만 남긴다.
 pub fn save(path: &PathBuf, machines: &[Machine]) {
-    let v: Vec<Value> = machines.iter().map(|m| json!({ "label": m.label, "kasanet": m.kasanet })).collect();
+    let v: Vec<Value> = machines.iter().map(|m| json!({ "label": m.label, "kind": m.kind.tag(), "kasanet": m.kasanet })).collect();
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, Value::Array(v).to_string()).is_ok() {
         let _ = std::fs::rename(&tmp, path);
@@ -117,7 +168,14 @@ mod tests {
     use super::*;
 
     fn m(label: &str, fresh: bool) -> Machine {
-        Machine { label: label.into(), kasanet: json!({ "id": label }), fresh }
+        Machine { label: label.into(), kind: DeviceKind::Mini, kasanet: json!({ "id": label }), fresh }
+    }
+
+    #[test]
+    fn device_kind_uses_explicit_version_hints_and_works_with_old_rosters() {
+        assert_eq!(DeviceKind::classify("Studio", &json!({"os": "windows"})), DeviceKind::Desktop);
+        assert_eq!(DeviceKind::classify("현장 맥북", &Value::Null), DeviceKind::Laptop);
+        assert_eq!(DeviceKind::classify("Studio", &Value::Null), DeviceKind::Mini);
     }
 
     #[test]
