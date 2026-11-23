@@ -1460,16 +1460,54 @@ pub(crate) fn status_label(row: &kasa_socket::backend::PaneActivity) -> String {
         .and_then(crate::agent_state::WaitKind::parse).is_none() {
         "미확인".to_string()
     } else if let Some(outcome) = &row.done_outcome {
-        if outcome == "succeeded" { "완료 보고".to_string() } else { "실패 보고".to_string() }
+        let head = if outcome == "succeeded" { "완료 보고" } else { "실패 보고" };
+        match row.done_at_ms.and_then(|ms| hhmm(ms / 1000)) {
+            Some(at) => format!("{head} · {at}"),
+            None => head.to_string(),
+        }
     } else if row.status == "thinking" {
-        "생각 중".to_string()
+        for_how_long("생각 중".to_string(), row.busy_secs)
     } else if row.status == "compacting" {
-        "대화 정리 중".to_string()
+        for_how_long("대화 정리 중".to_string(), row.busy_secs)
     } else if agent_is_working(row) {
-        if row.intent.is_empty() { "작업 중".to_string() } else { row.intent.clone() }
+        for_how_long(if row.intent.is_empty() { "작업 중".to_string() } else { row.intent.clone() }, row.busy_secs)
+    } else if !row.background.is_empty() {
+        // 턴은 끝났지만 완료 통보를 기다리는 배경 일이 남았다 — 끝난 것이 아니다.
+        since_when(format!("배경 일 {}개 기다림", row.background.len()), row.idle_secs)
     } else {
-        "대기 중".to_string()
+        since_when("대기 중".to_string(), row.idle_secs)
     }
+}
+
+/// 일한 지 얼마나 — `작업 중 · 12분 30초`.
+fn for_how_long(head: String, busy_secs: Option<u64>) -> String {
+    match busy_secs.filter(|s| *s > 0) {
+        Some(s) => format!("{head} · {}", span(s)),
+        None => head,
+    }
+}
+
+/// 언제부터 — `대기 중 · 15:52부터`.
+fn since_when(head: String, idle_secs: Option<u64>) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    match idle_secs.and_then(|s| hhmm(now.saturating_sub(s))) {
+        Some(at) => format!("{head} · {at}부터"),
+        None => head,
+    }
+}
+
+fn span(secs: u64) -> String {
+    match (secs / 3600, (secs % 3600) / 60, secs % 60) {
+        (0, 0, s) => format!("{s}초"),
+        (0, m, 0) => format!("{m}분"),
+        (0, m, s) => format!("{m}분 {s}초"),
+        (h, 0, _) => format!("{h}시간"),
+        (h, m, _) => format!("{h}시간 {m}분"),
+    }
+}
+
+fn hhmm(secs: u64) -> Option<String> {
+    crate::info_prompts::local_tm(secs).map(|tm| format!("{:02}:{:02}", tm.tm_hour, tm.tm_min))
 }
 
 pub(crate) fn agent_needs_attention(row: &kasa_socket::backend::PaneActivity) -> bool {
@@ -1488,8 +1526,24 @@ pub(crate) fn agent_is_working(row: &kasa_socket::backend::PaneActivity) -> bool
 
 #[cfg(test)]
 mod pane_activity_tests {
-    use super::{agent_is_working, agent_needs_attention, status_label};
+    use super::{agent_is_working, agent_needs_attention, span, status_label, task_repeats_state};
     use kasa_socket::backend::PaneActivity;
+
+    /// 턴이 끝났어도 배경 일이 남았으면 「기다리는 중」, 일하는 중이면 걸린 시간, 끝을 알렸으면 그 시각이 붙는다 — 상태 칸이
+    /// 「대기」라도 그 줄은 숨기지 않는다.
+    #[test]
+    fn the_task_line_tells_how_long_and_since_when() {
+        let working = PaneActivity { status: "working".into(), busy_secs: Some(750), ..Default::default() };
+        assert_eq!(status_label(&working), "작업 중 · 12분 30초");
+        let waiting = PaneActivity { status: "idle".into(), idle_secs: Some(60), background: vec!["wait-publish.sh".into(), "gh run watch".into()], ..Default::default() };
+        let label = status_label(&waiting);
+        assert!(label.starts_with("배경 일 2개 기다림 · ") && label.ends_with("부터"), "{label}");
+        assert!(!task_repeats_state(&label, "대기"));
+        let done = PaneActivity { status: "idle".into(), done_outcome: Some("succeeded".into()), done_at_ms: Some(1_795_414_000_000), ..Default::default() };
+        assert!(status_label(&done).starts_with("완료 보고 · "));
+        assert_eq!(status_label(&PaneActivity { status: "idle".into(), ..Default::default() }), "대기 중");
+        assert_eq!((span(45), span(600), span(3_900)), ("45초".to_string(), "10분".to_string(), "1시간 5분".to_string()));
+    }
 
     #[test]
     fn board_attention_requires_a_live_typed_request() {
@@ -2483,6 +2537,10 @@ fn kv<'a>(name: &str, value: impl Into<Option<String>>, tip: &str, warn: bool) -
 
 /// 작업 한 줄이 상태 칸과 같은 말인가 — 「대기 · claude」 아래 「대기 중」 을 또 세우지 않는다.
 fn task_repeats_state(label: &str, state: &str) -> bool {
+    // 시각·걸린 시간이 붙은 줄은 상태 칸에 없는 말을 싣는다 — 숨기지 않는다.
+    if label.contains(" · ") {
+        return false;
+    }
     let label = label.trim().trim_end_matches(" 중");
     label == state || (state == "실행" && label == "작업") || (state == "대기" && label == "대기")
 }

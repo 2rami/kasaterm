@@ -32,10 +32,18 @@ pub(crate) enum Item {
     Interrupted,
     /// 꺼내진 예약. 지우면 뒤 칸의 번호가 밀려 도구 결과가 엉뚱한 칸에 붙는다.
     Gone,
-    /// 턴 끝 한 줄 — 걸린 ms 와(코덱스면) 끝난 시각(유닉스 초).
-    Duration(u64, Option<u64>),
+    /// 턴 끝 한 줄 — 걸린 ms, 끝난 시각(유닉스 초), 그 턴이 끝낸 것인지·배경 일을 남겼는지.
+    Duration(u64, Option<u64>, TurnEnd),
     /// 압축 경계.
     Compacted,
+}
+
+/// 턴이 어떻게 끝났나 — 턴이 끝났다고 일이 끝난 것은 아니다. `kasaterm-cli done` 으로 끝을 알렸으면 `done`,
+/// 완료 통보(`<task-notification>`)가 아직 안 온 배경 일(`run_in_background`)이 남았으면 그 수.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct TurnEnd {
+    pub(crate) done: bool,
+    pub(crate) background: usize,
 }
 
 /// 기록에 실린 세션 머리 — classic 화면 맨 위 배너가 쓴다. 처음 본 값을 쥔다.
@@ -63,6 +71,10 @@ pub(crate) struct Conversation {
     pub(crate) meta: Meta,
     /// 코덱스 rollout 이다 — 그리는 쪽이 코덱스 화면 꼴을 고른다.
     pub(crate) codex: bool,
+    /// 시작했는데 완료 통보가 아직 없는 배경 일 id(`toolUseResult.backgroundTaskId`).
+    background: std::collections::HashSet<String>,
+    /// 이 턴에 `kasaterm-cli done` 을 불렀다.
+    turn_done: bool,
 }
 
 impl Conversation {
@@ -132,7 +144,9 @@ impl Conversation {
                 match ev["subtype"].as_str() {
                     Some("turn_duration") => {
                         if let Some(ms) = ev["durationMs"].as_f64() {
-                            self.push(Item::Duration(ms.max(0.0) as u64, None));
+                            let end = TurnEnd { done: std::mem::take(&mut self.turn_done), background: self.background.len() };
+                            let at = ev["timestamp"].as_str().and_then(unix_secs);
+                            self.push(Item::Duration(ms.max(0.0) as u64, at, end));
                         }
                     }
                     Some("compact_boundary") => {
@@ -147,6 +161,11 @@ impl Conversation {
                 return;
             }
             "queue-operation" => {
+                if ev["operation"] == "enqueue" {
+                    if let Some(id) = ev["content"].as_str().and_then(|c| tag(c, "task-id")) {
+                        self.background.remove(id.trim());
+                    }
+                }
                 self.queue_op(ev);
                 return;
             }
@@ -210,6 +229,9 @@ impl Conversation {
                 }
                 "tool_use" => self.tool_use(block),
                 "tool_result" => {
+                    if let Some(id) = ev["toolUseResult"]["backgroundTaskId"].as_str() {
+                        self.background.insert(id.to_string());
+                    }
                     self.tool_result(block);
                     let patch = &ev["toolUseResult"]["structuredPatch"];
                     if let (Some(&at), true) = (block["tool_use_id"].as_str().and_then(|id| self.by_tool.get(id)), patch.as_array().is_some_and(|p| !p.is_empty())) {
@@ -224,6 +246,17 @@ impl Conversation {
     fn tool_use(&mut self, b: &Value) {
         let name = b["name"].as_str().unwrap_or("tool");
         let input = &b["input"];
+        match name {
+            "TaskStop" | "KillShell" => {
+                for key in ["task_id", "shell_id"] {
+                    if let Some(id) = input[key].as_str() {
+                        self.background.remove(id);
+                    }
+                }
+            }
+            "Bash" if input["command"].as_str().is_some_and(|c| c.contains("kasaterm-cli done")) => self.turn_done = true,
+            _ => {}
+        }
         let item = match name {
             "AskUserQuestion" => Item::Answered {
                 questions: input["questions"]
@@ -383,7 +416,7 @@ impl Conversation {
             }
             ("event_msg", "task_complete") => {
                 if let Some(ms) = p["duration_ms"].as_u64() {
-                    self.push(Item::Duration(ms, p["completed_at"].as_u64()));
+                    self.push(Item::Duration(ms, p["completed_at"].as_u64(), TurnEnd::default()));
                 }
             }
             ("event_msg", "agent_reasoning") => {
@@ -1404,4 +1437,22 @@ mod tests {
         assert_eq!(codex.context, ["Would you like to run the following command?", "Environment: local", "Reason: Allow me to create hello.txt in the current workspace?"]);
         assert_eq!(codex.options[2].label, "No, and tell Codex what to do differently (esc)");
     }
+}
+
+/// `2026-11-20T11:29:49.723Z` → 유닉스 초. 기록의 시각은 늘 UTC(`Z`)다.
+fn unix_secs(iso: &str) -> Option<u64> {
+    let (date, time) = iso.trim_end_matches('Z').split_once('T')?;
+    let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let mut t = time.splitn(3, ':');
+    let (h, min) = (t.next()?.parse::<i64>().ok()?, t.next()?.parse::<i64>().ok()?);
+    let sec = t.next()?.split('.').next()?.parse::<i64>().ok()?;
+    // 날짜 → 1970-01-01 부터 날 수(Howard Hinnant 의 days_from_civil).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + h * 3600 + min * 60 + sec).ok()
 }

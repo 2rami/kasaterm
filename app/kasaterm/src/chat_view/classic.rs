@@ -901,6 +901,23 @@ fn tool_block(width: usize, item: usize, conv: &Conversation, open: bool, ink: &
     out
 }
 
+/// 턴 끝 한 줄 — 걸린 시간과 끝난 시각. 턴이 끝났다고 일이 끝난 것은 아니라서, `kasaterm-cli done` 을 부른 턴만
+/// 「끝냈어요」, 배경 일을 남긴 턴은 「기다려요」, 나머지는 「일했어요」다.
+fn turn_line(ms: u64, at: Option<u64>, end: crate::chat_view::parse::TurnEnd) -> String {
+    let took = took(ms);
+    let head = if end.done {
+        format!("{took} 걸려 끝냈어요")
+    } else if end.background > 0 {
+        format!("{took} 일하고 배경 일 {}개를 기다려요", end.background)
+    } else {
+        format!("{took} 일했어요")
+    };
+    match at.and_then(crate::info_prompts::local_tm) {
+        Some(tm) => format!("{head} · {:02}:{:02}", tm.tm_hour, tm.tm_min),
+        None => head,
+    }
+}
+
 fn took(ms: u64) -> String {
     let s = (ms as f64 / 1000.0).round() as u64;
     let (h, m) = (s / 3600, (s % 3600) / 60);
@@ -918,7 +935,7 @@ fn took(ms: u64) -> String {
     } else {
         parts.push(format!("{s}초"));
     }
-    format!("{} 걸려 끝났어요", parts.join(" "))
+    parts.join(" ")
 }
 
 fn banner(width: usize, conv: &Conversation, ink: &Ink) -> Vec<Line> {
@@ -1042,7 +1059,7 @@ pub(super) fn sig_of(conv: &Conversation, items: &[usize], extra: impl Hash) -> 
             Item::Answered { pairs, .. } => (2u8, pairs.as_ref().map(Vec::len)).hash(&mut h),
             Item::Output(t) | Item::System(t) | Item::Launch(t) | Item::Thinking(t) => (3u8, t.len()).hash(&mut h),
             Item::Command { name, args } => (4u8, name.len(), args.len()).hash(&mut h),
-            Item::Duration(ms, at) => (5u8, ms, at).hash(&mut h),
+            Item::Duration(ms, at, end) => (5u8, ms, at, end).hash(&mut h),
             Item::Interrupted | Item::Gone | Item::Compacted => 6u8.hash(&mut h),
         }
     }
@@ -1295,10 +1312,11 @@ fn one(width: usize, i: usize, conv: &Conversation, big: bool, look: &Look, ink:
             line(wrap(width, first, 5, &spans, None))
         }
         Item::Compacted => line(wrap(width, Vec::new(), 2, &plain("✻ Conversation compacted (ctrl+o for history)", dim), None)),
-        Item::Duration(ms, _) => {
+        Item::Duration(ms, at, end) => {
             let color = look.student.map(rgb).unwrap_or(ink.dim);
+            let text = turn_line(*ms, *at, *end);
             if look.face {
-                let mut out = line(wrap(width, blanks(3, St::default()), 3, &plain(took(*ms), St::fg(color)), None));
+                let mut out = line(wrap(width, blanks(3, St::default()), 3, &plain(text, St::fg(color)), None));
                 if let Some(h) = out.first_mut() {
                     h.face = Some(Face { cols: 2, rows: 1 });
                 }
@@ -1306,7 +1324,7 @@ fn one(width: usize, i: usize, conv: &Conversation, big: bool, look: &Look, ink:
             } else {
                 let mut first = cells("◆", St::fg(color));
                 first.push(GridCell::blank());
-                line(wrap(width, first, 2, &plain(took(*ms), St::fg(color)), None))
+                line(wrap(width, first, 2, &plain(text, St::fg(color)), None))
             }
         }
     }
@@ -1382,10 +1400,27 @@ mod tests {
             "",
             "  - 하나",
             "  - 둘",
-            "◆ 15초 걸려 끝났어요",
+            "◆ 15초 일했어요",
             "",
         ];
         assert_eq!(got, want);
+    }
+
+    /// 배경 일을 남긴 턴은 「기다려요」, 완료 통보가 오면 다음 턴부터 빠진다. `kasaterm-cli done` 을 부른 턴만 「끝냈어요」.
+    #[test]
+    fn a_turn_end_says_whether_work_is_done_or_still_waiting() {
+        let c = conv(&[
+            r#"{"type":"assistant","sessionId":"s","message":{"content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"wait-publish.sh","run_in_background":true}}]}}"#,
+            r#"{"type":"user","sessionId":"s","message":{"content":[{"type":"tool_result","tool_use_id":"b1","content":"Command running in background with ID: bf08z4iz9."}]},"toolUseResult":{"backgroundTaskId":"bf08z4iz9"}}"#,
+            r#"{"type":"system","sessionId":"s","subtype":"turn_duration","durationMs":67000,"timestamp":"2026-11-23T06:52:00.000Z"}"#,
+            r#"{"type":"queue-operation","sessionId":"s","operation":"enqueue","content":"<task-notification>\n<task-id>bf08z4iz9</task-id>\n<status>completed</status>\n</task-notification>"}"#,
+            r#"{"type":"assistant","sessionId":"s","message":{"content":[{"type":"tool_use","id":"d1","name":"Bash","input":{"command":"kasaterm-cli done succeeded '게시 확인'"}}]}}"#,
+            r#"{"type":"system","sessionId":"s","subtype":"turn_duration","durationMs":8000}"#,
+            r#"{"type":"system","sessionId":"s","subtype":"turn_duration","durationMs":3000}"#,
+        ]);
+        let ends: Vec<_> = c.items.iter().filter_map(|i| match i { Item::Duration(ms, at, end) => Some((*ms, *at, *end)), _ => None }).collect();
+        let end = |done, background| crate::chat_view::parse::TurnEnd { done, background };
+        assert_eq!(ends, vec![(67_000, Some(1_795_416_720), end(false, 1)), (8_000, None, end(true, 0)), (3_000, None, end(false, 0))]);
     }
 
     #[test]
@@ -1496,7 +1531,12 @@ mod tests {
     fn model_ids_read_like_the_banner() {
         assert_eq!(model_label("claude-opus-5-5"), "Opus 5.5");
         assert_eq!(model_label("claude-sonnet-5-5-20261001"), "Sonnet 5.5");
-        assert_eq!(took(67_000), "1분 7초 걸려 끝났어요");
-        assert_eq!(took(8_000), "8초 걸려 끝났어요");
+        assert_eq!(took(67_000), "1분 7초");
+        assert_eq!(took(8_000), "8초");
+        let end = |done, background| crate::chat_view::parse::TurnEnd { done, background };
+        assert_eq!(turn_line(67_000, None, end(false, 0)), "1분 7초 일했어요");
+        assert_eq!(turn_line(67_000, None, end(true, 2)), "1분 7초 걸려 끝냈어요");
+        assert_eq!(turn_line(8_000, None, end(false, 2)), "8초 일하고 배경 일 2개를 기다려요");
+        assert!(turn_line(8_000, Some(1_795_414_000), end(false, 0)).starts_with("8초 일했어요 · "));
     }
 }

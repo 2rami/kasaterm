@@ -2830,7 +2830,7 @@ impl App {
         // Display-only fixture: never connect to or change a real source pane.
         // Reapply while active so process polling cannot replace the capture.
         let preview = std::env::var("KASATERM_AUTOINFO").unwrap_or_default();
-        if crate::verification_run() && matches!(preview.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown" | "execution-skills") {
+        if crate::verification_run() && matches!(preview.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown" | "execution-skills" | "execution-waiting") {
             use crate::context_info::ContextEvidence;
             use crate::info::{ContextLines, InfoSnap, PaneGroup};
             let evidence = if preview == "execution-unknown" { ContextEvidence::default() } else {
@@ -2894,7 +2894,12 @@ impl App {
                     request: "문서 편집기에서 한글 줄바꿈이 어절 가운데서 끊기지 않는지 확인해 주세요".into(),
                     reply: "입력창 폭을 세 가지로 바꿔 가며 확인했고, 긴 경로만 글자 단위로 넘어가요.".into(),
                 })]),
-                tasks: std::collections::HashMap::from([("%info-fixture".into(), crate::info::TaskLine { label: "대기 중".into(), ..Default::default() })]),
+                // `execution-waiting` 은 턴이 끝났어도 배경 일이 남은 칸 — 상태 칸이 「대기」여도 그 줄이 선다.
+                tasks: std::collections::HashMap::from([("%info-fixture".into(), crate::info::TaskLine { label: if preview == "execution-waiting" {
+                    crate::info::status_label(&kasa_socket::backend::PaneActivity {
+                        status: "idle".into(), idle_secs: Some(1500), background: vec!["배포 피드 기다림".into(), "Windows 굽기".into()], ..Default::default()
+                    })
+                } else { "대기 중".into() }, ..Default::default() })]),
                 ..Default::default()
             };
             if !ACTED.swap(true, Ordering::Relaxed) {

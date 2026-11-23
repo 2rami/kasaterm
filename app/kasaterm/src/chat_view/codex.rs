@@ -402,7 +402,7 @@ fn one(width: usize, i: usize, conv: &Conversation) -> Vec<Line> {
             line(rows)
         }
         Item::Bubble { user: false, text, .. } => line(markdown(text, width, cwd)),
-        Item::Duration(ms, at) => line(wrap(width, blanks(2, St::default()), 2, &plain(worked(*ms, *at), dim()), None)),
+        Item::Duration(ms, at, _) => line(wrap(width, blanks(2, St::default()), 2, &plain(worked(*ms, *at), dim()), None)),
         Item::Interrupted => line(wrap(
             width,
             Vec::new(),
