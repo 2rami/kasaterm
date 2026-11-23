@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -6,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
+import '../server.dart';
 import '../status_style.dart';
 import 'model.dart';
 import 'rain.dart';
@@ -21,17 +23,31 @@ Mood weatherMood(PaneMood m) => switch (m) {
   _ => Mood.resting,
 };
 
+IndicatorPhase? paneIndicatorPhase(Pane p) {
+  if (p.closed || p.offline) return null;
+  if (p.needsYou) return p.kind == 'permission' ? IndicatorPhase.permission : IndicatorPhase.question;
+  if (p.isCompacting) return IndicatorPhase.compacting;
+  if (p.isBusy) return IndicatorPhase.working;
+  if (p.isStalled || p.status == 'error' || p.status == 'failed') return IndicatorPhase.error;
+  if (p.bgActive || p.hasRunningSubagents) return IndicatorPhase.background;
+  if (p.reportedFailure) return IndicatorPhase.error;
+  if (p.status == 'done' || p.status == 'succeeded') return IndicatorPhase.done;
+  return p.status == 'idle' || p.kind == 'idle' ? IndicatorPhase.idle : null;
+}
+
 class WorkWeather extends StatefulWidget {
   const WorkWeather({
     super.key,
     required this.id,
-    required this.working,
+    required this.phase,
+    this.doneUntilMs,
     required this.radius,
     required this.builder,
   });
 
   final String id;
-  final bool working;
+  final IndicatorPhase? phase;
+  final int? doneUntilMs;
   final BorderRadius radius;
   final Widget Function(bool replacesOutline) builder;
 
@@ -50,7 +66,33 @@ class _WorkWeatherState extends State<WorkWeather> implements WorkWeatherPlace {
   BorderRadius get corners => widget.radius;
 
   @override
-  RainAmount get amount => widget.working ? weather.settings.value.amount : RainAmount.none;
+  StateIndicator get indicator {
+    var phase = widget.phase;
+    if (phase == IndicatorPhase.idle && (widget.doneUntilMs ?? _observedDoneUntil) > DateTime.now().millisecondsSinceEpoch) {
+      phase = IndicatorPhase.done;
+    }
+    return phase == null ? const StateIndicator() : weather.settings.value.indicator(phase);
+  }
+
+  @override
+  RainAmount get amount => indicator.weather == null ? RainAmount.none : weather.settings.value.amount;
+
+  int _observedDoneUntil = 0;
+  Timer? _expiry;
+  void _scheduleExpiry() {
+    _expiry?.cancel();
+    final left = (widget.doneUntilMs ?? _observedDoneUntil) - DateTime.now().millisecondsSinceEpoch;
+    if (left <= 0 || widget.phase != IndicatorPhase.idle) return;
+    _expiry = Timer(Duration(milliseconds: left), () {
+      if (mounted) { setState(() {}); _scene?.workChanged(); }
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleExpiry();
+  }
 
   @override
   Rect? rectIn(RenderBox scene) {
@@ -71,11 +113,20 @@ class _WorkWeatherState extends State<WorkWeather> implements WorkWeatherPlace {
   @override
   void didUpdateWidget(WorkWeather oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.working != widget.working) _scene?.workChanged();
+    if (oldWidget.phase != widget.phase || oldWidget.doneUntilMs != widget.doneUntilMs || oldWidget.id != widget.id) {
+      if (oldWidget.phase != widget.phase || oldWidget.id != widget.id) {
+        final finished = oldWidget.id == widget.id && widget.phase == IndicatorPhase.idle &&
+            (oldWidget.phase == IndicatorPhase.working || oldWidget.phase == IndicatorPhase.compacting);
+        _observedDoneUntil = finished ? DateTime.now().millisecondsSinceEpoch + 6000 : 0;
+      }
+      _scheduleExpiry();
+      _scene?.workChanged();
+    }
   }
 
   @override
   void dispose() {
+    _expiry?.cancel();
     _scene?.unregisterWork(this);
     super.dispose();
   }
@@ -85,7 +136,7 @@ class _WorkWeatherState extends State<WorkWeather> implements WorkWeatherPlace {
     listenable: weather.changes,
     builder: (context, _) {
       final replaces = _scene != null && weather.settings.value.style == RainStyle.showers &&
-          amount != RainAmount.none && weatherVerdictOf(context).moving;
+          weatherVerdictOf(context).active;
       return KeyedSubtree(key: _boxKey, child: widget.builder(replaces));
     },
   );

@@ -51,6 +51,23 @@ void main() {
     });
   });
 
+  test('each state can combine a condition with any subset of edges', () {
+    for (final phase in IndicatorPhase.values) {
+      for (var edges = 0; edges < 16; edges++) {
+        final rule = StateIndicator(weather: edges.isEven ? WeatherCondition.snow : null, edges: edges);
+        final settings = on.copyWith(style: RainStyle.showers, indicators: {phase: rule}, beads: false);
+        final restored = WeatherSettings.fromJson(settings.toJson());
+        expect(restored.indicator(phase).edges, edges);
+        expect(restored.indicator(phase).weather, rule.weather);
+        expect(restored.beads, false);
+      }
+    }
+    final older = WeatherSettings.fromJson({'style': 'showers', 'condition': 'snow'});
+    expect(older.indicator(IndicatorPhase.working).weather, WeatherCondition.snow);
+    expect(older.indicator(IndicatorPhase.idle).weather, isNull);
+    expect(older.beads, true);
+  });
+
   test('work weather restores every condition and defaults older settings to rain', () {
     expect(WeatherSettings.fromJson({'style': 'showers'}).condition, WeatherCondition.rain);
     expect(WeatherSettings.fromJson({'condition': 'future'}).condition, WeatherCondition.rain);
@@ -154,25 +171,25 @@ void main() {
           valueListenable: working,
           builder: (_, active, _) => WorkWeather(
             id: 'pane',
-            working: active,
+            phase: active ? IndicatorPhase.working : IndicatorPhase.idle,
             radius: BorderRadius.zero,
-            builder: (replaces) => SizedBox(width: 120, height: 60, child: Text(replaces ? 'rain' : 'outline')),
+            builder: (replaces) => SizedBox(width: 120, height: 60, child: Text(replaces ? 'custom' : 'outline')),
           ),
         ),
       ),
     ));
     await tester.pump();
-    expect(find.text('outline'), findsOneWidget);
+    expect(find.text('custom'), findsOneWidget);
     expect(tester.binding.transientCallbackCount, 0);
     working.value = true;
     await tester.pump();
     for (var i = 0; i < 10; i++) {
       await tester.pump(const Duration(milliseconds: 40));
     }
-    expect(find.text('rain'), findsOneWidget);
+    expect(find.text('custom'), findsOneWidget);
     working.value = false;
     await tester.pump();
-    expect(find.text('outline'), findsOneWidget);
+    expect(find.text('custom'), findsOneWidget);
     expect(tester.binding.transientCallbackCount, greaterThan(0));
     for (var i = 0; i < 43; i++) {
       await tester.pump(const Duration(milliseconds: 40));

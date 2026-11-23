@@ -4,6 +4,8 @@
 //! 판정은 순수 함수라 설정 화면·렌더·테스트가 같은 답을 본다.
 
 use super::condition::WeatherCondition;
+use super::indicator::{Indicator, Phase};
+use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +119,10 @@ pub(crate) struct WeatherSettings {
     pub style: RainStyle,
     #[serde(skip_serializing_if = "WeatherCondition::is_rain")]
     pub condition: WeatherCondition,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub indicators: BTreeMap<Phase, Indicator>,
+    #[serde(skip_serializing_if = "is_enabled")]
+    pub beads: bool,
     pub amount: RainAmount,
     /// −1(왼쪽) ~ 1(오른쪽).
     pub wind_dir: f32,
@@ -134,12 +140,16 @@ pub(crate) struct WeatherSettings {
     pub ignore_os: bool,
 }
 
+fn is_enabled(value: &bool) -> bool { *value }
+
 impl Default for WeatherSettings {
     fn default() -> Self {
         WeatherSettings {
             enabled: false,
             style: RainStyle::Liquid,
             condition: WeatherCondition::Rain,
+            indicators: BTreeMap::new(),
+            beads: true,
             amount: RainAmount::Drizzle,
             wind_dir: 0.0,
             wind_strength: 0.0,
@@ -165,6 +175,14 @@ impl WeatherSettings {
         self.wind_strength = if self.wind_strength.is_finite() { self.wind_strength.clamp(0.0, 1.0) } else { 0.0 };
         self.rewet_secs = self.rewet_secs.clamp(REWET_MIN, REWET_MAX);
         self
+    }
+
+    pub(crate) fn indicator(&self, phase: Phase) -> Indicator {
+        self.indicators.get(&phase).copied().unwrap_or_else(|| match phase {
+            Phase::Working | Phase::Compacting => Indicator { weather: Some(self.condition), edges: 0 },
+            Phase::Background => Indicator { weather: None, edges: 15 },
+            _ => Indicator::default(),
+        })
     }
 
     /// 바람 한 값(−1~1): 방향 × 세기.
@@ -262,7 +280,9 @@ pub(crate) fn rewet_label(secs: u32) -> String {
 pub(crate) enum Change {
     Enabled(bool),
     Style(RainStyle),
-    Condition(WeatherCondition),
+    StateWeather(Phase, Option<WeatherCondition>),
+    StateEdge(Phase, u8),
+    Beads(bool),
     Amount(RainAmount),
     WindDir(i8),
     WindStrength(u8),
@@ -278,7 +298,17 @@ pub(crate) fn apply(mut s: WeatherSettings, c: Change) -> WeatherSettings {
     match c {
         Change::Enabled(on) => s.enabled = on,
         Change::Style(v) => s.style = v,
-        Change::Condition(v) => s.condition = v,
+        Change::StateWeather(phase, condition) => {
+            let mut rule = s.indicator(phase);
+            rule.weather = condition;
+            s.indicators.insert(phase, rule);
+        }
+        Change::StateEdge(phase, bit) => {
+            let mut rule = s.indicator(phase);
+            rule.edges ^= bit & 15;
+            s.indicators.insert(phase, rule);
+        }
+        Change::Beads(v) => s.beads = v,
         Change::Amount(a) => s.amount = a,
         Change::WindDir(q) => s.wind_dir = q as f32 / 4.0,
         Change::WindStrength(q) => s.wind_strength = q as f32 / 4.0,
@@ -432,6 +462,29 @@ mod tests {
         assert_eq!(work_rain_amount(&s, PaneWeather::Follow, false), RainAmount::None);
         assert_eq!(work_rain_amount(&s, PaneWeather::Fixed(RainAmount::Downpour), false), RainAmount::None);
         assert_eq!(work_rain_amount(&s, PaneWeather::Clear, true), RainAmount::None);
+    }
+
+    #[test]
+    fn independent_state_weather_and_edges_survive_sync() {
+        let mut s = apply(on(), Change::Style(RainStyle::Showers));
+        s = apply(s, Change::Beads(false));
+        for phase in Phase::ALL {
+            for mask in 0..16 {
+                s.indicators.insert(phase, Indicator { weather: Some(WeatherCondition::ClearNight), edges: mask });
+                let value = serde_json::to_value(&s).unwrap();
+                assert!(kasa_device::account_sync::schema::valid_setting("weather", &value));
+                let restored: WeatherSettings = serde_json::from_value(value).unwrap();
+                assert_eq!(s, restored);
+            }
+        }
+        s = apply(s, Change::StateEdge(Phase::Done, 1));
+        s = apply(s, Change::StateWeather(Phase::Done, None));
+        assert_eq!(s.indicator(Phase::Done), Indicator { weather: None, edges: 14 });
+        assert_eq!(s.indicator(Phase::Idle).edges, 15);
+        assert!(!s.beads);
+        assert!(!kasa_device::account_sync::schema::valid_setting("weather", &serde_json::json!({
+            "indicators": {"idle": {"edges": 16}}
+        })));
     }
 
     #[test]

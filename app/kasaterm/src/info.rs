@@ -1606,6 +1606,7 @@ mod tests {
     #[test]
     fn device_browser_keeps_a_hole_for_mirrors_open_here() {
         let row = |local: &str, source: &str| state::MachinesColRow {
+            background: false, done_until_ms: None,
             pane: local.into(), remote_id: source.into(), remote_cwd: "/work/project".into(),
             name: "모모이".into(), title: "작업".into(), status: "working".into(),
             room: "방 1".into(), closed: false, rect: None, window: None, tab_of: None,

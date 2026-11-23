@@ -41,12 +41,8 @@ fn one_of(v: &Value, allowed: &[&str]) -> bool {
 
 const RAIN: &[&str] = &["none", "drizzle", "rain", "downpour"];
 
-fn weather(v: &Value) -> bool {
-    let Some(o) = v.as_object() else { return false };
-    o.len() <= 16 && o.iter().all(|(key, value)| match key.as_str() {
-        "enabled" | "by_status" | "ignore_os" => value.is_boolean(),
-        "amount" | "busy" | "your_turn" | "resting" => one_of(value, RAIN),
-        "condition" => one_of(value, &[
+fn weather_condition(value: &Value) -> bool {
+    one_of(value, &[
             "rain", "drizzle", "heavyRain", "sunShowers", "freezingDrizzle", "freezingRain",
             "nightDrizzle", "clear", "mostlyClear", "partlyCloudy", "mostlyCloudy", "cloudy",
             "clearNight", "mostlyClearNight", "partlyCloudyNight", "sunrise", "sunset", "foggy",
@@ -54,7 +50,24 @@ fn weather(v: &Value) -> bool {
             "snow", "heavySnow", "sunFlurries", "blowingSnow", "blizzard", "sleet",
             "wintryMix", "hail", "isolatedThunderstorms", "scatteredThunderstorms", "thunderstorms", "strongStorms",
             "hot", "frigid", "tropicalStorm", "hurricane", "tornado",
-        ]),
+    ])
+}
+
+fn weather(v: &Value) -> bool {
+    let Some(o) = v.as_object() else { return false };
+    o.len() <= 18 && o.iter().all(|(key, value)| match key.as_str() {
+        "enabled" | "by_status" | "ignore_os" => value.is_boolean(),
+        "amount" | "busy" | "your_turn" | "resting" => one_of(value, RAIN),
+        "condition" => weather_condition(value),
+        "beads" => value.is_boolean(),
+        "indicators" => value.as_object().is_some_and(|rules| rules.len() <= 8 && rules.iter().all(|(phase, rule)| {
+            matches!(phase.as_str(), "working" | "background" | "compacting" | "permission" | "question" | "done" | "idle" | "error")
+                && rule.as_object().is_some_and(|o| o.iter().all(|(k, v)| match k.as_str() {
+                    "weather" => v.is_null() || weather_condition(v),
+                    "edges" => v.as_u64().is_some_and(|n| n <= 15),
+                    _ => false,
+                }))
+        })),
         "style" => one_of(value, &["liquid", "showers"]),
         "wind_dir" => number(value, -1.0, 1.0),
         "wind_strength" => number(value, 0.0, 1.0),

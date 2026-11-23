@@ -318,6 +318,30 @@ fn rainSky(p: vec2f, size: vec2f, clock: f32, variant: f32, wind: f32, opacity: 
     return vec4f(0.0);
 }
 
+fn edge_light(p: vec2f, size: vec2f, mask: f32, time: f32, moving: f32) -> f32 {
+    var light = 0.0;
+    var lap = fract(time * 0.5);
+    var perimeter = 2.0 * (size.x + size.y);
+    for (var side = 0; side < 4; side++) {
+        var bit = exp2(f32(side));
+        if (fract(floor(mask / bit) * 0.5) < 0.25) { continue; }
+        var distance = p.y;
+        var along = p.x;
+        var lengthPx = size.x;
+        var offset = 0.0;
+        if (side == 1) { distance = size.x - p.x; along = p.y; lengthPx = size.y; offset = size.x; }
+        if (side == 2) { distance = size.y - p.y; along = size.x - p.x; offset = size.x + size.y; }
+        if (side == 3) { distance = p.x; along = size.y - p.y; lengthPx = size.y; offset = 2.0 * size.x + size.y; }
+        if (distance > 3.0) { continue; }
+        var position = along / max(1.0, lengthPx);
+        if (mask == 15.0) { position = (offset + along) / perimeter; }
+        var tail = 1.0 - smoothstep(0.0, 0.24, fract(lap - position + 1.0));
+        if (moving < 0.5) { tail = 0.68; }
+        light = max(light, tail * (1.0 - smoothstep(0.6 + tail, 1.4 + tail, distance)));
+    }
+    return light;
+}
+
 @fragment
 fn fs_showers(in: VOut) -> @location(0) vec4f {
     let px = in.uv * g.res.xy;
@@ -330,30 +354,36 @@ fn fs_showers(in: VOut) -> @location(0) vec4f {
         if (guarded(px, owner)) { return vec4f(base, 1.0); }
         let amount = rg.b[owner].z;
         let opacity = rg.b[owner].w;
+        let local = (px - rg.rect[owner].xy) / g.t.z;
+        let size = max(rg.rect[owner].zw / g.t.z, vec2f(1.0));
+        let material = rg.a[owner].x;
+        let variant = rg.a[owner].y;
         if (opacity > 0.0) {
-            let local = (px - rg.rect[owner].xy) / g.t.z;
-            let size = max(rg.rect[owner].zw / g.t.z, vec2f(1.0));
-            if (g.rain.x == 0.0) {
-                let rate = rainRate(amount, g.rain.z);
-                let water = bead(local, rate, rg.a[owner].w) * opacity;
-                let backdrop = rainSky(local, size, g.t.x, g.rain.z, g.rain.y, opacity);
+            if (material == 0.0) {
+                let rate = rainRate(amount, variant);
+                var water = vec2f(0.0);
+                if (g.rain.x > 0.5) { water = bead(local, rate, rg.a[owner].w) * opacity; }
+                let backdrop = rainSky(local, size, g.t.x, variant, g.rain.y, opacity);
                 let sky = overLayer(backdrop, atmosphere(px / g.t.z, g.t.x, rate, g.rain.y, g.rain.w, opacity, ink));
                 col = base * (1.0 - sky.a) + sky.rgb;
                 col = col * (1.0 - water.x - water.y) + vec3f(0.81, 0.90, 0.96) * water.y;
             } else {
-                let sky = conditionLayer(local, size, g.t.x, g.rain.x, g.rain.z, g.rain.y, amount, opacity, ink, g.rain.w);
+                let sky = conditionLayer(local, size, g.t.x, material, variant, g.rain.y, amount, opacity, ink, g.rain.w);
                 col = base * (1.0 - sky.a) + sky.rgb;
             }
         }
+        if (rg.a[owner].z > 0.0) {
+            col = mix(col, rg.n.yzw, edge_light(local, size, rg.a[owner].z, g.t.x, g.rain.w));
+        }
     }
-    if (g.rain.x == 0.0 && g.rain.w > 0.0) {
+    if (g.rain.w > 0.0) {
         for (var i = 0; i < i32(rg.n.x); i++) {
             let dropAlpha = smoothstep(0.28, 1.0, rg.b[i].w);
             let r = rg.rect[i];
             let local = (px - r.xy) / g.t.z;
-            if (dropAlpha <= 0.0 || local.y < -32.0 || local.y > 2.0 ||
+            if (rg.a[i].x != 0.0 || dropAlpha <= 0.0 || local.y < -32.0 || local.y > 2.0 ||
                 local.x < 8.0 || local.x > r.z / g.t.z - 8.0) { continue; }
-            let hit = impact(local, g.t.x, rainRate(rg.b[i].z, g.rain.z), g.rain.y, rg.a[i].w);
+            let hit = impact(local, g.t.x, rainRate(rg.b[i].z, rg.a[i].y), g.rain.y, rg.a[i].w);
             col = mix(col, ink, hit * 0.85 * dropAlpha);
         }
     }

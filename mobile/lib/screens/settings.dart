@@ -375,7 +375,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           tone: tone,
           icon: Icons.umbrella_outlined,
           title: '날씨',
-          subtitle: w.enabled ? (w.style == RainStyle.showers ? '작업 중 · ${w.condition.label}' : '${w.amount.label} · ${w.target.label}') : '꺼짐',
+          subtitle: w.enabled ? (w.style == RainStyle.showers ? '상태별 날씨와 프로세스바' : '${w.amount.label} · ${w.target.label}') : '꺼짐',
         );
       },
     ),

@@ -51,6 +51,26 @@ enum WeatherCondition {
   final int material, variant;
 }
 
+enum IndicatorPhase {
+  working('작업 중'), background('백그라운드'), compacting('컨텍스트 압축'), permission('승인 대기'),
+  question('답변 대기'), done('완료'), idle('쉬는 중'), error('오류');
+
+  const IndicatorPhase(this.label);
+  final String label;
+}
+
+class StateIndicator {
+  const StateIndicator({this.weather, this.edges = 0});
+  final WeatherCondition? weather;
+  final int edges;
+  Map<String, Object?> toJson() => {'weather': weather?.name, 'edges': edges};
+
+  static StateIndicator parse(Map value) => StateIndicator(
+    weather: WeatherCondition.values.where((c) => c.name == value['weather']).firstOrNull,
+    edges: value['edges'] is int ? (value['edges'] as int) & 15 : 0,
+  );
+}
+
 enum RainStyle { liquid, showers }
 
 enum RainAmount {
@@ -107,6 +127,8 @@ class WeatherSettings {
     this.enabled = false,
     this.style = RainStyle.liquid,
     this.condition = WeatherCondition.rain,
+    this.indicators = const {},
+    this.beads = true,
     this.amount = RainAmount.drizzle,
     this.windDir = 0,
     this.windStrength = 0,
@@ -123,6 +145,8 @@ class WeatherSettings {
   final bool enabled;
   final RainStyle style;
   final WeatherCondition condition;
+  final Map<IndicatorPhase, StateIndicator> indicators;
+  final bool beads;
   final RainAmount amount;
 
   /// −1(왼쪽) ~ 1(오른쪽).
@@ -146,6 +170,12 @@ class WeatherSettings {
   bool has(Effect e) => effects.contains(e);
 
   /// 바람 한 값(−1~1): 방향 × 세기.
+  StateIndicator indicator(IndicatorPhase phase) => indicators[phase] ?? switch (phase) {
+    IndicatorPhase.working || IndicatorPhase.compacting => StateIndicator(weather: condition),
+    IndicatorPhase.background => const StateIndicator(edges: 15),
+    _ => const StateIndicator(),
+  };
+
   double get wind => windDir.clamp(-1.0, 1.0) * windStrength.clamp(0.0, 1.0);
 
   RainAmount moodAmount(Mood m) => switch (m) {
@@ -158,6 +188,8 @@ class WeatherSettings {
     bool? enabled,
     RainStyle? style,
     WeatherCondition? condition,
+    Map<IndicatorPhase, StateIndicator>? indicators,
+    bool? beads,
     RainAmount? amount,
     double? windDir,
     double? windStrength,
@@ -173,6 +205,8 @@ class WeatherSettings {
     enabled: enabled ?? this.enabled,
     style: style ?? this.style,
     condition: condition ?? this.condition,
+    indicators: indicators ?? this.indicators,
+    beads: beads ?? this.beads,
     amount: amount ?? this.amount,
     windDir: windDir ?? this.windDir,
     windStrength: windStrength ?? this.windStrength,
@@ -199,6 +233,8 @@ class WeatherSettings {
     'enabled': enabled,
     if (style != RainStyle.liquid) 'style': style.name,
     if (condition != WeatherCondition.rain) 'condition': condition.name,
+    if (!beads) 'beads': false,
+    if (indicators.isNotEmpty) 'indicators': {for (final phase in IndicatorPhase.values) if (indicators.containsKey(phase)) phase.name: indicators[phase]!.toJson()},
     'amount': amount.name,
     'wind_dir': windDir,
     'wind_strength': windStrength,
@@ -221,6 +257,10 @@ class WeatherSettings {
     final fx = raw['effects'];
     return WeatherSettings(
       enabled: raw['enabled'] == true,
+      beads: raw['beads'] != false,
+      indicators: {for (final phase in IndicatorPhase.values)
+        if (raw['indicators'] case final Map rules)
+          if (rules[phase.name] case final Map rule) phase: StateIndicator.parse(rule)},
       condition: WeatherCondition.values.firstWhere((c) => c.name == raw['condition'], orElse: () => WeatherCondition.rain),
       style: raw['style'] == 'showers' ? RainStyle.showers : RainStyle.liquid,
       amount: RainAmount.parse(raw['amount'], d.amount),

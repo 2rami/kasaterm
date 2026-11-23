@@ -601,7 +601,7 @@ pub(crate) enum HitCursor {
 /// 펼쳐지는 선택 상자. 한 번에 하나만 열린다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DropdownId {
-    WeatherCondition,
+    WeatherCondition(crate::weather::indicator::Phase),
     UiFont,
     /// 시스템 따라가기에서 밝은(true)·어두운(false) 화면에 입힐 팔레트.
     SystemPalette(bool),
@@ -4672,8 +4672,17 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         ("작업 날씨", ws.style == RainStyle::Showers, act(Change::Style(RainStyle::Showers))),
     ]);
     if ws.style == RainStyle::Showers {
-        dropdown_row(g, s, hits, x, y, w, "작업 중 날씨", &crate::native_strings::text(ws.condition.label()), DropdownId::WeatherCondition);
-        plain_hint(g, x, y, w, "작업이 끝나면 날씨 효과가 걷힙니다");
+        use crate::weather::indicator::Phase;
+        toggle_row(g, s, hits, x, y, w, "표면에 물방울 맺힘", ws.beads, act(Change::Beads(!ws.beads)));
+        plain_hint(g, x, y, w, "완료는 6초 후 쉬는 중으로 바뀝니다");
+        for phase in Phase::ALL {
+            let rule = ws.indicator(phase);
+            let label = rule.weather.map_or("날씨 없음", |c| c.label());
+            dropdown_row(g, s, hits, x, y, w, phase.label(), &crate::native_strings::text(label), DropdownId::WeatherCondition(phase));
+            let cells: Vec<_> = [("위", 1), ("아래", 4), ("왼쪽", 8), ("오른쪽", 2)].into_iter()
+                .map(|(label, side)| (label, rule.edges & side != 0, act(Change::StateEdge(phase, side)))).collect();
+            seg_row(g, s, hits, x, y, w, "프로세스바 위치", &cells);
+        }
         let levels = ["없음", "약하게", "보통", "강하게"];
         let cells: Vec<_> = RainAmount::ALL.iter().map(|&a| (levels[a.index()], a == ws.amount, act(Change::Amount(a)))).collect();
         seg_row(g, s, hits, x, y, w, "효과 강도", &cells);
@@ -6877,10 +6886,14 @@ fn ui_font_label(value: &str) -> String {
 /// 선택 상자에 들어갈 항목들: (보이는 이름, 지금 골라진 것인지, 고르면 할 일).
 fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAction)> {
     match id {
-        DropdownId::WeatherCondition => crate::weather::condition::WeatherCondition::ALL.iter().map(|&c| (
-            crate::native_strings::text(c.label()).into_owned(), c == s.weather.condition,
-            SettingsAction::Weather(crate::weather::model::Change::Condition(c)),
-        )).collect(),
+        DropdownId::WeatherCondition(phase) => {
+            let current = s.weather.indicator(phase).weather;
+            std::iter::once(None).chain(crate::weather::condition::WeatherCondition::ALL.iter().copied().map(Some))
+                .map(|c| (
+                    crate::native_strings::text(c.map_or("날씨 없음", |v| v.label())).into_owned(), c == current,
+                    SettingsAction::Weather(crate::weather::model::Change::StateWeather(phase, c)),
+                )).collect()
+        }
         DropdownId::UiFont => {
             let custom = !matches!(s.ui_font.as_str(), "" | "terminal" | "system");
             let mut items = vec![

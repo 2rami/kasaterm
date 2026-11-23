@@ -379,6 +379,8 @@ pub(crate) struct WebShell {
 
 #[derive(Clone)]
 pub(crate) struct MachinesColRow {
+    pub(crate) background: bool,
+    pub(crate) done_until_ms: Option<u64>,
     /// 로컬 surface id. 원격 전용 행은 빈 문자열(이사 대상이 못 된다).
     pub(crate) pane: String,
     /// Source device pane id (`%N`), also retained by existing mirrors.

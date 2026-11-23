@@ -168,6 +168,8 @@ impl Default for SessionsInfo {
 /// 종료 열쇠와 그 열쇠가 속한 세션 신원을 함께 싣는다. 값은 모두 같은 판정 스냅샷에서 나온다.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponseEnd {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_until_ms: Option<u64>,
     pub surface_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,

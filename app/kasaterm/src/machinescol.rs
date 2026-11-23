@@ -413,6 +413,8 @@ impl App {
             let win = pane_window.get(id).copied().unwrap_or(self.active_window);
             let closed = facts.as_ref().is_some_and(|(_, row)| remote_pane_closed(row));
             let row = state::MachinesColRow {
+                background: facts.as_ref().is_some_and(|(_, row)| row["response_end"]["background"].as_bool() == Some(true)),
+                done_until_ms: facts.as_ref().and_then(|(_, row)| row["response_end"]["done_until_ms"].as_u64()),
                 pane: id.clone(),
                 remote_id: remote.as_ref().map(|i| i.remote_id.clone()).unwrap_or_default(),
                 remote_cwd: remote_str("cwd").unwrap_or_default(),
@@ -539,6 +541,8 @@ impl App {
                                 Some((
                                     win.unwrap_or(u64::MAX),
                                     state::MachinesColRow {
+                                        background: p["response_end"]["background"].as_bool() == Some(true),
+                                        done_until_ms: p["response_end"]["done_until_ms"].as_u64(),
                                         pane: String::new(), // 로컬 자리가 없다 — 데려오기 대상이 못 된다.
                                         // GUI pane(`%…`)만 거울 대상이다 — 헤드리스 웹 셸은
                                         // 그 기계 화면의 방이 아니다.

@@ -12,6 +12,9 @@ uniform float uOpacity;
 uniform float uMaterial;
 uniform float uVariant;
 uniform vec2 uSize;
+uniform float uBeads;
+uniform float uEdges;
+uniform vec3 uBarColor;
 out vec4 fragColor;
 
 float grain(vec2 p) {
@@ -330,11 +333,39 @@ vec4 rainSky(vec2 p, vec2 size, float clock, float variant, float wind, float op
     return vec4(0.0);
 }
 
+float edgeLight(vec2 p, vec2 size, float mask, float time, float moving) {
+    float light = 0.0;
+    float lap = fract(time * 0.5);
+    float perimeter = 2.0 * (size.x + size.y);
+    for (int side = 0; side < 4; side++) {
+        float bit = exp2(float(side));
+        if (fract(floor(mask / bit) * 0.5) < 0.25) { continue; }
+        float distance = p.y;
+        float along = p.x;
+        float lengthPx = size.x;
+        float offset = 0.0;
+        if (side == 1) { distance = size.x - p.x; along = p.y; lengthPx = size.y; offset = size.x; }
+        if (side == 2) { distance = size.y - p.y; along = size.x - p.x; offset = size.x + size.y; }
+        if (side == 3) { distance = p.x; along = size.y - p.y; lengthPx = size.y; offset = 2.0 * size.x + size.y; }
+        if (distance > 3.0) { continue; }
+        float position = along / max(1.0, lengthPx);
+        if (mask == 15.0) { position = (offset + along) / perimeter; }
+        float tail = 1.0 - smoothstep(0.0, 0.24, fract(lap - position + 1.0));
+        if (moving < 0.5) { tail = 0.68; }
+        light = max(light, tail * (1.0 - smoothstep(0.6 + tail, 1.4 + tail, distance)));
+    }
+    return light;
+}
+
 void main() {
   vec2 screen = FlutterFragCoord().xy;
   vec2 p = screen - uOrigin;
   vec3 ink = mix(vec3(0.35, 0.48, 0.60), vec3(0.77, 0.87, 0.96), uDark);
   vec2 size = max(uSize, vec2(1.0));
+  if (uPass > 2.5) {
+    fragColor = wash(uBarColor, edgeLight(p, size, uEdges, uTime, uMoving));
+    return;
+  }
   if (uMaterial != 0.0) {
     fragColor = conditionLayer(p, size, uTime, uMaterial, uVariant, uWind, uAmount, uOpacity, ink, uMoving);
     return;
@@ -346,7 +377,7 @@ void main() {
   } else {
     vec4 sky = overLayer(rainSky(p, size, uTime, uVariant, uWind, uOpacity), atmosphere(screen, uTime, rate, uWind, uMoving, ink));
     vec2 water = vec2(0.0);
-    if (uPass > 0.5) water = bead(p, rate, uSeed) * uOpacity;
+    if (uBeads > 0.5 && uPass > 0.5) water = bead(p, rate, uSeed) * uOpacity;
     float a = water.x + water.y;
     fragColor = vec4(sky.rgb * (1.0 - a) + vec3(0.81, 0.90, 0.96) * water.y, sky.a * (1.0 - a) + a);
   }

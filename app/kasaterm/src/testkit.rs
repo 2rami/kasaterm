@@ -2946,6 +2946,7 @@ impl App {
                     label: "맥북".into(), online: true, ago_secs: Some(0), outdated: false,
                     closed: 0, web_shells: Vec::new(), link: Default::default(),
                     mirrored: vec![crate::state::MachinesColRow {
+                        background: false, done_until_ms: None,
                         pane: "%2".into(), remote_id: "%13".into(), name: "하치와레".into(),
                         title: "브라우저 연동".into(), status: "working".into(),
                         room: "방 1 · 브라우저".into(), remote_cwd: String::new(), closed: false,
@@ -2954,6 +2955,7 @@ impl App {
                         error: None,
                     }],
                     remote: vec![crate::state::MachinesColRow {
+                        background: false, done_until_ms: None,
                         pane: String::new(), remote_id: "%4".into(), name: "히후미".into(),
                         title: "모바일 연결".into(), status: "idle".into(),
                         room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
@@ -2961,6 +2963,7 @@ impl App {
                         attention_kind: None,
                         error: None,
                     }, crate::state::MachinesColRow {
+                        background: false, done_until_ms: None,
                         pane: String::new(), remote_id: "%5".into(), name: "아루".into(),
                         title: "탭 학생".into(), status: "idle".into(),
                         room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
@@ -2968,6 +2971,7 @@ impl App {
                         attention_kind: None,
                         error: None,
                     }, crate::state::MachinesColRow {
+                        background: false, done_until_ms: None,
                         pane: String::new(), remote_id: "%6".into(), name: "카즈사".into(),
                         title: "옆 자리".into(), status: "waiting".into(),
                         room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
@@ -2977,6 +2981,7 @@ impl App {
                     }, crate::state::MachinesColRow {
                         // 같은 `waiting` 낱말인데 주황으로 부르지 않는 쪽 — 화면에서 둘을
                         // 나란히 놓아야 가름이 도로 무너졌을 때 눈에 띈다.
+                        background: false, done_until_ms: None,
                         pane: String::new(), remote_id: "%7".into(), name: "시로코".into(),
                         title: "다음 지시 기다림".into(), status: "waiting".into(),
                         room: "방 3 · 방치".into(), remote_cwd: String::new(), closed: false,

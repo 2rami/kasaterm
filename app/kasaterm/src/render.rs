@@ -2467,18 +2467,22 @@ impl App {
         let claude_observations: ClaudeObservations = self.set_claude_accounts.iter()
             .map(|account| (account.id.clone(), (self.claude_account_usage(&account.id), self.claude_account_status(&account.id))))
             .collect();
-        let weather_frame = self.weather_frame(
-            scale,
-            [win_px.0 / scale, win_px.1 / scale],
-            &footer_slots,
-            weather_focus.as_deref(),
-            weather_guard,
-        );
+        let mut weather_rows = Vec::new();
+        if self.weather.settings.enabled && self.weather.settings.style == crate::weather::model::RainStyle::Showers
+            && !self.tabs_on_top && tab_strip_w > 0.0 {
+            for (_, id, rect) in sb_rows.iter().chain(&sb_mini).chain(&sb_undock) {
+                let y = rect.1.max(sb_view.0);
+                let bottom = (rect.1 + rect.3).min(sb_view.0 + sb_view.1);
+                if bottom > y { weather_rows.push((id.clone(), rect.0, y, rect.2, bottom - y)); }
+            }
+        }
+        let custom_indicators = self.weather.refresh_custom_indicators();
         let mut weather_spots = Vec::new();
         let live_zoom_now = self.live_zoom().map(str::to_string);
         crate::turn_probe::frame_mark(1);
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
+            g.custom_indicators = custom_indicators;
             // Upload any image pane's pixels once, then queue each for this
             // frame. The image pass (in g.render) paints under the chrome so
             // pane headers / focus ring / dim overlay land on top.
@@ -3400,6 +3404,7 @@ impl App {
                     },
                 );
                 let panes = sidebar::Panes {
+                    custom_indicators,
                     rows: &sb_rows,
                     row_info: &sb_row_info,
                     mini: &sb_mini,
@@ -4357,8 +4362,8 @@ impl App {
                     // 손을 기다리는 칸(아래 깜빡임)과는 상태가 배타적이라 같이 서지 않는다.
                     let activity = self.pane_activity.get(fid).and_then(|a| {
                         if a.state.is_busy() {
-                            (!self.weather.replaces_work_outline(fid)).then_some(theme::Activity::Working)
-                        } else if a.bg_active {
+                            (!custom_indicators).then_some(theme::Activity::Working)
+                        } else if a.bg_active && !custom_indicators {
                             Some(theme::Activity::Background)
                         } else {
                             None
@@ -5010,12 +5015,23 @@ impl App {
                 }
             }
             weather_spots = std::mem::take(&mut g.weather_spots);
+            self.image_preview.paint(preview_window_id, g, (win_px.0 / scale, win_px.1 / scale), self.cursor_px);
+            self.media_preview.paint(preview_window_id, g, (win_px.0 / scale, win_px.1 / scale), self.cursor_px);
+            let remote = std::mem::take(&mut g.remote_indicators);
+            let weather_frame = self.weather_frame(
+                scale,
+                [win_px.0 / scale, win_px.1 / scale],
+                &footer_slots,
+                &weather_rows,
+                &remote,
+                weather_focus.as_deref(),
+                weather_guard,
+            );
+            let g = self.gpu.as_mut().unwrap();
             if weather_frame.is_none() {
                 g.weather = None;
             }
             g.weather_frame = weather_frame;
-            self.image_preview.paint(preview_window_id, g, (win_px.0 / scale, win_px.1 / scale), self.cursor_px);
-            self.media_preview.paint(preview_window_id, g, (win_px.0 / scale, win_px.1 / scale), self.cursor_px);
             crate::turn_probe::frame_mark(2);
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");

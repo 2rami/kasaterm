@@ -303,6 +303,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
       a.status == b.status &&
       a.kind == b.kind &&
       a.idleSecs == b.idleSecs &&
+      a.doneUntilMs == b.doneUntilMs && a.reportedFailure == b.reportedFailure && a.error == b.error && a.bgActive == b.bgActive &&
+      a.hasRunningSubagents == b.hasRunningSubagents &&
       a.doing == b.doing &&
       a.compactPct == b.compactPct &&
       a.session == b.session &&
@@ -829,7 +831,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
                     workOnly: true,
                     child: WorkWeather(
                       id: pane.viewKey,
-                      working: pane.isBusy && !pane.closed && s.state != TermState.gone,
+                      phase: s.state == TermState.gone ? null : paneIndicatorPhase(pane),
+                      doneUntilMs: pane.doneUntilMs,
                       radius: BorderRadius.zero,
                       builder: (_) => NotificationListener<ScrollNotification>(
                         onNotification: _onPageScroll,

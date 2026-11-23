@@ -19,11 +19,13 @@ abstract interface class WeatherPlace {
 
 abstract interface class WorkWeatherPlace implements WeatherPlace {
   BorderRadius get corners;
+  StateIndicator get indicator;
 }
 
 class _ShowerFade {
   _ShowerFade(this.amount);
 
+  WeatherCondition condition = WeatherCondition.rain;
   RainAmount amount;
   double opacity = 0;
 
@@ -203,7 +205,7 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
     _repaint.value++;
   }
 
-  bool get _wetWork => _workFades.isNotEmpty || _workPlaces.any((p) => p.amount != RainAmount.none);
+  bool get _wetWork => _workFades.isNotEmpty || _workPlaces.any((p) => p.amount != RainAmount.none || p.indicator.edges != 0);
 
   void _updateScan() {
     final wantsScan = _v.active && _current &&
@@ -223,11 +225,13 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
     if (!_v.active || !_showerStyle) return;
     for (final p in _workPlaces) {
       final target = p.amount;
-      if (target != RainAmount.none) _workFades.putIfAbsent(p, () => _ShowerFade(target));
+      final rule = p.indicator;
+      if (target != RainAmount.none || rule.edges != 0) _workFades.putIfAbsent(p, () => _ShowerFade(target));
       final fade = _workFades[p];
       if (fade == null) continue;
+      if (rule.weather != null) fade.condition = rule.weather!;
       fade.step(target, dt, _v.moving);
-      if (fade.opacity == 0) _workFades.remove(p);
+      if (fade.opacity == 0 && rule.edges == 0) _workFades.remove(p);
     }
   }
 
@@ -407,7 +411,7 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
               if (active && _showerStyle && _showers != null)
                 Positioned.fill(
                   child: IgnorePointer(
-                    child: RepaintBoundary(child: CustomPaint(painter: _ShowersPainter(this, _showers!, dark))),
+                    child: RepaintBoundary(child: CustomPaint(painter: _ShowersPainter(this, _showers!, dark, Theme.of(context).colorScheme.primary))),
                   ),
                 ),
               if (active && !_showerStyle && _buttons != null && weather.settings.value.has(Effect.buttons))
@@ -425,8 +429,9 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
 }
 
 class _ShowersPainter extends CustomPainter {
-  _ShowersPainter(this.scene, this.shader, this.dark) : super(repaint: scene._repaint);
+  _ShowersPainter(this.scene, this.shader, this.dark, this.barColor) : super(repaint: scene._repaint);
 
+  final Color barColor;
   final WeatherSceneState scene;
   final bool dark;
   final ui.FragmentShader shader;
@@ -444,8 +449,8 @@ class _ShowersPainter extends CustomPainter {
       ..setFloat(4, settings.wind * 0.68)
       ..setFloat(6, moving ? 1 : 0)
       ..setFloat(8, dark ? 1 : 0)
-      ..setFloat(10, settings.condition.material.toDouble())
-      ..setFloat(11, settings.condition.variant.toDouble());
+      ..setFloat(14, settings.beads ? 1 : 0)
+      ..setFloat(16, barColor.r)..setFloat(17, barColor.g)..setFloat(18, barColor.b);
 
     void draw(Rect area, Offset origin, _ShowerFade fade, double seed, double pass) {
       shader
@@ -472,11 +477,16 @@ class _ShowersPainter extends CustomPainter {
       final seed = (place.placeId.hashCode % 997).toDouble();
       canvas.save();
       canvas.clipRRect(place.corners.toRRect(rect));
-      shader..setFloat(12, rect.width)..setFloat(13, rect.height);
-      draw(rect, rect.topLeft, fade, seed, 1);
+      shader
+        ..setFloat(10, fade.condition.material.toDouble())
+        ..setFloat(11, fade.condition.variant.toDouble())
+        ..setFloat(12, rect.width)..setFloat(13, rect.height)
+        ..setFloat(15, place.indicator.edges.toDouble());
+      if (fade.opacity > 0) draw(rect, rect.topLeft, fade, seed, 1);
+      if (place.indicator.edges != 0) draw(rect, rect.topLeft, fade, seed, 3);
       canvas.restore();
       // The splash clears the clip on the top edge without crossing the scene's input guards.
-      if (settings.condition.material == 0 && moving && fade.opacity > 0.28 && rect.width > 16) {
+      if (fade.condition.material == 0 && moving && fade.opacity > 0.28 && rect.width > 16) {
         draw(Rect.fromLTRB(rect.left + 8, rect.top - 32, rect.right - 8, rect.top + 2),
             rect.topLeft, fade, seed, 2);
       }

@@ -10,7 +10,7 @@ use bytemuck::{Pod, Zeroable};
 const MAP_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SCENE_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub(crate) const MAX_INST: usize = 8192;
-pub(crate) const MAX_PLACES: usize = 24;
+pub(crate) const MAX_PLACES: usize = 128;
 pub(crate) const MAX_BUTTONS: usize = 64;
 pub(crate) const MAX_ROWS: usize = 32;
 pub(crate) const MAX_RIPPLES: usize = 64;

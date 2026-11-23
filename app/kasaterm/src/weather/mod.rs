@@ -6,11 +6,14 @@
 
 pub(crate) mod condition;
 pub(crate) mod gpu;
+pub(crate) mod indicator;
 pub(crate) mod model;
 pub(crate) mod sim;
 
 use crate::agent_state::AgentState;
 use crate::App;
+use indicator::{Indicator, Phase};
+use condition::WeatherCondition;
 use model::{OsMotion, PaneMood, PaneWeather, RainAmount, Verdict, WeatherSettings};
 use sim::{ButtonSpot, Place, PlaceKind};
 use std::collections::HashMap;
@@ -33,6 +36,8 @@ pub(crate) struct WeatherState {
     places: Vec<Place>,
     spots: Vec<ButtonSpot>,
     showers: HashMap<u64, ShowerFade>,
+    indicators: HashMap<u64, Indicator>,
+    next_indicator_change: Option<u64>,
     shower_time: f32,
     ripple_acc: f32,
     ripple_tail: f32,
@@ -43,6 +48,7 @@ pub(crate) struct WeatherState {
 }
 
 struct ShowerFade {
+    condition: WeatherCondition,
     amount: RainAmount,
     opacity: f32,
 }
@@ -58,7 +64,7 @@ impl ShowerFade {
     }
 }
 
-fn key_of(id: &str) -> u64 {
+pub(crate) fn key_of(id: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     id.hash(&mut h);
@@ -154,15 +160,22 @@ impl WeatherState {
         self.overrides.get(pane).copied().unwrap_or_default()
     }
 
-    pub(crate) fn replaces_work_outline(&self, id: &str) -> bool {
-        self.settings.style == model::RainStyle::Showers && model::verdict(&self.settings, self.os).moving
-            && self.places.iter().any(|p| p.kind == PlaceKind::Pane && p.key == key_of(id) && p.amount != RainAmount::None)
+    pub(crate) fn refresh_custom_indicators(&mut self) -> bool {
+        self.settings.style == model::RainStyle::Showers && self.verdict().active
+    }
+
+    pub(crate) fn poll_indicator_deadline(&mut self) -> bool {
+        if self.next_indicator_change.is_some_and(|deadline| deadline <= kasa_socket::board::now_ms()) {
+            self.next_indicator_change = None;
+            return true;
+        }
+        false
     }
 
     /// Wet places still dripping after the rain stopped keep the frames coming.
     fn busy(&self, v: Verdict) -> bool {
         if self.settings.style == model::RainStyle::Showers {
-            return v.moving && !self.showers.is_empty();
+            return v.moving && (!self.showers.is_empty() || self.indicators.values().any(|r| r.edges != 0));
         }
         v.active
             && v.moving
@@ -258,10 +271,14 @@ impl App {
         scale: f32,
         win: [f32; 2],
         panes: &[(String, f32, f32, f32, f32)],
+        sidebar: &[(String, f32, f32, f32, f32)],
+        remote: &[indicator::RemoteIndicator],
         active: Option<&str>,
         guard: Option<[f32; 4]>,
     ) -> Option<gpu::Frame> {
         let v = self.weather.verdict();
+        self.weather.indicators.clear();
+        self.weather.next_indicator_change = None;
         if !v.active {
             self.weather.showers.clear();
             self.weather.places.clear();
@@ -271,17 +288,34 @@ impl App {
         let showers = s.style == model::RainStyle::Showers;
         // The settings page stands where the panes are; keep it dry and readable.
         let settings_open = self.settings_room_active();
-        if showers && settings_open {
-            self.weather.showers.clear();
-            self.weather.places.clear();
-            return None;
-        }
         let mut places = Vec::new();
-        for (id, x, y, w, h) in panes.iter().take(gpu::MAX_PLACES) {
-            let focused = active == Some(id.as_str());
+        let now_ms = kasa_socket::board::now_ms();
+        let surfaces = panes.iter().map(|p| (p, false)).chain(sidebar.iter().map(|p| (p, true)));
+        for ((id, x, y, w, h), small) in surfaces {
+            if showers && settings_open && !small { continue; }
+            if places.len() == gpu::MAX_PLACES { break; }
+            let key = if small { key_of(&format!("row:{id}")) } else { key_of(id) };
+            let focused = !small && active == Some(id.as_str());
             let over = self.weather.pane_override(id);
             let amount = if showers {
-                model::work_rain_amount(&s, over, self.agent_state(id).is_busy())
+                let tab = self.ws.lock().unwrap().active_tab_pid(id);
+                let (deadline, failed) = self.collab.hub.indicator_report(&tab);
+                let end = deadline.filter(|t| *t > now_ms);
+                if let Some(t) = end {
+                    self.weather.next_indicator_change = Some(self.weather.next_indicator_change.map_or(t, |cur| cur.min(t)));
+                }
+                let state = self.agent_state(id);
+                let bg = self.pane_activity.get(id).is_some_and(|a| a.bg_active);
+                let phase = match Phase::of(&state, bg, end.is_some()) {
+                    Some(Phase::Idle | Phase::Done) if failed => Some(Phase::Error),
+                    phase => phase,
+                };
+                let rule = phase.map(|p| s.indicator(p)).unwrap_or_default();
+                let amount = model::work_rain_amount(&s, over, rule.weather.is_some());
+                if amount == RainAmount::None && rule.edges == 0 && !self.weather.showers.contains_key(&key)
+                    && !(focused && guard.is_some()) { continue; }
+                self.weather.indicators.insert(key, rule);
+                amount
             } else if settings_open {
                 RainAmount::None
             } else {
@@ -289,7 +323,7 @@ impl App {
                 model::pane_amount(&s, over, focused, m)
             };
             places.push(Place {
-                key: key_of(id),
+                key,
                 kind: PlaceKind::Pane,
                 rect: [*x, *y, *w, *h],
                 amount,
@@ -298,12 +332,23 @@ impl App {
             });
         }
         if showers {
+            for row in remote {
+                if places.len() == gpu::MAX_PLACES { break; }
+                let rule = s.indicator(row.phase);
+                let amount = if rule.weather.is_some() { s.amount } else { RainAmount::None };
+                if let Some(t) = row.done_until_ms {
+                    self.weather.next_indicator_change = Some(self.weather.next_indicator_change.map_or(t, |cur| cur.min(t)));
+                }
+                if amount == RainAmount::None && rule.edges == 0 && !self.weather.showers.contains_key(&row.key) { continue; }
+                self.weather.indicators.insert(row.key, rule);
+                places.push(Place { key: row.key, kind: PlaceKind::Pane, rect: row.rect, amount, focused: false, guard: None });
+            }
             self.weather.showers.retain(|key, _| places.iter().any(|p| p.key == *key));
             self.weather.places = places;
             self.weather.scale = scale;
             self.weather.win = win;
             let frame = self.weather_step(v);
-            return (!self.weather.showers.is_empty()).then_some(frame);
+            return (!self.weather.showers.is_empty() || self.weather.indicators.values().any(|r| r.edges != 0)).then_some(frame);
         }
         let bg = model::background_amount(&s);
         let title = crate::TITLE_HEIGHT;
@@ -357,19 +402,25 @@ impl App {
             if v.moving {
                 st.shower_time = (st.shower_time + dt) % 3600.0;
             }
-            let (material, variant) = s.condition.material();
+            let accent = crate::theme::accent();
             let strength = |amount: RainAmount| [0.0, 0.24, 0.62, 1.0][amount.index()];
             let physical = |rect: [f32; 4]| rect.map(|n| n * scale);
             let [w, h] = win.map(|n| (n * scale).max(1.0));
             let mut regions = gpu::PlacesU::zeroed();
-            regions.n[0] = st.places.len() as f32;
+            regions.n = [st.places.len() as f32, accent[0] as f32 / 255.0, accent[1] as f32 / 255.0, accent[2] as f32 / 255.0];
             for (i, place) in st.places.iter().enumerate() {
                 regions.rect[i] = physical(place.rect);
                 regions.c[i] = place.guard.map_or([0.0; 4], physical);
+                let rule = st.indicators.get(&place.key).copied().unwrap_or_default();
+                regions.a[i][2] = rule.edges as f32;
                 if place.amount != RainAmount::None {
-                    st.showers.entry(place.key).or_insert(ShowerFade { amount: place.amount, opacity: 0.0 });
+                    st.showers.entry(place.key).or_insert(ShowerFade { condition: WeatherCondition::Rain, amount: place.amount, opacity: 0.0 });
                 }
                 if let Some(shower) = st.showers.get_mut(&place.key) {
+                    if let Some(condition) = rule.weather { shower.condition = condition; }
+                    let (material, variant) = shower.condition.material();
+                    regions.a[i][0] = material;
+                    regions.a[i][1] = variant;
                     shower.step(place.amount, dt, v.moving);
                     regions.a[i][3] = (place.key % 997) as f32;
                     regions.b[i][2] = strength(shower.amount);
@@ -381,7 +432,7 @@ impl App {
                 globals: gpu::Globals {
                     res: [w, h, 1.0 / w, 1.0 / h],
                     t: [st.shower_time, dt, scale, 0.0],
-                    rain: [material, s.wind() * 0.68, variant, if v.moving { 1.0 } else { 0.0 }],
+                    rain: [if s.beads { 1.0 } else { 0.0 }, s.wind() * 0.68, 0.0, if v.moving { 1.0 } else { 0.0 }],
                     ..Default::default()
                 },
                 places: regions, buttons: gpu::ButtonsU::zeroed(), canvas: win,
@@ -570,7 +621,7 @@ impl App {
 #[cfg(test)]
 #[test]
 fn work_rain_clears_and_resumes_from_its_current_opacity() {
-    let mut fade = ShowerFade { amount: RainAmount::Rain, opacity: 0.0 };
+    let mut fade = ShowerFade { condition: WeatherCondition::Rain, amount: RainAmount::Rain, opacity: 0.0 };
     fade.step(RainAmount::Rain, 0.35, true);
     assert_eq!(fade.opacity, 1.0);
     fade.step(RainAmount::None, 0.8, true);

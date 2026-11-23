@@ -1344,7 +1344,7 @@ class _MiniCellState extends State<_MiniCell> {
           ),
         );
         Widget buildEdge(bool raining) => OrbitEdge(
-          live: (!raining && (busy || childrenRunning)) || behind,
+          live: !raining && (busy || childrenRunning || behind),
           dashed: behind,
           color: childrenRunning ? StatusStyle.success : accent,
           radius: Look.smallCorners,
@@ -1354,7 +1354,8 @@ class _MiniCellState extends State<_MiniCell> {
             ? WorkWeather(
                 key: ValueKey(p.viewKey),
                 id: p.viewKey,
-                working: busy,
+                phase: behind ? IndicatorPhase.background : paneIndicatorPhase(p),
+                doneUntilMs: p.doneUntilMs,
                 radius: Look.smallCorners,
                 builder: buildEdge,
               )
@@ -1545,7 +1546,7 @@ class _PaneTile extends StatelessWidget {
     final time = st.live ? elapsedLabel(pane.busySecs) : null;
     final behind = !st.live && !st.needsYou && !pane.hasRunningSubagents && pane.bgActive;
     Widget edge(bool raining) => OrbitEdge(
-      live: (!raining && (st.live || pane.hasRunningSubagents)) || behind,
+      live: !raining && (st.live || pane.hasRunningSubagents || behind),
       dashed: behind,
       color: pane.hasRunningSubagents ? StatusStyle.success : scheme.primary,
       radius: Look.smallCorners,
@@ -1648,7 +1649,8 @@ class _PaneTile extends StatelessWidget {
     );
     return WorkWeather(
       id: pane.viewKey,
-      working: online && st.live,
+      phase: online ? paneIndicatorPhase(pane) : null,
+      doneUntilMs: pane.doneUntilMs,
       radius: Look.smallCorners,
       builder: edge,
     );

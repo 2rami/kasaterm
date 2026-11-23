@@ -152,17 +152,14 @@ class WeatherSettingsList extends StatelessWidget {
             ),
           ),
           if (s.style == RainStyle.showers) ...[
-            _Title('작업 중 날씨'),
-            _Pad(DropdownButton<WeatherCondition>(
-              value: s.condition,
-              isExpanded: true,
-              menuMaxHeight: 360,
-              items: [
-                for (final c in WeatherCondition.values) DropdownMenuItem(value: c, child: Text(c.label)),
-              ],
-              onChanged: (c) { if (c != null) set(s.copyWith(condition: c)); },
-            )),
-            _Pad(Text('작업이 끝나면 날씨 효과가 걷혀요.', style: TextStyle(color: dim))),
+            SwitchListTile(
+              title: const Text('표면에 물방울 맺힘'), value: s.beads,
+              onChanged: (v) => set(s.copyWith(beads: v)),
+            ),
+            for (final phase in IndicatorPhase.values)
+              _IndicatorTile(phase: phase, rule: s.indicator(phase), onChanged: (rule) {
+                set(s.copyWith(indicators: {...s.indicators, phase: rule}));
+              }),
           ],
           _Title(s.style == RainStyle.showers ? '효과 강도' : '비 양'),
           _Pad(
@@ -353,5 +350,43 @@ class _Slider extends StatelessWidget {
         SizedBox(width: 72, child: Text(text, textAlign: TextAlign.end)),
       ],
     ),
+  );
+}
+
+class _IndicatorTile extends StatelessWidget {
+  const _IndicatorTile({required this.phase, required this.rule, required this.onChanged});
+  final IndicatorPhase phase;
+  final StateIndicator rule;
+  final ValueChanged<StateIndicator> onChanged;
+  static const sides = [('위', 1), ('아래', 4), ('왼쪽', 8), ('오른쪽', 2)];
+
+  @override
+  Widget build(BuildContext context) => ExpansionTile(
+    key: PageStorageKey(phase),
+    title: Text(phase.label),
+    subtitle: Text([
+      if (phase == IndicatorPhase.done) '6초',
+      rule.weather?.label ?? '날씨 없음',
+      if (rule.edges != 0) [for (final (label, bit) in sides) if (rule.edges & bit != 0) label].join('·'),
+    ].join(' · ')),
+    children: [
+      _Pad(DropdownButton<String>(
+        value: rule.weather?.name ?? '', isExpanded: true, menuMaxHeight: 360,
+        items: [
+          const DropdownMenuItem(value: '', child: Text('날씨 없음')),
+          for (final c in WeatherCondition.values) DropdownMenuItem(value: c.name, child: Text(c.label)),
+        ],
+        onChanged: (id) => onChanged(StateIndicator(
+          weather: WeatherCondition.values.where((c) => c.name == id).firstOrNull, edges: rule.edges,
+        )),
+      )),
+      _Pad(Wrap(spacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
+        const Text('프로세스바 위치'),
+        for (final (label, bit) in sides)
+          FilterChip(label: Text(label), selected: rule.edges & bit != 0, onSelected: (_) {
+            onChanged(StateIndicator(weather: rule.weather, edges: rule.edges ^ bit));
+          }),
+      ])),
+    ],
   );
 }

@@ -167,11 +167,12 @@ pub(crate) fn remote_fact(row: &serde_json::Value, now: Instant) -> Resolved {
             && row.get("id").and_then(|v| v.as_str()) == Some(end.surface_id.as_str())
             && row.get("state_fresh").and_then(|v| v.as_bool()) != Some(false));
     let Some(end) = end else {
-        return Resolved { state: AgentState::Unknown, source: None, completion: None, questions: Vec::new(),
+        return Resolved { done_until_ms: None, state: AgentState::Unknown, source: None, completion: None, questions: Vec::new(),
             reason: "remote", bg_active: false, has_error: false, intent: String::new(), since: now,
             continues: false, report: None };
     };
     Resolved {
+        done_until_ms: end.done_until_ms,
         state: if end.idle { AgentState::Idle } else { AgentState::Working },
         source: Some(format!("{}:{}", end.session_id.unwrap_or_default(), end.source)),
         completion: end.completion.and_then(|key| u64::from_str_radix(&key, 16).ok()),
@@ -316,7 +317,7 @@ mod tests {
     }
 
     fn fact(state: AgentState, completion: Option<u64>) -> Resolved {
-        Resolved { state, source: Some("session-a".into()), completion, questions: Vec::new(),
+        Resolved { done_until_ms: None, state, source: Some("session-a".into()), completion, questions: Vec::new(),
             reason: "fixture", bg_active: false, has_error: false, intent: String::new(), since: std::time::Instant::now(),
             continues: false, report: None }
     }

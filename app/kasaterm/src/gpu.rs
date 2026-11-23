@@ -103,6 +103,8 @@ pub struct GpuRenderer {
     /// 이번 장에 얹을 날씨 — 앱이 `render` 직전에 넣는다.
     pub(crate) weather_frame: Option<crate::weather::gpu::Frame>,
     /// 이번 장에 그린 조작 단추(`native_controls`) — 날씨의 단추 물방울 자리.
+    pub(crate) custom_indicators: bool,
+    pub(crate) remote_indicators: Vec<crate::weather::indicator::RemoteIndicator>,
     pub(crate) weather_spots: Vec<crate::weather::sim::ButtonSpot>,
     /// Logical-px rects of link spans drawn in the most recent markdown
     /// frame: (x, y, w, h, dest). main.rs hit-tests a click against these to
@@ -358,6 +360,8 @@ impl GpuRenderer {
             hover_pointer: false,
             weather: None,
             weather_frame: None,
+            custom_indicators: false,
+            remote_indicators: Vec::new(),
             weather_spots: Vec::new(),
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
