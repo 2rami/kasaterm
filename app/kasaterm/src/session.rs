@@ -29,7 +29,7 @@ pub(crate) use self::closed_panes::RetainedBy;
 pub(crate) use self::accounts::{
     followed_recently, observe_workbench_identity, selection_generation, shared_choice_view, retry_choice_after_login,
     account_sync_notice, seed_account_sync_notice_for_verify, AccountIdentity, AccountSyncReport, SyncNotice,
-    account_switch_confirm_text, account_switch_toast, AccountSwitchBtn, AccountSwitchImpact,
+    account_switch_confirm_text, account_switch_toast, account_switch_toast_for, AccountSwitchBtn, AccountSwitchImpact,
     AccountSwitchProvider, PendingAccountSwitch,
 };
 pub(crate) use self::agent_launch::{

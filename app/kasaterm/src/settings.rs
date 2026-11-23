@@ -1335,7 +1335,11 @@ impl App {
                 }
             }
             SettingsAction::ToggleAccountAutoswitch => {
-                if !self.set_account_autoswitch && self.set_claude_accounts.len() < 2 {
+                // Codex 는 기본 로그인도 계정이라 슬롯 하나면 둘이다.
+                if !self.set_account_autoswitch
+                    && self.set_claude_accounts.len() < 2
+                    && self.set_codex_accounts.is_empty()
+                {
                     self.set_toast("자동 전환은 등록 계정이 둘 이상일 때 사용할 수 있어요".into());
                     return;
                 }

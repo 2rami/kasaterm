@@ -2041,6 +2041,34 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::CodexAccountAutoswitch { from, to, pct } => {
+                // 판정과 지금 사이에 사람이 계정을 골랐거나 기능을 껐으면 옛 숫자로 옮기지 않는다.
+                if !socket::read_account_autoswitch()
+                    || *from != self.set_codex_account
+                    || *from != socket::read_codex_account()
+                {
+                    return;
+                }
+                if self
+                    .account_switch_confirm
+                    .as_ref()
+                    .is_some_and(|pending| pending.provider == crate::session::AccountSwitchProvider::Codex)
+                {
+                    self.account_switch_confirm = None;
+                }
+                self.account_flash = Some(std::time::Instant::now());
+                let (from_label, to_label, restarted, deferred, focused, live) =
+                    self.apply_codex_account_switch(to);
+                self.set_toast(format!(
+                    "{from_label} · Codex 사용량 {pct:.0}% — {}",
+                    crate::session::account_switch_toast_for(
+                        "Codex", &to_label, false, restarted, deferred, focused, live
+                    )
+                ));
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::DiskGuard(alert) => {
                 self.on_disk_guard(*alert);
                 self.render_frame();
@@ -2571,6 +2599,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut fresh_usage = crate::quota_alerts::FreshUsageCache::default();
                 // 방금 전환했으면 잠시 **자동 전환 판정만** 쉰다(표시는 계속 갱신).
                 let mut last_switch: Option<std::time::Instant> = None;
+                let mut last_codex_switch: Option<std::time::Instant> = None;
                 let mut seen_account = socket::read_claude_account();
                 let mut badge_account = seen_account.clone();
                 // 비활성 계정을 마지막으로 친 시각. `None` 이면 아직 안 쳤다는
@@ -2645,6 +2674,7 @@ impl ApplicationHandler<UserEvent> for App {
                             .into_iter()
                             .map(|account| account.id),
                     );
+                    let codex_order = codex_ids.clone();
                     codex_ids.sort();
                     codex_ids.dedup();
                     let mut codex_changed = false;
@@ -2657,6 +2687,26 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if codex_changed {
                         let _ = usage_proxy.send_event(UserEvent::Redraw);
+                    }
+                    // Codex 도 기준을 넘으면 다음 로그인으로 옮긴다. 위에서 전 슬롯을 물었으니 후보의
+                    // 숫자도 5분 안의 것이다. 방금 옮겼으면 Claude 와 같이 5분 쉰다.
+                    if socket::read_account_autoswitch()
+                        && last_codex_switch.is_none_or(|at| at.elapsed().as_secs() >= 300)
+                    {
+                        let from = socket::read_codex_account();
+                        if let Some((to, pct)) = crate::codexlimits::autoswitch_target(
+                            &from,
+                            &codex_order,
+                            socket::read_account_autoswitch_pct(),
+                        ) {
+                            last_codex_switch = Some(std::time::Instant::now());
+                            if usage_proxy
+                                .send_event(UserEvent::CodexAccountAutoswitch { from, to, pct })
+                                .is_err()
+                            {
+                                break 'poll;
+                            }
+                        }
                     }
                     let active_id = socket::read_claude_account();
                     let generation = crate::session::selection_generation();

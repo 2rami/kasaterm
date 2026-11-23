@@ -4420,7 +4420,8 @@ fn autoswitch_rows(
     let switch_on = switch_home.map_or(s.account_autoswitch, |h| h.autoswitch);
     let switch_accounts = switch_home.map_or(s.accounts.as_ref(), |h| h.accounts.as_ref());
     let named_count = switch_accounts.iter().filter(|row| row.provider == AccountProvider::Claude && !row.id.is_empty()).count();
-    if named_count >= 2 || switch_on {
+    let codex_count = switch_accounts.iter().filter(|row| row.provider == AccountProvider::Codex).count();
+    if named_count >= 2 || codex_count >= 2 || switch_on {
         toggle_row(
             g,
             s,
@@ -4433,7 +4434,7 @@ fn autoswitch_rows(
             SettingsAction::ToggleAccountAutoswitch,
         );
     } else {
-        flat_row(g, x, *y, w, "한도에 맞춰 자동 전환", "Claude 계정을 2개 이상 등록하면 켤 수 있어요", w);
+        flat_row(g, x, *y, w, "한도에 맞춰 자동 전환", "Claude나 Codex 계정이 2개 이상이면 켤 수 있어요", w);
         *y += ROW_H;
     }
     let switch_pct = switch_home

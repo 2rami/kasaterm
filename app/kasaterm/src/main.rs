@@ -4354,6 +4354,12 @@ enum UserEvent {
         /// 판단을 시작할 때의 계정 선택 세대 — 그 사이 계정이 바뀌었으면 이 판단은 낡았다.
         generation: u64,
     },
+    /// 같은 폴러가 「지금 Codex 계정이 기준을 넘었고 갈 만한 다른 로그인이 있다」고 판정했다.
+    CodexAccountAutoswitch {
+        from: String,
+        to: String,
+        pct: f32,
+    },
     ClaudeQuotaWarning(quota_alerts::QuotaAlert),
     /// 디스크 지키기 — 참이면 문턱을 새로 넘어 사람을 부를 일(disk_warning.rs).
     DiskGuard(bool),

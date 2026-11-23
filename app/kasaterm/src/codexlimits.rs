@@ -35,8 +35,6 @@ pub(crate) struct CodexLimits {
     pub stale: bool,
     /// 구독 플랜(`pro` 등). 같은 퍼센트도 플랜에 따라 뜻이 다르다.
     pub plan: Option<String>,
-    /// 한도 초기화권 잔액 — 코덱스가 문자열로 준다("0"·"2").
-    pub reset_credits: Option<String>,
 }
 
 #[derive(Clone)]
@@ -217,12 +215,6 @@ pub(crate) fn seeded_for_probe(account_id: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// 다시 물을 때가 됐나. app-server 를 띄우는 값이라 자주 부를 자리가 아니다.
-pub(crate) fn stale(every: Duration) -> bool {
-    let account_id = current_account_id();
-    stale_for(&account_id, every)
-}
-
 /// 특정 계정에 다시 물을 때가 됐나. 계정 메뉴의 비활성 행이 쓴다.
 pub(crate) fn stale_for(account_id: &str, every: Duration) -> bool {
     cache()
@@ -242,10 +234,50 @@ pub(crate) fn invalidate() {
     }
 }
 
-/// 코덱스에게 물어 캐시를 채운다. **블로킹이라 폴러 스레드에서만 부른다.**
-pub(crate) fn refresh() -> bool {
-    let account_id = current_account_id();
-    refresh_for(&account_id)
+/// 공용 Codex 창 중 가장 많이 쓴 비율. 이름 달린 모델 bucket 은 그 모델만의 한도라 뺀다.
+fn pressure(limits: &CodexLimits) -> Option<f32> {
+    limits.windows.iter().map(|(_, pct, _)| *pct).reduce(f32::max)
+}
+
+/// 한도 자동 전환이 옮겨 갈 Codex 로그인과 떠나는 계정의 사용률. `order` 는 기본
+/// 로그인(`""`)부터 등록 차례대로다.
+///
+/// 지금 계정이 기준을 넘었을 때만 옮긴다. Claude 처럼 위 차례로 되돌아가면 사람이 방금
+/// 고른 계정을 다음 조회에서 뒤집는다. Plus·Pro 는 한도를 넘으면 크레딧 잔액에서 묻지
+/// 않고 빠지므로, 기준을 넘긴 채 머무는 것 자체가 비용이다.
+pub(crate) fn autoswitch_target(current: &str, order: &[String], threshold: f32) -> Option<(String, f32)> {
+    let cached = cache().lock().ok()?;
+    pick_autoswitch(
+        current,
+        order.iter().map(|id| (id.as_str(), cached_snapshot(&cached, id))),
+        threshold,
+    )
+}
+
+fn pick_autoswitch<'a>(
+    current: &str,
+    slots: impl IntoIterator<Item = (&'a str, Option<CodexLimits>)>,
+    threshold: f32,
+) -> Option<(String, f32)> {
+    // `pick_account_by_order` 는 빈 id 를 「계정 아님」으로 거르는데 Codex 는 빈 id 가 기본
+    // 로그인이다. 표지를 붙여 넘기고 돌려받을 때 뗀다.
+    const KEY: &str = "codex:";
+    // 마지막 조회가 실패한 슬롯(로그아웃·토큰 만료)은 후보가 아니다. 그리로 옮기면 그 뒤
+    // 뜨는 codex 가 전부 로그인 화면에서 멈춘다.
+    let fresh: Vec<(String, f32)> = slots
+        .into_iter()
+        .filter_map(|(id, limits)| {
+            let limits = limits.filter(|limits| !limits.stale)?;
+            Some((format!("{KEY}{id}"), pressure(&limits)?))
+        })
+        .collect();
+    let current = format!("{KEY}{current}");
+    let pct = fresh.iter().find(|(id, _)| *id == current)?.1;
+    if pct < threshold {
+        return None;
+    }
+    let (to, _) = crate::socket::pick_account_by_order(&current, pct, &fresh, threshold, &HashMap::new(), 0)?;
+    Some((to.strip_prefix(KEY)?.to_string(), pct))
 }
 
 /// 특정 계정의 코덱스를 띄워 캐시를 채운다. **블로킹이라 폴러 스레드에서만 부른다.**
@@ -408,10 +440,6 @@ fn parse(result: &serde_json::Value) -> Option<CodexLimits> {
             .get("planType")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        reset_credits: rl
-            .pointer("/credits/balance")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
     })
 }
 
@@ -423,6 +451,48 @@ mod tests {
     fn account_slots_read_the_same_file_auth_that_login_writes() {
         assert_eq!(app_server_args(false), vec!["app-server"]);
         assert!(app_server_args(true).contains(&"cli_auth_credentials_store=\"file\""));
+    }
+
+    fn limits(pcts: &[f32], stale: bool) -> Option<CodexLimits> {
+        Some(CodexLimits {
+            windows: pcts.iter().map(|pct| (300, *pct, None)).collect(),
+            stale,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn 한도에_닿은_기본_로그인은_차례상_다음_슬롯으로_옮긴다() {
+        let slots = [("", limits(&[12.0, 100.0], false)), ("codex-1", limits(&[0.0], false))];
+        assert_eq!(pick_autoswitch("", slots, 100.0), Some(("codex-1".into(), 100.0)));
+    }
+
+    #[test]
+    fn 슬롯이_한도에_닿으면_기본_로그인으로도_옮긴다() {
+        let slots = [("", limits(&[30.0], false)), ("codex-1", limits(&[96.0], false))];
+        assert_eq!(pick_autoswitch("codex-1", slots, 95.0), Some((String::new(), 96.0)));
+    }
+
+    #[test]
+    fn 기준_아래면_위_차례에_여유가_있어도_그대로_둔다() {
+        let slots = [("", limits(&[0.0], false)), ("codex-1", limits(&[40.0], false))];
+        assert_eq!(pick_autoswitch("codex-1", slots, 90.0), None);
+    }
+
+    #[test]
+    fn 조회가_실패했거나_여유가_모자란_슬롯으로는_안_간다() {
+        let expired = [("", limits(&[100.0], false)), ("codex-1", limits(&[0.0], true))];
+        assert_eq!(pick_autoswitch("", expired, 100.0), None);
+        let never = [("", limits(&[100.0], false)), ("codex-1", None)];
+        assert_eq!(pick_autoswitch("", never, 100.0), None);
+        let tight = [("", limits(&[100.0], false)), ("codex-1", limits(&[97.0], false))];
+        assert_eq!(pick_autoswitch("", tight, 100.0), None);
+    }
+
+    #[test]
+    fn 지금_계정의_숫자가_낡았으면_판단하지_않는다() {
+        let slots = [("", limits(&[100.0], true)), ("codex-1", limits(&[0.0], false))];
+        assert_eq!(pick_autoswitch("", slots, 100.0), None);
     }
 
     #[test]
@@ -570,7 +640,6 @@ mod tests {
             "5시간이 먼저"
         );
         assert_eq!(got.plan.as_deref(), Some("pro"));
-        assert_eq!(got.reset_credits.as_deref(), Some("2"));
     }
 
     /// 창이 하나뿐이거나 null 이어도 나머지를 버리지 않는다.
@@ -582,7 +651,6 @@ mod tests {
         .unwrap();
         let got = parse(&v).unwrap();
         assert_eq!(got.windows, vec![(10080, 0.0, None)]);
-        assert!(got.reset_credits.is_none());
     }
 
     /// 서버가 5시간 창을 안 주면 주간 하나만 남긴다. 없는 값을 0%로 만들면
