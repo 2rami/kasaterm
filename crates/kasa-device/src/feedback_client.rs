@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-pub const ENDPOINT: &str = "https://kasaterm.debimarlene.com/feedback";
+pub const ENDPOINT: &str = "https://kasaterm.kasa.page/feedback";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeliveryError {

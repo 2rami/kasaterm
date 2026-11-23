@@ -31,7 +31,7 @@ done
 out=build/ios/adhoc
 # 관문 기계 자신에서 돌면(서명 준비가 여기 있으면) ssh 없이 바로 쓰고, 아카이브도 서명 없이 해 둔 뒤 여기서 서명한다.
 if [ -z "${KASA_INSTALL_HOST:-}" ] && [ -f "$HOME/.config/kasaterm/asc/adhoc/cert.json" ]; then host=local; else host=${KASA_INSTALL_HOST:-nachoneko}; fi
-origin=${KASA_INSTALL_ORIGIN:-https://kasaterm.debimarlene.com}
+origin=${KASA_INSTALL_ORIGIN:-https://kasaterm.kasa.page}
 remote=.config/kasaterm/relay-install
 
 if [ "$mode" != publish ] && [ "$host" = local ]; then

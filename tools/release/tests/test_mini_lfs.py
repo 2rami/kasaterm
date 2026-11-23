@@ -350,7 +350,7 @@ class RealGitLfsTests(Served):
         self.git("push", "-q", "origin", "main", cwd=self.dst)
 
 
-PUBLIC_URL = "https://kasaterm.debimarlene.com/lfs"
+PUBLIC_URL = "https://kasaterm.kasa.page/lfs"
 
 
 class RepoContractTests(unittest.TestCase):
