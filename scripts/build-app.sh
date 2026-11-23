@@ -2,7 +2,7 @@
 # Build a macOS .app bundle around the kasaterm binary.
 #
 # Output: dist/kasaterm.app/Contents/{Info.plist, MacOS/kasaterm,
-#                                     Resources/AppIcon.icns}
+#                                     Resources/{AppIcon.icns, Assets.car}}
 #
 # Usage:
 #   scripts/build-app.sh            # release build, dist/kasaterm.app
@@ -73,8 +73,8 @@ for r in board:
   fi
 fi
 
-if [[ ! -f assets/AppIcon.icns ]]; then
-  echo "error: assets/AppIcon.icns missing — run the iconset builder first" >&2
+if [[ ! -f assets/AppIcon.icns || ! -f assets/AppIcon.car ]]; then
+  echo "error: assets/AppIcon.icns or assets/AppIcon.car missing — run scripts/build-icon.sh" >&2
   exit 1
 fi
 
@@ -122,6 +122,8 @@ cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
 # 디스패처의 ACP 학생 runner — 칸 PATH 에 없어 디스패처가 본판 옆 절대 경로로 부른다(docs/acp.md).
 cp "$BINDIR/kasa-acp" "$APP/Contents/MacOS/kasa-acp"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# macOS 26 reads the adaptive icon (CFBundleIconName) from the asset catalog; older systems fall back to the icns.
+cp assets/AppIcon.car "$APP/Contents/Resources/Assets.car"
 # 화면 서비스 도우미(docs/screen-service-split.md 「macOS」) — 번들 안 LoginItems 의 작은 앱. 앱이 SMAppService 로 등록하면
 # launchd 가 띄워, 화면 기록·손쉬운 사용 권한이 앱이 아니라 이 번들(com.kasa.kasaterm.screen)에 붙는다. 판은 서비스 판이다 —
 # 번들을 갈아 끼워도 판이 같으면 돌던 도우미는 그대로 두고, 바뀌면 보는 사람이 없을 때 도우미가 스스로 갈아탄다.
@@ -291,6 +293,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>
     <string>kasaterm</string>
     <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>

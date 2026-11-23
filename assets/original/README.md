@@ -38,9 +38,16 @@ and show the same two characters:
 | Outfit A, rainwear (default) | KASA browser new-tab background (`kasabrowser-go` `internal/home/assets/kasa-garden.png`), the mobile app | `mobile/assets/original/twins.png`, `sky.png`, `amber.png` |
 | Outfit B, everyday white blouse, ribbon tie and skirt | Personal site hero illustration | Not in this repository |
 
-`assets/icon_src.png`, the current app icon, predates the twins: Sky alone with
-short twin tails, a wink and a white dress. It is not an identity reference for
-new artwork.
+`assets/icon_src.png`, the app icon before the twins, shows Sky alone with short
+twin tails, a wink and a white dress. It is not an identity reference for new
+artwork.
+
+The app icon (`assets/AppIcon.icon`, see `docs/design.md` 「앱 아이콘」) is the
+outfit A Sky from the browser background, close up, with her clear umbrella, the
+raindrop pupil and a forceful wink: the eye on the viewer's left squeezed shut so
+its lid lines meet at the inner corner as a `>`, the wink-side corner of the mouth
+raised. It was generated from the browser background crop alone. Mixing in other
+references drifted the face away from the canon.
 
 ### Writing a prompt
 
