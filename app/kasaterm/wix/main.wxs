@@ -175,24 +175,6 @@
                                 Scope='any'
                                 IgnoreFailure='yes'/>
                         </Component>
-                        <!-- 보기 앱 KasaDesk(app/kasadesk, docs/screen-service-split.md「보기 앱」) — 다른 기기 화면을 앱과 따로 본다.
-                             사람 권한 프로세스라 방화벽 묻기 창이 사람 앞에 뜨고, 답하기 전에는 들어오는 UDP 가 막혀 같은 망 직통이
-                             안 선다 — 화면 서비스처럼 예외를 건다. -->
-                        <Component Id='DeskBinary' Guid='*'>
-                            <File
-                                Id='deskexe'
-                                Name='kasadesk.exe'
-                                DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\kasadesk.exe'
-                                KeyPath='yes'/>
-                            <fire:FirewallException
-                                Id='DeskUdp'
-                                Name='KasaDesk'
-                                Program='[#deskexe]'
-                                Protocol='udp'
-                                Scope='any'
-                                IgnoreFailure='yes'/>
-                        </Component>
                         <!-- 크로스-pane RPC + statusline. locate_cmux_compat_binary 가
                              exe 옆에서 찾아 pane PATH(shim dir)에 스테이징하고, claude
                              statusLine 커맨드(kasaterm-cli statusline)가 이를 실행한다.
@@ -280,14 +262,6 @@
                 <RegistryValue Root='HKCU' Key='Software\kasaterm' Name='installed' Type='integer' Value='1' KeyPath='yes'/>
             </Component>
         </DirectoryRef>
-        <DirectoryRef Id='ApplicationProgramsFolder'>
-            <Component Id='DeskStartMenuShortcut' Guid='*'>
-                <Shortcut Id='DeskShortcut' Name='KasaDesk'
-                    Description='다른 기기 화면 보기'
-                    Target='[Bin]kasadesk.exe' WorkingDirectory='Bin' Icon='DeskICO'/>
-                <RegistryValue Root='HKCU' Key='Software\kasaterm' Name='desk' Type='integer' Value='1' KeyPath='yes'/>
-            </Component>
-        </DirectoryRef>
         <DirectoryRef Id='DesktopFolder'>
             <Component Id='DesktopShortcut' Guid='*'>
                 <Shortcut Id='AppDesktopShortcut' Name='kasaterm'
@@ -358,7 +332,6 @@
             <ComponentRef Id='ScreenPolicy'/>
             <ComponentRef Id='binary2'/>
             <ComponentRef Id='binary3'/>
-            <ComponentRef Id='DeskBinary'/>
             <ComponentRef Id='ConptyDll'/>
             <ComponentRef Id='ConptyOpenConsole'/>
             <ComponentRef Id='ConptyLicense'/>
@@ -368,7 +341,6 @@
             <ComponentGroupRef Id='AronaUiGroup'/>
             <ComponentGroupRef Id='CollabHooksGroup'/>
             <ComponentRef Id='StartMenuShortcut'/>
-            <ComponentRef Id='DeskStartMenuShortcut'/>
             <ComponentRef Id='DesktopShortcut'/>
             <ComponentRef Id='MarkdownOpenWith'/>
 
@@ -392,7 +364,6 @@
           Programs control panel for the application.
         -->
         <Icon Id='ProductICO' SourceFile='assets\app.ico'/>
-        <Icon Id='DeskICO' SourceFile='assets\desk.ico'/>
         <Property Id='ARPPRODUCTICON' Value='ProductICO' />
 
         

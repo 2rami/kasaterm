@@ -493,7 +493,9 @@
 
 보는 쪽도 앱 밖으로 뺐다. 보내는 쪽이 서비스로 빠져 그 기기 앱이 다시 떠도 화면이 이어지지만, 보는 칸이 본 앱 안이면 **이쪽** 앱이
 다시 뜰 때 끊긴다. KasaDesk 는 본 앱과 따로 도는 작은 앱이다(문서 보기 앱 KasaViewer·맥 화면 서비스 도우미 KasatermScreen 과
-다른 것). 창 하나에 기기 하나, 기기를 안 골랐으면 고르기 화면이다.
+다른 것). 창 하나에 기기 하나, 기기를 안 골랐으면 고르기 화면이다. 코드·굽기·릴리스는 따로 된 공개 저장소
+[2rami/kasadesk](https://github.com/2rami/kasadesk)에 있고, 이 저장소를 서브모듈로 고정해 `kasa-castview`·`kasa-net`·`kasa-gridview` 를
+받는다. 여기서 공용 크레이트를 바꾸면 그쪽 서브모듈을 그 커밋으로 올려야 보기 앱에 실린다.
 
 기기를 고를 때는 아이소메트릭 모형 방 하나를 보여 준다(그림 자산 없이 코드로 지은 상자들). 기기는 제자리에 놓인다 — 맥북은 책상 위,
 Windows 는 책상 위 모니터와 책상 밑 타워, 맥미니는 왼벽 선반(앞 칸부터, 남는 칸엔 책). 명부 이름과 `/version` 에서 종류를 알 수 없는
@@ -549,16 +551,20 @@ Windows 는 책상 위 모니터와 책상 밑 타워, 맥미니는 왼벽 선�
 
 - 기기 메뉴 「화면 보기」는 KasaDesk 를 그 기기로 띄운다(`screen_stream/desk.rs`). 맥은 `open -n -a` 로 LaunchServices 가 띄워 본 앱의
   자식이 아니다 — 본 앱이 다시 떠도 산다. Windows 는 떼어 낸 프로세스(작업 개체에서 빠져나가기)로 띄운다.
-- 보기 앱이 없는 실행(개발 판·`cargo run`)만 지금처럼 화면 탭으로 연다. 탭을 걷지 않은 까닭: 검증 리그(`KASATERM_TEST_SCREEN_LABEL`)와
-  번들 없는 개발 실행이 그 길을 쓰고, 보기 코드가 같은 크레이트라 둘이 갈리지 않는다.
+- 보기 앱 자리: 맥 `/Applications`·`~/Applications` 의 `KasaDesk.app`, Windows `Program Files\KasaDesk\kasadesk.exe`,
+  `KASATERM_DESK` 가 있으면 그것만. 검증 실행은 `KASATERM_DESK` 없이는 보기 앱을 안 띄운다 — 깔린 보기 앱은 사람 것이라 떠 있으면 그쪽에
+  넘어간다. 안 깔린 기기는 화면 탭으로 연다. 탭을 걷지 않은 까닭: 검증 리그(`KASATERM_TEST_SCREEN_LABEL`)와 보기 앱 없는 기기가 그 길을
+  쓰고, 보기 코드가 같은 크레이트라 둘이 갈리지 않는다.
 
 ### 싣기
 
-- 맥: `kasaterm.app/Contents/Applications/KasaDesk.app`(번들 id `com.kasa.kasaterm.desk`, 앱 판과 같은 판). 안쪽 앱으로 따로 서명하고
-  (`build-app.sh`·`tools/release/macsign.py` `HARDENED_SIGNED`) 번들째 Sparkle 로 바뀐다. Spotlight·Dock 에서 보이고, Launchpad 는 번들 안
-  앱을 안 보여 준다 — `/Applications` 에 사본을 두면 업데이트가 안 닿아 낡는다.
-- Windows: 같은 MSI 가 `bin\kasadesk.exe` 와 시작 메뉴 「KasaDesk」 바로가기, 들어오는 UDP 방화벽 예외를 건다(사람 권한 프로세스라 묻기 창이
-  사람 앞에 뜨고 답하기 전엔 같은 망 직통이 막힌다).
+- 카사텀 번들·MSI 에는 싣지 않는다 — 판도 피드도 따로다(2026-11-23 저장소를 뗐다. 그전 판은 `Contents/Applications/KasaDesk.app`·
+  `bin\kasadesk.exe` 로 같이 실었다).
+- 맥: 공증된 `KasaDesk-<판>-macos-arm64.dmg`(번들 id `com.kasa.kasadesk`), 번들 안 Sparkle 이 `https://2rami.github.io/kasadesk/appcast.xml`
+  을 본다. Windows: `KasaDesk-<판>-windows-x86_64.msi`(Program Files, 시작 메뉴, 들어오는 UDP 방화벽 예외 — 사람 권한 프로세스라 묻기
+  창이 사람 앞에 뜨고 답하기 전엔 같은 망 직통이 막힌다), 앱이 `appcast-win.xml` 을 보고 서명을 확인한 MSI 를 칩으로 알린다.
+- 피드는 보기 앱 전용 EdDSA 키로 서명한다(카사텀 키와 다르다). 개인키·서명 열쇠고리·공증 프로필은 릴리스 기계에만 있고, 릴리스는 그
+  저장소의 `scripts/release.py` 하나다.
 
 ### 검증 리그
 

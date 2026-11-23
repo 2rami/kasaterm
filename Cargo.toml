@@ -4,7 +4,6 @@ resolver = "2"
 members = [
     "app/kasaterm",
     "app/kasaterm-screen",
-    "app/kasadesk",
     "crates/kasa-socket",
     "crates/kasa-identity",
     "crates/kasa-characters",
@@ -46,7 +45,6 @@ members = [
 default-members = [
     "app/kasaterm",
     "app/kasaterm-screen",
-    "app/kasadesk",
     "crates/kasa-socket",
     "crates/kasa-identity",
     "crates/kasa-characters",
@@ -139,7 +137,6 @@ bytemuck = { version = "1", features = ["derive"] }
 bytes = "1"
 crossbeam-channel = "0.5"
 futures-util = "0.3"
-glam = "0.25"
 # 셸에서 여는 형식만 싣는다. 기본 기능은 모든 코덱과 rayon 을 끌어온다.
 qrcodegen = "1.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }

@@ -106,10 +106,10 @@ fi
 # 릴리스 도구(tools/release)는 격리 target(CARGO_TARGET_DIR)으로 굽는다 — 바이너리는 cargo 가 실제로 쓴 자리에서 가져온다.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp -p kasaterm-screen -p kasadesk --bins
+  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp -p kasaterm-screen --bins
   BINDIR="$TARGET_DIR/release"
 else
-  cargo build --locked -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp -p kasaterm-screen -p kasadesk --bins
+  cargo build --locked -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp -p kasaterm-screen --bins
   BINDIR="$TARGET_DIR/debug"
 fi
 
@@ -187,45 +187,6 @@ cat > "$APP/Contents/Library/LaunchAgents/com.kasa.kasaterm.screen.plist" <<'SCR
 </dict>
 </plist>
 SCREENAGENT
-# 보기 앱 KasaDesk(docs/screen-service-split.md 「보기 앱」) — 번들 안 Applications 의 작은 앱. 사람이 Spotlight·Dock 에서
-# 띄우고, 본 앱 「화면 보기」도 이걸 띄운다. 본 앱과 따로 돌아 본 앱이 다시 떠도 화면이 이어진다. 번들째 Sparkle 로 같이 바뀐다 —
-# 그래서 /Applications 에 따로 두지 않는다(낡은 사본이 남는다). Launchpad 는 번들 안 앱을 안 보여 준다.
-DESK="$APP/Contents/Applications/KasaDesk.app"
-mkdir -p "$DESK/Contents/MacOS" "$DESK/Contents/Resources"
-cp "$BINDIR/kasadesk" "$DESK/Contents/MacOS/kasadesk"
-cp assets/DeskIcon.icns "$DESK/Contents/Resources/DeskIcon.icns"
-cat > "$DESK/Contents/Info.plist" <<DESKPLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key>
-    <string>com.kasa.kasaterm.desk</string>
-    <key>CFBundleName</key>
-    <string>KasaDesk</string>
-    <key>CFBundleDisplayName</key>
-    <string>KasaDesk</string>
-    <key>CFBundleExecutable</key>
-    <string>kasadesk</string>
-    <key>CFBundleIconFile</key>
-    <string>DeskIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>$VERSION</string>
-    <key>CFBundleVersion</key>
-    <string>$VERSION</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSRequiresAquaSystemAppearance</key>
-    <false/>
-</dict>
-</plist>
-DESKPLIST
 mkdir -p "$APP/Contents/Resources/licenses"
 cp crates/kasa-gridview/assets/fonts/OFL-D2Coding.txt "$APP/Contents/Resources/licenses/OFL-D2Coding.txt"
 # 협업 훅 정본 — claude PATH shim 이 --settings 로 가리키는 스크립트들
@@ -661,8 +622,6 @@ sign_part "$APP/Contents/MacOS/kasaterm-cli"
 sign_part "$APP/Contents/MacOS/kasa-acp"
 # 화면 도우미는 따로 서명한 안쪽 앱이다 — 앱 서명보다 먼저(안쪽 → 바깥쪽). 번들 id 가 TCC 의 열쇠라 바꾸지 않는다.
 sign_part "$SCREEN_HELPER"
-# 보기 앱도 따로 서명한 안쪽 앱이다 — 앱 서명보다 먼저.
-sign_part "$DESK"
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
 # hardened runtime 은 마이크(음성 입력)·osascript 자동화를 권한 항목 없이는 막는다 — 번들 본체에만 싣는다.
 APP_ENTITLEMENTS="-"

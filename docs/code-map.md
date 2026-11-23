@@ -120,7 +120,7 @@
   공유 텍스처·`annexb.rs` Annex-B↔길이 머리 NAL; 소리 `audio*.rs`·스피커 끄기 `source_mute.rs`). 보기 하나는 `crates/kasa-castview` 다 — `view.rs` 풀기 일꾼·
   `input.rs` 조작 판정(누름·휠·키·한글·맥→Windows 키 자리)·`paint.rs` 장·「조작」·HUD·키 메뉴(글자는 `Canvas`)·`audio.rs` 「소리」 알약. 본 앱 `screen_stream/` 은
   그것을 칸 탭으로 쓴다 — `pane.rs` 화면 칸 여닫기·`input.rs` 어느 보기로 갈지·`window.rs` 별도 창·`desk.rs` 「화면 보기」를 보기 앱으로 넘기기. 따로 띄우는
-  보기 앱은 `app/kasadesk`(KasaDesk — `net.rs` 보기 앱 키 노드·`roster.rs` 본 앱 명부와 지난 명부·`desk.rs` 창과 입력·`scene.rs` 고르기 방 — 배치·카메라·광선 판정·이름표·다가가기·`scene/` wgpu 방·모형·셰이더·
+  보기 앱 KasaDesk 는 따로 된 저장소 [2rami/kasadesk](https://github.com/2rami/kasadesk)다(`net.rs` 보기 앱 키 노드·`roster.rs` 본 앱 명부와 지난 명부·`desk.rs` 창과 입력·`scene.rs` 고르기 방 — 배치·카메라·광선 판정·이름표·다가가기·`scene/` wgpu 방·모형·셰이더·`update.rs` 업데이트·
   `ipc.rs` 하나만 띄우기·`account.rs` 관문 계정 로그인·기기 목록·등록·`login.rs` 로그인 판·`rig.rs` 리그 손잡이,
   [screen-service-split.md](screen-service-split.md) 「보기 앱」). 폰은 `/screen/ws` 영상 방식(`screen_stream::serve_ws`)을
   `mobile/lib/screen_video.dart`·`ios/Runner/ScreenVideo.swift`(VT 풀기 → `FlutterTexture`)로 본다. 칸 탭은

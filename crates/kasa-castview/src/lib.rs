@@ -1,6 +1,6 @@
 //! 화면 스트림의 보는 쪽 — 받은 장을 풀어 창에 그리고, 칸 위 누름·휠·키를 그 기기 조작으로 바꾼다(`docs/screen-stream.md`).
 //! 틀과 흐름은 `kasa_cast`, 풀기·소리 틀기는 `kasa_cast_host`, 여기는 그 사이의 보기 하나다. 본 앱의 화면 탭과 따로 띄우는 보기 앱
-//! (`app/kasadesk`, `docs/screen-service-split.md` 「보기 앱」)이 같이 쓴다 — 그래서 조작·HUD·상태 글이 둘에서 같다.
+//! (KasaDesk, github.com/2rami/kasadesk — 이 저장소를 서브모듈로 받는다, `docs/screen-service-split.md` 「보기 앱」)이 같이 쓴다 — 그래서 조작·HUD·상태 글이 둘에서 같다.
 //! 어느 기기에 어느 카사넷 노드로 붙는지는 부르는 쪽이 [`Start`] 로 넘긴다.
 
 mod audio;

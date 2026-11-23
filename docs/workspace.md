@@ -24,7 +24,7 @@
 | 전송 | 3 | `kasa-net-ffi` | 카사넷 C ABI(폰 앱 정적 라이브러리). 산출물이라 받는 쪽이 없다 | 금지 | 허용 |
 | 전송 | 3 | `kasa-cast` | 화면 스트림 계약 — 제어·장·소리 데이터그램·조작 낱말과 보내기·보기 흐름(`docs/screen-stream.md`). 카사넷 노드·명부·웹소켓은 모른다 | 금지 | 허용 |
 | 전송 | 4 | `kasa-cast-host` | 화면 스트림 OS 부분 — 화면 뜨기·하드웨어 압축·풀기, 시스템 소리 뜨기·틀기·스피커 끄기, 조작 넣기, JPEG 한 장. 앱과 화면 서비스가 같이 쓴다(`docs/screen-service-split.md`) | 금지 | 금지 |
-| 보기 | 5 | `kasa-castview` | 화면 스트림 보는 쪽 하나 — 풀기 일꾼·소리 틀기·조작 판정·HUD 그리기. 본 앱 화면 탭과 보기 앱 KasaDesk 가 같이 쓴다 | 허용 | 금지 |
+| 보기 | 5 | `kasa-castview` | 화면 스트림 보는 쪽 하나 — 풀기 일꾼·소리 틀기·조작 판정·HUD 그리기. 본 앱 화면 탭과 보기 앱 KasaDesk(따로 된 저장소 2rami/kasadesk, 서브모듈로 받는다)가 같이 쓴다 | 허용 | 금지 |
 | 협업 | 3 | `kasa-agents` | 하네스 지식: Claude Code·Codex 대화 기록, CLI 위치·공용 명부 캐시 | 금지 | feature 뒤만 |
 | 협업 | 3 | `kasa-acp` | ACP 클라이언트와 칸 runner `kasa-acp` — Claude Code·Codex 어댑터를 stdio JSON-RPC 로 부린다(`docs/acp.md`). 디스패처(`kasa-students`)가 받는다 | 금지 | 금지 |
 | 협업 | 4 | `kasa-collab` | 보드 수집기·tell 장부·칸 열쇠·기계 id. 다른 기계와의 HTTP 는 feature `net` | 금지 | feature 뒤만 |
@@ -42,7 +42,6 @@
 | 호스트 | 10 | `kasa-http` | 이 기기 HTTP 라우터·칸·화면 API와 서버 수명 | 금지 | 허용 |
 | 호스트 | 11 | `kasa-serve` | 독립 HTTP 서버 kasa-serve-web 실행 파일 | 금지 | 허용 |
 | 앱 | 12 | `kasaterm-screen` | 화면 서비스 실행 파일 — 앱 밖에서 이 기기 화면을 보낸다(Windows 서비스·도우미, 서비스 카사넷 노드·제어 길, `docs/screen-service-split.md`). 판을 따로 센다. 받는 쪽이 없다 | 금지 | 허용 |
-| 앱 | 12 | `kasadesk` | 보기 앱 KasaDesk 실행 파일 — 다른 기기 화면을 본 앱과 따로 본다(보기 앱 키 카사넷 노드·명부, `docs/screen-service-split.md` 「보기 앱」). 받는 쪽이 없다 | 허용 | 허용 |
 | 앱 | 12 | `kasaterm` | 본판 GUI 실행 파일. 산출물이라 받는 쪽이 없다(바탕화면 펫 `kasapet` 은 2026-10-19 레포 밖으로 뗐다) | 허용 | 허용 |
 | 실험 | — | `spikes/*` | 렌더러·IME 시험판. 제품이 아니다 | — | — |
 
@@ -63,8 +62,7 @@ kasa-http ── kasa-backend (7) [시험]
 kasa-collab ── kasa-socket · kasa-pty ── kasa-screen
 kasa-agents ── kasa-socket
 kasa-gridview ── kasa-cells · kasa-screen
-kasa-castview (5) ── kasa-cast-host (4) · kasa-cast (3) · kasa-gridview · kasa-ime ← kasaterm · kasadesk
-kasadesk (12) ── kasa-castview (5) · kasa-net (2)
+kasa-castview (5) ── kasa-cast-host (4) · kasa-cast (3) · kasa-gridview · kasa-ime ← kasaterm · (저장소 밖) kasadesk
 kasa-net-ffi ── kasa-net
 kasa-acp (3, 내부 의존 없음) ← kasa-students (7)
 kasa-host ── kasa-pty · kasa-screen

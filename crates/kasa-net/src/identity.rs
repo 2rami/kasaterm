@@ -10,7 +10,7 @@ pub const KEY_FILE: &str = "kasanet.key";
 /// 격리 인스턴스(검증 앱·시험)가 본판과 같은 키로 뜨면 상대가 두 기기를 한 기기로 본다 — 경로를 가를 창구.
 pub const KEY_PATH_ENV: &str = "KASATERM_KASANET_KEY";
 
-/// 그 기기 보기 앱(`app/kasadesk`)의 신원 — 기기 키와 따로다. 보내는 쪽은 이 id 에 화면만 내준다(`docs/screen-service-split.md`
+/// 그 기기 보기 앱(KasaDesk, github.com/2rami/kasadesk)의 신원 — 기기 키와 따로다. 보내는 쪽은 이 id 에 화면만 내준다(`docs/screen-service-split.md`
 /// 「보기 앱」).
 pub const VIEW_KEY_FILE: &str = "kasanet-view.key";
 /// 격리 인스턴스(검증 리그)의 보기 앱 키 자리.

@@ -52,19 +52,18 @@ LAYERS = {
     "kasa-host": ("host", 5),
     "kasaterm": ("app", 12),
     "kasaterm-screen": ("app", 12),
-    "kasadesk": ("app", 12),
 }
 SPIKE_DIR = "spikes/"
 HOST_RANK = min(rank for layer, rank in LAYERS.values() if layer == "host")
 
 # 받는 쪽이 없어야 하는 산출물(실행 파일·폰 정적 라이브러리).
-LEAVES = {"kasaterm", "kasaterm-screen", "kasadesk", "kasa-net-ffi", "kasa-host", "kasa-gateway", "kasa-serve"}
+LEAVES = {"kasaterm", "kasaterm-screen", "kasa-net-ffi", "kasa-host", "kasa-gateway", "kasa-serve"}
 
 # 옛 tmux 백엔드. 화면 낱말은 kasa-screen 에서 받는다 — 새로 기대는 크레이트를 만들지 않는다.
 LEGACY_DEPENDENTS = {"kasa-bridge": {"kasaterm"}}
 
 # 창·GPU 를 만질 수 있는 크레이트. 나머지 제품 크레이트는 GUI 없이 돈다(서버·관문·`kasa tui`).
-GUI_CRATES = {"kasa-cells", "kasa-gridview", "kasa-castview", "kasaterm", "kasadesk"}
+GUI_CRATES = {"kasa-cells", "kasa-gridview", "kasa-castview", "kasaterm"}
 GUI_DEPS = {
     "winit", "wgpu", "wgpu-hal", "wry", "tao", "muda", "raw-window-handle", "softbuffer",
     "objc2-app-kit", "objc2-web-kit", "eframe", "egui", "iced", "kasa-cells", "kasa-gridview", "kasa-castview",
