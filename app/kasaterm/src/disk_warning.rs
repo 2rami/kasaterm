@@ -148,7 +148,9 @@ impl crate::App {
         let dedup = format!("disk:{:?}", status.level);
         crate::chrome::notify_desktop(&title, &body, None, Some(&dedup), None);
         // 관문은 빈 pane 을 받지 않는다. 「disk」 는 어느 칸도 아니라 폰은 눌러도 허브에 머문다.
-        self.ring_phone("disk", &title, None, &body, "waiting:blocked", "disk".into(), &dedup);
+        self.ring_phone(
+            "disk", &title, None, &body, "waiting:blocked", "disk".into(), &dedup, crate::chrome::BellEntry::PushOnly,
+        );
     }
 
     /// 다른 기기의 디스크 — 기기 명부가 새로 받은 것이 있을 때만 다시 읽는다(캐시라 GUI 스레드에서 읽어도 된다).

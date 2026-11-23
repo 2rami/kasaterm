@@ -58,6 +58,7 @@ pub(crate) struct AuxTerminal {
     tab_bar_h: f32,
     tabs_out: crate::render::TabStripOut,
     header_hits: Vec<(TermHeaderBtn, (f32, f32, f32, f32))>,
+    close_hits: crate::mirror_close::ConfirmationHits,
     /// 하네스(`KASATERM_AUTOUNDOCK_CAP`)가 건 캡처 예약 — 때가 되면 `gpu.capture_next`.
     pub(crate) capture_at: Option<(Instant, String)>,
     pub(crate) window: Arc<Window>,
@@ -406,6 +407,7 @@ impl App {
             tab_bar_h: 0.0,
             tabs_out: Default::default(),
             header_hits: Vec::new(),
+            close_hits: Vec::new(),
             capture_at: None,
             window,
         });
@@ -471,9 +473,19 @@ impl App {
 
 // ---- 렌더 ----
 impl App {
+    pub(crate) fn show_aux_close_confirmation(&mut self, idx: usize) {
+        if let Some(terminal) = self.aux.terminals.get_mut(idx) {
+            terminal.close_hits.clear();
+            terminal.redraw();
+        }
+    }
+
     /// 터미널 별도창 한 프레임. 셀·학생·상태줄은 본창과 같은 `compose_terminal_pane`
     /// 을 지나고, 그 위에 커서·조합·테두리를 얹는다.
     fn aux_terminal_render(&mut self, idx: usize, blink: bool) {
+        let confirmation = self.confirm_close.as_ref()
+            .filter(|_| self.close_confirmation_terminal() == Some(idx))
+            .cloned();
         self.aux_sync_tab_bar(idx);
         let (pane_id, home, scale, w, h, focused, cell_left, cell_top, cw, ch, cols, rows, cursor_px) = {
             let Some(t) = self.aux.terminals.get(idx) else { return };
@@ -744,6 +756,9 @@ impl App {
         draw_aux_border(t, w, h, accent, focused);
         self.image_preview.paint(t.window.id(), &mut t.gpu, (w, h), t.cursor_px);
         self.media_preview.paint(t.window.id(), &mut t.gpu, (w, h), t.cursor_px);
+        t.close_hits = confirmation.as_ref().map_or_else(Vec::new, |dlg| {
+            crate::mirror_close::paint_confirmation(&mut t.gpu, dlg, (w, h), t.cursor_px)
+        });
         let _ = t.gpu.render(&[], scale, 0.0, true);
         t.dirty = false;
         // 스윕바·애니 셀은 다음 프레임을 스스로 불러야 한다 — PTY 출력이 없으면
@@ -775,6 +790,46 @@ impl App {
         event: WindowEvent,
         _event_loop: &ActiveEventLoop,
     ) {
+        if self.close_confirmation_terminal() == Some(idx) {
+            use winit::keyboard::{Key, NamedKey};
+            let button = match &event {
+                WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() && !event.repeat => {
+                    match event.logical_key {
+                        Key::Named(NamedKey::Enter) => self.confirm_close.as_ref()
+                            .map(|dlg| crate::mirror_close::default_button(&dlg.why)),
+                        Key::Named(NamedKey::Escape) => Some(crate::ConfirmBtn::Cancel),
+                        _ => None,
+                    }
+                }
+                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                    let t = &self.aux.terminals[idx];
+                    let (x, y) = t.cursor_px;
+                    t.close_hits.iter().find(|(_, (left, top, width, height))| {
+                        x >= *left && x <= left + width && y >= *top && y <= top + height
+                    }).map(|(button, _)| *button)
+                }
+                WindowEvent::CloseRequested => Some(crate::ConfirmBtn::Cancel),
+                _ => None,
+            };
+            if let Some(button) = button {
+                self.confirm_dialog_pick(button, _event_loop);
+                if let Some(terminal) = self.aux.terminals.get_mut(idx) {
+                    terminal.redraw();
+                }
+                return;
+            }
+            match &event {
+                WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_) |
+                WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => return,
+                WindowEvent::CursorMoved { position, .. } => {
+                    let t = &mut self.aux.terminals[idx];
+                    t.cursor_px = (position.x as f32 / t.gpu.scale(), position.y as f32 / t.gpu.scale());
+                    t.redraw();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if let Some(t) = self.aux.terminals.get_mut(idx) {
             if let WindowEvent::CursorMoved { position, .. } = &event {
                 t.cursor_px = (position.x as f32 / t.gpu.scale(), position.y as f32 / t.gpu.scale());

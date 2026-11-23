@@ -762,6 +762,24 @@ impl StateHub {
             );
         }
         drop(transcript);
+        let wall = std::time::SystemTime::now();
+        let choices = next.iter().filter_map(|(id, resolved)| {
+            let permission = matches!(resolved.state, AgentState::Waiting { kind: WaitKind::Permission, .. });
+            let question = matches!(resolved.state, AgentState::Waiting { kind: WaitKind::Question, .. });
+            if (!permission && !question && resolved.questions.is_empty()) || kasa_remote::remote::is_remote_pane(id) {
+                return None;
+            }
+            let since = wall.checked_sub(now.saturating_duration_since(resolved.since))
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |time| time.as_secs());
+            Some((id.clone(), kasa_students::notes::Choices {
+                permission, question, since,
+                question_ids: resolved.questions.iter().map(|item| item.id.clone()).collect(),
+            }))
+        }).collect();
+        if kasa_students::notes::publish_choices(choices) {
+            kasa_wire::changes::bump();
+        }
         let mut memo = self.resolved.lock().unwrap();
         *memo = (Some(now), next);
     }

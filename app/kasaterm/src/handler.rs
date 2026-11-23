@@ -1832,14 +1832,6 @@ impl ApplicationHandler<UserEvent> for App {
                 self.open_url_for_pane(url, target.as_deref());
                 return;
             }
-            UserEvent::NativeConfirm(request, ok) => {
-                if *request != self.confirm_native_id { return; }
-                self.confirm_native = false;
-                self.confirm_dialog_pick(
-                    if *ok { ConfirmBtn::Close } else { ConfirmBtn::Cancel },
-                    event_loop,
-                );
-            }
             UserEvent::RemoteOpenUrl(pane, url) => {
                 self.open_url_here(url, Some(pane));
                 return;
@@ -2240,7 +2232,7 @@ impl ApplicationHandler<UserEvent> for App {
             let app_m = Submenu::new(app_name, true);
             let update_item = MenuItem::new("업데이트 확인…", true, None);
             // ⌘Q 를 가로채 종료 확인(ghostty 식)을 띄우려면 PredefinedMenuItem::quit(OS 가
-            // 직접 terminate 라 가로채기 불가) 대신 커스텀 항목으로 — MenuEvent 로 받아 NSAlert.
+            // 직접 terminate 라 가로채기 불가) 대신 커스텀 항목으로 — MenuEvent 로 받아 앱 안 확인 카드.
             let quit_item = MenuItem::new(
                 format!("{app_name} 종료"),
                 true,
@@ -7013,7 +7005,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // Modal keys must never reach the terminal underneath.
                 if self.confirm_close.is_some() {
-                    if matches!(event.state, ElementState::Pressed) {
+                    if self.close_confirmation_terminal().is_none() && matches!(event.state, ElementState::Pressed) {
                         use winit::keyboard::{Key, NamedKey};
                         let go = crate::mirror_close::default_button(&self.confirm_close.as_ref().unwrap().why);
                         match event.logical_key {

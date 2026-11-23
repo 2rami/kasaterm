@@ -3185,7 +3185,6 @@ impl App {
         if self.guard_dirty(&PendingClose::AuxEditor(id)) {
             if let Some(main) = &self.window {
                 main.focus_window();
-                main.request_user_attention(Some(winit::window::UserAttentionType::Critical));
             }
             return;
         }

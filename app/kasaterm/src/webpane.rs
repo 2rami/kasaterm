@@ -776,7 +776,9 @@ impl App {
         // ws 잠금 아래에서 「어느 host 가 어느 셀 상자에 보이나」와 「어느 host 가
         // 아직 어딘가에 존재하나」만 뽑는다 — pane_header_px 가 다시 잠그므로
         // 프레임 계산은 잠금 밖에서.
-        let inline_open = self.inline_web.is_some();
+        // A child web view sits above the GPU and would cover the confirmation card.
+        let inline_open = self.inline_web.is_some()
+            || (self.confirm_close.is_some() && self.close_confirmation_terminal().is_none());
         let (visible, alive): (Vec<(u64, String, (u16, u16, u16, u16))>, HashSet<u64>) = {
             let ws = self.ws.lock().unwrap();
             let mut vis = Vec::new();

@@ -13,7 +13,7 @@ import urllib.request
 import uuid
 
 if sys.platform != 'darwin':
-    raise SystemExit('This fixture uses native macOS confirmation sheets')
+    raise SystemExit('This fixture runs the macOS app and its in-window confirmation cards')
 parser = argparse.ArgumentParser()
 parser.add_argument('--case', action='append')
 args = parser.parse_args()
@@ -156,16 +156,15 @@ for name, kind, command, sibling, accept in cases:
         stale = {**address, 'instance_id': 'stale-fixture-instance'}
         refused = source.http('/cmd', {'method': 'surface.close_idle_checked', 'params': {'kind': 'tab', 'addresses': [stale]}})
         assert refused.get('ok') is False and pane in {p['id'] for p in source.panes()}, refused
-        sheets = folder / 'sheets'
-        sheets.mkdir()
+        card = folder / 'confirmation.png'
+        pick = 'close' if accept else 'cancel'
         extra = {'KASATERM_MACHINES': json.dumps([{'label': 'fixture-source', 'base': source.base}]),
                  'KASATERM_TEST_BOARD_REMOTE': '1', 'KASATERM_TEST_MIRROR_LABEL': 'fixture-source',
                  'KASATERM_TEST_MIRROR_PANE': pane, 'KASATERM_TEST_MIRROR_ROOM': '1',
                  'KASATERM_TEST_MIRROR_CLOSE_MS': '8000', 'KASATERM_TEST_MIRROR_CLOSE_KIND': kind,
-                 'KASATERM_UPDATE_RIG_SHOTS': str(sheets), 'KASATERM_UPDATE_RIG_PRESS_MS': '1500',
-                 'KASATERM_AUTOCAPTURE_MS': '16000', 'KASATERM_AUTOCAPTURE_PATH': str(folder / 'after.png')}
-        if accept:
-            extra['KASATERM_UPDATE_RIG_BUTTON'] = '닫기'
+                 'KASATERM_TEST_MD_SCRIPT_MS': '12000', 'KASATERM_TEST_MD_STEP_MS': '2000',
+                 'KASATERM_TEST_MD_SCRIPT': f'cap:{card}|pick:{pick}',
+                 'KASATERM_AUTOCAPTURE_MS': '18000', 'KASATERM_AUTOCAPTURE_PATH': str(folder / 'after.png')}
         viewer = App(folder / 'view', 'fixture-viewer', extra)
         viewer.ready()
         deadline = time.monotonic() + 22
@@ -183,8 +182,8 @@ for name, kind, command, sibling, accept in cases:
         checks = {'stale_address_rejected': refused.get('ok') is False,
                   'requested': '[mirror-view-test] close=' in log,
                   'source_outcome': (pane not in after) == should_close,
-                  'confirmation_only_for_jobs': bool(list(sheets.glob('*.png'))) == should_confirm,
-                  'captured': (folder / 'after.png').exists()}
+                  'confirmation_only_for_jobs': (f'[mdscript] cap → {card} close_confirmation=true' in log) == should_confirm,
+                  'captured': card.exists() and (folder / 'after.png').exists() and f'[mdscript] cap → {card} close_confirmation=' in log}
         if protected:
             checks['sibling_preserved'] = protected in after and after[protected]['surface_key'] == before[protected]['surface_key']
         if should_close:

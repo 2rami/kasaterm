@@ -36,7 +36,7 @@ fn merged(local: Vec<Note>, remote: Vec<(String, Vec<Note>)>, sent: &[(String, u
     let mut out: Vec<Entry> = local.into_iter().filter(|n| !n.read).map(|note| Entry { machine: None, note }).collect();
     for (label, notes) in remote {
         out.extend(notes.into_iter()
-            .filter(|n| !n.read && kasa_students::notes::KINDS.contains(&n.kind.as_str()))
+            .filter(|n| !n.read && n.is_student_alert())
             .filter(|n| !sent.iter().any(|(l, id, _)| *l == label && *id == n.id))
             .map(|note| Entry { machine: Some(label.clone()), note }));
     }
@@ -253,7 +253,7 @@ mod tests {
     }
 
     fn note(id: u64, kind: &str, when: u64, read: bool) -> Note {
-        Note { id, pane: format!("%{id}"), character: "학생".into(), kind: kind.into(), summary: "본문".into(), when, read }
+        Note { id, pane: format!("%{id}"), character: "학생".into(), kind: kind.into(), summary: "본문".into(), when, read, request_id: None }
     }
 
     #[test]

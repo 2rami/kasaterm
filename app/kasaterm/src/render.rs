@@ -2281,6 +2281,9 @@ impl App {
         // so a stale rect can't outlive its glyph after a layout change.
         let mut pane_action_hits: Vec<(String, ActionKind, (f32, f32, f32, f32))> = Vec::new();
         let mut confirm_btn_hits: Vec<(ConfirmBtn, (f32, f32, f32, f32))> = Vec::new();
+        let close_confirmation = self.confirm_close.as_ref()
+            .filter(|_| self.close_confirmation_terminal().is_none())
+            .cloned();
         // `g` 대여가 끝난 뒤에 대기 상태로 되쓴다 — 그리는 동안은 `&self` 만 잡는다.
         let mut account_confirm_hits: Vec<(
             crate::session::AccountSwitchBtn,
@@ -4775,131 +4778,10 @@ impl App {
                     codex_rollout: codex_rollout.as_ref(),
                 },
             );
-            // Confirm-close modal: a dim scrim + centered card with 취소/닫기,
-            // queued last so it sits over every pane, overlay and toast.
-            if let Some(dlg) = self.confirm_close.clone().filter(|_| !self.confirm_native) {
-                let win_w = win_px.0 / scale;
-                let win_h = win_px.1 / scale;
-                g.rect(
-                    0.0,
-                    0.0,
-                    win_w,
-                    win_h,
-                    theme::with_alpha([0, 0, 0, 255], 0xB0),
+            if let Some(dlg) = &close_confirmation {
+                confirm_btn_hits = crate::mirror_close::paint_confirmation(
+                    g, dlg, (win_px.0 / scale, win_px.1 / scale), self.cursor_px,
                 );
-                let dirty = matches!(dlg.why, crate::CloseWhy::Dirty(_));
-                let mirror = matches!(dlg.why, crate::CloseWhy::Mirror { .. });
-                let retry = matches!(dlg.why, crate::CloseWhy::Mirror { error: Some(_), .. });
-                let mirror_closing = matches!(dlg.why, crate::CloseWhy::Mirror { closing: true, .. });
-                let (title, subtitle) = crate::mirror_close::confirmation_text(&dlg);
-                let title = &title;
-                let subtitle = subtitle.as_str();
-                // 부제에 파일 이름이 들어와 길이가 변하니 카드도 재서 정한다 —
-                // 고정 폭이던 시절엔 이름 셋이 그대로 카드 밖으로 나갔다.
-                let pad = 24.0_f32;
-                let title_w = g.measure_chrome_text(title, 15.0, true);
-                let sub_w = g.measure_chrome_text(subtitle, 13.0, false);
-                let card_w = (title_w.max(sub_w) + pad * 2.0)
-                    .max(if dirty || mirror { 420.0 } else { 360.0 })
-                    .min((win_w - 48.0).max(1.0));
-                let subtitle = info::fit_text(g, subtitle, card_w - pad * 2.0, 13.0, false);
-                let card_h = 168.0_f32;
-                let cx0 = ((win_w - card_w) / 2.0).round();
-                let cy0 = ((win_h - card_h) / 2.0).round();
-                panel_rect_outlined(
-                    g,
-                    cx0,
-                    cy0,
-                    card_w,
-                    card_h,
-                    theme::radius_md(),
-                    theme::surface_active(),
-                );
-                g.draw_text(
-                    cx0 + pad,
-                    cy0 + 30.0,
-                    &title,
-                    gpu::DrawOpts {
-                        font_size: 15.0,
-                        color: theme::text(),
-                        bold: true,
-                        italic: false,
-                    },
-                );
-                g.draw_text(
-                    cx0 + pad,
-                    cy0 + 60.0,
-                    &subtitle,
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::text_dim(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                let btn_h = crate::native_controls::CONTROL_HEIGHT;
-                let btn_y = cy0 + card_h - 20.0 - btn_h;
-                let mut right = cx0 + card_w - pad;
-                let mut button = |g: &mut gpu::GpuRenderer,
-                                  hits: &mut Vec<(crate::ConfirmBtn, (f32, f32, f32, f32))>,
-                                  label: &str,
-                                  btn: crate::ConfirmBtn,
-                                  tone: Option<[u8; 4]>| {
-                    let style = crate::native_controls::Style {
-                        primary: btn == crate::ConfirmBtn::Save,
-                        danger: btn == crate::ConfirmBtn::Close && tone.is_some(),
-                        ..Default::default()
-                    };
-                    let w = crate::native_controls::button_width(g, label, btn_h, style.primary);
-                    let x = right - w;
-                    right = x - 10.0;
-                    let rect = crate::native_controls::text_button(
-                        g, (x, btn_y, w, btn_h), self.cursor_px, label, style,
-                    );
-                    if !dirty && btn == crate::ConfirmBtn::Cancel {
-                        crate::native_controls::focus_ring(g, rect);
-                    }
-                    hits.push((btn, rect));
-                };
-                if mirror && !mirror_closing {
-                    let label = if retry { "다시 시도" } else { "닫기" };
-                    button(g, &mut confirm_btn_hits, label, crate::ConfirmBtn::Close, Some(theme::danger()));
-                } else if dirty {
-                    // 저장이 기본이라 오른쪽 끝 — 실수로 끝을 눌러도 안전한 쪽이
-                    // 걸리게. 편집분을 버리는 "저장 안 함" 은 그 왼쪽에 빨강으로.
-                    let acc = theme::accent();
-                    button(
-                        g,
-                        &mut confirm_btn_hits,
-                        "저장",
-                        crate::ConfirmBtn::Save,
-                        Some(acc),
-                    );
-                    let dg = theme::danger();
-                    button(
-                        g,
-                        &mut confirm_btn_hits,
-                        "저장 안 함",
-                        crate::ConfirmBtn::Close,
-                        Some(dg),
-                    );
-                } else if !mirror_closing {
-                    let dg = theme::danger();
-                    button(
-                        g,
-                        &mut confirm_btn_hits,
-                        "닫기",
-                        crate::ConfirmBtn::Close,
-                        Some(dg),
-                    );
-                }
-                if !mirror_closing { button(
-                    g,
-                    &mut confirm_btn_hits,
-                    "취소",
-                    crate::ConfirmBtn::Cancel,
-                    None,
-                ); }
             }
             if self.restore_prompt.is_some() {
                 restore_btn_hits = crate::restore_picker::paint(

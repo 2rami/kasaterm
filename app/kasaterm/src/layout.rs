@@ -2995,13 +2995,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             self.collapse_layout_only(target);
         } else if self.leaf_lingers_anywhere(target) {
             self.remove_pane_stashed(target);
-        } else {
-            return;
         }
-        // 소리 없이 사라지면 사용자는 학생이 어떻게 된 건지 알 방법이 없다
-        // (사용자가 두 번 물었다). 되살리기 목록엔 이미 레코드가 있으므로 그리로
-        // 안내한다.
-        self.set_toast(format!("{target} 이 끝나 자리를 접었다 — ⌘⇧T 로 되살린다"));
     }
 
     /// Ordinary close blocks input, requests cancellation and retains the PTY
@@ -3014,9 +3008,6 @@ for p in glob.glob(os.path.join(d, '*.json')):
             return;
         }
         self.tuck_pane(target, false);
-        if self.stashed_record(target).is_some_and(|c| !c.stashed) {
-            self.set_toast("창을 닫았어요 · 10초 뒤 실행 종료 · ⌘⇧T로 되살리기".into());
-        }
     }
 
     /// 사이드바 「pane 숨기기」 — 닫기와 같은 자리에 넣되 **절대 정리하지 않는다.**

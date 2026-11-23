@@ -4027,8 +4027,6 @@ enum UserEvent {
     /// 원격 호스트가 거울로 되돌려 보낸 `open-url` — (로컬 pane id, url). 이 기계의
     /// 기본 브라우저로 연다(맥북에서 미니 학생의 페이지를 보는 길).
     RemoteOpenUrl(String, String),
-    /// OS 닫기 확인 시트의 답 — true 면 「닫기」.
-    NativeConfirm(u64, bool),
     /// 웹뷰 안에서 친 앱 단축키(Cmd+D 분할 등). 자식 창이 key 인 동안 winit
     /// 키 이벤트는 앱에 안 오므로(WKWebView 가 first responder), 웹뷰에 심은
     /// 초기화 스크립트가 keydown 을 잡아 wry IPC → 이 이벤트로 넘긴다.
@@ -5387,9 +5385,6 @@ struct App {
     /// dialog is painted over everything and swallows input until the user
     /// picks 취소/닫기.
     confirm_close: Option<ConfirmClose>,
-    /// `confirm_close` 를 OS 시트가 대신 보여 주는 중 — 앱 안 카드는 안 그린다.
-    confirm_native: bool,
-    confirm_native_id: u64,
     mirror_close_scope: Option<mirror_close::LocalScope>,
     /// Confirm-modal button hit rects, refreshed each frame: `(btn, rect)`.
     confirm_btn_rects: Vec<(ConfirmBtn, (f32, f32, f32, f32))>,
@@ -5945,7 +5940,7 @@ struct App {
     paste_menu_item: Option<muda::MenuItem>,
     /// "업데이트 확인" 메뉴 — MenuEvent id 로 매칭해 Sparkle checkForUpdates 를 부른다.
     update_menu_item: Option<muda::MenuItem>,
-    /// "kasaterm 종료"(⌘Q) 메뉴 — MenuEvent id 로 매칭해 종료 확인 NSAlert 를 띄운다.
+    /// "kasaterm 종료"(⌘Q) 메뉴 — MenuEvent id 로 매칭해 종료 확인 카드를 띄운다.
     quit_menu_item: Option<muda::MenuItem>,
     /// 트레이 — 있으면 창 닫기는 숨기기다(`tray.rs`). 검증 실행·lite 는 없다.
     tray: Option<tray::Tray>,
@@ -6189,8 +6184,6 @@ impl App {
             image_pan_drag: None,
             text_cursor_shown: false,
             confirm_close: None,
-            confirm_native: false,
-            confirm_native_id: 0,
             mirror_close_scope: None,
             confirm_btn_rects: Vec::new(),
             restore_prompt: None,

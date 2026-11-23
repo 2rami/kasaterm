@@ -284,6 +284,12 @@ mod quick_instruction_tests {
 /// 방 이름 칸의 편집기 열쇠 — 본기기·다른 기기 방이 한 칸을 같이 쓴다(한 번에 하나만 연다).
 pub(crate) const ROOM_FIELD: &str = "room-rename";
 
+pub(crate) enum BellEntry<'a> {
+    Report,
+    Choice(Option<&'a str>),
+    PushOnly,
+}
+
 impl App {
     /// pane 의 표시용 학생 — "터미널은 파싱만"(사용자): claude sessionId 바인딩이 정본,
     /// agents/attach 뷰 pane 은 파싱 전 스폰 랜덤(ws.pane_character)을 보여주지 않는다
@@ -607,7 +613,7 @@ impl App {
                 if let Some(report) = report.as_ref() {
                     let body = kasa_agents::ring::finished(Some(report), self.pane_last_words(id).as_deref());
                     let dedup = format!("done:{id}:{key:016x}");
-                    self.ring_phone(id, &heading, character.as_deref(), &body, "done", format!("done-/{id}"), &dedup);
+                    self.ring_phone(id, &heading, character.as_deref(), &body, "done", format!("done-/{id}"), &dedup, BellEntry::Report);
                     if !(self.window_focused && is_active_pane) {
                         notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
                     }
@@ -624,7 +630,7 @@ impl App {
                 }
                 let body = kasa_agents::ring::blocked(&report, self.pane_last_words(id).as_deref());
                 let dedup = format!("blocked:{id}:{}", report.key);
-                self.ring_phone(id, &heading, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup);
+                self.ring_phone(id, &heading, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup, BellEntry::Report);
                 notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
             }
             // 60초 방치는 알릴 일이 아니다 — 학생이 답을 마치고 서 있는 것뿐이고, 그건 완료 알림과
@@ -940,9 +946,9 @@ impl App {
             crate::agent_state::WaitKind::Permission => (self.permission_words(id, reason), "waiting:permission"),
             _ => (kasa_agents::ring::question(reason), "waiting:question"),
         };
-        let key = key.map(|key| format!("question:{id}:{key}")).unwrap_or_else(|| format!("approval:{id}"));
-        self.ring_phone(id, &heading, character.as_deref(), &body, push_kind, format!("wait-/{id}"), &key);
-        notify_desktop(&heading, &body, character.as_deref(), Some(&key), Some((id, sid.as_deref())));
+        let dedup = key.map(|key| format!("question:{id}:{key}")).unwrap_or_else(|| format!("approval:{id}"));
+        self.ring_phone(id, &heading, character.as_deref(), &body, push_kind, format!("wait-/{id}"), &dedup, BellEntry::Choice(key));
+        notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
     }
 
     /// 저절로 안 풀리는 오류·한도·세션 팅김 — 칸을 깨워 반짝이고 읽지 않음만 세운다. 맥·폰 알림은 보내지 않는다:
@@ -972,15 +978,23 @@ impl App {
     /// 이 기계 칸의 알림을 폰에도 — 맥 알림과 같은 사건·같은 말이다(`kasa_agents::ring`). 폰은 사람이 자리에 없을 때 보는
     /// 것이라 이 칸을 보고 있어도 보낸다. 다른 기계 칸은 그 기계가 스스로 보낸다.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn ring_phone(&self, id: &str, heading: &str, character: Option<&str>, body: &str, kind: &str, collapse: String, dedup: &str) {
+    pub(crate) fn ring_phone(&self, id: &str, heading: &str, character: Option<&str>, body: &str, kind: &str, collapse: String, dedup: &str, bell: BellEntry<'_>) {
         if kasa_remote::remote::is_remote_pane(id) || crate::lite_mode() || !notify_dedup_passes(&format!("phone:{dedup}")) {
             return;
         }
-        // 종 목록은 폰 알림과 같은 자리에서 한 줄 — 둘이 어긋나지 않게(kasa_students::notes 머리말). 격리 실행은
-        // 쪽지 파일을 따로 준 때만 남긴다(사람 것을 안 건드린다).
-        if !crate::verification_run() || std::env::var_os("KASATERM_NOTES_FILE").is_some() {
-            if kasa_students::notes::add(id, character.unwrap_or(""), kind.strip_prefix("waiting:").unwrap_or(kind), body).is_some() {
+        let note = match bell {
+            BellEntry::Report => Some(None),
+            BellEntry::Choice(request_id) => Some(request_id),
+            BellEntry::PushOnly => None,
+        };
+        if let Some(request_id) = note {
+            if (!crate::verification_run() || std::env::var_os("KASATERM_NOTES_FILE").is_some())
+                && kasa_students::notes::add(
+                    id, character.unwrap_or(""), kind.strip_prefix("waiting:").unwrap_or(kind), body, request_id,
+                ).is_some()
+            {
                 crate::statusbar::notes::forget();
+                kasa_wire::changes::bump();
             }
         }
         // 격리 실행은 사람의 폰을 울리지 않는다 — 시험이 볼 수 있게 탐침 파일에만 남긴다.
@@ -3164,31 +3178,22 @@ impl App {
             action,
         });
     }
+    pub(crate) fn close_confirmation_terminal(&self) -> Option<usize> {
+        match &self.confirm_close.as_ref()?.action {
+            PendingClose::Tab { pane, .. } | PendingClose::Pane { pane } => self.aux_terminal_index(pane),
+            _ => None,
+        }
+    }
+
     pub(crate) fn raise_confirm(&mut self, dlg: ConfirmClose) {
-        self.confirm_native_id = self.confirm_native_id.wrapping_add(1);
-        #[cfg(target_os = "macos")]
-        let native = {
-            let owner = match &dlg.action {
-                PendingClose::Tab { pane, .. } | PendingClose::Pane { pane } => self.aux_terminal_index(pane),
-                _ => None,
-            };
-            let window = owner.map(|i| self.aux.terminals[i].window.as_ref()).or(self.window.as_deref());
-            let compatible = !matches!(dlg.why, CloseWhy::Dirty(_) | CloseWhy::Mirror { closing: true, .. });
-            let fallback = crate::verification_run() && std::env::var_os("KASATERM_TEST_CLOSE_FALLBACK").is_some();
-            if let Some(window) = window.filter(|_| compatible && !fallback) {
-                let (title, detail) = crate::mirror_close::confirmation_text(&dlg);
-                let proxy = self.proxy.clone();
-                let request = self.confirm_native_id;
-                crate::macos_open::confirm_sheet(window, &title, &detail,
-                    (if matches!(dlg.why, CloseWhy::Mirror { error: Some(_), .. }) { "다시 시도" } else { "닫기" }, "취소"),
-                    true, move |ok| { let _ = proxy.send_event(UserEvent::NativeConfirm(request, ok)); })
-            } else { false }
-        };
-        #[cfg(not(target_os = "macos"))]
-        let native = false;
-        self.confirm_native = native;
         self.confirm_close = Some(dlg);
+        self.confirm_btn_rects.clear();
         self.chrome_dirty = true;
+        if let Some(index) = self.close_confirmation_terminal() {
+            self.show_aux_close_confirmation(index);
+        } else {
+            self.sync_web_hosts();
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }

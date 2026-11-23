@@ -201,9 +201,8 @@ KASATERM_AUTOFOREIGNSPLIT_MS=4000`을 더해 검사한다. `KASATERM_AUTOFOREIGN
 옛 거울은 5초 유예 뒤 사라지는지 확인한다. 원본 칸·대화와 도착 방의 거울은 살아 있어야 한다.
 
 미러 닫기는 위 리그에 `KASATERM_TEST_MIRROR_CLOSE_MS=4500`, `KASATERM_TEST_MIRROR_CLOSE_KIND=tab|pane|session|remote-room|remote-pane`을 더한다.
-macOS 시트는 `KASATERM_UPDATE_RIG_SHOTS=<기존 폴더>`로 자기 앱의 시트만 캡처한다. `KASATERM_UPDATE_RIG_PRESS_MS=1800`은 기본 단추(취소),
-`KASATERM_UPDATE_RIG_BUTTON=닫기`를 더하면 그 제목의 실제 NSButton을 누른다(격리 실행에서만). `KASATERM_TEST_MD_SCRIPT`의 `reopen:`은 되살리기 경로를 실행한다.
-GPU 확인 카드는 `KASATERM_TEST_CLOSE_FALLBACK=1`로 별도 검사한다. 원본 첫 탭·다중 탭 칸·방 전체, 취소·원본 완료 응답·신원 변경 거절,
+카사텀 확인 카드는 `KASATERM_TEST_MD_SCRIPT`의 `cap:<경로>`로 찍고, `pick:cancel` 또는 `pick:close`로 결정한다.
+`reopen:`은 되살리기 경로를 실행한다. 원본 첫 탭·다중 탭 칸·방 전체, 취소·원본 완료 응답·신원 변경 거절,
 혼합 로컬/미러 칸과 대기 중 새 탭 추가, 유예 시간 전후 되살리기를 모두 확인한다. 본판 세션으로 닫기·되살리기를 시험하지 않는다.
 일반 셸은 `surface.close_idle_checked`로 원본에서 재검사한 뒤 확인 없이 닫힌다. 빈 셸·마지막 탭, 실행 중인 명령·셸 내장 명령,
 바쁜 형제 탭이 섞인 칸·방, 오래된 주소·구판 원본을 대조한다. 자동 검사 오류 뒤의 「다시 시도」도 일반 셸 검사로 돌아가야 한다.

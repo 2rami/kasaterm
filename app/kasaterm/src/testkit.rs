@@ -3528,11 +3528,11 @@ impl App {
         let seed = SEED.lock().unwrap().clone();
         let Some((first, ids)) = seed else {
             let Some(first) = active(self).filter(|pid| pid.starts_with('%')) else { return; };
-            let add = |pane: &str, who: &str, kind: &str, text: &str| kasa_students::notes::add(pane, who, kind, text).map_or(0, |n| n.id);
+            let add = |pane: &str, who: &str, kind: &str, text: &str| kasa_students::notes::add(pane, who, kind, text, None).map_or(0, |n| n.id);
             let ids = [
                 add(&first, "유우카", "done", "하단바에 학생 쪽지 칩을 붙였어요."),
-                add("%999", "미치루", "permission", "이 쪽지는 × 로 지워져야 해요"),
-                add(&first, "코하루", "question", "두 줄을 넘는 본문은 둘째 줄 끝이 줄임표로 잘려야 해요. 길게 이어 쓴 문장이라 폭을 넘깁니다."),
+                add("%999", "학생", "blocked", "이 쪽지는 × 로 지워져야 해요"),
+                add(&first, "코하루", "done", "두 줄을 넘는 본문은 둘째 줄 끝이 줄임표로 잘려야 해요. 길게 이어 쓴 문장이라 폭을 넘깁니다."),
             ];
             crate::statusbar::notes::forget();
             let split = self.split_active_pane_focused(kasa_pty::SplitDir::Horizontal).is_ok();
@@ -5064,7 +5064,7 @@ impl App {
                 if let Some(g) = self.gpu.as_mut() {
                     g.capture_next = Some(p.to_string());
                 }
-                eprintln!("[mdscript] cap → {p}");
+                eprintln!("[mdscript] cap → {p} close_confirmation={}", !self.confirm_btn_rects.is_empty());
                 self.wake_after_mdstep();
                 return;
             }
