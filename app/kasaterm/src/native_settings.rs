@@ -601,6 +601,7 @@ pub(crate) enum HitCursor {
 /// 펼쳐지는 선택 상자. 한 번에 하나만 열린다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DropdownId {
+    WeatherCondition,
     UiFont,
     /// 시스템 따라가기에서 밝은(true)·어두운(false) 화면에 입힐 팔레트.
     SystemPalette(bool),
@@ -4649,7 +4650,7 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     };
 
     *y += 6.0;
-    toggle_row_hint(g, s, hits, x, y, w, "날씨", "창과 단추에 비를 내립니다. 끄면 그리는 비용이 없습니다",
+    toggle_row_hint(g, s, hits, x, y, w, "날씨", "창과 카드에 표시할 날씨 효과를 고릅니다",
         ws.enabled, act(Change::Enabled(!ws.enabled)));
     let os_off = !ws.ignore_os && ws.enabled && (s.weather_os.reduce_transparency || s.weather_os.reduce_motion);
     if os_off {
@@ -4657,23 +4658,28 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         plain_hint(g, x, y, w, match (s.weather_os.reduce_transparency, cfg!(windows)) {
             (true, false) => "macOS 「투명도 줄이기」가 켜져 있어 날씨를 그리지 않습니다. 아래 「OS 설정 무시」로 바꿀 수 있습니다",
             (true, true) => "Windows 「투명 효과」가 꺼져 있어 날씨를 그리지 않습니다. 아래 「OS 설정 무시」로 바꿀 수 있습니다",
-            (false, false) => "macOS 「동작 줄이기」가 켜져 있어 비가 멈추고 맺힌 물방울만 남습니다",
-            (false, true) => "Windows 「애니메이션 효과」가 꺼져 있어 비가 멈추고 맺힌 물방울만 남습니다",
+            (false, false) => "macOS 「동작 줄이기」에 따라 날씨를 정지 화면으로 표시합니다",
+            (false, true) => "Windows 「애니메이션 효과」 설정에 따라 날씨를 정지 화면으로 표시합니다",
         });
     }
 
     *y += 8.0;
-    section_title(g, x, *y, "비", "");
+    section_title(g, x, *y, "효과", "");
     *y += 54.0;
     use wm::RainStyle;
-    seg_row(g, s, hits, x, y, w, "비 표현", &[
+    seg_row(g, s, hits, x, y, w, "날씨 표현", &[
         ("리퀴드 비", ws.style == RainStyle::Liquid, act(Change::Style(RainStyle::Liquid))),
-        ("빗줄기와 물보라", ws.style == RainStyle::Showers, act(Change::Style(RainStyle::Showers))),
+        ("작업 날씨", ws.style == RainStyle::Showers, act(Change::Style(RainStyle::Showers))),
     ]);
     if ws.style == RainStyle::Showers {
-        plain_hint(g, x, y, w, "일하는 칸에 비가 내리고, 작업이 끝나면 맑아집니다");
+        dropdown_row(g, s, hits, x, y, w, "작업 중 날씨", &crate::native_strings::text(ws.condition.label()), DropdownId::WeatherCondition);
+        plain_hint(g, x, y, w, "작업이 끝나면 날씨 효과가 걷힙니다");
+        let levels = ["없음", "약하게", "보통", "강하게"];
+        let cells: Vec<_> = RainAmount::ALL.iter().map(|&a| (levels[a.index()], a == ws.amount, act(Change::Amount(a)))).collect();
+        seg_row(g, s, hits, x, y, w, "효과 강도", &cells);
+    } else {
+        seg_row(g, s, hits, x, y, w, "비 양", &amounts(ws.amount, &|a| Change::Amount(a)));
     }
-    seg_row(g, s, hits, x, y, w, "비 양", &amounts(ws.amount, &|a| Change::Amount(a)));
     let dir = wm::quarters(ws.wind_dir);
     let dir_text = match dir {
         0 => crate::native_strings::text("없음").into_owned(),
@@ -6616,7 +6622,7 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         SettingsCat::Weather => (
             "날씨",
             "sparkles",
-            "창과 단추에 비를 내립니다. 끄면 그리는 비용이 없습니다",
+            "창과 카드에 표시할 날씨 효과를 고릅니다",
         ),
         SettingsCat::Claude => (
             "코딩 에이전트",
@@ -6871,6 +6877,10 @@ fn ui_font_label(value: &str) -> String {
 /// 선택 상자에 들어갈 항목들: (보이는 이름, 지금 골라진 것인지, 고르면 할 일).
 fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAction)> {
     match id {
+        DropdownId::WeatherCondition => crate::weather::condition::WeatherCondition::ALL.iter().map(|&c| (
+            crate::native_strings::text(c.label()).into_owned(), c == s.weather.condition,
+            SettingsAction::Weather(crate::weather::model::Change::Condition(c)),
+        )).collect(),
         DropdownId::UiFont => {
             let custom = !matches!(s.ui_font.as_str(), "" | "terminal" | "system");
             let mut items = vec![

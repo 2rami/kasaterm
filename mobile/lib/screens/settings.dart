@@ -9,6 +9,7 @@ import '../relay_account.dart';
 import '../server.dart';
 import '../theme_prefs.dart';
 import '../twins_loading.dart';
+import '../weather/model.dart';
 import '../weather/sheet.dart';
 import '../weather/store.dart';
 import '../wide_layout.dart';
@@ -374,7 +375,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           tone: tone,
           icon: Icons.umbrella_outlined,
           title: '날씨',
-          subtitle: w.enabled ? '${w.amount.label} · ${w.target.label}' : '꺼짐 · 카드와 단추에 비를 내려요',
+          subtitle: w.enabled ? (w.style == RainStyle.showers ? '작업 중 · ${w.condition.label}' : '${w.amount.label} · ${w.target.label}') : '꺼짐',
         );
       },
     ),

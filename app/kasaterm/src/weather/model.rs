@@ -3,6 +3,7 @@
 //! 전역 설정은 계정으로 기기끼리 맞추고, 창별 덮어쓰기는 그 기기 세션에만 둔다.
 //! 판정은 순수 함수라 설정 화면·렌더·테스트가 같은 답을 본다.
 
+use super::condition::WeatherCondition;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +115,8 @@ pub(crate) struct WeatherSettings {
     pub enabled: bool,
     #[serde(skip_serializing_if = "RainStyle::is_liquid")]
     pub style: RainStyle,
+    #[serde(skip_serializing_if = "WeatherCondition::is_rain")]
+    pub condition: WeatherCondition,
     pub amount: RainAmount,
     /// −1(왼쪽) ~ 1(오른쪽).
     pub wind_dir: f32,
@@ -136,6 +139,7 @@ impl Default for WeatherSettings {
         WeatherSettings {
             enabled: false,
             style: RainStyle::Liquid,
+            condition: WeatherCondition::Rain,
             amount: RainAmount::Drizzle,
             wind_dir: 0.0,
             wind_strength: 0.0,
@@ -258,6 +262,7 @@ pub(crate) fn rewet_label(secs: u32) -> String {
 pub(crate) enum Change {
     Enabled(bool),
     Style(RainStyle),
+    Condition(WeatherCondition),
     Amount(RainAmount),
     WindDir(i8),
     WindStrength(u8),
@@ -272,7 +277,8 @@ pub(crate) enum Change {
 pub(crate) fn apply(mut s: WeatherSettings, c: Change) -> WeatherSettings {
     match c {
         Change::Enabled(on) => s.enabled = on,
-        Change::Style(style) => s.style = style,
+        Change::Style(v) => s.style = v,
+        Change::Condition(v) => s.condition = v,
         Change::Amount(a) => s.amount = a,
         Change::WindDir(q) => s.wind_dir = q as f32 / 4.0,
         Change::WindStrength(q) => s.wind_strength = q as f32 / 4.0,
@@ -426,6 +432,20 @@ mod tests {
         assert_eq!(work_rain_amount(&s, PaneWeather::Follow, false), RainAmount::None);
         assert_eq!(work_rain_amount(&s, PaneWeather::Fixed(RainAmount::Downpour), false), RainAmount::None);
         assert_eq!(work_rain_amount(&s, PaneWeather::Clear, true), RainAmount::None);
+    }
+
+    #[test]
+    fn every_work_condition_roundtrips_through_account_settings() {
+        for &condition in WeatherCondition::ALL {
+            let settings = WeatherSettings { condition, style: RainStyle::Showers, ..on() };
+            let value = serde_json::to_value(&settings).unwrap();
+            assert!(kasa_device::account_sync::schema::valid_setting("weather", &value), "{condition:?}");
+            assert_eq!(serde_json::from_value::<WeatherSettings>(value).unwrap(), settings);
+        }
+        let unknown = serde_json::json!({"enabled": true, "style": "showers", "condition": "future"});
+        let settings: WeatherSettings = serde_json::from_value(unknown).unwrap();
+        assert!(settings.enabled);
+        assert_eq!(settings.condition, WeatherCondition::Rain);
     }
 
     #[test]

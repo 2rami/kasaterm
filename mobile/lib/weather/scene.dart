@@ -443,7 +443,9 @@ class _ShowersPainter extends CustomPainter {
       ..setFloat(2, scene._time.value)
       ..setFloat(4, settings.wind * 0.68)
       ..setFloat(6, moving ? 1 : 0)
-      ..setFloat(8, dark ? 1 : 0);
+      ..setFloat(8, dark ? 1 : 0)
+      ..setFloat(10, settings.condition.material.toDouble())
+      ..setFloat(11, settings.condition.variant.toDouble());
 
     void draw(Rect area, Offset origin, _ShowerFade fade, double seed, double pass) {
       shader
@@ -470,10 +472,11 @@ class _ShowersPainter extends CustomPainter {
       final seed = (place.placeId.hashCode % 997).toDouble();
       canvas.save();
       canvas.clipRRect(place.corners.toRRect(rect));
+      shader..setFloat(12, rect.width)..setFloat(13, rect.height);
       draw(rect, rect.topLeft, fade, seed, 1);
       canvas.restore();
       // The splash clears the clip on the top edge without crossing the scene's input guards.
-      if (moving && fade.opacity > 0.28 && rect.width > 16) {
+      if (settings.condition.material == 0 && moving && fade.opacity > 0.28 && rect.width > 16) {
         draw(Rect.fromLTRB(rect.left + 8, rect.top - 32, rect.right - 8, rect.top + 2),
             rect.topLeft, fade, seed, 2);
       }

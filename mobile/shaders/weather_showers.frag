@@ -9,6 +9,9 @@ uniform float uMoving;
 uniform float uPass;
 uniform float uDark;
 uniform float uOpacity;
+uniform float uMaterial;
+uniform float uVariant;
+uniform vec2 uSize;
 out vec4 fragColor;
 
 float grain(vec2 p) {
@@ -103,17 +106,247 @@ vec4 atmosphere(vec2 p, float t, float amount, float wind, float moving, vec3 in
   return vec4(sky * shade * (1.0 - gleam) + ink * gleam, shade + gleam * (1.0 - shade));
 }
 
+// Premultiplied layers keep the underlying terminal and card text visible.
+vec4 wash(vec3 color, float alpha) {
+    return vec4(color * alpha, alpha);
+}
+
+vec4 overLayer(vec4 under, vec4 top) {
+    return under * (1.0 - top.a) + top;
+}
+
+float cloudField(vec2 p) {
+    float warp = haze(p * 0.63);
+    vec2 q = p + vec2(0.74 * warp, 0.32 * warp);
+    return 0.56 * haze(q) + 0.28 * haze(q * 2.03 + 9.1) + 0.16 * haze(q * 4.19 + 3.7);
+}
+
+vec4 cloudBank(vec2 uv, float clock, float cover, float wind) {
+    vec2 q = uv * vec2(3.0, 3.8) - vec2(clock * (0.047 + 0.09 * wind), clock * 0.009);
+    float field = cloudField(q) - uv.y * 0.16;
+    float threshold = mix(0.67, 0.23, cover);
+    float mass = smoothstep(threshold - 0.085, threshold + 0.13, field);
+    float relief = cloudField(q + vec2(0.11, 0.18)) - field - uv.y * 0.16;
+    float light = clamp(0.58 + 1.7 * relief + 0.28 * (1.0 - uv.y), 0.0, 1.0);
+    vec3 color = mix(vec3(0.24, 0.31, 0.41), vec3(0.83, 0.87, 0.91), light);
+    return wash(color, mass * (0.18 + 0.21 * cover));
+}
+
+vec4 skyScene(vec2 p, vec2 size, float clock, float variant, float wind) {
+    vec2 uv = p / size;
+    bool night = variant >= 5.0 && variant <= 7.0;
+    bool horizon = variant >= 8.0;
+    float cover = min(1.0, variant * 0.25);
+    if (night) { cover = (variant - 5.0) * 0.23; }
+    if (horizon) { cover = 0.24; }
+    float height = 0.23 + 0.018 * sin(clock * 0.08);
+    if (horizon) { height = 0.74 + 0.065 * sin(clock * 0.09); }
+    vec2 sun = (p - vec2(0.76, height) * size) / min(size.x, size.y);
+    float distanceToSun = length(sun);
+    float glow = exp(-distanceToSun * 3.8);
+    float disk = 1.0 - smoothstep(0.069, 0.080, distanceToSun);
+    vec4 sky = wash(vec3(0.32, 0.67, 0.91), 0.17 * (1.0 - uv.y * 0.65));
+    if (night) {
+        sky = wash(vec3(0.095, 0.14, 0.36), 0.34 - 0.13 * uv.y);
+        vec2 grid = p / 18.0;
+        vec2 cell = floor(grid);
+        float star = grain(cell + 61.0);
+        vec2 offset = fract(grid) - vec2(0.18 + 0.64 * star, 0.18 + 0.64 * grain(cell + 3.0));
+        float spark = (1.0 - smoothstep(0.016, 0.059, length(offset))) * smoothstep(0.72, 0.85, star);
+        sky = overLayer(sky, wash(vec3(0.76, 0.84, 1.0), spark * (0.54 + 0.17 * sin(clock * 0.8 + star * 97.0))));
+        float crescent = disk * smoothstep(0.064, 0.073, length(sun - vec2(0.033, -0.023)));
+        sky = overLayer(sky, wash(vec3(0.88, 0.90, 1.0), crescent * 0.70 + 0.13 * glow));
+    } else {
+        if (horizon) {
+            vec3 band = mix(vec3(0.51, 0.34, 0.62), vec3(1.0, 0.50, 0.20), smoothstep(0.0, 0.82, uv.y));
+            if (variant == 8.0) { band = mix(vec3(0.43, 0.59, 0.77), vec3(1.0, 0.74, 0.47), uv.y); }
+            sky = wash(band, 0.36);
+        }
+        float angle = atan(sun.y, sun.x + 0.00001);
+        float rays = 0.5 + 0.5 * sin(9.0 * angle + clock * 0.12 + sin(4.0 * angle - clock * 0.09));
+        float sunlight = (0.49 * disk + glow * (0.25 + 0.10 * rays)) * (1.0 - cover * cover);
+        sky = overLayer(sky, wash(vec3(1.0, 0.86, 0.55), sunlight));
+    }
+    if (cover > 0.0) { sky = overLayer(sky, cloudBank(uv, clock, cover, wind)); }
+    return sky;
+}
+
+// A flake stays in one moving cell throughout its fall. The two depths never share a lattice.
+float flakes(vec2 p, float clock, float wind, float pitch, float speed, float density, float sizePx, bool ice) {
+    vec2 q = p - vec2(wind * speed * clock, speed * clock);
+    if (!ice) { q.x += sin(p.y * 0.017 + clock * 1.3 + pitch) * pitch * 0.20; }
+    vec2 grid = q / pitch;
+    vec2 cell = floor(grid);
+    float noise = grain(cell + pitch);
+    vec2 d = (fract(grid) - vec2(0.22 + 0.56 * grain(cell + 3.0), 0.22 + 0.56 * grain(cell + 8.0))) * pitch;
+    float radius = sizePx * (0.48 + noise * 0.80);
+    float dist = length(d);
+    if (ice) { dist = abs(d.x) + abs(d.y) * 0.76; }
+    return (1.0 - smoothstep(radius * 0.3, radius + 0.55, dist)) * step(noise, density);
+}
+
+vec4 snowScene(vec2 p, vec2 size, float clock, float variant, float wind, float amount, vec3 ink) {
+    vec2 uv = p / size;
+    bool drift = variant == 4.0 || variant == 5.0;
+    bool ice = variant >= 6.0;
+    float sweep = wind;
+    float speed = 52.0;
+    float density = 0.5;
+    if (variant == 0.0) { density = 0.22; }
+    if (variant == 2.0 || variant == 5.0) { density = 0.93; }
+    if (drift) { sweep += 1.45; speed = 83.0; }
+    if (ice) { speed = 196.0; }
+    vec4 sky = cloudBank(uv, clock, 0.60, sweep);
+    if (variant == 3.0) { sky = skyScene(p, size, clock, 1.0, wind); }
+    float farSnow = flakes(p, clock, sweep, 16.0, speed * 0.56, density, 1.10, ice);
+    float nearSnow = flakes(p + 19.0, clock, sweep, 32.0, speed, density, 2.6, ice);
+    if (variant == 8.0) { nearSnow = flakes(p, clock, wind, 23.0, 330.0, 0.57, 3.7, true); }
+    if (variant == 7.0) { nearSnow = nearSnow * 0.55 + falling(p, clock, wind, amount, 0.7); }
+    if (variant == 5.0) {
+        float veil = cloudField(p / vec2(110.0, 17.0) - vec2(clock * 1.3, 0.0));
+        sky = overLayer(sky, wash(vec3(0.78, 0.87, 0.94), 0.31 * veil));
+    }
+    return overLayer(sky, wash(ink, min(0.86, 0.29 * farSnow + 0.65 * nearSnow)));
+}
+
+vec4 visibilityScene(vec2 p, vec2 size, float clock, float variant, float wind) {
+    vec2 uv = p / size;
+    float drift = clock * (0.05 + 0.14 * wind);
+    vec2 q = vec2(uv.x * 2.7 - drift, uv.y * 5.0);
+    float bank = cloudField(q);
+    vec3 color = vec3(0.76, 0.85, 0.88);
+    float alpha = 0.10 + 0.39 * smoothstep(0.27, 0.70, bank + 0.12 * uv.y);
+    if (variant == 1.0) { color = vec3(0.83, 0.71, 0.53); alpha = 0.13 + 0.20 * bank; }
+    if (variant == 2.0) {
+        float plume = cloudField(vec2(q.x + 0.44 * sin(q.y * 1.5 - clock * 0.21), q.y + clock * 0.18));
+        color = mix(vec3(0.27, 0.23, 0.25), vec3(0.77, 0.67, 0.61), plume);
+        alpha = 0.10 + 0.37 * smoothstep(0.23, 0.70, plume);
+    }
+    if (variant == 3.0) {
+        float dust = flakes(p.yx, clock, 0.08, 13.0, 147.0, 0.43, 1.0, false);
+        color = vec3(0.88, 0.61, 0.31);
+        alpha = 0.14 + 0.21 * cloudField(q - vec2(clock * 0.45, 0.0)) + dust * 0.45;
+    }
+    return wash(color, alpha);
+}
+
+vec4 windScene(vec2 p, float clock, float variant, float wind, vec3 ink) {
+    float direction = 1.0;
+    if (wind < 0.0) { direction = -1.0; }
+    float travel = direction * p.x - clock * (73.0 + variant * 105.0 + abs(wind) * 60.0);
+    float lift = 6.0 * sin(p.x * 0.029 + clock * 0.54) + 3.4 * sin(p.x * 0.043 - clock * 0.22);
+    vec2 grid = vec2(travel / 116.0, (p.y + lift) / 28.0);
+    vec2 cell = floor(grid);
+    float y = 0.20 + 0.60 * grain(cell);
+    float x = fract(grid.x);
+    float arc = (1.0 - smoothstep(0.005, 0.047, abs(fract(grid.y) - y))) * sin(x * 3.14159);
+    float fade = smoothstep(0.16, 0.59, grain(cell + 4.0) + variant * 0.25);
+    return wash(ink, arc * fade * (0.39 + 0.21 * variant));
+}
+
+vec4 stormScene(vec2 p, vec2 size, float clock, float variant, float wind, vec3 ink, float motion) {
+    vec2 uv = p / size;
+    vec4 sky = cloudBank(uv, clock, 0.92, wind + 0.3);
+    float cell = cloudField(uv * vec2(2.4, 1.4) + vec2(clock * 0.09, 0.0));
+    float coverage = smoothstep(0.56 - 0.09 * variant, 0.72 - 0.08 * variant, cell);
+    float drops = falling(p, clock, wind + 0.11, 0.7, 0.38) + falling(p, clock, wind + 0.16, 1.0, 0.90);
+    sky = overLayer(sky, wash(ink, min(0.70, drops * (0.27 + coverage * 0.9))));
+    float cycle = clock / (7.5 - variant * 0.72) + 0.14;
+    float pulse = exp(-22.0 * fract(cycle)) * smoothstep(0.0, 0.022, fract(cycle)) * motion;
+    float origin = 0.14 + 0.72 * grain(vec2(floor(cycle), 49.0));
+    float bend = 0.095 * (haze(vec2(uv.y * 23.0, floor(cycle))) - 0.5) + 0.12 * uv.y;
+    float bolt = (1.0 - smoothstep(0.001, 0.009, abs(uv.x - origin - bend))) * (1.0 - smoothstep(0.05, 0.68, uv.y));
+    float glow = exp(-length((uv - vec2(origin, 0.16)) * vec2(2.2, 1.5)) * 5.0);
+    return overLayer(sky, wash(vec3(0.83, 0.85, 1.0), pulse * (0.53 * bolt + 0.19 * glow)));
+}
+
+vec4 cyclone(vec2 p, vec2 size, float clock, float variant, float wind, vec3 ink) {
+    vec2 uv = p / size;
+    vec2 rel = (uv - vec2(0.56, 0.41)) * vec2(size.x / size.y, 1.0);
+    float radius = length(rel);
+    float a = atan(rel.y, rel.x + 0.00001);
+    float turbulence = cloudField(uv * 8.0 + vec2(clock * 0.035, -clock * 0.021));
+    float bands = 0.5 + 0.5 * sin(2.0 * a + 15.0 * radius + 5.0 * turbulence - clock * (0.28 + 0.13 * variant));
+    float textureCloud = cloudField(uv * 4.9 + vec2(bands * 0.6, clock * 0.045));
+    float mass = smoothstep(0.13, 0.89, 0.30 * bands + 0.73 * textureCloud + 0.14 * turbulence);
+    if (variant == 1.0) { mass *= smoothstep(0.038, 0.095, radius); }
+    if (variant == 2.0) {
+        float height = clamp(uv.y, 0.0, 1.0);
+        float axis = 0.46 + 0.06 * sin(height * 7.0 + clock * 0.45);
+        float width = mix(0.31, 0.026, height);
+        float curl = 0.5 + 0.5 * sin(height * 65.0 + (uv.x - axis) * 20.0 - clock * 3.3);
+        mass = (1.0 - smoothstep(width * 0.62, width, abs(uv.x - axis))) * (0.28 + 0.22 * curl + 0.58 * turbulence);
+    }
+    vec3 color = mix(vec3(0.20, 0.25, 0.37), vec3(0.73, 0.79, 0.85), mass);
+    vec4 sky = wash(color, 0.055 + mass * 0.48);
+    float spray = falling(p, clock, wind + 0.72, 0.9, 0.6);
+    return overLayer(sky, wash(ink, spray * 0.56));
+}
+
+vec4 conditionLayer(vec2 p, vec2 size, float clock, float material, float variant, float wind, float amount, float opacity, vec3 ink, float motion) {
+    vec4 layer = vec4(0.0);
+    if (material == 1.0) {
+        layer = skyScene(p, size, clock, variant, wind);
+    } else if (material == 2.0) {
+        layer = visibilityScene(p, size, clock, variant, wind);
+    } else if (material == 3.0) {
+        layer = windScene(p, clock, variant, wind, ink);
+    } else if (material == 4.0) {
+        layer = snowScene(p, size, clock, variant, wind, amount, ink);
+    } else if (material == 5.0) {
+        layer = stormScene(p, size, clock, variant, wind, ink, motion);
+    } else if (material == 6.0) {
+        if (variant == 0.0) {
+            layer = skyScene(p, size, clock, 0.0, wind);
+            float shimmer = cloudField(p / vec2(72.0, 13.0) + vec2(0.0, clock * 0.37));
+            layer = overLayer(layer, wash(vec3(1.0, 0.56, 0.20), shimmer * 0.31 * (p.y / size.y)));
+        } else {
+            float frost = flakes(p, clock, wind, 31.0, 12.0, 0.60, 2.3, true);
+            vec2 edge = min(p, size - p);
+            float rim = exp(-max(0.0, min(edge.x, edge.y)) * 0.07);
+            layer = wash(vec3(0.63, 0.84, 0.96), 0.065 + 0.28 * rim * cloudField(p / 15.0) + 0.52 * frost);
+        }
+    } else {
+        layer = cyclone(p, size, clock, variant, wind, ink);
+    }
+    return layer * (opacity * (0.58 + 0.42 * amount));
+}
+
+float rainRate(float amount, float variant) {
+    if (variant == 1.0 || variant == 4.0 || variant == 6.0) { return amount * 0.38; }
+    if (variant == 2.0) { return 0.48 + 0.80 * amount; }
+    return amount;
+}
+
+vec4 rainSky(vec2 p, vec2 size, float clock, float variant, float wind, float opacity) {
+    if (variant == 3.0) { return skyScene(p, size, clock, 0.0, wind) * opacity; }
+    if (variant == 6.0) { return skyScene(p, size, clock, 6.0, wind) * opacity; }
+    if (variant == 4.0 || variant == 5.0) {
+        vec2 edge = min(p, size - p);
+        float rim = exp(-max(0.0, min(edge.x, edge.y)) * 0.085);
+        float ice = cloudField(p / 9.0);
+        return wash(vec3(0.63, 0.85, 1.0), rim * ice * opacity * 0.54);
+    }
+    return vec4(0.0);
+}
+
 void main() {
   vec2 screen = FlutterFragCoord().xy;
   vec2 p = screen - uOrigin;
   vec3 ink = mix(vec3(0.35, 0.48, 0.60), vec3(0.77, 0.87, 0.96), uDark);
+  vec2 size = max(uSize, vec2(1.0));
+  if (uMaterial != 0.0) {
+    fragColor = conditionLayer(p, size, uTime, uMaterial, uVariant, uWind, uAmount, uOpacity, ink, uMoving);
+    return;
+  }
+  float rate = rainRate(uAmount, uVariant);
   if (uPass > 1.5) {
-    float a = impact(p, uTime, uAmount, uWind, uSeed) * 0.85 * uMoving * smoothstep(0.28, 1.0, uOpacity);
+    float a = impact(p, uTime, rate, uWind, uSeed) * 0.85 * uMoving * smoothstep(0.28, 1.0, uOpacity);
     fragColor = vec4(ink * a, a);
   } else {
-    vec4 sky = atmosphere(screen, uTime, uAmount, uWind, uMoving, ink);
+    vec4 sky = overLayer(rainSky(p, size, uTime, uVariant, uWind, uOpacity), atmosphere(screen, uTime, rate, uWind, uMoving, ink));
     vec2 water = vec2(0.0);
-    if (uPass > 0.5) water = bead(p, uAmount, uSeed) * uOpacity;
+    if (uPass > 0.5) water = bead(p, rate, uSeed) * uOpacity;
     float a = water.x + water.y;
     fragColor = vec4(sky.rgb * (1.0 - a) + vec3(0.81, 0.90, 0.96) * water.y, sky.a * (1.0 - a) + a);
   }

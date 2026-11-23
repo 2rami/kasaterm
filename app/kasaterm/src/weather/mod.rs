@@ -4,6 +4,7 @@
 //! 자리 목록을 만들어 시뮬레이션을 한 걸음 옮기고 GPU 가 그릴 한 장(`gpu::Frame`)을 낸다.
 //! 꺼져 있으면 아무것도 만들지 않는다.
 
+pub(crate) mod condition;
 pub(crate) mod gpu;
 pub(crate) mod model;
 pub(crate) mod sim;
@@ -356,6 +357,7 @@ impl App {
             if v.moving {
                 st.shower_time = (st.shower_time + dt) % 3600.0;
             }
+            let (material, variant) = s.condition.material();
             let strength = |amount: RainAmount| [0.0, 0.24, 0.62, 1.0][amount.index()];
             let physical = |rect: [f32; 4]| rect.map(|n| n * scale);
             let [w, h] = win.map(|n| (n * scale).max(1.0));
@@ -379,7 +381,7 @@ impl App {
                 globals: gpu::Globals {
                     res: [w, h, 1.0 / w, 1.0 / h],
                     t: [st.shower_time, dt, scale, 0.0],
-                    rain: [0.0, s.wind() * 0.68, 0.0, if v.moving { 1.0 } else { 0.0 }],
+                    rain: [material, s.wind() * 0.68, variant, if v.moving { 1.0 } else { 0.0 }],
                     ..Default::default()
                 },
                 places: regions, buttons: gpu::ButtonsU::zeroed(), canvas: win,

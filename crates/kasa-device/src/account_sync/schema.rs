@@ -46,6 +46,15 @@ fn weather(v: &Value) -> bool {
     o.len() <= 16 && o.iter().all(|(key, value)| match key.as_str() {
         "enabled" | "by_status" | "ignore_os" => value.is_boolean(),
         "amount" | "busy" | "your_turn" | "resting" => one_of(value, RAIN),
+        "condition" => one_of(value, &[
+            "rain", "drizzle", "heavyRain", "sunShowers", "freezingDrizzle", "freezingRain",
+            "nightDrizzle", "clear", "mostlyClear", "partlyCloudy", "mostlyCloudy", "cloudy",
+            "clearNight", "mostlyClearNight", "partlyCloudyNight", "sunrise", "sunset", "foggy",
+            "haze", "smoky", "blowingDust", "breezy", "windy", "flurries",
+            "snow", "heavySnow", "sunFlurries", "blowingSnow", "blizzard", "sleet",
+            "wintryMix", "hail", "isolatedThunderstorms", "scatteredThunderstorms", "thunderstorms", "strongStorms",
+            "hot", "frigid", "tropicalStorm", "hurricane", "tornado",
+        ]),
         "style" => one_of(value, &["liquid", "showers"]),
         "wind_dir" => number(value, -1.0, 1.0),
         "wind_strength" => number(value, 0.0, 1.0),

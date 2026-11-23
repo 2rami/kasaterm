@@ -51,6 +51,15 @@ void main() {
     });
   });
 
+  test('work weather restores every condition and defaults older settings to rain', () {
+    expect(WeatherSettings.fromJson({'style': 'showers'}).condition, WeatherCondition.rain);
+    expect(WeatherSettings.fromJson({'condition': 'future'}).condition, WeatherCondition.rain);
+    for (final condition in WeatherCondition.values) {
+      final settings = on.copyWith(style: RainStyle.showers, condition: condition);
+      expect(WeatherSettings.fromJson(settings.toJson()), settings);
+    }
+  });
+
   test('showers round-trips independently of the liquid effect switches', () {
     expect(WeatherSettings.fromJson({}).style, RainStyle.liquid);
     final s = on.copyWith(style: RainStyle.showers, effects: {});

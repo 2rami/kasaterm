@@ -135,29 +135,40 @@ class WeatherSettingsList extends StatelessWidget {
         children: [
           SwitchListTile(
             title: const Text('날씨'),
-            subtitle: const Text('카드·단추·바탕에 비를 내린다. 끄면 그리는 비용이 없다'),
+            subtitle: const Text('창과 카드에 표시할 날씨 효과를 골라요'),
             value: s.enabled,
             onChanged: (v) => set(s.copyWith(enabled: v)),
           ),
-          _Title('비 표현'),
+          _Title('날씨 표현'),
           _Pad(
             SegmentedButton<RainStyle>(
               showSelectedIcon: false,
               segments: const [
                 ButtonSegment(value: RainStyle.liquid, label: Text('리퀴드 비')),
-                ButtonSegment(value: RainStyle.showers, label: Text('빗줄기와 물보라')),
+                ButtonSegment(value: RainStyle.showers, label: Text('작업 날씨')),
               ],
               selected: {s.style},
               onSelectionChanged: (v) => set(s.copyWith(style: v.first)),
             ),
           ),
-          if (s.style == RainStyle.showers)
-            _Pad(Text('일하는 칸에 비가 내리고, 작업이 끝나면 맑아져요.', style: TextStyle(color: dim))),
-          _Title('비 양'),
+          if (s.style == RainStyle.showers) ...[
+            _Title('작업 중 날씨'),
+            _Pad(DropdownButton<WeatherCondition>(
+              value: s.condition,
+              isExpanded: true,
+              menuMaxHeight: 360,
+              items: [
+                for (final c in WeatherCondition.values) DropdownMenuItem(value: c, child: Text(c.label)),
+              ],
+              onChanged: (c) { if (c != null) set(s.copyWith(condition: c)); },
+            )),
+            _Pad(Text('작업이 끝나면 날씨 효과가 걷혀요.', style: TextStyle(color: dim))),
+          ],
+          _Title(s.style == RainStyle.showers ? '효과 강도' : '비 양'),
           _Pad(
             SegmentedButton<RainAmount>(
               showSelectedIcon: false,
-              segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(a.label))],
+              segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(s.style == RainStyle.liquid ? a.label : const ['없음', '약하게', '보통', '강하게'][a.index]))],
               selected: {s.amount},
               onSelectionChanged: (v) => set(s.copyWith(amount: v.first)),
             ),
@@ -238,7 +249,7 @@ class WeatherSettingsList extends StatelessWidget {
           SwitchListTile(
             title: const Text('OS 설정 무시'),
             subtitle: Text(
-              '끄면 「동작 줄이기」에선 맺힌 물방울만 남기고, 「투명도 줄이기」에선 날씨를 끈다.'
+              '「동작 줄이기」에서는 날씨가 멈추고, 「투명도 줄이기」에서는 날씨를 숨겨요.'
               ' 지금 이 폰: 동작 줄이기 ${motion ? '켬' : '끔'} · 투명도 줄이기 ${glassOff ? '켬' : '끔'}',
             ),
             value: s.ignoreOs,
