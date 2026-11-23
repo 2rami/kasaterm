@@ -111,7 +111,7 @@ void main() {
       );
       await tester.tap(find.byKey(const Key('account-login')));
       await tester.pump();
-      expect(submitted, ['https://kasaterm.debimarlene.com/fixture']);
+      expect(submitted, ['https://kasaterm.kasa.page/fixture']);
     },
   );
 
