@@ -72,7 +72,7 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 - **대화 보기**: 내용은 기록 파일이 정본이다(재개한 세션도 전체가 보여야 한다). `GET /transcript-raw` 에 `wait_ms` 를 주면
   새 줄이 없을 때 그 칸의 다음 `row` 까지 쥐었다가 다시 읽는다 — 폰은 1.5초 바퀴 대신 행이 쌓이는 즉시 받는다.
 
-- **깃 신호는 없다**: Git 열·배지는 누가 고쳤든 같은 길로 안다 — 작업 트리 파일 감시(`kasa_git::git_watch`, macOS FSEvents·
+- **깃 신호는 없다**: 칸 배지·원격 Git 창구는 누가 고쳤든 같은 길로 안다 — 작업 트리 파일 감시(`kasa_git::git_watch`, macOS FSEvents·
   Windows ReadDirectoryChangesW)와 git 지문. codex·셸 칸에도 같아야 해서 mod 신호(`git` 이벤트)는 걷었다(2026-10-07). 옛 mod 가
   보내는 `git` 이벤트는 앱이 버린다. 상세는 `docs/remote-git-panel.md`.
 - **Info 카드**(오른쪽 Info 열 맨 위 「지금 보는 칸」, `app/kasaterm/src/info_focus.rs`): 새 이벤트 없이 `tool`·`turn`·
@@ -81,7 +81,7 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
   안 갈린다). 이벤트 묶음·승인 결정마다 그 칸의 판 번호(`claude_mod::seq`)가 오르고 `set_focus_listener` 가 GUI 감시를
   깨운다 — 상태·사용량·백그라운드 목록 변경을 알리는 `set_listener` 와 달리 도구 하나가 시작·끝나도 부른다. 다른 기기 칸은 원본의
   `GET /term/pane-info?schema=kasa.pane-info.v1&machine_id&pane&surface_key&since&wait_ms`(최대 8초)가 판 번호로 풀리고,
-  프로세스·포트가 바뀌면 1초 안에 답한다. 신원은 Git 열과 같이 기계 id·칸·surface_key 로 확인하고 거울 칸이면 거절한다.
+  프로세스·포트가 바뀌면 1초 안에 답한다. 신원은 원격 Git 창구(`/term/gitcol`)와 같이 기계 id·칸·surface_key 로 확인하고 거울 칸이면 거절한다.
   답 `{schema, ok, seq, card}` 의 `card` 는 칸 종류·셸·셸 위 프로그램·폴더·모델·추론 강도·위 mod 사실·그 칸 프로세스
   트리의 listen 포트다. 옛 원본(404)·옛 판(`update_needed`)은 카드에 까닭을 적고 드물게 다시 묻는다.
 

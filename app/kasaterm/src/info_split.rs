@@ -122,7 +122,7 @@ impl crate::state::InfoState {
 
 impl crate::App {
     fn info_split_live(&self) -> bool {
-        self.git.col_visible && self.info.runtime_page() && self.info.ctx_menu.is_none() && self.info.pane_menu.is_none()
+        self.git.col_visible && self.info.ctx_menu.is_none() && self.info.pane_menu.is_none()
     }
 
     /// 커서가 경계 위인가 — 끌 수 있다는 커서를 띄운다.

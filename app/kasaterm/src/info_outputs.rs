@@ -170,7 +170,7 @@ fn label(item: &Output, nth: usize) -> String {
 
 impl crate::App {
     pub(crate) fn pump_info_outputs(&mut self) {
-        let open = self.info.runtime_page() && self.git.col_visible;
+        let open = self.git.col_visible;
         let seen = if open { self.ws.lock().ok().and_then(|ws| focused(&ws)) } else { None };
         let source = seen.as_ref().and_then(|(pane, pid)| match kasa_remote::remote::remote_meta(pid) {
             Some((base, rid)) => Some(Source::Remote(base, rid)),

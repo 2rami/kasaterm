@@ -292,7 +292,8 @@ pub(crate) fn edit(
     with_state(field.id, |state| apply(state, field.multiline, text, cursor, key, code, mods, &mut SystemClip))
 }
 
-/// 수정키 없는 편집 키 하나 — 선택·클립보드를 안 쓰는 낮은 층(검증 도구가 쓴다).
+/// 수정키 없는 편집 키 하나 — 선택·클립보드를 안 쓰는 낮은 층(시험이 쓴다).
+#[cfg(test)]
 pub(crate) fn key(text: &mut String, cursor: &mut usize, k: &Key) -> LineEditAction {
     let mut state = State::default();
     apply(&mut state, false, text, cursor, k, None, Mods::default(), &mut SystemClip)

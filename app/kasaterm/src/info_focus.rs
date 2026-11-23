@@ -1,4 +1,4 @@
-//! 오른쪽 Info 열 맨 위 「지금 보는 칸」 카드. Git 열처럼 초점 칸 하나만 본다 — 칸 종류·경로·도는 도구와 최근
+//! 오른쪽 Info 열 맨 위 「지금 보는 칸」 카드. 초점 칸 하나만 본다 — 칸 종류·경로·도는 도구와 최근
 //! 도구·백그라운드·그 칸 프로세스 트리의 listen 포트·모델·추론 강도·문맥·승인 요청.
 //!
 //! 사실은 `observe` 한 곳에서 짓는다. 이 기기 칸은 감시 스레드가, 다른 기기가 거울로 보는 칸은 원본의
@@ -475,7 +475,7 @@ fn fingerprint(card: &FocusCard) -> u64 {
 }
 
 impl App {
-    /// 지금 보는 칸 — Git 열과 같은 칸(활성 pane 의 보고 있는 탭).
+    /// 지금 보는 칸 — 활성 pane 의 보고 있는 탭.
     pub(crate) fn info_focus_target(&self) -> (Option<Target>, Option<std::path::PathBuf>) {
         let Some(pane) = self.ws.lock().ok().and_then(|ws| ws.active_pane.as_deref().map(|id| ws.active_tab_pid(id))) else {
             return (None, None);

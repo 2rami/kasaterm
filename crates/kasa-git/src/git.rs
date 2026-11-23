@@ -991,19 +991,6 @@ pub fn git_commit_staged(repo: &Path, message: &str) -> Value {
     json!({ "ok": ok, "output": out.trim() })
 }
 
-/// 한 파일을 stage (`git add -- <path>`). 패널 Changes 행의 + 버튼.
-pub fn git_add_path(repo: &Path, path: &str) -> Value {
-    let (ok, out) = run_git(repo, &["add", "--", path]);
-    json!({ "ok": ok, "output": out.trim() })
-}
-
-/// 한 파일을 unstage (`git reset -q HEAD -- <path>`). 패널 Staged 행의 - 버튼.
-/// 워킹트리는 건드리지 않고 index 에서만 내린다.
-pub fn git_unstage_path(repo: &Path, path: &str) -> Value {
-    let (ok, out) = run_git(repo, &["reset", "-q", "HEAD", "--", path]);
-    json!({ "ok": ok, "output": out.trim() })
-}
-
 /// `git push`. 결과 텍스트를 그대로 패널에 돌려준다.
 pub fn git_push(repo: &Path) -> Value {
     let (ok, out) = run_git(repo, &["push"]);
@@ -1039,38 +1026,6 @@ pub fn git_log(repo: &Path, n: u32) -> Value {
         })
         .collect();
     json!(commits)
-}
-
-/// 한 커밋이 바꾼 파일들 `[(path, additions, deletions)]`. 커밋 더블클릭 시
-/// 인라인으로 펼치는 변경 파일 목록용. `--format=` 로 커밋 메타를 죽이고
-/// `--numstat` 만 받는다. binary 파일은 numstat 가 `-` 라 (path, 0, 0).
-pub fn git_commit_files(repo: &Path, hash: &str) -> Vec<(String, u32, u32)> {
-    let (ok, out) = run_git(repo, &["show", "--numstat", "--format=", hash]);
-    if !ok {
-        return Vec::new();
-    }
-    out.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let mut parts = line.splitn(3, '\t');
-            let a = parts.next()?;
-            let d = parts.next()?;
-            let path = parts.next()?.to_string();
-            Some((path, a.parse().unwrap_or(0), d.parse().unwrap_or(0)))
-        })
-        .collect()
-}
-
-/// 한 커밋 안 특정 파일의 unified diff. 커밋 펼침 안에서 파일을 다시 펼칠 때의
-/// 인라인 diff — `git_file_diff` 와 같은 `DiffLine`. `parse_unified_diff` 가 파일
-/// 헤더를 버리므로 `git show` 출력을 그대로(선두 공백만 잘라) 넘긴다.
-pub fn git_commit_file_diff(repo: &Path, hash: &str, path: &str) -> Vec<DiffLine> {
-    let (ok, out) = run_git(repo, &["show", "--format=", hash, "--", path]);
-    let _ = ok;
-    parse_unified_diff(out.trim_start())
 }
 
 /// 폴더가 든 저장소의 지금 브랜치 — `git rev-parse --abbrev-ref HEAD` 와 같은 답을 `HEAD` 파일에서
@@ -1115,17 +1070,6 @@ pub fn git_branches(repo: &Path) -> Vec<String> {
 /// 모르는 사이 작업이 stash로 숨겨지는 일이 없도록.
 pub fn git_checkout(repo: &Path, branch: &str) -> Value {
     let (ok, out) = run_git(repo, &["checkout", branch]);
-    json!({ "ok": ok, "output": out.trim() })
-}
-
-/// Discard a file's worktree changes (status-bar / git-panel ↩ button). Tracked
-/// files are restored to HEAD (`checkout --`); an untracked file is removed.
-pub fn git_discard_path(repo: &Path, path: &str, untracked: bool) -> Value {
-    if untracked {
-        let ok = std::fs::remove_file(repo.join(path)).is_ok();
-        return json!({ "ok": ok, "output": "" });
-    }
-    let (ok, out) = run_git(repo, &["checkout", "--", path]);
     json!({ "ok": ok, "output": out.trim() })
 }
 
@@ -1194,49 +1138,10 @@ pub fn git_ignored(repo: &Path, paths: &[String]) -> std::collections::HashSet<S
     set
 }
 
-/// One row of a unified diff, line-numbered for the gutter. `Hunk` is the
-/// `@@ … @@` separator (carries no line numbers); `Context`/`Add`/`Del` carry
-/// the side(s) they belong to.
-#[derive(Clone, Debug, PartialEq)]
-pub enum DiffLineKind {
-    Hunk,
-    Context,
-    Add,
-    Del,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct DiffLine {
-    pub kind: DiffLineKind,
-    pub old_no: Option<u32>,
-    pub new_no: Option<u32>,
-    pub text: String,
-}
-
-/// Unified diff of one file for the git panel's inline expander. `staged` picks
-/// the index diff (`--cached`) vs the worktree diff. An untracked file has no
-/// tracked diff, so we fall back to `--no-index` against /dev/null to render the
-/// whole file as additions.
-pub fn git_file_diff(repo: &Path, path: &str, staged: bool) -> Vec<DiffLine> {
-    let (ok, out) = if staged {
-        run_git(repo, &["diff", "--cached", "--", path])
-    } else {
-        let (ok, out) = run_git(repo, &["diff", "--", path]);
-        if ok && out.trim().is_empty() {
-            // Likely untracked — show every line as an addition.
-            run_git(repo, &["diff", "--no-index", "--", "/dev/null", path])
-        } else {
-            (ok, out)
-        }
-    };
-    let _ = ok;
-    parse_unified_diff(&out)
-}
-
 /// HEAD 시점의 파일 본문. 편집기 거터가 「지금 버퍼 ↔ 이것」을 메모리에서 떠
 /// 실시간 diff 를 만든다.
 ///
-/// `git_file_diff` 로는 그걸 못 한다 — 그쪽은 **디스크**를 보므로 저장 전 버퍼를
+/// `git diff` 로는 그걸 못 한다 — 그쪽은 **디스크**를 보므로 저장 전 버퍼를
 /// 모른다. 여기서 원본만 받아 오고 차이는 `gitdiff` 가 낸다.
 ///
 /// HEAD 에 없으면(미추적·새 파일·레포 아님) `None`. 그때 편집기는 표시를 아예
@@ -1245,84 +1150,6 @@ pub fn git_head_text(repo: &Path, rel: &str) -> Option<String> {
     // `--` 로 갈라야 `HEAD:foo` 를 리비전이 아니라 경로로 읽는 사고가 안 난다.
     let (ok, out) = run_git(repo, &["show", &format!("HEAD:{rel}"), "--"]);
     ok.then_some(out)
-}
-
-/// Parse `git diff` output into line-numbered rows. File headers (`diff`,
-/// `index`, `+++`, `---`, `new file`, …) are dropped; only hunks + body lines
-/// survive. Line numbers track from each hunk header's `@@ -old +new @@`.
-fn parse_unified_diff(text: &str) -> Vec<DiffLine> {
-    let mut rows = Vec::new();
-    let mut old_no = 0u32;
-    let mut new_no = 0u32;
-    for line in text.lines() {
-        if line.starts_with("@@") {
-            // @@ -<old>[,n] +<new>[,n] @@ …
-            let nums = |seg: &str| -> u32 {
-                seg.trim_start_matches(['-', '+'])
-                    .split(',')
-                    .next()
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(1)
-            };
-            let mut parts = line.split_whitespace();
-            let _ = parts.next(); // "@@"
-            if let Some(o) = parts.next() {
-                old_no = nums(o);
-            }
-            if let Some(n) = parts.next() {
-                new_no = nums(n);
-            }
-            rows.push(DiffLine {
-                kind: DiffLineKind::Hunk,
-                old_no: None,
-                new_no: None,
-                text: line.to_string(),
-            });
-            continue;
-        }
-        if line.starts_with("diff ")
-            || line.starts_with("index ")
-            || line.starts_with("--- ")
-            || line.starts_with("+++ ")
-            || line.starts_with("new file")
-            || line.starts_with("deleted file")
-            || line.starts_with("old mode")
-            || line.starts_with("new mode")
-            || line.starts_with("similarity")
-            || line.starts_with("rename ")
-            || line.starts_with("\\ No newline")
-        {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('+') {
-            rows.push(DiffLine {
-                kind: DiffLineKind::Add,
-                old_no: None,
-                new_no: Some(new_no),
-                text: rest.to_string(),
-            });
-            new_no += 1;
-        } else if let Some(rest) = line.strip_prefix('-') {
-            rows.push(DiffLine {
-                kind: DiffLineKind::Del,
-                old_no: Some(old_no),
-                new_no: None,
-                text: rest.to_string(),
-            });
-            old_no += 1;
-        } else {
-            let rest = line.strip_prefix(' ').unwrap_or(line);
-            rows.push(DiffLine {
-                kind: DiffLineKind::Context,
-                old_no: Some(old_no),
-                new_no: Some(new_no),
-                text: rest.to_string(),
-            });
-            old_no += 1;
-            new_no += 1;
-        }
-    }
-    rows
 }
 
 /// 마커의 우선순위 — 폴더가 자손들의 상태를 하나로 물려받을 때 쓴다.

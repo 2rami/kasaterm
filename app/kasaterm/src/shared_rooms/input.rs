@@ -362,7 +362,7 @@ impl App {
 
 impl App {
     pub(crate) fn shared_pointer_focus(&self) -> bool {
-        self.shared_room_active() && !self.main_pointer_modal() && !self.account_menu
+        self.shared_room_active() && !self.main_confirmation_modal() && !self.account_menu
             && self.statusbar.popover.is_none() && self.handle_menu.is_none()
             && self.sidebar_menu.is_none() && self.info.navigation.room_menu.is_none()
             && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()

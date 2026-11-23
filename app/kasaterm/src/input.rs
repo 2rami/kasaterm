@@ -1,93 +1,7 @@
 //! 키/마우스/휠 입력 + 클립보드 + claude 상태 글리프/타이틀.
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CommitModalKey {
-    Quit,
-    Close,
-    Commit,
-    Edit,
-    Consume,
-}
-
-fn platform_ime_owns_commit_key(key: &Key, modifiers: ModifiersState, macos: bool, active: bool, composing: bool) -> bool {
-    if macos || modifiers.super_key() || modifiers.control_key() { return false; }
-    composing || (active && matches!(key, Key::Character(text) if text.chars().any(is_hangul_codepoint)))
-}
-
-fn commit_modal_key_plan(
-    key: &winit::keyboard::Key, physical: Option<winit::keyboard::KeyCode>,
-    pressed: bool, repeat: bool, modifiers: ModifiersState, host: bool, macos: bool,
-) -> CommitModalKey {
-    use winit::keyboard::{Key, KeyCode, NamedKey};
-    if !pressed || is_modifier_logical(key) { return CommitModalKey::Consume; }
-    if matches!(key, Key::Named(NamedKey::Escape)) {
-        return if repeat { CommitModalKey::Consume } else { CommitModalKey::Close };
-    }
-    if host && !repeat {
-        match physical {
-            Some(KeyCode::KeyQ) => return CommitModalKey::Quit,
-            Some(KeyCode::KeyW) => return CommitModalKey::Close,
-            _ => {}
-        }
-    }
-    // 편집 조합(⌘A·⌘C·⌘V·⌘←·⌥⌫·⌃A …)은 칸 편집기로, 나머지 앱 조합은 삼킨다.
-    if host || modifiers.control_key() || modifiers.super_key() {
-        let edit = crate::lineedit::handles(key, physical, crate::lineedit::Mods::on(modifiers, macos));
-        return if edit && !(repeat && physical == Some(KeyCode::KeyV)) { CommitModalKey::Edit } else { CommitModalKey::Consume };
-    }
-    if matches!(key, Key::Named(NamedKey::Enter)) {
-        return if repeat || modifiers.alt_key() { CommitModalKey::Consume } else { CommitModalKey::Commit };
-    }
-    CommitModalKey::Edit
-}
-
-#[cfg(test)]
-mod commit_modal_key_tests {
-    use super::*;
-    use winit::keyboard::{Key, KeyCode, NamedKey};
-
-    #[test]
-    fn platform_composition_cannot_submit_or_duplicate_its_commit() {
-        let modifiers = ModifiersState::empty();
-        assert!(platform_ime_owns_commit_key(&Key::Named(NamedKey::Enter), modifiers, false, true, true));
-        assert!(platform_ime_owns_commit_key(&Key::Named(NamedKey::Backspace), modifiers, false, true, true));
-        assert!(platform_ime_owns_commit_key(&Key::Character("한".into()), modifiers, false, true, false));
-        assert!(!platform_ime_owns_commit_key(&Key::Character("a".into()), modifiers, false, true, false));
-        assert!(!platform_ime_owns_commit_key(&Key::Named(NamedKey::Enter), modifiers, true, true, true));
-        assert!(!platform_ime_owns_commit_key(&Key::Character("w".into()), ModifiersState::SUPER, false, true, true));
-    }
-
-    #[test]
-    fn modal_owns_submit_close_and_modified_application_chords() {
-        let plan = |key, code, modifiers, host, repeat| commit_modal_key_plan(&key, code, true, repeat, modifiers, host, true);
-        assert_eq!(plan(Key::Named(NamedKey::Enter), None, ModifiersState::empty(), false, false), CommitModalKey::Commit);
-        assert_eq!(plan(Key::Named(NamedKey::Enter), None, ModifiersState::empty(), false, true), CommitModalKey::Consume);
-        assert_eq!(plan(Key::Named(NamedKey::Enter), None, ModifiersState::SUPER, true, false), CommitModalKey::Consume);
-        assert_eq!(plan(Key::Named(NamedKey::Escape), None, ModifiersState::empty(), false, false), CommitModalKey::Close);
-        assert_eq!(plan(Key::Named(NamedKey::Escape), None, ModifiersState::empty(), false, true), CommitModalKey::Consume);
-        assert_eq!(plan(Key::Character(",".into()), Some(KeyCode::Comma), ModifiersState::SUPER, true, false), CommitModalKey::Consume);
-        assert_eq!(plan(Key::Character("w".into()), Some(KeyCode::KeyW), ModifiersState::SUPER, true, false), CommitModalKey::Close);
-        assert_eq!(plan(Key::Character("q".into()), Some(KeyCode::KeyQ), ModifiersState::SUPER, true, false), CommitModalKey::Quit);
-    }
-
-    #[test]
-    fn clipboard_and_edit_keys_never_need_the_background_input_path() {
-        for (macos, modifiers) in [(true, ModifiersState::SUPER), (false, ModifiersState::CONTROL)] {
-            assert_eq!(commit_modal_key_plan(&Key::Character("v".into()), Some(KeyCode::KeyV), true, false, modifiers, macos, macos), CommitModalKey::Edit);
-            assert_eq!(commit_modal_key_plan(&Key::Character("c".into()), Some(KeyCode::KeyC), true, false, modifiers, macos, macos), CommitModalKey::Edit);
-            assert_eq!(commit_modal_key_plan(&Key::Named(NamedKey::ArrowLeft), Some(KeyCode::ArrowLeft), true, false, modifiers, macos, macos), CommitModalKey::Edit);
-            assert_eq!(commit_modal_key_plan(&Key::Character("v".into()), Some(KeyCode::KeyV), true, true, modifiers, macos, macos), CommitModalKey::Consume);
-        }
-        assert_eq!(commit_modal_key_plan(&Key::Character("a".into()), Some(KeyCode::KeyA), true, false, ModifiersState::CONTROL, false, true), CommitModalKey::Edit, "⌃A 줄 처음");
-        assert_eq!(commit_modal_key_plan(&Key::Character("x".into()), Some(KeyCode::KeyX), true, false, ModifiersState::empty(), false, true), CommitModalKey::Edit);
-        assert_eq!(commit_modal_key_plan(&Key::Named(NamedKey::Backspace), None, true, true, ModifiersState::empty(), false, true), CommitModalKey::Edit);
-        assert_eq!(commit_modal_key_plan(&Key::Named(NamedKey::Enter), None, false, false, ModifiersState::empty(), false, true), CommitModalKey::Consume);
-    }
-}
-
 /// 입력칸 편집기 열쇠(`lineedit`) — 선택·되돌리기 기록이 칸마다 따로 산다.
-pub(crate) const GIT_COMMIT_FIELD: &str = "git-commit";
 pub(crate) const TREE_SEARCH_FIELD: &str = "tree-search";
 pub(crate) const TREE_NAME_FIELD: &str = "tree-name";
 
@@ -211,71 +125,6 @@ impl App {
         self.chrome_dirty = true;
     }
 
-    pub(crate) fn git_commit_modal_key(&mut self, event: &KeyEvent) -> bool {
-        use winit::keyboard::{Key, NamedKey, PhysicalKey};
-        if !self.git.commit_modal_open { return false; }
-        if platform_ime_owns_commit_key(&event.logical_key, self.modifiers, cfg!(target_os = "macos"), self.ime_active, self.in_preedit) {
-            return true;
-        }
-        let physical = match event.physical_key { PhysicalKey::Code(code) => Some(code), _ => None };
-        let action = commit_modal_key_plan(&event.logical_key, physical, event.state.is_pressed(),
-            event.repeat, self.modifiers, self.host_mod(), cfg!(target_os = "macos"));
-        if action == CommitModalKey::Quit { return false; }
-        if action == CommitModalKey::Consume { return true; }
-        self.ime_retarget(crate::ImeFocus::GitCommit);
-        self.git.commit_focused = true;
-        match action {
-            CommitModalKey::Edit => self.git_commit_input(event),
-            _ => {
-                if let Some(text) = self.hangul.flush() { self.git_commit_insert(&text); }
-                self.preedit.clear();
-                self.in_preedit = false;
-                match action {
-                    CommitModalKey::Commit => {
-                        self.settings_scene.arm_activation_key(NamedKey::Enter);
-                        self.run_commit_modal(false);
-                    }
-                    CommitModalKey::Close => {
-                        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                            self.settings_scene.arm_activation_key(NamedKey::Escape);
-                        }
-                        self.close_commit_modal();
-                    }
-                    _ => {}
-                }
-            }
-        }
-        self.chrome_dirty = true;
-        self.last_input_at = Instant::now();
-        true
-    }
-
-    pub(crate) fn git_commit_modal_ime(&mut self, ime: &Ime) -> bool {
-        if !self.git.commit_modal_open { return false; }
-        self.ime_retarget(crate::ImeFocus::GitCommit);
-        self.git.commit_focused = true;
-        match ime {
-            Ime::Enabled => self.ime_active = true,
-            Ime::Disabled => {
-                self.ime_active = false;
-                self.preedit.clear();
-                self.in_preedit = false;
-            }
-            Ime::Preedit(text, _) => {
-                self.ime_active = true;
-                self.preedit = text.clone();
-                self.in_preedit = !text.is_empty();
-            }
-            Ime::Commit(text) => {
-                self.preedit.clear();
-                self.in_preedit = false;
-                self.git_commit_insert(text);
-            }
-        }
-        self.chrome_dirty = true;
-        true
-    }
-
     fn close_account_menu(&mut self) {
         self.account_menu = false;
         self.account_menu_provider = None;
@@ -310,7 +159,6 @@ impl App {
                 && self.confirm_close.is_none()
                 && self.restore_prompt.is_none()
                 && self.character_swap_confirm.is_none()
-                && !self.git.commit_modal_open
                 && !self.account_switch_confirm.as_ref().is_some_and(|pending| {
                     pending.surface == crate::session::ConfirmSurface::Main
                 })
@@ -329,9 +177,6 @@ impl App {
                 self.info.pane_menu = None;
                 self.info.machine_menu = None;
                 self.info.navigation.room_menu = None;
-                self.git.commit_menu_open = false;
-                self.git.path_menu_open = false;
-                self.git.branch_menu_open = false;
                 self.account_menu = true;
                 self.account_menu_anchor = Some(anchor);
                 self.account_menu_rect = None;
@@ -2779,11 +2624,10 @@ impl App {
                 return;
             }
         };
-        // Info 탭: 커서 아래 영역(위 카드·프롬프트, 아래 결과물·방 — `info_split`) 스크롤. clamp 는
+        // 오른쪽 열(Info): 커서 아래 영역(위 카드·프롬프트, 아래 결과물·방 — `info_split`) 스크롤. clamp 는
         // 렌더가 실제 행 수로 다시 하니(draw_info_col) 여기선 하한만 잡고 넘긴다 — 목록 길이가 워커
         // 스레드에서 바뀌므로 입력 시점의 최대치는 이미 낡았을 수 있다.
         if self.git.col_visible
-            && self.info.runtime_page()
             && self.cursor_px.1 > TITLE_HEIGHT
             && self.cursor_px.0 >= self.git_col_x()
         {
@@ -2791,80 +2635,6 @@ impl App {
             let next = (*scroll - lines as f32 * 22.0).max(0.0);
             if (next - *scroll).abs() > 0.01 {
                 *scroll = next;
-                self.chrome_dirty = true;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            return;
-        }
-        // 세션 기록 탭: 목록 스크롤. Info 와 같은 이유로 상한은 렌더가 잡는다
-        // (행 수가 워커 스레드에서 바뀌어 입력 시점의 최대치는 낡았을 수 있다).
-        if self.git.col_visible
-            && self.info.tab == state::SideTab::Mcp
-            && self.cursor_px.1 > TITLE_HEIGHT
-            && self.cursor_px.0 >= self.git_col_x()
-        {
-            let next = (self.mcp_col.scroll - lines as f32 * 22.0).max(0.0);
-            if (next - self.mcp_col.scroll).abs() > 0.01 {
-                self.mcp_col.scroll = next;
-                self.chrome_dirty = true;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            return;
-        }
-        if self.git.col_visible
-            && self.info.tab == state::SideTab::Sessions
-            && self.cursor_px.1 > TITLE_HEIGHT
-            && self.cursor_px.0 >= self.git_col_x()
-        {
-            let next = (self.sessions_col.scroll - lines as f32 * 22.0).max(0.0);
-            if (next - self.sessions_col.scroll).abs() > 0.01 {
-                self.sessions_col.scroll = next;
-                self.chrome_dirty = true;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            return;
-        }
-        // Git column: scroll the change list when the pointer is over it. Same
-        if self.git.col_visible && self.info.tab == state::SideTab::Git
-            && !self.git.branch_menu_open && !self.git.path_menu_open && !self.git.commit_menu_open
-            && self.git.graph_rect.is_some_and(|(x, y, w, h)| self.cursor_px.0 >= x
-                && self.cursor_px.0 < x + w && self.cursor_px.1 >= y && self.cursor_px.1 < y + h)
-        {
-            let (visible, content) = self.git.graph_extent;
-            let next = (self.git.graph_scroll - lines as f32 * 40.0).clamp(0.0, (content - visible).max(0.0));
-            if next != self.git.graph_scroll {
-                self.git.graph_scroll = next;
-                self.git.col_commit_rects.clear();
-                self.git.col_commit_file_rects.clear();
-                self.chrome_dirty = true;
-                if let Some(window) = &self.window { window.request_redraw(); }
-            }
-            return;
-        }
-        // clamp idea as the file tree; the visible height is the band between
-        // the header and the bottom button zone.
-        if self.git.col_visible
-            && self.cursor_px.1 > TITLE_HEIGHT
-            && self.cursor_px.0 >= self.git_col_x()
-        {
-            let item_h = 22.0_f32;
-            // 기하는 그리기 쪽이 직전 프레임에 써 둔 것을 쓴다. 여기서 다시 세면
-            // 반드시 어긋난다 — 예전엔 `헤더 68px · 버튼 44px` 로 자리를 어림하고
-            // 내용은 `파일 수 × 22` 로 셌는데, 그 셈에는 섹션 머리 둘과 **펼친 diff
-            // 줄이 통째로 빠져 있었다.** 그래서 diff 를 펼치면 목록은 화면 몇 배로
-            // 길어지는데 상한은 파일 몇 개 몫 그대로라 끝까지 스크롤이 안 됐다.
-            let (visible_h, content_h) = self.git.col_list_extent;
-            let max_scroll = (content_h - visible_h).max(0.0);
-            let delta_px = lines as f32 * item_h;
-            let next = (self.git.col_scroll - delta_px).clamp(0.0, max_scroll);
-            if (next - self.git.col_scroll).abs() > 0.01 {
-                self.git.col_scroll = next;
                 self.chrome_dirty = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -3024,15 +2794,10 @@ impl App {
             w.request_redraw();
         }
     }
-    /// Insert text at the commit-message cursor (committed Hangul or a typed
-    /// char). Char-indexed; advances the cursor by the inserted char count.
-    pub(crate) fn git_commit_insert(&mut self, text: &str) {
-        crate::lineedit::insert_in(crate::lineedit::line(GIT_COMMIT_FIELD), &mut self.git.commit_msg, &mut self.git.commit_cursor, text);
-    }
     /// 조합기의 주인을 `next` 로 옮긴다. 주인이 실제로 바뀔 때만 일한다.
     ///
     /// 조합기(`self.hangul`)와 preedit 은 App 에 하나뿐인데 이걸 쓰는 입구는
-    /// 터미널·편집기·git 커밋·경로검색·트리검색·새이름·설정
+    /// 터미널·편집기·경로검색·트리검색·새이름·설정
     /// 이다. 문맥이 바뀌어도 조합 상태가 그대로 남아 있어서, 터미널에서 "한" 을
     /// 치다 편집기를 클릭하면 그 "한" 이 **편집기에** 떨어지고(이상하게 쳐짐),
     /// Backspace 는 편집기 글자 대신 그 잔재를 갉아 아무것도 안 지워진다
@@ -3059,8 +2824,6 @@ impl App {
             }
             crate::ImeFocus::Editor(id) => self.md_insert_into(&id, &text),
             crate::ImeFocus::AuxEditor(id) => self.aux_insert_id(id, &text),
-            crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
-            crate::ImeFocus::McpAdd => self.mcp_add_insert(&text),
             crate::ImeFocus::RoomRename(_) => self.room_rename_insert(&text),
             crate::ImeFocus::TreeSearch => self.file_tree_search_insert(&text),
             crate::ImeFocus::TreeNew => self.ft_edit_insert(&text),
@@ -3084,73 +2847,6 @@ impl App {
         self.ime_retarget(crate::ImeFocus::Pane(surface));
     }
 
-    /// Commit-input key entry with Hangul composition, mirroring
-    /// `md_editor_input` for the single-line git commit field. macOS hands jamo
-    /// through `event.text`; feed the shared composer, insert committed
-    /// syllables, keep the preedit in `self.preedit` for the overlay. Non-jamo
-    /// flushes the pending syllable first, then edits.
-    pub(crate) fn git_commit_input(&mut self, event: &KeyEvent) {
-        use winit::keyboard::{Key, NamedKey};
-        if is_modifier_key(event) {
-            return;
-        }
-        self.ime_retarget(crate::ImeFocus::GitCommit);
-        #[cfg(target_os = "macos")]
-        if let Some(t) = event.text.as_ref().filter(|_| !crate::lineedit::Mods::of(self.modifiers).chord()) {
-            if t.chars().count() == 1 {
-                if let Some(c) = t.chars().next() {
-                    if (0x3130..=0x318F).contains(&(c as u32)) {
-                        if let Some(commit) = self.hangul.feed(c) {
-                            self.git_commit_insert(&commit);
-                        }
-                        self.preedit = self.hangul.preedit().unwrap_or_default();
-                        self.in_preedit = !self.preedit.is_empty();
-                        self.chrome_dirty = true;
-                        return;
-                    }
-                }
-            }
-        }
-        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
-            self.preedit = self.hangul.preedit().unwrap_or_default();
-            self.in_preedit = !self.preedit.is_empty();
-            self.chrome_dirty = true;
-            return;
-        }
-        if let Some(flushed) = self.hangul.flush() {
-            self.git_commit_insert(&flushed);
-        }
-        self.preedit.clear();
-        self.in_preedit = false;
-        self.git_commit_key(event);
-    }
-    /// Single-line editing for the commit field. 조작은 `lineedit` 한 벌을 쓴다 —
-    /// 칸마다 커서 산수를 다시 짜면 한글 경계에서 하나씩 어긋난다. Enter 는 커밋을
-    /// 실행하고 Esc 는 포커스를 뗀다(그 둘만 이 칸의 몫). 한글 조합은 이 함수 앞의
-    /// `git_commit_input` 이 이미 흘려보냈다.
-    pub(crate) fn git_commit_key(&mut self, event: &KeyEvent) {
-        let act = crate::lineedit::edit_event(
-            crate::lineedit::line(GIT_COMMIT_FIELD),
-            &mut self.git.commit_msg,
-            &mut self.git.commit_cursor,
-            event,
-            crate::lineedit::Mods::of(self.modifiers),
-        );
-        match act {
-            crate::lineedit::LineEditAction::Submit => {
-                self.run_git_col_action(GitColBtn::Commit);
-                return;
-            }
-            crate::lineedit::LineEditAction::Cancel => {
-                self.git.commit_focused = false;
-                self.preedit.clear();
-                self.in_preedit = false;
-                let _ = self.hangul.flush();
-            }
-            _ => {}
-        }
-        self.chrome_dirty = true;
-    }
     /// 트리 검색칸의 커서 자리에 글자를 넣고 걸린 노드를 다시 모은다.
     pub(crate) fn file_tree_search_insert(&mut self, text: &str) {
         crate::lineedit::insert_in(
@@ -3336,11 +3032,7 @@ impl App {
         if self.shared_key(event) { return; }
         // A full-width panel must not type into the terminal or chat hidden underneath it.
         if self.side_column_covers_workspace() {
-            if self.git.commit_focused {
-                self.git_commit_input(event);
-            } else if self.mcp_col.add.is_some() {
-                self.mcp_add_input(event);
-            } else if matches!(event.logical_key, winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)) {
+            if matches!(event.logical_key, winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)) {
                 self.toggle_git_col();
             }
             if let Some(window) = &self.window { window.request_redraw(); }
@@ -3375,28 +3067,10 @@ impl App {
         if let Some(id) = self.target_surface() {
             self.turn_done_panes.remove(&id);
         }
-        // Git commit field has focus: keystrokes edit the message, not the PTY.
-        // (Click elsewhere blurs it — see the column's mouse handler.)
-        if self.git.commit_focused {
-            self.git_commit_input(event);
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-            return;
-        }
-        // MCP 탭의 추가 칸도 같은 자리에서 가른다 — 열려 있으면 키가 PTY 로 안 간다.
-        if self.mcp_col.add.is_some() {
-            self.mcp_add_input(event);
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-            return;
-        }
         // Cmd+Delete (= Cmd+Backspace) on a selected tree row → trash it.
         // Gated on no text input having focus so it never eats shell editing
         // keys; the selection clears when a terminal pane is clicked.
-        if !self.git.commit_focused
-            && self.file_tree.new.is_none()
+        if self.file_tree.new.is_none()
             && self.file_tree.rename.is_none()
             && !self.file_tree.search_active
         {
@@ -5293,7 +4967,7 @@ mod working_scan_tests {
         let owner = crate::ImeFocus::Pane("%secondary-tab".to_string());
         assert_eq!(owner.terminal_surface(), Some("%secondary-tab"));
         assert_ne!(owner.terminal_surface(), Some("%outer-pane"));
-        assert_eq!(crate::ImeFocus::GitCommit.terminal_surface(), None);
+        assert_eq!(crate::ImeFocus::TreeSearch.terminal_surface(), None);
     }
 
     #[test]

@@ -414,9 +414,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
             theme::with_alpha(theme::border(), 0x88),
         );
     }
-    // git 표시는 **배지 폴러**가 채운 맵을 읽는다(git 컬럼 폴러가 아니라)
-    // — 컬럼 폴러는 그 패널이 열렸을 때만 돌아서, 파일트리 표시가 남의
-    // 패널 개폐에 묶여 버린다. 배지는 모든 pane 의 cwd 로 항상 돈다.
+    // git 표시는 **배지 폴러**가 채운 맵을 읽는다 — 배지는 모든 pane 의 cwd 로
+    // 항상 돌아, 파일트리 표시가 다른 패널의 개폐에 묶이지 않는다.
     // 루프 **밖에서 한 번만** 잠근다: 행마다 잠그면 폴러와 프레임당
     // 수십 번 부딪히고, 복사하면 프레임마다 맵을 통째로 clone 한다.
     let git_badges = f.git_badges.lock().ok();

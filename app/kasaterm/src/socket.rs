@@ -1571,7 +1571,7 @@ impl Backend for PtyBackend {
 
     fn toggle_git_panel(&self) -> Result<()> {
         self.proxy
-            .send_event(UserEvent::SocketToggleGit)
+            .send_event(UserEvent::SocketToggleSideColumn)
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
         Ok(())
     }
@@ -2210,10 +2210,11 @@ impl Backend for PtyBackend {
         Ok(crate::render::pane_identity::device_color_sync_table())
     }
 
+    /// 이 앱에는 Git 열이 없지만, 옛 판 기기의 Git 열은 아직 이 창구로 이 기기 레포를 읽는다.
     fn git_col_view(&self, path: &str, commits: usize) -> Result<serde_json::Value> {
-        let view = crate::handler::fetch_git_col_view(std::path::Path::new(path), None, &[], commits, None)
-            .ok_or_else(|| anyhow::anyhow!("여기는 git 레포가 아니에요"))?;
-        Ok(serde_json::to_value(view)?)
+        let commits = if commits == 0 { 5 } else { commits };
+        kasa_git::git_panel::panel_view(std::path::Path::new(path), None, &[], commits, kasa_git::git::PANEL_READ_TIMEOUT, None)
+            .map_err(|_| anyhow::anyhow!("여기는 git 레포가 아니에요"))
     }
 
     fn prepare_action(&self) -> Result<()> {

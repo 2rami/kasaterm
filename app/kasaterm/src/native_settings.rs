@@ -8147,7 +8147,6 @@ mod tests {
         assert!(mouse.find("self.confirm_close.is_some()").unwrap() < native);
         assert!(mouse.find("self.restore_prompt.is_some()").unwrap() < native);
         assert!(mouse.find("self.account_switch_confirm").unwrap() < native);
-        assert!(mouse.find("self.git.commit_modal_open").unwrap() < native);
     }
 
     #[test]

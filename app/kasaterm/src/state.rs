@@ -209,108 +209,14 @@ pub(crate) enum StatusbarHit {
     ScheduleDelete(String),
 }
 
-/// Right-hand git column + commit modal + path/branch dropdowns (the in-window
-/// replacement for the old floating webview git panel). `col_*` are the column
-/// (visibility, width, scroll, per-frame file-row/button hit rects, the parsed
-/// diff cache, and the off-thread `git status` snapshot + its cwd). `commit_*`
-/// back the VSCode-style message box + commit modal. `path_*`/`branch_*` are the
-/// header dropdowns; `op` labels the in-flight push/pull for the spinner.
+/// 오른쪽 열(Info)의 여닫기·폭·확대 단추. 이름은 이 열이 Git 열이던 때의 것이다 — 저장 값
+/// (`git_col_visible`·`git_col_w`)과 맞물려 그대로 둔다.
 #[derive(Default)]
 pub(crate) struct GitState {
-    pub(crate) col_displayed_target: Option<(std::path::PathBuf, Option<(String, String)>, u64)>,
-    pub(crate) col_context: std::sync::Arc<std::sync::Mutex<crate::git_panel::Context>>,
-    pub(crate) col_wake: std::sync::Arc<crate::git_panel::Wake>,
     pub(crate) col_visible: bool,
     pub(crate) col_w_logical: f32,
     pub(crate) col_resize: Option<(f32, f32)>,
-    pub(crate) col_scroll: f32,
-    /// 직전 프레임의 변경 목록 기하 — `(보이는 높이, 내용 높이)`, LOGICAL px.
-    /// 휠이 스크롤 상한을 여기서 읽는다.
-    ///
-    /// 그리기 쪽이 써 주는 이유: 휠은 이 값을 자기 힘으로 알 수 없다. 목록 높이는
-    /// 파일 수만이 아니라 섹션 머리 두 개와 **펼친 diff 줄 수**로 정해지는데, 그건
-    /// 캐시를 뒤져야 나온다. 예전엔 휠이 `파일 수 × 22` 로 어림했고 그래서 diff 를
-    /// 펼치면 끝까지 스크롤이 안 됐다 — 목록은 화면 몇 배로 길어졌는데 상한은
-    /// 파일 몇 개 몫 그대로였다. 보이는 높이도 `헤더 68px · 버튼 44px` 로 박혀 있어
-    /// 최근 커밋 미리보기가 자리를 얼마나 먹는지를 아예 못 봤다.
-    pub(crate) col_list_extent: (f32, f32),
-    pub(crate) col_file_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
-    pub(crate) col_btn_rects: Vec<(GitColBtn, (f32, f32, f32, f32))>,
-    pub(crate) col_expanded: std::collections::HashSet<(bool, String)>,
-    pub(crate) col_diff_cache: HashMap<(bool, String), Vec<kasa_git::git::DiffLine>>,
-    /// 최근 커밋 더블클릭 인라인 펼침(GitLens 그래프식): 펼친 커밋 hash(하나만),
-    /// 그 변경 파일 목록 캐시, 다시 펼친 파일 diff 집합/캐시, 행 hit, 더블클릭 감지.
-    pub(crate) col_commit_expanded: Option<String>,
-    pub(crate) col_commit_files_cache: HashMap<String, Vec<(String, u32, u32)>>,
-    pub(crate) col_commit_file_expanded: std::collections::HashSet<(String, String)>,
-    pub(crate) col_commit_diff_cache: HashMap<(String, String), Vec<kasa_git::git::DiffLine>>,
-    pub(crate) col_commit_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) graph_scroll: f32,
-    pub(crate) graph_extent: (f32, f32),
-    pub(crate) graph_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) col_commit_file_rects: Vec<(String, String, (f32, f32, f32, f32))>,
-    pub(crate) last_commit_click: Option<(std::time::Instant, String)>,
-    /// 「최근 커밋」 구역에 사용자가 잡아 준 높이(LOGICAL px). `None` 이면 가져온
-    /// 커밋 수에 맞춘 자동. 구역 머리의 가로선을 위아래로 끌면 잡힌다.
-    pub(crate) col_commits_h: Option<f32>,
-    /// 그 가로선 드래그 중 — `(드래그 시작 커서 y, 시작 높이)`. 시작 높이를 함께
-    /// 쥐는 건 폭 드래그(`col_resize`)와 같은 이유다: 매 이동마다 델타를 누적하면
-    /// clamp 에 걸린 뒤 커서를 되돌려도 값이 안 따라온다.
-    pub(crate) col_commits_resize: Option<(f32, f32)>,
-    /// 그 가로선의 hit rect(직전 프레임). 렌더가 써 주고 마우스가 읽는다 — 자리가
-    /// 변경 목록 길이·펼침 상태에 따라 매 프레임 달라져 handler 가 자기 힘으로는
-    /// 못 구한다.
-    pub(crate) col_commits_grip: Option<(f32, f32, f32, f32)>,
-    /// 폴러에게 건네는 「커밋 몇 개까지 가져와라」. 렌더가 구역 높이에서 계산해
-    /// 쓰고 폴러 스레드가 읽는다. 0 은 「아직 안 정해짐」이라 폴러가 기본값을 쓴다.
-    pub(crate) col_commit_want: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) col_expand_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) commit_btn_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) commit_caret_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) commit_menu_open: bool,
-    pub(crate) commit_menu_rects: Vec<(GitCommitAction, (f32, f32, f32, f32))>,
-    pub(crate) commit_modal_open: bool,
-    pub(crate) commit_modal_include_unstaged: bool,
-    pub(crate) commit_modal_rects: Vec<(GitModalBtn, (f32, f32, f32, f32))>,
-    pub(crate) col_stage_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
-    pub(crate) col_discard_rects: Vec<(String, bool, (f32, f32, f32, f32))>,
-    pub(crate) col_open_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) commit_msg: String,
-    pub(crate) commit_cursor: usize,
-    pub(crate) commit_focused: bool,
-    pub(crate) commit_input_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) col_data: std::sync::Arc<std::sync::Mutex<GitColView>>,
-    /// 그리기가 보는 `col_data` 사본. 폴러가 내용을 바꿨을 때만 새로 뜬다.
-    pub(crate) col_frame: Option<std::sync::Arc<GitColView>>,
-    /// 지금 패널이 보는 레포가 다른 기기 것이면 (기기 이름, base). 일꾼이 그쪽 창구로 읽고,
-    /// 배경은 기기색을 문다. 고치는 단추는 막는다(여기서 git 을 돌리면 남의 경로다).
-    pub(crate) col_remote: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
-    pub(crate) op: Option<&'static str>,
-    pub(crate) col_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
-    pub(crate) col_pinned_cwd: Option<std::path::PathBuf>,
-    /// 부모 폴더 칸마다 사람이 고른 하위 레포(칸 id → 레포). 없으면 최근에 만진 레포를 따라간다.
-    pub(crate) col_repo_choice: HashMap<String, std::path::PathBuf>,
-    /// 머리 메뉴의 하위 레포 줄 — 누르면 그 칸의 레포로 고른다.
-    pub(crate) path_menu_repo_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
-    pub(crate) path_menu_open: bool,
-    pub(crate) branch_menu_open: bool,
-    pub(crate) branch_page: usize,
-    pub(crate) branch_page_rects: Vec<(bool, (f32, f32, f32, f32))>,
-    pub(crate) path_hdr_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) branch_hdr_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) path_menu_rects: Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
-}
-
-/// 폭·닫기·확대를 공유해야 탭을 고를 때 PTY 크기가 흔들리지 않는다.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum SideTab {
-    #[default]
-    Git,
-    Info,
-    /// 과거 세션 기록(claude·codex·agy)을 골라 그 자리에서 잇는다.
-    Sessions,
-    /// 하네스별 MCP 서버와 스킬 — 무엇이 붙어 있고 무엇이 꺼져 있나.
-    Mcp,
 }
 
 /// Info 탭 「다른 기계」 절의 재료 — 조립은 `refresh_machines_col`. 절에는 기계마다
@@ -552,170 +458,6 @@ pub(crate) enum MachinesColBtn {
     },
 }
 
-/// 「+」로 여는 URL 서버 추가 칸. 이름·주소 두 줄뿐이다.
-#[derive(Default)]
-pub(crate) struct McpAddForm {
-    /// 어느 하네스에 더하나 — `"claude"` | `"codex"`. 누른 섹션이 정한다.
-    pub(crate) harness: &'static str,
-    pub(crate) name: String,
-    pub(crate) name_cursor: usize,
-    pub(crate) url: String,
-    pub(crate) url_cursor: usize,
-    /// 참이면 주소 칸에 커서가 있다. Tab 으로 오간다.
-    pub(crate) on_url: bool,
-    /// 마지막 시도가 남긴 한 줄. 칸 아래에 그대로 뜬다 — 토스트로 띄우면 칸을
-    /// 보고 있는 눈에서 멀어지고, 다음 토스트에 밀려 사라진다.
-    pub(crate) err: Option<String>,
-    pub(crate) name_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) url_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) ok_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) cancel_rect: Option<(f32, f32, f32, f32)>,
-}
-
-/// 우측 칼럼의 「MCP·Skill」 탭 상태.
-///
-/// 설정 두 벌(`~/.claude.json` json · `~/.codex/config.toml` toml)을 파싱하고 스킬
-/// 폴더를 훑는 일이라 수집을 워커로 뺀다 — `SessionsColState` 와 같은 얼개다.
-pub(crate) struct McpColState {
-    pub(crate) snap: std::sync::Arc<std::sync::Mutex<Vec<crate::mcpcol::McpRow>>>,
-    pub(crate) view: Vec<crate::mcpcol::McpRow>,
-    pub(crate) rev: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) seen_rev: u64,
-    pub(crate) busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) last_refresh: Option<std::time::Instant>,
-    /// 다음 pump 에서 주기를 무시하고 다시 읽는다. 우리가 설정을 고친 직후에 세운다 —
-    /// 방금 누른 토글이 6초 뒤에 반영되면 눌린 건지 아닌지를 알 수 없다.
-    pub(crate) stale: bool,
-    /// 워커가 끝내 놓고 가는 한 줄. GUI 스레드에서만 토스트를 띄울 수 있어서,
-    /// 지우기처럼 CLI 를 부르는 일은 결과를 여기 두고 다음 pump 가 집어 간다.
-    pub(crate) notice: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// 지우기를 한 번 눌러 확인을 기다리는 행(`view` 인덱스)과 그 시각. 삭제는
-    /// 되돌릴 수 없어 두 번 누르게 한다 — 다이얼로그를 띄우면 목록에서 눈이 떠난다.
-    pub(crate) confirm_delete: Option<(usize, std::time::Instant)>,
-    /// 이 창이 보고 있는 폴더. claude 쪽은 꺼짐도 `.mcp.json` 도 폴더마다 달라서,
-    /// 여기가 바뀌면 주기를 기다리지 않고 다시 읽는다.
-    pub(crate) cwd: Option<std::path::PathBuf>,
-    /// URL 서버를 더하는 칸. 열려 있으면 키가 PTY 대신 이리로 온다.
-    ///
-    /// URL 만 받는 이유는 stdio 서버가 커맨드·인자·환경변수를 다 받아야 해서다. 그
-    /// 환경변수 자리엔 대개 API 키가 들어가는데, 그걸 여기서 받으면 우리가 토큰을
-    /// 평문으로 설정 파일에 적는 셈이 된다 — 2026-08-11 확정("URL 서버 추가까지").
-    pub(crate) add: Option<McpAddForm>,
-    pub(crate) scroll: f32,
-    /// 매 paint 재생성되는 hit target. 행은 `view` 인덱스로 되짚는다.
-    pub(crate) row_rects: Vec<(usize, (f32, f32, f32, f32))>,
-    /// 행별 지우기 버튼. 행 hit 보다 먼저 본다 — 겹쳐 있다.
-    pub(crate) del_rects: Vec<(usize, (f32, f32, f32, f32))>,
-    /// 섹션 머리의 더하기 버튼과 그게 여는 하네스.
-    pub(crate) add_rects: Vec<(&'static str, (f32, f32, f32, f32))>,
-    /// Fresh groups start folded without undoing the user's choices on later refreshes.
-    pub(crate) collapsed: std::collections::HashSet<String>,
-    pub(crate) seen_groups: std::collections::HashSet<String>,
-    /// 섹션·종류 머리의 클릭 자리와 그 접힘 키.
-    pub(crate) head_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) body_rect: (f32, f32, f32, f32),
-    pub(crate) content_h: f32,
-}
-
-impl Default for McpColState {
-    fn default() -> Self {
-        Self {
-            snap: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            view: Vec::new(),
-            rev: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            seen_rev: 0,
-            busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_refresh: None,
-            stale: false,
-            notice: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            confirm_delete: None,
-            cwd: None,
-            add: None,
-            scroll: 0.0,
-            row_rects: Vec::new(),
-            del_rects: Vec::new(),
-            add_rects: Vec::new(),
-            collapsed: Default::default(),
-            seen_groups: Default::default(),
-            head_rects: Vec::new(),
-            refresh_rect: None,
-            body_rect: (0.0, 0.0, 0.0, 0.0),
-            content_h: 0.0,
-        }
-    }
-}
-
-/// 우측 칼럼의 「세션 기록」 탭 — 과거 대화를 골라 잇는 레일.
-///
-/// 살아 있는 tmux 세션 목록(`/sessions` 패널)과 다르다. 이쪽은 각 하네스가
-/// 디스크에 남긴 기록이라 목록을 만들려면 저장소를 통째로 stat 해야 하고,
-/// 그래서 `snap` 을 워커 스레드가 채운다(Info 탭이 `ps`/`lsof` 를 GUI 스레드
-/// 밖으로 뺀 것과 같은 이유). 렌더는 `rev` 가 올라갔을 때만 `view` 로 옮겨
-/// 담는다 — 매 프레임 Vec<String> 을 clone 하면 목록 길이만큼 할당이 돈다.
-pub(crate) struct SessionsColState {
-    pub(crate) snap: std::sync::Arc<std::sync::Mutex<Vec<kasa_socket::backend::RecentSession>>>,
-    pub(crate) view: Vec<kasa_socket::backend::RecentSession>,
-    pub(crate) rev: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) seen_rev: u64,
-    pub(crate) busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) last_refresh: Option<std::time::Instant>,
-    /// `false` = 이 방(활성 pane 의 cwd) 세션만, `true` = 하네스 전부.
-    /// 기본이 방인 건 목록을 여는 대부분의 이유가 "방금 하던 그거"라서다.
-    pub(crate) scope_all: bool,
-    /// 지금 목록이 어느 cwd 의 것인지 — pane 을 옮겨 cwd 가 달라지면 재수집을
-    /// 트리거한다(`scope_all` 일 땐 무의미하므로 비교에서 뺀다).
-    pub(crate) cwd: Option<std::path::PathBuf>,
-    pub(crate) scroll: f32,
-    /// 직전 프레임의 본문 영역 — 스크롤 clamp 가 실제 그려진 높이를 알아야 한다.
-    pub(crate) body_rect: (f32, f32, f32, f32),
-    pub(crate) content_h: f32,
-    /// 닫힌 pane 줄의 hit rect `(스택 인덱스, rect)` — 누르면 그 줄만 되살린다.
-    /// 매 paint 재생성(다른 hit target 과 같은 규칙).
-    pub(crate) closed_rects: Vec<(usize, (f32, f32, f32, f32))>,
-    pub(crate) retained_mode: bool,
-    pub(crate) filter: Option<String>,
-    pub(crate) selected: Option<(String, String)>,
-    pub(crate) selected_closed: Option<String>,
-    pub(crate) confirm_discard: Option<String>,
-    pub(crate) actions: Vec<(crate::sesscol::Action, (f32, f32, f32, f32))>,
-    pub(crate) keyboard_focus: Option<crate::sesscol::Action>,
-    pub(crate) generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) loaded_scope: Option<bool>,
-    pub(crate) scroll_track: Option<(f32, f32, f32, f32)>,
-    pub(crate) scroll_drag: Option<f32>,
-}
-
-impl Default for SessionsColState {
-    fn default() -> Self {
-        Self {
-            snap: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            view: Vec::new(),
-            rev: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            seen_rev: 0,
-            busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_refresh: None,
-            scope_all: false,
-            cwd: None,
-            scroll: 0.0,
-            body_rect: (0.0, 0.0, 0.0, 0.0),
-            content_h: 0.0,
-            closed_rects: Vec::new(),
-            retained_mode: false,
-            filter: None,
-            selected: None,
-            selected_closed: None,
-            confirm_discard: None,
-            actions: Vec::new(),
-            keyboard_focus: None,
-            generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            loaded_scope: None,
-            scroll_track: None,
-            scroll_drag: None,
-        }
-    }
-}
-
 /// Info 패널의 접히는 섹션. 접힘 상태는 pane 을 옮겨도 유지된다 — 포트만 보려고
 /// 프로세스를 접어둔 사람이 탭을 옮길 때마다 다시 접을 이유가 없다.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -801,7 +543,6 @@ pub(crate) struct InfoState {
     pub(crate) selected_pid: String,
     pub(crate) selected_session_id: String,
     pub(crate) selected_harness: String,
-    pub(crate) tab: SideTab,
     pub(crate) navigation: crate::sidebar_navigation::NavigationState,
     /// 이사 탭 본문 상태. App 필드가 아니라 여기 있는 건 병렬 작업 규칙 때문이다
     /// (struct App 정의는 충돌 핫스팟 — 탭 상태는 탭 선택과 같은 집에 있어도
@@ -859,9 +600,8 @@ pub(crate) struct InfoState {
     /// 그룹 머리 직전 클릭 `(시각, 열쇠)` — 더블클릭(=그 학생으로 포커스) 판정용.
     /// 한 번 클릭은 접기라, 두 번째 클릭이 접기를 되돌리고 포커스까지 옮긴다.
     pub(crate) last_group_click: Option<(std::time::Instant, String)>,
-    /// 매 paint 재생성되는 hit target. 탭 머리 / 포트 행(→ 브라우저로 열기) /
+    /// 매 paint 재생성되는 hit target. 포트 행(→ 브라우저로 열기) /
     /// 프로세스 행(우클릭 대상) / 종료 버튼 / 섹션 머리 / 디렉터리 버튼.
-    pub(crate) tab_rects: Vec<(SideTab, (f32, f32, f32, f32))>,
     /// `(포트, 소유 pid, rect)` — 종료가 붙으면서 pid 없이는 행을 다룰 수 없다.
     /// pane 그룹 머리 — 클릭하면 그 그룹만 접힌다.
     pub(crate) group_rects: Vec<(String, (f32, f32, f32, f32))>,
@@ -905,7 +645,6 @@ impl Default for InfoState {
             selected_pid: String::new(),
             selected_session_id: String::new(),
             selected_harness: String::new(),
-            tab: SideTab::Git,
             navigation: crate::sidebar_navigation::NavigationState::default(),
             machines_col: MachinesColState::default(),
             snap: std::sync::Arc::new(std::sync::Mutex::new(crate::info::InfoSnap::default())),
@@ -929,7 +668,6 @@ impl Default for InfoState {
             group_collapsed: std::collections::HashSet::new(),
             pane_expanded: std::collections::HashSet::new(),
             last_group_click: None,
-            tab_rects: Vec::new(),
             group_rects: Vec::new(),
             tip_rects: Vec::new(),
             proc_rects: Vec::new(),
@@ -1241,11 +979,5 @@ impl Default for CollabState {
             hub,
             unread: 0,
         }
-    }
-}
-
-impl InfoState {
-    pub(crate) fn runtime_page(&self) -> bool {
-        self.tab == SideTab::Info
     }
 }

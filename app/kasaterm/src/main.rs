@@ -98,7 +98,6 @@ mod weather;
 /// 다른 모듈이라 루트에서 재수출한다(`use super::*` 하나로 닿게).
 pub(crate) use chrome::Density;
 mod gitdiff;
-mod git_panel;
 mod info;
 mod info_focus;
 mod info_outputs;
@@ -139,10 +138,8 @@ mod mirror_sync;
 mod own_room;
 mod mirror_layout;
 mod mirror_diff;
-mod mcpcol;
 mod nl_command;
 mod proc;
-mod sesscol;
 mod state;
 mod statusbar;
 mod statusbar_config;
@@ -425,101 +422,6 @@ fn hover_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32) 
     round_rect(g, x, y, w, h, r, theme::surface_hover());
 }
 
-/// 하위 레포 고르기 메뉴에 싣는 줄 수 — 그 아래는 덜 최근이라 고를 일이 드물다.
-const GIT_NESTED_MENU_ROWS: usize = 8;
-
-/// Paint the git-column header dropdowns (repo path picker + branch switcher)
-/// and fill their click rects. A free fn, not a method, so it can run inside
-/// the `&mut self.gpu` block (which can't re-borrow `&self`): the caller hands
-/// it `g` plus the disjoint rect Vecs. Drawn last so it overlays the list.
-#[allow(clippy::too_many_arguments)]
-fn git_paint_dropdowns(
-    g: &mut gpu::GpuRenderer,
-    col_x: f32,
-    col_w: f32,
-    _title_h: f32,
-    path_hdr: Option<(f32, f32, f32, f32)>,
-    path_open: bool,
-    repos: &[std::path::PathBuf],
-    pinned: Option<&std::path::Path>,
-    path_rects: &mut Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
-    nested: &[std::path::PathBuf],
-    chosen: Option<&std::path::Path>,
-    nested_rects: &mut Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
-) {
-    let item_h = 28.0_f32;
-    let pad = 6.0_f32;
-    let px = col_x + 6.0;
-    let pw = (col_w - 12.0).max(0.0);
-    // A raised menu panel with a 1px border so it reads above the list.
-    let panel = |g: &mut gpu::GpuRenderer, y: f32, h: f32| {
-        round_rect(
-            g,
-            px - 1.0,
-            y - 1.0,
-            pw + 2.0,
-            h + 2.0,
-            theme::radius_md(),
-            theme::border(),
-        );
-        round_rect(g, px, y, pw, h, theme::radius_md(), theme::surface_active());
-    };
-    let row = |g: &mut gpu::GpuRenderer, iy: f32, label: &str, on: bool| {
-        if on {
-            round_rect(
-                g,
-                px + 4.0,
-                iy + 1.0,
-                pw - 8.0,
-                item_h - 2.0,
-                theme::radius_sm(),
-                theme::with_alpha(theme::accent(), 0x40),
-            );
-        }
-        let col = if on { theme::text() } else { theme::text_dim() };
-        g.draw_text(
-            px + 12.0,
-            iy + (item_h - 12.0) / 2.0,
-            label,
-            gpu::DrawOpts {
-                font_size: 12.0,
-                color: col,
-                bold: false,
-                italic: false,
-            },
-        );
-    };
-    if path_open {
-        if let Some((_hx, hy, _hw, hh)) = path_hdr {
-            // 부모 폴더 칸의 하위 레포 — 최근에 만진 순, 맨 위가 자동으로 보이는 것.
-            let nested = &nested[..nested.len().min(GIT_NESTED_MENU_ROWS)];
-            let n = repos.len() + nested.len() + 1; // +1 for the "자동 추적" toggle
-            let menu_h = n as f32 * item_h + pad * 2.0;
-            let my = hy + hh + 2.0;
-            panel(g, my, menu_h);
-            let mut iy = my + pad;
-            // "자동 추적" — selected when nothing is pinned or chosen.
-            row(g, iy, "자동 추적 (활성 pane)", pinned.is_none() && chosen.is_none());
-            path_rects.push((None, (px, iy, pw, item_h)));
-            iy += item_h;
-            for (i, r) in nested.iter().enumerate() {
-                let name = r.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-                let label = if i == 0 { format!("› {name}  ·  최근") } else { format!("› {name}") };
-                row(g, iy, &label, pinned.is_none() && chosen == Some(r.as_path()));
-                nested_rects.push((r.clone(), (px, iy, pw, item_h)));
-                iy += item_h;
-            }
-            for r in repos {
-                let name = r.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-                let sel = pinned == Some(r.as_path());
-                row(g, iy, name, sel);
-                path_rects.push((Some(r.clone()), (px, iy, pw, item_h)));
-                iy += item_h;
-            }
-        }
-    }
-}
-
 /// Lucide icon name for a sidebar tab's chip, chosen from the window label.
 /// 에이전트 pane 은 sparkle, markdown 은 문서, 나머지는 터미널 글리프.
 /// codex 도 학생 대접이라 같은 sparkle 을 쓴다(사용자 2026-08-05) — 종류를 아이콘으로
@@ -760,7 +662,7 @@ const SIDEBAR_TRAY_H: f32 = 44.0;
 const FILE_TREE_W: f32 = 220.0;
 const FILE_TREE_W_MIN: f32 = 140.0;
 const FILE_TREE_W_MAX: f32 = 480.0;
-/// Right-hand git column, mirroring the file-tree column on the left:
+/// Right column (Info), mirroring the file-tree column on the left:
 /// `effective_right_chrome_w()` folds its width in so the cell grid reflows
 /// and panes never overlap it.
 const GIT_COL_W: f32 = 420.0;
@@ -792,16 +694,6 @@ const SIDEBAR_DENSE_FULL: f32 = 168.0;
 const SIDEBAR_DENSE_COMPACT: f32 = 124.0;
 const FILE_TREE_DENSE_FULL: f32 = 186.0;
 const FILE_TREE_DENSE_COMPACT: f32 = 150.0;
-const GIT_DENSE_FULL: f32 = 340.0;
-const GIT_DENSE_COMPACT: f32 = 248.0;
-/// 칼럼 발치 「최근 커밋」 구역이 손대기 전에 보여 주는 줄 수. 사용자가 그 구역의
-/// 경계선을 끌면 높이가 잡히고, 그때부터는 높이에 들어가는 만큼 가져온다.
-const GIT_RECENT_COMMITS_DEFAULT: usize = 5;
-/// 그 구역의 최소·최대 높이(LOGICAL px). 최소는 머리 24px + 한 줄 20px 이라 끝까지
-/// 줄여도 커밋 하나는 남는다 — 0 까지 줄면 경계선도 함께 사라져 되돌릴 손잡이가
-/// 없어진다. 최대는 창 크기에 따라 다시 좁혀지므로(`commits_cap`) 여기선 헐겁게.
-const GIT_COMMITS_H_MIN: f32 = 44.0;
-const GIT_COMMITS_H_MAX: f32 = 4000.0;
 const SCROLLBACK_MAX: usize = 5000;
 /// Min ms between wheel emits. Default 0 = pass every macOS scroll event
 /// straight through to `pty.scroll`; the try_send-based reader pipeline
@@ -3869,14 +3761,9 @@ enum UserEvent {
     /// Windows 세션이 끝나 간다(`session_end.rs`) — 칸이 살아 있을 때 저장하고 `Sender` 로 끝났다고 알린다.
     #[cfg(windows)]
     SessionEnding(std::sync::mpsc::Sender<()>),
-    /// A background git op (push/pull/commit) finished — clears the panel's
-    /// spinner. Carries nothing: only one git op runs at a time.
-    GitOpDone,
     /// 자연어 명령 요청 하나가 끝났다(`nl_command.rs`). `seq` 가 지금 기다리는 것과
     /// 다르면 그 사이 새 요청이 나간 것이라 버린다.
     NlCommand { pane: String, seq: u64, result: Result<String, String> },
-    /// 다른 기기 레포에 시킨 깃 동작이 실패했다 — 사유를 토스트로.
-    GitOpFailed(String),
     /// Local cmux socket backend → GUI delegation. The socket server runs on
     /// its own thread and can't touch `self.pty` (not Arc<Mutex>), so it routes
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
@@ -4265,9 +4152,9 @@ enum UserEvent {
     /// claude 가 [Image] 칩으로 첨부하게 한다(터미널 DroppedFile 과 같은 경로). `(surface, bytes)`.
     SocketPasteImage(String, Vec<u8>, Option<std::sync::mpsc::Sender<Result<(), String>>>),
     ImagePasteDone(Result<(), String>),
-    /// `POST /git-panel` — 아로나 타이틀바 버튼 → 터미널 GUI 의 git 소스컨트롤 패널 열기.
-    /// 메인 터미널 창을 띄우고(숨겨져 있으면) git 컬럼을 토글한다(사용자: 그 버튼=소스컨트롤).
-    SocketToggleGit,
+    /// `POST /git-panel` — 아로나 타이틀바 버튼. 창구 이름은 옛 Git 열 때의 것이고, 지금은
+    /// 메인 창을 띄우고 오른쪽 열(Info)을 여닫는다.
+    SocketToggleSideColumn,
     /// Show/hide the main terminal window, delegated from the socket thread
     /// (`POST /terminal-reveal` — the arona classroom's red-pill button).
     /// `(show, focus_pane)`: a reveal may also focus a specific pane so the
@@ -4486,70 +4373,6 @@ fn resets_in_label_at(resets_at: Option<u64>, now: u64) -> Option<String> {
     Some(remaining_duration_label(left))
 }
 
-/// Parsed `git status` snapshot for the right-hand git column. The background
-/// poller fills it from `kasa_git::git::git_status` (off the main thread);
-/// the render reads it. Kept as a flat, render-ready struct so the gpu block
-/// (which can't re-borrow `&self` to call helpers) paints straight from it.
-#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-struct GitColView {
-    #[serde(skip)]
-    generation: u64,
-    #[serde(skip)]
-    loading: bool,
-    #[serde(skip)]
-    issue: Option<String>,
-    /// 보이는 것이 마지막으로 잘 읽은 열이고 새로 읽는 중이거나 방금 읽기가 실패했다.
-    #[serde(skip)]
-    stale: bool,
-    #[serde(default)]
-    repo_root: Option<std::path::PathBuf>,
-    #[serde(default)]
-    branch_list: Vec<kasa_git::git::GitBranch>,
-    #[serde(default)]
-    detached: bool,
-    #[serde(default)]
-    unborn: bool,
-    #[serde(default)]
-    head_oid: Option<String>,
-    #[serde(default)]
-    remote: Option<(String, String)>,
-    /// cwd this snapshot was computed for — so a stale repo's rows aren't
-    /// shown after a pane switch until the poller catches the new cwd.
-    cwd: Option<std::path::PathBuf>,
-    /// `git_status` found no repo here (home / arbitrary dir): render a soft
-    /// notice instead of a branch + file list.
-    no_repo: bool,
-    branch: String,
-    ahead: u32,
-    behind: u32,
-    insertions: u32,
-    deletions: u32,
-    clean: bool,
-    /// Index (staged) changes — VSCode's "Staged Changes". `(marker, path)`
-    /// where marker is `A`/`M`/`D`. Each row's - button unstages it.
-    staged: Vec<(char, String)>,
-    /// Worktree changes not yet staged — VSCode's "Changes". `(marker, path)`
-    /// where marker is `M` modified · `?` untracked. Each row's + button
-    /// stages it. A partially-staged file appears in BOTH lists.
-    unstaged: Vec<(char, String)>,
-    /// Local branch names for the switcher dropdown (current one is `branch`).
-    branches: Vec<String>,
-    /// Per-file `(insertions, deletions)` for the row's `+N -M` count, keyed by
-    /// path. Filled from `git diff --numstat` (+ `--cached`).
-    numstat: HashMap<String, (u32, u32)>,
-    /// Most recent commits `(short_hash, subject)` for the panel's preview list.
-    recent_commits: Vec<(String, String)>,
-    #[serde(default)]
-    commit_graph: Vec<kasa_git::git::GitGraphCommit>,
-    #[serde(default)]
-    graph_supported: bool,
-    #[serde(default)]
-    graph_truncated: bool,
-    /// 칸 폴더가 여러 저장소를 담은 부모일 때 그 아래 저장소들(최근에 만진 순). 보이는 것은 `repo_root`.
-    #[serde(default)]
-    repos: Vec<std::path::PathBuf>,
-}
-
 /// 파일트리 우클릭 컨텍스트 메뉴 항목. `NewFile`/`NewFolder`/`Rename` 은 인라인
 /// 입력행을 열고, `CopyPath` 는 절대경로를 클립보드로, `Reveal` 은 OS 파일매니저
 /// (Finder/탐색기)에서 보여주고, `Delete` 는 선택 전체를 휴지통으로 보낸다.
@@ -4613,10 +4436,6 @@ pub(crate) enum ImeFocus {
     Editor(String),
     /// Raw editor in a detached document window.
     AuxEditor(WindowId),
-    GitCommit,
-    /// MCP 탭의 URL 서버 추가 칸(이름·주소 두 칸을 한 문맥으로 본다 — 조합 중에
-    /// Tab 으로 칸을 옮기면 그 음절은 옮기기 전 칸에 확정되는 것이 맞다).
-    McpAdd,
     /// 좌측 사이드바 방 이름 인라인 편집(윈도우 인덱스).
     RoomRename(usize),
     TreeSearch,
@@ -4639,39 +4458,6 @@ impl ImeFocus {
             _ => None,
         }
     }
-}
-
-/// Action buttons at the foot of the git column. `Commit` hands the commit to
-/// the active claude pane; `Pull`/`Push` sync the current branch with its
-/// upstream. All shell out through `kasa_git::git` on a worker thread so the UI
-/// never blocks. (전체 stage 버튼은 cursor 개조 때 사라졌다 — 파일 행마다
-/// 개별 stage 하는 모델로 바뀌어서다.)
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GitColBtn {
-    Commit,
-    Pull,
-    Push,
-}
-
-/// Items in the Commit-button split dropdown (cursor-style): plain commit,
-/// commit + push, or open a PR. Wired to `git_commit_menu_rects`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GitCommitAction {
-    Commit,
-    Push,
-    Pull,
-    CreatePr,
-}
-
-/// Clickable targets inside the Commit modal (screenshot #5).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GitModalBtn {
-    Close,
-    IncludeUnstaged,
-    Commit,
-    CommitAndPush,
-    Cancel,
-    Confirm,
 }
 
 /// Left-nav category in the settings screen (Warp-style: list on the left,
@@ -5262,10 +5048,6 @@ struct App {
         String,
         std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
     )>,
-    /// Headless git-panel demo `(deadline, action)` from KASATERM_AUTOGIT —
-    /// "diff" expands the first changed file's inline diff, "modal" opens the
-    /// commit modal, so those states can be self-captured without clicking.
-    pending_autogit: Option<(std::time::Instant, String)>,
     /// Queued split directions driven by KASATERM_AUTOSPLIT — headless
     /// repro for the multi-pane render path. Empty in normal use.
     autosplit_plan: Vec<kasa_pty::SplitDir>,
@@ -5917,20 +5699,11 @@ struct App {
     /// draw a Warp-style cwd/branch/diff bar on plain (non-claude) terminal
     /// tiles, which carry no board row to read cwd from. CLAUDE.md 병렬 규칙.
     pane_status_pub: std::sync::Arc<std::sync::Mutex<HashMap<String, PaneStatus>>>,
-    /// Right-hand git column + commit modal + path/branch dropdowns, grouped
-    /// into a sub-struct (state.rs) so git-UI work touches one file, not this
-    /// App definition — CLAUDE.md 병렬 규칙. (badge poller `git_poll_cwds` and
-    /// the file-tree `git_ignore_*` stay separate — different domains.)
+    /// 오른쪽 열의 여닫기·폭. 이름은 그 열이 Git 열이던 때의 것이고, 저장 값(`git_col_*`)과
+    /// 맞물려 있어 그대로 둔다.
     git: state::GitState,
-    /// 우측 칼럼의 Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. 칼럼
-    /// 폭/닫기는 `git` 과 공유하고 본문과 갱신 스레드만 여기 있다(state.rs).
+    /// 오른쪽 열의 본문(Info). 열의 여닫기·폭은 `git` 이 쥔다.
     info: state::InfoState,
-    /// 우측 칼럼의 Sessions 탭 — 과거 세션 기록(claude·codex·agy)을 골라 잇는다.
-    /// `git`/`info` 와 칼럼 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
-    sessions_col: state::SessionsColState,
-    /// 우측 칼럼의 MCP·Skill 탭 — 하네스별로 무엇이 붙어 있나. 위 둘과 칼럼
-    /// 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
-    mcp_col: state::McpColState,
     design_study: Option<design_study::State>,
     /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) + the
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
@@ -6158,16 +5931,13 @@ struct App {
     /// 모든 창의 학생 동작·상태 효과가 같은 시간축을 쓰게 한다.
     version_anim_start: Instant,
     /// macOS menu bar (muda). Held here because the menu must outlive the
-    /// app; `git_menu_item` is matched against incoming MenuEvent ids to
-    /// toggle the git panel from the menu. 짓고 읽는 곳이 전부 cfg(macos) 라
+    /// app; `side_menu_item` is matched against incoming MenuEvent ids to
+    /// toggle the right column from the menu. 짓고 읽는 곳이 전부 cfg(macos) 라
     /// 다른 플랫폼에선 자리만 차지한다 — 필드째 접으면 생성자까지 갈라져야 해서
     /// 경고만 끈다.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     menu: Option<muda::Menu>,
-    git_menu_item: Option<muda::MenuItem>,
-    /// "세션 패널" menu item id, matched against MenuEvents to toggle the
-    /// session panel.
-    session_menu_item: Option<muda::MenuItem>,
+    side_menu_item: Option<muda::MenuItem>,
     /// 편집 메뉴 복사/붙여넣기 — 네이티브 PredefinedMenuItem 은 Cmd+C/Cmd+V
     /// keyDown 을 가로채 터미널까지 안 내려보낸다(먹통). 커스텀 항목으로 만들어
     /// MenuEvent id 로 매칭, webview 우선 위임 후 폴백으로 직접 클립보드 처리.
@@ -6306,7 +6076,6 @@ impl App {
             autoquit_at: None,
             pending_capture: Vec::new(),
             pending_capture_reply: Vec::new(),
-            pending_autogit: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,
             autoopen_path: None,
@@ -6507,47 +6276,13 @@ impl App {
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or_else(|_| ui.git_col_visible.unwrap_or(false)),
                 col_w_logical: ui.git_col_w.unwrap_or(GIT_COL_W),
-                // KASATERM_FORCE_ACCOUNT_MENU 와 같은 헤드리스 검증용 — 클릭 합성
-                // 없이 모달이 열린 프레임을 캡처한다(모달은 창 안 모든 것 위에
-                // 떠야 해서 겹침 회귀가 나기 쉬운 자리다).
-                commit_modal_open: std::env::var_os("KASATERM_FORCE_COMMIT_MODAL").is_some(),
-                commit_modal_include_unstaged: true,
                 ..Default::default()
             },
             info: state::InfoState {
                 navigation: sidebar_navigation::NavigationState::from_settings(&socket::read_settings()),
-                // 헤드리스 검증용 — 시작 탭을 Info 로. 탭 전환은 클릭이라
-                // PTY-only autosend 로는 재현할 수 없다(KASATERM_TEST_FILETREE
-                // 가 사이드바를 강제로 여는 것과 같은 이유).
-                tab: if std::env::var("KASATERM_TEST_INFO").is_ok() {
-                    state::SideTab::Info
-                } else if std::env::var("KASATERM_TEST_SESSIONS").is_ok() {
-                    state::SideTab::Sessions
-                } else if std::env::var("KASATERM_TEST_MCP").is_ok() {
-                    state::SideTab::Mcp
-                } else {
-                    state::SideTab::Git
-                },
-                ..Default::default()
-            },
-            sessions_col: state::SessionsColState {
-                // 헤드리스 검증에서 방 하나에 기록이 없으면 빈 목록만 찍힌다 —
-                // 전체 범위로 열어야 목록이 실제로 그려진 프레임을 캡처할 수 있다.
-                scope_all: std::env::var("KASATERM_TEST_SESSIONS").is_ok_and(|v| v == "all"),
                 ..Default::default()
             },
             design_study: design_study::State::from_env(),
-            mcp_col: state::McpColState {
-                // 추가 칸은 열어야만 보이는데 헤드리스 캡처는 클릭을 못 한다.
-                add: std::env::var("KASATERM_TEST_MCP")
-                    .ok()
-                    .filter(|v| v == "add")
-                    .map(|_| state::McpAddForm {
-                        harness: "claude",
-                        ..Default::default()
-                    }),
-                ..Default::default()
-            },
             statusbar: Default::default(),
             disk_warning: Default::default(),
             turn: Default::default(),
@@ -6665,8 +6400,7 @@ impl App {
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,
-            git_menu_item: None,
-            session_menu_item: None,
+            side_menu_item: None,
             copy_menu_item: None,
             paste_menu_item: None,
             update_menu_item: None,

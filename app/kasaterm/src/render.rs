@@ -747,15 +747,10 @@ impl App {
         if self.file_tree.visible {
             self.refresh_file_tree();
         }
-        // Git column follows the same active-pane cwd; publish it so the
-        // off-thread poller refreshes the right repo.
-        self.publish_git_col_cwd();
         // Info 탭이 열려 있으면 프로세스·포트 스냅샷을 갱신(스로틀은 내부에서).
         self.pump_info();
         self.pump_info_prompts();
         self.pump_info_outputs();
-        self.pump_sessions_col();
-        self.pump_mcp_col();
         // Every pane's status bar wants its own repo badge — feed all pane cwds
         // to the same poller.
         self.publish_pane_git_cwds();
@@ -869,11 +864,11 @@ impl App {
         let tab_strip_w = self.tab_strip_w();
         let tree_col_x = self.file_tree_col_x();
         let tree_col_w = self.file_tree_col_w();
-        // Right-hand git column geometry (logical px) + this frame's status
-        // snapshot, all captured before the &mut self.gpu block (which can't
-        // re-borrow &self). `git_reserve` is what the rightmost pane's stretch
-        // must leave free on the right: the column plus one window padding, or
-        // 0 when the column is hidden (so the pane keeps hugging the edge).
+        // Right column geometry (logical px), captured before the &mut self.gpu
+        // block (which can't re-borrow &self). `git_reserve` is what the
+        // rightmost pane's stretch must leave free on the right: the column plus
+        // one window padding, or 0 when the column is hidden (so the pane keeps
+        // hugging the edge).
         let git_col_w = self.git_col_w();
         let side_column_covers_workspace = self.side_column_covers_workspace();
         let git_col_x = (win_px.0 / scale - git_col_w).max(0.0);
@@ -884,29 +879,6 @@ impl App {
             reserved_column + WINDOW_PADDING
         } else {
             0.0
-        };
-        // 폴러가 내용을 바꿨을 때만 사본을 뜬다 — 커밋 그래프 200개와 파일 목록을 장마다 복사·해제했다(2026-11-18 표본).
-        let git_view = match self.git.col_data.lock() {
-            Ok(data) => match self.git.col_frame.as_ref().filter(|seen| ***seen == *data) {
-                Some(seen) => seen.clone(),
-                None => {
-                    let fresh = std::sync::Arc::new(data.clone());
-                    self.git.col_frame = Some(fresh.clone());
-                    fresh
-                }
-            },
-            Err(_) => std::sync::Arc::default(),
-        };
-        let git_repo_choice = self.git_active_pane().and_then(|id| self.git.col_repo_choice.get(&id).cloned());
-        // Remote paths must never become local repository picker targets.
-        let git_repo_list: Vec<std::path::PathBuf> = {
-            let mut set: std::collections::BTreeSet<std::path::PathBuf> = self.pane_cwd_cache.iter()
-                .filter(|(id, _)| !kasa_remote::remote::is_remote_pane(id))
-                .map(|(_, cwd)| cwd.clone()).collect();
-            if let Some(cur) = git_view.cwd.clone().filter(|_| git_view.remote.is_none()) {
-                set.insert(cur);
-            }
-            set.into_iter().collect()
         };
         let pad_px = (WINDOW_PADDING + sidebar_w) * scale;
         let title_px = TITLE_HEIGHT * scale;
@@ -1320,7 +1292,7 @@ impl App {
                     let extra = self.window.as_ref().map_or(0.0, |w| {
                         let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lw = w.inner_size().width as f32 / s;
-                        // Stop at the git column's left padding when it's shown,
+                        // Stop at the right column's left padding when it's shown,
                         // else hug the true window edge (git_reserve == 0).
                         (raw_lw
                             - git_reserve
@@ -1683,7 +1655,7 @@ impl App {
         let chrome_font = 14.0_f32;
         // Markdown Render/Raw toggle lives in the pane action buttons
         // (drawn in the header loop), not a separate pill.
-        // Session tabs live in a wry webview panel (like the git panel), not
+        // Session tabs live in a wry webview panel, not
         // the native title bar — drawing them here collided with the OSC title.
         // Drop-zone overlay: while a header drag is active, highlight the
         // half of the target pane the dragged pane would land in. Computed
@@ -3583,17 +3555,9 @@ impl App {
                 }
             }
             paint_shell_menu(g);
-            // ── Git column ── right-hand chrome mirroring the file-tree column
-            // on the left, but native instead of the old floating webview: the
-            // poller fills `git_view` off-thread and this paints branch +
-            // change list + Commit/Push, caching file-row / button hit rects
-            // for the mouse handler. window_cells already reserved its width so
-            // no pane overlaps it; it stops above the status bar.
-            self.git.clear_panel_hit_targets();
-            // 계정 칩 rect 는 Info 탭 블록에서만 채워진다 — 여기서 매 프레임 비우지
-            // 않으면 다른 탭으로 옮기거나 칼럼을 닫아도 옛 좌표가 남아, 그 자리에
-            // 무엇이 놓이든 클릭이 계정 드롭다운에 먼저 먹힌다(2026-08-11 지적:
-            // 세션 탭의 「전체」칩이 안 눌리고 계정 메뉴가 열렸다).
+            // 계정 칩 rect 는 Info 블록에서만 채워진다 — 여기서 매 프레임 비우지
+            // 않으면 칼럼을 닫아도 옛 좌표가 남아, 그 자리에 무엇이 놓이든 클릭이
+            // 계정 드롭다운에 먼저 먹힌다(2026-08-11 지적).
             self.account_chip_rect = None;
             // Per-pane header bar. The band is the unified BG (same as the
             // body) so there's no depth seam; a bottom hairline separates it
@@ -4647,13 +4611,8 @@ impl App {
             if git_col_w > 0.0 {
                 side_column::paint(
                     g,
-                    side_column::Panels {
-                        git: &mut self.git,
-                        info: &mut self.info,
-                        sessions: &mut self.sessions_col,
-                        mcp: &mut self.mcp_col,
-                        closed_panes: &self.closed_panes,
-                    },
+                    &mut self.git,
+                    &mut self.info,
                     &side_column::Frame {
                         x: git_col_x,
                         w: git_col_w,
@@ -4661,10 +4620,6 @@ impl App {
                         viewport: (win_px.0 / scale, win_px.1 / scale),
                         status_h,
                         cursor: self.cursor_px,
-                        time_secs,
-                        git_view: &git_view,
-                        repo_list: &git_repo_list,
-                        repo_choice: git_repo_choice.as_ref(),
                     },
                 );
             }
@@ -4820,484 +4775,6 @@ impl App {
                     codex_rollout: codex_rollout.as_ref(),
                 },
             );
-            // 커밋 모달 — 전면 스크림을 깐 진짜 대화상자라, 창 안의 모든 것보다
-            // 나중에 그려져야 한다. 사이드바 블록 안에서 그리던 동안엔 그 뒤에
-            // 오는 pane 헤더·divider·활성 보더가 카드 위를 가로질렀다(사용자).
-            // ── Commit modal (screenshot #5): dim + centered card.
-            self.git.commit_modal_rects.clear();
-            if self.git.commit_modal_open {
-                // Full-window dim + centered card (not clipped to the git
-                // column) so the modal reads as a real dialog and nothing
-                // behind it bleeds through.
-                let win_w = win_px.0 / scale;
-                let win_h = win_px.1 / scale;
-                g.rect(
-                    0.0,
-                    0.0,
-                    win_w,
-                    win_h,
-                    theme::with_alpha([0, 0, 0, 255], 0xCC),
-                );
-                let bw = 560.0_f32.min(win_w - 60.0).max(0.0);
-                let bx = (win_w - bw) / 2.0;
-                let bh = (win_h - TITLE_HEIGHT - 60.0).min(660.0).max(0.0);
-                let bxy = TITLE_HEIGHT + (win_h - TITLE_HEIGHT - bh) / 2.0;
-                round_rect(
-                    g,
-                    bx - 1.0,
-                    bxy - 1.0,
-                    bw + 2.0,
-                    bh + 2.0,
-                    theme::radius_md(),
-                    theme::with_alpha(theme::border(), 0xFF),
-                );
-                round_rect(g, bx, bxy, bw, bh, theme::radius_md(), theme::bg());
-                let pad = 22.0_f32;
-                let cx = bx + pad;
-                let cw = bw - pad * 2.0;
-                let mut my = bxy + pad;
-                // Header: icon chip + X
-                round_rect(
-                    g,
-                    cx,
-                    my,
-                    36.0,
-                    36.0,
-                    theme::radius_sm(),
-                    theme::surface_active(),
-                );
-                g.queue_icon(
-                    "git-commit-horizontal",
-                    cx + 10.0,
-                    my + 10.0,
-                    16.0,
-                    theme::text(),
-                );
-                let xx = bx + bw - pad - 16.0;
-                let xhov = self.cursor_px.0 >= xx - 5.0
-                    && self.cursor_px.0 <= xx + 21.0
-                    && self.cursor_px.1 >= my
-                    && self.cursor_px.1 <= my + 24.0;
-                g.queue_icon(
-                    "x",
-                    xx,
-                    my + 4.0,
-                    16.0,
-                    if xhov {
-                        theme::text()
-                    } else {
-                        theme::text_mute()
-                    },
-                );
-                self.git
-                    .commit_modal_rects
-                    .push((GitModalBtn::Close, (xx - 5.0, my, 26.0, 26.0)));
-                my += 36.0 + 18.0;
-                g.draw_text(
-                    cx,
-                    my,
-                    "Commit your changes",
-                    gpu::DrawOpts {
-                        font_size: 19.0,
-                        color: theme::text(),
-                        bold: true,
-                        italic: false,
-                    },
-                );
-                my += 36.0;
-                // Branch
-                g.draw_text(
-                    cx,
-                    my,
-                    "Branch",
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::text_mute(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                my += 22.0;
-                g.queue_icon("git-branch", cx, my, 15.0, theme::text_dim());
-                let mbranch = if git_view.branch.is_empty() {
-                    "—"
-                } else {
-                    git_view.branch.as_str()
-                };
-                g.draw_text(
-                    cx + 22.0,
-                    my + 1.0,
-                    mbranch,
-                    gpu::DrawOpts {
-                        font_size: 14.0,
-                        color: theme::text(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                my += 34.0;
-                // Changes + Include unstaged toggle
-                g.draw_text(
-                    cx,
-                    my,
-                    "Changes",
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::text_mute(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                let tw = 38.0_f32;
-                let th = 20.0_f32;
-                let tx = bx + bw - pad - tw;
-                let tlbl = "Include unstaged";
-                let tlw = g.measure_chrome_text(tlbl, 13.0, false);
-                g.draw_text(
-                    tx - 8.0 - tlw,
-                    my,
-                    tlbl,
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::text_dim(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                let on = self.git.commit_modal_include_unstaged;
-                pill_rect(
-                    g,
-                    tx,
-                    my - 2.0,
-                    tw,
-                    th,
-                    if on {
-                        theme::accent()
-                    } else {
-                        theme::surface_active()
-                    },
-                );
-                let knob = th - 6.0;
-                let kx = if on { tx + tw - knob - 3.0 } else { tx + 3.0 };
-                circle_rect(g, kx, my - 2.0 + 3.0, knob, [255, 255, 255, 255]);
-                self.git.commit_modal_rects.push((
-                    GitModalBtn::IncludeUnstaged,
-                    (tx - 4.0, my - 5.0, tw + 8.0, th + 8.0),
-                ));
-                my += 28.0;
-                // File list box
-                let lh = (bh * 0.28).min(180.0).max(60.0);
-                panel_rect_outlined(g, cx, my, cw, lh, theme::radius_sm(), theme::surface());
-                let nf = git_view.staged.len() + git_view.unstaged.len();
-                let mut fx = g.draw_text(
-                    cx + 12.0,
-                    my + 10.0,
-                    &format!("{} files", nf),
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::text(),
-                        bold: true,
-                        italic: false,
-                    },
-                );
-                fx = g.draw_text(
-                    fx + 10.0,
-                    my + 10.0,
-                    &format!("+{}", git_view.insertions),
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::success(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                g.draw_text(
-                    fx + 8.0,
-                    my + 10.0,
-                    &format!("-{}", git_view.deletions),
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: DIFF_RED,
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                let mut ly = my + 34.0;
-                for (_m, path) in git_view.staged.iter().chain(git_view.unstaged.iter()) {
-                    if ly > my + lh - 18.0 {
-                        break;
-                    }
-                    let fname = path.rsplit('/').next().unwrap_or(path.as_str());
-                    let dir = path.strip_suffix(fname).unwrap_or("").trim_end_matches('/');
-                    let ex = g.draw_text(
-                        cx + 12.0,
-                        ly,
-                        fname,
-                        gpu::DrawOpts {
-                            font_size: 13.0,
-                            color: theme::text(),
-                            bold: false,
-                            italic: false,
-                        },
-                    );
-                    if !dir.is_empty() {
-                        g.draw_text(
-                            ex + 7.0,
-                            ly + 0.5,
-                            dir,
-                            gpu::DrawOpts {
-                                font_size: 11.0,
-                                color: theme::text_mute(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                    }
-                    if let Some((ins, del)) = git_view.numstat.get(path) {
-                        let minus = format!("-{del}");
-                        let plus = format!("+{ins}");
-                        let wm = g.measure_chrome_text(&minus, 12.0, false);
-                        let wp = g.measure_chrome_text(&plus, 12.0, false);
-                        let mut rx = cx + cw - 12.0;
-                        if *del > 0 {
-                            rx -= wm;
-                            g.draw_text(
-                                rx,
-                                ly,
-                                &minus,
-                                gpu::DrawOpts {
-                                    font_size: 12.0,
-                                    color: DIFF_RED,
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            rx -= 6.0;
-                        }
-                        if *ins > 0 {
-                            rx -= wp;
-                            g.draw_text(
-                                rx,
-                                ly,
-                                &plus,
-                                gpu::DrawOpts {
-                                    font_size: 12.0,
-                                    color: theme::success(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                        }
-                    }
-                    ly += 22.0;
-                }
-                my += lh + 18.0;
-                // Commit message box
-                g.draw_text(
-                    cx,
-                    my,
-                    "Commit message",
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::text_mute(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                my += 22.0;
-                let inh = 70.0_f32;
-                if self.git.commit_focused {
-                    round_rect(
-                        g,
-                        cx - 1.0,
-                        my - 1.0,
-                        cw + 2.0,
-                        inh + 2.0,
-                        theme::radius_sm(),
-                        theme::accent(),
-                    );
-                }
-                panel_rect(g, cx, my, cw, inh, theme::radius_sm(), theme::surface());
-                let itx = cx + 10.0;
-                let ity = my + 9.0;
-                let preedit = if self.git.commit_focused {
-                    self.preedit.as_str()
-                } else {
-                    ""
-                };
-                if self.git.commit_msg.is_empty() && preedit.is_empty() {
-                    g.draw_text(
-                        itx,
-                        ity,
-                        "변경 사항 설명…",
-                        gpu::DrawOpts {
-                            font_size: 13.0,
-                            color: theme::text_mute(),
-                            bold: false,
-                            italic: false,
-                        },
-                    );
-                }
-                let cur = self
-                    .git
-                    .commit_cursor
-                    .min(self.git.commit_msg.chars().count());
-                let before: String = self.git.commit_msg.chars().take(cur).collect();
-                let after: String = self.git.commit_msg.chars().skip(cur).collect();
-                if let Some(range) = crate::lineedit::selection(crate::input::GIT_COMMIT_FIELD, cur, self.git.commit_msg.chars().count())
-                    .filter(|_| self.git.commit_focused && preedit.is_empty())
-                {
-                    crate::lineedit::paint_band(g, &self.git.commit_msg, range, itx, ity, 13.0, false, cx + cw);
-                }
-                let mut px = g.draw_text(
-                    itx,
-                    ity,
-                    &before,
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::text(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                let caret_x = px;
-                if !preedit.is_empty() {
-                    px = g.draw_text(
-                        px,
-                        ity,
-                        preedit,
-                        gpu::DrawOpts {
-                            font_size: 13.0,
-                            color: theme::accent(),
-                            bold: false,
-                            italic: false,
-                        },
-                    );
-                }
-                if !after.is_empty() {
-                    g.draw_text(
-                        px,
-                        ity,
-                        &after,
-                        gpu::DrawOpts {
-                            font_size: 13.0,
-                            color: theme::text(),
-                            bold: false,
-                            italic: false,
-                        },
-                    );
-                }
-                if self.git.commit_focused && preedit.is_empty() && commit_caret_on {
-                    g.rect(caret_x, ity, 1.5, 14.0, theme::text());
-                }
-                self.git.commit_input_rect = Some((cx, my, cw, inh));
-                my += inh + 14.0;
-                // Commit / Commit and push buttons (full width)
-                let bbh = 36.0_f32;
-                for (icon, label, btn) in [
-                    ("git-commit-horizontal", "Commit", GitModalBtn::Commit),
-                    ("arrow-up", "Commit and push", GitModalBtn::CommitAndPush),
-                ] {
-                    let hov = self.cursor_px.0 >= cx
-                        && self.cursor_px.0 <= cx + cw
-                        && self.cursor_px.1 >= my
-                        && self.cursor_px.1 <= my + bbh;
-                    panel_rect(
-                        g,
-                        cx,
-                        my,
-                        cw,
-                        bbh,
-                        theme::radius_sm(),
-                        if hov {
-                            theme::surface_hover()
-                        } else {
-                            theme::surface_active()
-                        },
-                    );
-                    g.queue_icon(
-                        icon,
-                        cx + 14.0,
-                        my + (bbh - 15.0) / 2.0,
-                        15.0,
-                        theme::text(),
-                    );
-                    g.draw_text(
-                        cx + 38.0,
-                        my + (bbh - 13.0) / 2.0,
-                        label,
-                        gpu::DrawOpts {
-                            font_size: 13.0,
-                            color: theme::text(),
-                            bold: false,
-                            italic: false,
-                        },
-                    );
-                    self.git.commit_modal_rects.push((btn, (cx, my, cw, bbh)));
-                    my += bbh + 8.0;
-                }
-                // Cancel / Confirm (bottom-right)
-                let confirm_w = 96.0_f32;
-                let cancel_w = 80.0_f32;
-                let cby = bxy + bh - pad - 34.0;
-                let conf_x = bx + bw - pad - confirm_w;
-                let canc_x = conf_x - 10.0 - cancel_w;
-                let conf_hov = self.cursor_px.0 >= conf_x
-                    && self.cursor_px.0 <= conf_x + confirm_w
-                    && self.cursor_px.1 >= cby
-                    && self.cursor_px.1 <= cby + 34.0;
-                let canc_hov = self.cursor_px.0 >= canc_x
-                    && self.cursor_px.0 <= canc_x + cancel_w
-                    && self.cursor_px.1 >= cby
-                    && self.cursor_px.1 <= cby + 34.0;
-                let wcanc = g.measure_chrome_text("Cancel", 13.0, false);
-                g.draw_text(
-                    canc_x + (cancel_w - wcanc) / 2.0,
-                    cby + 10.0,
-                    "Cancel",
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: if canc_hov {
-                            theme::text()
-                        } else {
-                            theme::text_dim()
-                        },
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                self.git
-                    .commit_modal_rects
-                    .push((GitModalBtn::Cancel, (canc_x, cby, cancel_w, 34.0)));
-                panel_rect(
-                    g,
-                    conf_x,
-                    cby,
-                    confirm_w,
-                    34.0,
-                    theme::radius_sm(),
-                    if conf_hov {
-                        theme::accent()
-                    } else {
-                        theme::surface_active()
-                    },
-                );
-                let wconf = g.measure_chrome_text("Confirm", 13.0, true);
-                g.draw_text(
-                    conf_x + (confirm_w - wconf) / 2.0,
-                    cby + 10.0,
-                    "Confirm",
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::text(),
-                        bold: true,
-                        italic: false,
-                    },
-                );
-                self.git
-                    .commit_modal_rects
-                    .push((GitModalBtn::Confirm, (conf_x, cby, confirm_w, 34.0)));
-            }
             // Confirm-close modal: a dim scrim + centered card with 취소/닫기,
             // queued last so it sits over every pane, overlay and toast.
             if let Some(dlg) = self.confirm_close.clone().filter(|_| !self.confirm_native) {
@@ -5717,13 +5194,6 @@ impl App {
             .is_some_and(|g| g.atlas_needs_another_frame())
         {
             self.chrome_dirty = true;
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-        }
-        // Keep the frame loop alive while a git op spins, so the spinner
-        // animates until GitOpDone clears it.
-        if self.git.op.is_some() {
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
@@ -6312,8 +5782,6 @@ impl App {
         // sweep advances". A bar-only frame redraws cached chrome with a fresh
         // GPU time uniform — no clear_chrome, no per-pane grid clone, no draw-
         // list rebuild — so a busy pane no longer pins the CPU at 30fps.
-        // A running git op spins a button spinner every frame.
-        let git_op_animating = self.git.op.is_some();
         // 학생 도트 배너(Clawd 자리)가 보이는 동안은 idle 애니가 그림을
         // 바꾼다 — 전용 타이머(handler.rs)가 깨운 redraw 를 여기서
         // 통과시켜야 프레임이 넘어간다.
@@ -6346,7 +5814,6 @@ impl App {
             // 계정 전환 반짝임 — 펌프가 깨워도 여기 사유가 없으면 GPU 패스를 건너뛰어
             // 커서 blink(530ms)에나 얹혀 그려진다(혜성이 순간이동으로 보이던 그 함정).
             || self.account_flash_factor().is_some()
-            || git_op_animating
             || banner_animating
             || walk_animating
             || crate::sprites::chrome_due()

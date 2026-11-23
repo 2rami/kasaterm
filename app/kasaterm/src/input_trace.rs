@@ -86,8 +86,6 @@ impl App {
         cover(self.account_menu, "account-menu");
         cover(self.image_preview.focused(), "image-preview");
         cover(self.side_column_covers_workspace(), "side-column");
-        cover(self.git.commit_focused, "git-commit");
-        cover(self.mcp_col.add.is_some(), "mcp-add");
         cover(self.room_rename.editing.is_some(), "room-rename");
         cover(self.web_addr.is_some(), "web-addr");
         cover(self.web_find.is_some(), "web-find");

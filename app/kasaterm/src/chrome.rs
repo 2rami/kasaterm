@@ -84,120 +84,6 @@ mod notification_surface_tests {
     }
 }
 
-impl GitColView {
-    /// 펼친 diff·커밋 캐시가 기대는 자리. 부모 폴더 칸은 같은 칸에서도 보이는 하위 레포가 바뀌므로 레포 뿌리로 가른다.
-    fn target(&self) -> Option<(std::path::PathBuf, Option<(String, String)>, u64)> {
-        self.repo_root.clone().or_else(|| self.cwd.clone()).map(|root| (root, self.remote.clone(), self.generation))
-    }
-    /// 세대·「다시 읽는 중」 표시를 빼고 같은 열인가.
-    pub(crate) fn same_content(&self, other: &GitColView) -> bool {
-        let bare = |view: &GitColView| GitColView { generation: 0, stale: false, ..view.clone() };
-        bare(self) == bare(other)
-    }
-    fn local_cwd(&self, action: &str) -> Result<std::path::PathBuf, String> {
-        if let Some((label, _)) = &self.remote {
-            return Err(format!("{action}는 {label}에서 해 주세요. 원격 Git은 읽기 전용이에요"));
-        }
-        self.repo_root.clone().or_else(|| self.cwd.clone()).ok_or_else(|| "Git 폴더 정보를 읽는 중이에요".into())
-    }
-}
-
-pub(crate) fn git_operation_error(result: &serde_json::Value) -> Option<String> {
-    if result.get("ok").and_then(|value| value.as_bool()) == Some(true) { return None; }
-    Some(result.get("output").or_else(|| result.get("error"))
-        .and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty())
-        .unwrap_or("Git 작업을 완료하지 못했어요").to_string())
-}
-
-impl state::GitState {
-    pub(crate) fn use_panel_snapshot(&mut self, view: &GitColView) {
-        let target = view.target();
-        if self.col_displayed_target != target {
-            self.col_expanded.clear();
-            self.col_diff_cache.clear();
-            self.col_commit_expanded = None;
-            self.col_commit_files_cache.clear();
-            self.col_commit_file_expanded.clear();
-            self.col_commit_diff_cache.clear();
-            self.last_commit_click = None;
-            self.graph_scroll = 0.0;
-        }
-        self.col_displayed_target = target;
-    }
-
-    pub(crate) fn clear_panel_hit_targets(&mut self) {
-        self.col_file_rects.clear();
-        self.col_btn_rects.clear();
-        self.col_stage_rects.clear();
-        self.col_discard_rects.clear();
-        self.col_open_rects.clear();
-        self.col_commit_rects.clear();
-        self.graph_rect = None;
-        self.col_commit_file_rects.clear();
-        self.commit_menu_rects.clear();
-        self.commit_btn_rect = None;
-        self.commit_caret_rect = None;
-        self.commit_input_rect = None;
-        self.col_commits_grip = None;
-        self.path_hdr_rect = None;
-        self.branch_hdr_rect = None;
-        self.path_menu_rects.clear();
-        self.path_menu_repo_rects.clear();
-        self.branch_page_rects.clear();
-    }
-}
-
-#[cfg(test)]
-mod git_panel_safety_tests {
-    use super::*;
-
-    #[test]
-    fn remote_snapshot_never_resolves_to_a_local_repo_at_the_same_path() {
-        let path = std::path::PathBuf::from("/shared/project");
-        let mut view = GitColView { cwd: Some(path.clone()), ..Default::default() };
-        assert_eq!(view.local_cwd("변경 되돌리기").unwrap(), path);
-        view.remote = Some(("other device".into(), "https://other.invalid".into()));
-        assert!(view.local_cwd("변경 되돌리기").unwrap_err().contains("other device"));
-    }
-
-    #[test]
-    fn file_actions_resolve_repository_root_when_the_shell_is_in_a_subdirectory() {
-        let view = GitColView { cwd: Some("/repo/subdirectory".into()), repo_root: Some("/repo".into()), ..Default::default() };
-        assert_eq!(view.local_cwd("파일 열기").unwrap(), std::path::PathBuf::from("/repo"));
-    }
-
-    #[test]
-    fn clearing_git_panel_removes_mutating_targets_but_keeps_shared_header() {
-        let rect = (0.0, 0.0, 26.0, 26.0);
-        let mut git = state::GitState {
-            commit_btn_rect: Some(rect), commit_caret_rect: Some(rect),
-            col_stage_rects: vec![(true, "file".into(), rect)],
-            col_discard_rects: vec![("file".into(), false, rect)],
-            col_commit_rects: vec![("commit".into(), rect)],
-            col_expand_rect: Some(rect),
-            ..Default::default()
-        };
-        git.clear_panel_hit_targets();
-        assert!(git.commit_btn_rect.is_none() && git.commit_caret_rect.is_none());
-        assert!(git.col_stage_rects.is_empty() && git.col_discard_rects.is_empty() && git.col_commit_rects.is_empty());
-        assert_eq!(git.col_expand_rect, Some(rect));
-    }
-
-    #[test]
-    fn changing_only_the_device_invalidates_the_displayed_diff_cache() {
-        let mut git = state::GitState::default();
-        let mut view = GitColView { cwd: Some("/shared/project".into()), ..Default::default() };
-        git.use_panel_snapshot(&view);
-        let shown_local = git.col_displayed_target.clone();
-        git.col_diff_cache.insert((false, "file".into()), Vec::new());
-        view.remote = Some(("other device".into(), "https://other.invalid".into()));
-        assert_ne!(shown_local, view.target());
-        git.use_panel_snapshot(&view);
-        assert!(git.col_diff_cache.is_empty());
-        assert_eq!(git.col_displayed_target, view.target());
-    }
-}
-
 /// 기둥 하나가 지금 폭에서 **무엇까지 보여 줄 수 있나**. 폭을 줄이는 것만으로는
 /// 반응형이 안 된다 — 넓을 때 쓰던 글자가 좁은 칼럼에 그대로 남으면 잘리거나
 /// 겹쳐서, 좁아진 게 아니라 고장난 것으로 보인다. 각 렌더가 이 단계를 물어보고
@@ -1572,7 +1458,7 @@ impl App {
     pub(crate) fn file_tree_col_x(&self) -> f32 {
         self.tab_strip_w()
     }
-    /// Right-hand chrome width (the git column), mirroring `effective_sidebar_w`
+    /// Right-hand chrome width (the right column), mirroring `effective_sidebar_w`
     /// on the left. Folded into `window_cells` so the cell grid reflows and no
     /// pane ever overlaps the column.
     pub(crate) fn effective_right_chrome_w(&self) -> f32 {
@@ -1586,17 +1472,17 @@ impl App {
         !self.internal_room_active_any() && self.window.as_ref().is_some_and(|win|
             side_column_overlay(win.inner_size().width as f32 / self.effective_scale(), self.git.col_visible))
     }
-    /// 기기 목록은 우측 탭과 독립적으로 갱신돼야 왼쪽에서 고른 기기가 굳지 않는다.
+    /// 기기 목록은 우측 열과 독립적으로 갱신돼야 왼쪽에서 고른 기기가 굳지 않는다.
     pub(crate) fn machines_section_active(&self) -> bool {
         (self.sidebar_visible && !self.tabs_on_top)
-            || (self.git.col_visible && self.info.runtime_page())
+            || self.git.col_visible
             || self.info.machine_menu.is_some()
     }
     /// Git-column width (0 when hidden).
     pub(crate) fn git_col_w(&self) -> f32 {
         self.chrome_widths().2
     }
-    /// Left edge (logical x) of the git column — flush against the window's
+    /// Left edge (logical x) of the right column — flush against the window's
     /// right edge. 0 before the window exists (no paint yet).
     pub(crate) fn git_col_x(&self) -> f32 {
         let w = self.git_col_w();
@@ -1638,17 +1524,13 @@ impl App {
         self.git_col_toggle_rect()
             .map(|(x, y, w, h)| (x - w - crate::native_controls::TOOLBAR_GAP, y, w, h))
     }
-    /// Show/hide the git column. Same reflow path as `toggle_sidebar`: flip the
-    /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
-    /// active cwd so the poller has something to refresh the moment it opens.
+    /// Show/hide the right column. Same reflow path as `toggle_sidebar`: flip the
+    /// flag, resize the PTYs to the new usable cols, repaint.
     pub(crate) fn toggle_git_col(&mut self) {
         if self.lite || self.internal_room_active_any() {
             return;
         }
         self.git.col_visible = !self.git.col_visible;
-        if self.git.col_visible {
-            self.publish_git_col_cwd();
-        }
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
@@ -1846,99 +1728,6 @@ impl App {
         let _ = crate::proc::command("xdg-open").arg(url).spawn();
     }
 
-    /// Expand/collapse a file's inline unified diff in the git panel. The diff
-    /// is parsed once on first expand and cached; `git diff` for a single file
-    /// is cheap but not render-loop cheap, so it must not run per frame.
-    pub(crate) fn toggle_git_diff(&mut self, staged: bool, path: String) {
-        let Some(cwd) = self.local_git_panel_cwd("변경 내용 보기") else { return };
-        let key = (staged, path.clone());
-        if self.git.col_expanded.remove(&key) {
-            self.chrome_dirty = true;
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-            return;
-        }
-        if !self.git.col_diff_cache.contains_key(&key) {
-            let rows = kasa_git::git::git_file_diff(&cwd, &path, staged);
-            self.git.col_diff_cache.insert(key.clone(), rows);
-        }
-        self.git.col_expanded.insert(key);
-        self.chrome_dirty = true;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-    /// Double-click on a recent-commit row: expand/collapse its changed-file
-    /// list inline (only one commit open at a time). On expand the file list is
-    /// fetched once and cached.
-    pub(crate) fn toggle_git_commit(&mut self, hash: String) {
-        let Some(cwd) = self.local_git_panel_cwd("커밋 파일 보기") else { return };
-        if self.git.col_commit_expanded.as_deref() == Some(hash.as_str()) {
-            self.git.col_commit_expanded = None;
-        } else {
-            if !self.git.col_commit_files_cache.contains_key(&hash) {
-                let files = kasa_git::git::git_commit_files(&cwd, &hash);
-                self.git.col_commit_files_cache.insert(hash.clone(), files);
-            }
-            self.git.col_commit_expanded = Some(hash);
-        }
-        self.chrome_dirty = true;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-    /// Click a file row inside an expanded commit: expand/collapse that file's
-    /// diff. The diff is fetched once and cached, like `toggle_git_diff`.
-    pub(crate) fn toggle_git_commit_file(&mut self, hash: String, path: String) {
-        let Some(cwd) = self.local_git_panel_cwd("커밋 변경 내용 보기") else { return };
-        let key = (hash.clone(), path.clone());
-        if self.git.col_commit_file_expanded.remove(&key) {
-            self.chrome_dirty = true;
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-            return;
-        }
-        if !self.git.col_commit_diff_cache.contains_key(&key) {
-            let rows = kasa_git::git::git_commit_file_diff(&cwd, &hash, &path);
-            self.git.col_commit_diff_cache.insert(key.clone(), rows);
-        }
-        self.git.col_commit_file_expanded.insert(key);
-        self.chrome_dirty = true;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-    /// Collapse + drop cached diffs after a stage/unstage/commit changes the
-    /// tree — the cached rows (and which side a file lives on) are now stale, so
-    /// closing them is the no-surprise reset; the user re-expands for fresh diff.
-    pub(crate) fn invalidate_git_diffs(&mut self) {
-        self.git.col_expanded.clear();
-        self.git.col_diff_cache.clear();
-        // 편집기 거터도 같은 HEAD 를 기준으로 삼는다 — 여기서 안 버리면 방금
-        // 커밋한 변경이 거터에 그대로 남아, 고치지도 않은 줄이 파랗게 보인다.
-        self.invalidate_editor_diffs();
-    }
-
-    pub(crate) fn local_git_panel_cwd(&mut self, action: &str) -> Option<std::path::PathBuf> {
-        match self.git_panel_snapshot()?.local_cwd(action) {
-            Ok(cwd) => Some(cwd),
-            Err(message) => { self.set_toast(message); None }
-        }
-    }
-
-    fn git_panel_snapshot(&mut self) -> Option<GitColView> {
-        self.publish_git_col_cwd();
-        let view = self.git.col_data.lock().ok().map(|view| view.clone());
-        if view.as_ref().is_some_and(|view| !view.loading && view.issue.is_none() && !view.no_repo
-            && view.target().is_some() && view.target() == self.git.col_displayed_target) {
-            view
-        } else {
-            self.set_toast("Git 목록을 갱신 중이에요. 갱신 후 다시 눌러 주세요".into());
-            None
-        }
-    }
     /// Feed every pane's cwd into the badge poller (`git_poll_cwds`) so each
     /// pane's badge carries its own repo's branch/diff, not just the active
     /// one. The poller dedups + rate-limits, so a flat overwrite each frame is
@@ -1982,170 +1771,7 @@ impl App {
             *guard = map;
         }
     }
-    /// Push the active pane's cwd into the shared `git_col_cwd` so the git
-    /// poller refreshes the right repo. Cheap string clone; called from the
-    /// render right before the column paints (mirrors `git_poll_cwds`).
-    pub(crate) fn publish_git_col_cwd(&mut self) {
-        let target = self.git.col_visible.then(|| self.current_git_target()).flatten();
-        let changed = {
-            let Ok(mut context) = self.git.col_context.lock() else { return };
-            if !context.select(target.clone()) { return; }
-            let view = target.as_ref().map(|target| {
-                    target.issue.is_none().then(|| context.recall(target, context.generation)).flatten()
-                        .unwrap_or_else(|| git_panel::placeholder(target, context.generation, target.issue.clone()))
-                })
-                .unwrap_or_else(|| GitColView { generation: context.generation,
-                    issue: Some("현재 터미널 창을 선택해 주세요".into()), ..Default::default() });
-            if let Ok(mut remote) = self.git.col_remote.lock() { *remote = view.remote.clone(); }
-            if let Ok(mut cwd) = self.git.col_cwd.lock() { *cwd = view.cwd.clone(); }
-            if let Ok(mut data) = self.git.col_data.lock() { *data = view; }
-            true
-        };
-        if changed {
-            self.git.col_wake.kick();
-            self.git.clear_panel_hit_targets();
-            self.git.path_menu_open = false;
-            self.git.branch_menu_open = false;
-            self.git.branch_page = 0;
-            self.git.commit_menu_open = false;
-            self.git.commit_modal_open = false;
-            self.git.commit_focused = false;
-            self.git.commit_msg.clear();
-            self.git.commit_cursor = 0;
-            self.git.col_scroll = 0.0;
-            self.git.use_panel_snapshot(&GitColView::default());
-        }
-    }
-    /// Run a git-column button off a worker thread so the UI never blocks on
-    /// git/network. Pull/Push sync the branch; Commit
-    /// commits the STAGED changes with the panel's message (VSCode model). All
-    /// read the column's repo from the poller's snapshot so the action always
-    /// targets what the user sees.
-    pub(crate) fn run_git_col_action(&mut self, btn: GitColBtn) {
-        let Some(view) = self.git_panel_snapshot() else { return };
-        let Some(cwd) = view.repo_root.or(view.cwd) else { return };
-        if let Some((label, _)) = view.remote {
-            self.set_toast(format!("{label}의 Git은 읽기 전용이에요"));
-            return;
-        }
-        match btn {
-            GitColBtn::Pull => {
-                self.git.op = Some("Pulling");
-                let proxy = self.proxy.clone();
-                std::thread::spawn(move || {
-                    let result = kasa_git::git::git_pull(&cwd);
-                    if let Some(error) = git_operation_error(&result) {
-                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
-                    }
-                    // GitOpDone clears the spinner; the poller's next tick
-                    // repaints ahead/behind.
-                    let _ = proxy.send_event(UserEvent::GitOpDone);
-                });
-            }
-            GitColBtn::Push => {
-                self.git.op = Some("Pushing");
-                let proxy = self.proxy.clone();
-                std::thread::spawn(move || {
-                    let result = kasa_git::git::git_push(&cwd);
-                    if let Some(error) = git_operation_error(&result) {
-                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
-                    }
-                    let _ = proxy.send_event(UserEvent::GitOpDone);
-                });
-            }
-            GitColBtn::Commit => {
-                // Commit the STAGED changes with the panel's message (VSCode
-                // model — commit -m, no add). Empty message → focus the input
-                // instead of a silent no-op, so the user sees where to type.
-                let msg = self.git.commit_msg.trim().to_string();
-                if msg.is_empty() {
-                    self.git.commit_focused = true;
-                    self.chrome_dirty = true;
-                    return;
-                }
-                self.git.op = Some("Committing");
-                let proxy = self.proxy.clone();
-                std::thread::spawn(move || {
-                    let result = kasa_git::git::git_commit_staged(&cwd, &msg);
-                    if let Some(error) = git_operation_error(&result) {
-                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
-                    }
-                    let _ = proxy.send_event(UserEvent::GitOpDone);
-                });
-                self.git.commit_msg.clear();
-                self.git.commit_cursor = 0;
-                self.git.commit_focused = false;
-                self.chrome_dirty = true;
-            }
-        }
-    }
-    /// Open the cursor-style Commit modal: pre-fill nothing, focus the message
-    /// box, default to including unstaged changes (the toggle in the modal).
-    pub(crate) fn open_commit_modal(&mut self) {
-        if self.local_git_panel_cwd("커밋").is_none() { return; }
-        self.git.commit_menu_open = false;
-        self.git.commit_modal_open = true;
-        self.git.commit_focused = true;
-        self.chrome_dirty = true;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-    pub(crate) fn close_commit_modal(&mut self) {
-        self.git.commit_modal_open = false;
-        self.git.commit_focused = false;
-        self.chrome_dirty = true;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-    /// Run the modal's commit. `push` also pushes after. Honors the
-    /// include-unstaged toggle: when on, stage everything first (`git add -A`),
-    /// else commit only what's already staged. Empty message is a no-op.
-    pub(crate) fn run_commit_modal(&mut self, push: bool) {
-        let msg = self.git.commit_msg.trim().to_string();
-        if msg.is_empty() {
-            self.git.commit_focused = true;
-            self.chrome_dirty = true;
-            return;
-        }
-        let Some(cwd) = self.local_git_panel_cwd("커밋") else { return };
-        let include = self.git.commit_modal_include_unstaged;
-        self.git.op = Some(if push { "Pushing" } else { "Committing" });
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            let mut result = if include { kasa_git::git::git_commit_all(&cwd, &msg) }
-                else { kasa_git::git::git_commit_staged(&cwd, &msg) };
-            if push && git_operation_error(&result).is_none() {
-                result = kasa_git::git::git_push(&cwd);
-            }
-            if let Some(error) = git_operation_error(&result) {
-                let _ = proxy.send_event(UserEvent::GitOpFailed(error));
-            }
-            let _ = proxy.send_event(UserEvent::GitOpDone);
-        });
-        self.git.commit_msg.clear();
-        self.git.commit_cursor = 0;
-        self.git.commit_focused = false;
-        self.git.commit_modal_open = false;
-        self.invalidate_git_diffs();
-        self.chrome_dirty = true;
-    }
-    /// `gh pr create --web` for the column's repo (Commit-menu → Create PR).
-    pub(crate) fn create_git_pr(&mut self) {
-        self.git.commit_menu_open = false;
-        let Some(cwd) = self.local_git_panel_cwd("PR 만들기") else { return };
-        std::thread::spawn(move || {
-            let _ = crate::proc::command("gh")
-                .args(["pr", "create", "--web"])
-                .current_dir(&cwd)
-                .spawn();
-        });
-        self.set_toast(
-            "gh pr create --web 실행".to_string());
-        self.chrome_dirty = true;
-    }
-    /// Expand/restore the git column width (header ⤢ button). Toggles between a
+    /// Expand/restore the right column width (header ⤢ button). Toggles between a
     /// wide reading width and the normal sidebar width; reshapes the PTYs.
     pub(crate) fn toggle_git_col_expand(&mut self) {
         let wide = 620.0_f32;
@@ -2159,62 +1785,6 @@ impl App {
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
         self.save_ui_state();
-    }
-    /// 칼럼 발치 「최근 커밋」 구역의 크기조절 — 누르기·끌기·놓기 세 짝.
-    ///
-    /// handler 의 마우스 분기에서 뽑아 둔 건 헤드리스 하네스가 **같은 코드**를 타게
-    /// 하려고다. 손잡이 판정과 높이 계산이 두 벌로 갈리면 검증이 통과해도 실제 클릭은
-    /// 빗나갈 수 있고, 그 어긋남은 스크린샷에 안 찍힌다.
-    ///
-    /// 손잡이를 눌렀으면 참. 지금 그려져 있는 높이를 드래그 출발점으로 삼는다 —
-    /// 0 에서 출발하면 첫 픽셀에 구역이 접혔다 펴진다.
-    pub(crate) fn commits_grip_press(&mut self, cx: f32, cy: f32) -> bool {
-        let Some(gr) = self.git.col_commits_grip else {
-            return false;
-        };
-        if !(cx >= gr.0 && cx <= gr.0 + gr.2 && cy >= gr.1 && cy <= gr.1 + gr.3) {
-            return false;
-        }
-        let cur = self.git.col_commits_h.unwrap_or_else(|| {
-            let n = self
-                .git
-                .col_data
-                .lock()
-                .map(|g| g.recent_commits.len())
-                .unwrap_or(crate::GIT_RECENT_COMMITS_DEFAULT);
-            24.0 + n as f32 * 20.0
-        });
-        self.git.col_commits_resize = Some((cy, cur));
-        true
-    }
-    /// 끄는 중이면 `Some(값이 움직였나)`. 손잡이가 구역 **머리**라 위로 끌수록 커진다.
-    /// 델타를 누적하지 않고 시작점에서 재는 건 폭 드래그와 같은 이유다 — 누적하면
-    /// clamp 에 걸린 뒤 커서를 되돌려도 값이 안 따라온다.
-    pub(crate) fn commits_grip_drag(&mut self, cy: f32) -> Option<bool> {
-        let (start_y, start_h) = self.git.col_commits_resize?;
-        let new_h =
-            (start_h - (cy - start_y)).clamp(crate::GIT_COMMITS_H_MIN, crate::GIT_COMMITS_H_MAX);
-        let moved = self
-            .git
-            .col_commits_h
-            .map_or(true, |h| (new_h - h).abs() > 0.5);
-        if moved {
-            self.git.col_commits_h = Some(new_h);
-            self.chrome_dirty = true;
-        }
-        Some(moved)
-    }
-    pub(crate) fn commits_grip_release(&mut self) -> bool {
-        if self.git.col_commits_resize.take().is_none() { return false; }
-        let context = self.git.col_context.clone();
-        let proxy = self.proxy.clone();
-        let data = self.git.col_data.clone();
-        let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
-        std::thread::spawn(move || {
-            crate::git_panel::read_now(&context, &data, want);
-            let _ = proxy.send_event(crate::UserEvent::Redraw);
-        });
-        true
     }
     /// Persist the current window frame (logical size + physical position).
     /// Called from `exiting` and from the Moved/Resized debounce in
@@ -2638,15 +2208,6 @@ impl App {
         false
     }
 
-    /// Preview a changed file from the git column, resolved against the
-    /// column's repo cwd. `open_file` does its own extension branching
-    /// (image viewer / md render / raw code editor) and focuses an existing
-    /// pane instead of duplicating — same path as a file-tree double-click.
-    /// A native diff view is still phase 2; opening the file is the useful v1.
-    pub(crate) fn open_git_file(&mut self, rel: &str) {
-        let Some(cwd) = self.local_git_panel_cwd("파일 열기") else { return };
-        self.open_file(cwd.join(rel), None, false);
-    }
     /// 창 아래쪽이 pane 그리드에서 먹는 높이 — 상태줄.
     ///
     /// 예약과 그리기가 서로 다른 조건을 보면 바가 마지막 셀 줄 위에 겹치거나
@@ -2802,7 +2363,7 @@ impl App {
     /// **한글은 자체 조합기(`self.hangul`)를 태운다.** macOS 는 OS IME 를 꺼 두고
     /// (`set_ime_allowed(false)`) 자모를 `KeyboardInput.text` 로 직접 받으므로, 여기서
     /// 조합하지 않으면 "안녕"이 "ㅇㅏㄴㄴㅕㅇ"으로 박힌다 — 사용자: "이름 바꾸는 거
-    /// 이상한데". git 커밋 칸(`git_commit_input`)이 같은 이유로 같은 경로를 탄다.
+    /// 이상한데".
     pub(crate) fn room_rename_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
         let Some(idx) = self.room_rename.editing.as_ref().map(|(i, _)| *i) else {
@@ -3036,28 +2597,6 @@ impl App {
             crate::clipboard::preview(text, 36)
         };
         self.set_toast(format!("복사됨 · {head}"));
-    }
-    pub(crate) fn toggle_session_panel(&mut self, _event_loop: &ActiveEventLoop) {
-        let replacing_inline = self.inline_web.is_some();
-        self.close_inline_web();
-        if side_column_should_toggle(
-            replacing_inline,
-            self.git.col_visible,
-            self.info.tab == state::SideTab::Sessions,
-        ) {
-            self.toggle_git_col();
-            return;
-        }
-        self.info.tab = state::SideTab::Sessions;
-        self.info.scroll = 0.0;
-        if self.git.col_visible {
-            self.chrome_dirty = true;
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-        } else {
-            self.toggle_git_col();
-        }
     }
     pub(crate) fn toggle_settings_web(
         &mut self,
@@ -4631,14 +4170,6 @@ fn set_dock_badge(_count: usize) {}
 pub(crate) fn ensure_notification_authorization() {}
 
 
-pub(crate) fn side_column_should_toggle(
-    replacing_inline: bool,
-    column_visible: bool,
-    destination_already_selected: bool,
-) -> bool {
-    !replacing_inline && column_visible && destination_already_selected
-}
-
 // 트레이에는 기기 추가 하나만 남았다 — 보드 단추와 그 판은 나쵸 독립 앱으로 갔다.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SidebarTray {
@@ -4776,13 +4307,6 @@ mod room_rename_tests {
         assert!(notify_dedup_passes("test:dedup-beta"));
     }
 
-
-    #[test]
-    fn 인라인에서_고른_목적지는_이미_열려_있어도_닫지_않는다() {
-        assert!(!side_column_should_toggle(true, true, true));
-        assert!(!side_column_should_toggle(true, false, false));
-        assert!(side_column_should_toggle(false, true, true));
-    }
 
     #[test]
     fn 캐릭터_메뉴는_키보드_이동과_닫기를_모두_가진다() {

@@ -33,7 +33,7 @@
 
 - `render.rs` — GPU 렌더 패스(`render_frame`/`render_frame_gpu`/`paint_gpu_overlays`/`gpu_overlay_snapshot`). 자유함수는 2026-08-15 에 아래 두 모듈로 분리(13180→8360줄), 옛 `render::…` 경로는 glob 재수출로 유지.
 - `terminal_scene/preedit.rs` — 터미널 입력칸의 조합 글자 삽입·줄 접기. 화면 사본과 원본 셀 대응표를 함께 바꿔 뒤 문장·팝업을 보존하고 조합 밑줄 범위를 반환한다.
-  `render_frame_gpu` 는 그리는 **차례**를 보여 주고, 화면 구역별 패스는 자식 모듈이 그린다: `render/sidebar.rs`(방 카드·배치도/별도창 띠·pane 줄·목록 가장자리·줄 우클릭 메뉴) · `render/file_tree_column.rs`(파일트리 칼럼) · `render/side_column.rs`(오른쪽 Git·Info·세션·MCP 칼럼) · `render/status_bar.rs`(하단 상태줄) · `account_popover.rs`(계정 드롭다운 배치와 그리기). 자식 패스는 `g` 와 이 프레임에 읽는 작은 `Frame`, 고쳐 쓸 상태 `&mut` 만 받는다 — `g` 가 `self.gpu` 를 잡은 안쪽이라 `&self` 메서드로 구할 값은 부르는 쪽이 미리 풀어 넘긴다. 클립·히트렉트·그리는 순서는 옮기기 전과 같다
+  `render_frame_gpu` 는 그리는 **차례**를 보여 주고, 화면 구역별 패스는 자식 모듈이 그린다: `render/sidebar.rs`(방 카드·배치도/별도창 띠·pane 줄·목록 가장자리·줄 우클릭 메뉴) · `render/file_tree_column.rs`(파일트리 칼럼) · `render/side_column.rs`(오른쪽 칼럼 — 다시 읽기·확대 단추 머리 + Info 본문, 탭 없음) · `render/status_bar.rs`(하단 상태줄) · `account_popover.rs`(계정 드롭다운 배치와 그리기). 자식 패스는 `g` 와 이 프레임에 읽는 작은 `Frame`, 고쳐 쓸 상태 `&mut` 만 받는다 — `g` 가 `self.gpu` 를 잡은 안쪽이라 `&self` 메서드로 구할 값은 부르는 쪽이 미리 풀어 넘긴다. 클립·히트렉트·그리는 순서는 옮기기 전과 같다
 - `screenread.rs` — claude/codex **화면 그리드 판독·재작성** 자유함수: 스피너(`find_claude_spinner`)·입력박스(`prompt_box`)·배너/픽커/앵커 감지, 팀메시지(tell/SendMessage) 색칠·프사 배치·상태줄 mod 가 막 지은 줄 덧칠(`paint_status_line`)
   `screenread/foreground.rs`는 원본 TUI의 닫힌 테두리 판을 보존하고, 본문 후처리 범위·학생 장식의 실제 사각형 차폐를 공통으로 판정한다.
 - `sprites.rs` — 학생 스프라이트·프사 **에셋 적재와 드로잉**: 번들/override 프레임, idle GIF 캐시, `draw_student_*`
@@ -58,14 +58,12 @@
 - `disk_warning.rs` — 디스크 지키기의 앱 쪽: 지키미 이벤트를 받아 값을 들고(`State`), 문턱을 새로 넘으면 맥 알림·폰 푸시, 다른 기기 값은 기기 명부 캐시(`kasa_device::machines::cached_disk`)에서 읽어 새로 넘으면 이 맥 알림, 사이드바 트레이 위 경고 카드(`paint_card`, 배치는 `chrome::sidebar_tray_layout`), 설정 「디스크 지키기」 값. 재기·정리는 `kasa_socket::disk_guard` 뒤 스레드 몫이고 그리기 경로에서 부르지 않는다([disk-guard.md](disk-guard.md)).
 - `process_usage.rs` — PID·시작 시각과 PTY 세대로 실행 신원을 고정하고 개별 종료한다. 숨긴 다중 셸의 복원 기록을 나누고, 문서가 함께 숨겨졌으면 먼저 열어 개별 종료하게 한다. `screen_pump`의 EOF도 같은 PTY 세대일 때만 칸을 걷는다.
 - `session/accounts/sync.rs` — 다른 기기의 Claude 계정 선택: 검증 신원 일치·중복 별명 판정, 최신 선택 직렬 전파와 기기별 적용 확인. 계약은 `docs/agent-account-selection.md`.
-- `info.rs` — 오른쪽 Info 열. 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)
-- `sesscol.rs` + `sesscol/{model,paint}.rs` — 오른쪽 「기록」의 대화/닫은 칸 보기, 범위·하네스 필터와 선택 상세. 수집은 워커에서 하고 범위가 바뀐 뒤의 늦은 결과를 거른다. 대화 선택은 실행하지 않으며 별도 이어가기 버튼이 기존 ResumeSession 경로를 부른다. 닫은 칸의 UI 신원은 재사용되는 pane 번호와 분리한다.
+- `info.rs` — 오른쪽 Info 열(오른쪽 칼럼의 유일한 본문, 머리 `draw_side_head`). 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)
 - `session/restore_dialog.rs` — 저장된 작업의 종류 아이콘·학생 신원 표시 모델. 선택 복원 화면은 `restore_picker.rs`, 재구성은 `session/restore.rs`가 맡는다.
 - `info_focus.rs` — Info 열 맨 위 「지금 보는 칸」 카드. 사실은 `observe` 한 곳(칸 종류·폴더·모델·mod 사실·그 칸 포트)이고, 이 기기 칸은 감시 스레드가 mod 신호(`claude_mod::set_focus_listener`)·프로세스 지문·느린 주기로, 다른 기기 칸은 원본의 `/term/pane-info`(`kasa_http::pane_info`, 같은 `observe` 를 부른다) 롱폴로 받는다. 포트(lsof)는 뒤에서 읽어 mod 반영을 막지 않는다
 - `info_outputs.rs` — Info 「결과물」. 지금 보는 칸 대화 기록에서 `kasa_socket::inline_outputs::scan` 으로 그림·음성·영상 표식을 뽑아(거울은 `chat_view::history::remote`) 묶음으로 그리고, 누르면 `image_preview::open_path`·`media_preview::open_reference` 로 연다.
 - `info_prompts.rs` — Info 카드 아래 「내 프롬프트」. 지금 보는 칸에 묶인 기록(claude transcript·codex rollout, 거울은 원본 `/transcript-raw`)을 처음부터 읽어 `chat_view::parse` 규칙으로 사람이 친 말과 묻는 말에 고른 답만 남기고(`relayed` 로 쪽지·보고를 뺀다), 줄마다 체크칸(`prompt-checks.json`)을 두며, 누르면 대화 보기를 켠 칸은 그 보기 맨 위로(`chat_view_jump`), 풀스크린 claude 는 `prompt_nav` mod 행, 거울은 받은 화면 앵커에서 글로 맞춘 번호로 옮긴다(`place` — 차례를 지키는 최장 일치 + 사이 틈 차례 메우기). mod 없는 풀스크린 codex 와 풀스크린 원본의 거울은 화면의 `❯`·`›` 줄을 보며 휠로 찾아간다(`Seek`, 거울은 원본 화면이 돌아올 때까지 기다리며 성큼 걷는다). 줄에 올리면 칼럼 왼쪽에 본문만 담은 카드(`draw_card`, 칼럼을 다 그린 뒤 `render/side_column.rs` 가 부른다)
 - `info_split.rs` — Info 열 위(카드·「내 프롬프트」)·아래(「결과물」·「모든 방」) 영역 나눔. 끄는 경계·최소 높이·한 흐름으로 물러나는 조건, 비율 저장(`info-layout.json`, 설정 파일 옆), 휠이 굴릴 영역
-- `git_panel.rs` — 오른쪽 Git 열의 원본 pane·기기 식별, 읽기 요청 순서·문맥 검증, 현재/로컬/원격 브랜치 표시. 원격 조회 계약은 `kasa_git::git_panel`의 `kasa.git-panel.v2`이며 원본 기기가 cwd를 확인한다. 일꾼(`spawn_poller`)은 칸이 바뀌면 바로, 작업 트리 파일이 바뀌면(`kasa_git::git_watch`, 누가 고쳤든) 합쳐 한 번, 그 밖에는 git 지문이 바뀔 때만 읽고, 다른 기기 칸은 `spawn_remote_watcher` 가 원본의 `/term/gitcol/wait` 에 매달린다. 칸 폴더가 여러 레포를 담은 부모면 그 아래 레포를 최근에 만진 순으로 골라 보이고 머리 메뉴에서 칸마다 고른다(`kasa_git::git_panel::panel_view`)
 - `nl_command.rs` — 셸 입력줄의 `# 자연어 요청` + 맨 Enter 를 명령 한 줄로 바꿔 **넣기만** 한다(실행은 사람이 Enter). 셸 프롬프트 판정은 OSC 133 `B` 마크 + 마지막 명령 블록이 닫힘(`C` 뒤 `D` 전이면 claude·vim 같은 그 명령이 키를 받는 중이라 안 가로챈다). 모델은 OpenGateway(`themegen::og_key`·`curl_post`), settings `nl_command`·`nl_command_model`. 시험 `KASATERM_AUTONLCMD`
 - `input.rs` — `send_bytes`·mouse(`send_mouse_sgr`·호버 전달 `forward_hover`·손가락 커서 판정 `refresh_hover_pointer`)·copy/paste·`handle_wheel`·`forward_key`·claude 상태 글리프
 - `markdown.rs` — `md_editor_*`·md 링크/블록
@@ -185,8 +183,6 @@
 - `mobile/lib/inline_media.dart`·`inline_media_bridge_io.dart`·`screens/media_player.dart` — 폰의 결과 카드·루프백 Range 전송·네이티브 재생. 원본 인증 경로로 필요한 512KiB 조각만 읽고 닫힌 소비자의 요청을 취소한다.
 - `kasa-socket/src/guidance.rs` — 앱 연결 없는 `kasaterm-cli guide`와 칸에 까는 kasapane 스킬. `skills/kasapane`의 원문을 내장하고 요청한 주제 하나만 출력한다. 셰임이 이 스킬을 칸마다 싣고(claude `--plugin-dir`, codex 칸 홈 `skills/`), 늘 지킬 규칙(완료 보고·폰·다른 기기 학생)은 스킬 설명에 둔다. 실행 지침엔 말투만, 새 작업 브리프엔 보낸 학생 표식이 없을 때만 완료 보고 한 줄을 붙인다.
 - `kasa-socket/src/cli/summon_place.rs` — 학생 소환의 작업방 선택. 원격은 기존 칸 주소(`--beside`) 또는 이름 붙인 새 방(`--new-room`)을 지정하고, 사람의 활성 방으로 임의 배치하지 않는다.
-
-- `gpu/curves.rs` — Git 그래프의 배율별 안티앨리어싱 곡선 마스크와 재사용. 기존 아이콘의 클립·그리기 순서를 따른다.
 
 - HTTP 대화 기록 CPU·배포 최적화: [http-performance.md](http-performance.md), `crates/kasa-http/examples/transcript_http_bench.rs`·`scripts/bench-transcript-http.py`.
 

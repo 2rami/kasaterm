@@ -357,18 +357,6 @@ impl App {
                 .to_string_lossy()
                 .into_owned()
         });
-        // Optional git-panel demo before the capture: expand the first changed
-        // file's inline diff ("diff") or open the commit modal ("modal").
-        if let Ok(action) = std::env::var("KASATERM_AUTOGIT") {
-            let gms: u64 = std::env::var("KASATERM_AUTOGIT_MS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(deadlines[0].saturating_sub(1500));
-            self.pending_autogit = Some((
-                std::time::Instant::now() + std::time::Duration::from_millis(gms),
-                action,
-            ));
-        }
         // GPU frame readback (gpu::render → save_rgba_png) needs no OS
         // screen-record permission, so it works headless on every platform —
         // replacing the old screencapture (macOS, permission-blocked) and
@@ -389,64 +377,6 @@ impl App {
                 std::time::Instant::now() + std::time::Duration::from_millis(ms),
                 p,
             ));
-        }
-    }
-    /// Run a queued git-panel demo action (KASATERM_AUTOGIT) so headless capture
-    /// can show the inline diff / commit modal without a real click.
-    pub(crate) fn run_autogit(&mut self, action: &str) {
-        // The demo actions assume the column is up; open it for headless capture.
-        if !self.git.col_visible {
-            self.toggle_git_col();
-        }
-        match action {
-            "diff" => {
-                let pick = self.git.col_data.lock().ok().and_then(|g| {
-                    g.unstaged
-                        .first()
-                        .map(|(_, p)| (false, p.clone()))
-                        .or_else(|| g.staged.first().map(|(_, p)| (true, p.clone())))
-                });
-                if let Some((staged, path)) = pick {
-                    self.toggle_git_diff(staged, path);
-                }
-            }
-            "modal" => self.open_commit_modal(),
-            // 커밋 메시지 칸의 **커서 산수**를 화면으로 확인한다. 조작을 `lineedit`
-            // 한 벌로 합친 뒤(2026-08-07) 캐럿이 한글 경계에서 어긋나지 않는지가
-            // 눈으로 보여야 한다 — 단위테스트는 문자열만 보고 캐럿 픽셀은 못 본다.
-            // 키는 `logical_key` 만 있으면 되므로 KeyEvent 를 짓지 않는다.
-            "commitedit" => {
-                use winit::keyboard::{Key, NamedKey};
-                self.open_commit_modal();
-                self.git.commit_focused = true;
-                self.git.commit_msg.clear();
-                self.git.commit_cursor = 0;
-                self.git_commit_insert("한글커밋메시지");
-                let (msg, cur) = (&mut self.git.commit_msg, &mut self.git.commit_cursor);
-                // 맨 앞으로 갔다가 두 칸 오른쪽 → "한글" 뒤에 캐럿.
-                crate::lineedit::key(msg, cur, &Key::Named(NamedKey::Home));
-                crate::lineedit::key(msg, cur, &Key::Named(NamedKey::ArrowRight));
-                crate::lineedit::key(msg, cur, &Key::Named(NamedKey::ArrowRight));
-                crate::lineedit::key(msg, cur, &Key::Character("X".into()));
-                eprintln!(
-                    "[autogit] commitedit msg={:?} cursor={} (기대: '한글X커밋메시지' / 3)",
-                    self.git.commit_msg, self.git.commit_cursor
-                );
-            }
-            "menu" => self.git.commit_menu_open = true,
-            "branches" | "branches-last" => {
-                self.git.branch_menu_open = self.git.branch_hdr_rect.is_some();
-                self.git.branch_page = if action == "branches-last" { usize::MAX } else { 0 };
-            }
-            "spin" => self.git.op = Some("Pushing"),
-            "hover" => {
-                // Park the cursor over the first file row so its action cluster
-                // (open / discard / stage) renders for a headless capture.
-                let gx = self.git_col_x();
-                let gw = self.git_col_w();
-                self.cursor_px = (gx + gw - 30.0, TITLE_HEIGHT + 150.0);
-            }
-            _ => {}
         }
     }
     pub(crate) fn schedule_autosend(&self) {
@@ -1175,18 +1105,7 @@ impl App {
             self.pty.contains_key(&victim)
         );
         if std::env::var("KASATERM_AUTOCLOSEREOPEN_HOLD").is_ok() {
-            // 되살리기는 세션 탭이 맡으므로 hold 는 그 화면에서 멈춘다 — 하단바가
-            // 0 이라는 것만 찍고 끝내면 "되살릴 길이 사라진 것"과 구분이 안 된다.
-            if !self.git.col_visible {
-                self.toggle_git_col();
-            }
-            self.info.tab = crate::state::SideTab::Sessions;
-            self.render_frame();
-            eprintln!(
-                "[autoclosereopen] hold — 하단 예약={} · 세션 탭 되살리기 줄={:?}",
-                self.bottom_reserve_h(),
-                self.sessions_col.closed_rects
-            );
+            eprintln!("[autoclosereopen] hold — 하단 예약={}", self.bottom_reserve_h());
             return;
         }
         self.reopen_closed_pane();
@@ -1885,18 +1804,6 @@ impl App {
             self.window_event(event_loop, window_id, WindowEvent::Ime(winit::event::Ime::Commit("settings-sentinel".into())));
             check(self.feedback_body == "settings-sentinel", "IME fixture focuses the real settings input");
             let settings_text = self.feedback_body.clone();
-            let git_before = (
-                self.git.commit_modal_open, std::mem::take(&mut self.git.commit_msg),
-                self.git.commit_cursor, self.git.commit_focused, self.git.op,
-            );
-            self.git.commit_modal_open = true;
-            self.git.commit_cursor = 0;
-            self.git.commit_focused = false;
-            repaint(self);
-            self.window_event(event_loop, window_id, WindowEvent::Ime(winit::event::Ime::Commit("git-modal-input".into())));
-            check(self.git.commit_msg == "git-modal-input" && self.feedback_body == settings_text,
-                "window IME commit goes to Git modal instead of the settings underneath");
-            let commit_text = self.git.commit_msg.clone();
             let confirmation_before = self.confirm_close.take();
             self.confirm_close = Some(ConfirmClose {
                 why: CloseWhy::Busy("verification fixture".into()), action: PendingClose::Pane { pane: source.clone() },
@@ -1904,16 +1811,10 @@ impl App {
             repaint(self);
             self.window_event(event_loop, window_id, WindowEvent::Ime(winit::event::Ime::Preedit("blocked".into(), None)));
             self.window_event(event_loop, window_id, WindowEvent::Ime(winit::event::Ime::Commit("must-not-arrive".into())));
-            check(self.git.commit_msg == commit_text && self.feedback_body == settings_text
-                && self.preedit.is_empty() && !self.in_preedit,
-                "higher confirmation consumes IME without changing Git or settings text");
-            check(self.git.op == git_before.4, "IME probe never starts a Git operation");
+            check(self.feedback_body == settings_text && self.preedit.is_empty() && !self.in_preedit,
+                "higher confirmation consumes IME without changing settings text");
             self.confirm_close = confirmation_before;
             self.confirm_btn_rects.clear();
-            self.git.commit_modal_open = git_before.0;
-            self.git.commit_msg = git_before.1;
-            self.git.commit_cursor = git_before.2;
-            self.git.commit_focused = git_before.3;
         } else { check(false, "IME fixture has a visible settings text field"); }
         self.native_settings_control_key(NamedKey::Escape, false, false);
         self.feedback_body = feedback_before;
@@ -2177,7 +2078,6 @@ impl App {
                 if !self.git.col_visible {
                     self.toggle_git_col();
                 }
-                self.info.tab = crate::state::SideTab::Info;
             }
             self.render_frame();
             // 복원이 되살리기 목록을 채웠는지도 같은 자리에서 밝힌다 — 재시작으로
@@ -2300,7 +2200,6 @@ impl App {
             if !self.git.col_visible {
                 self.toggle_git_col();
             }
-            self.info.tab = crate::state::SideTab::Info;
             // 방을 하나 더 만들면 활성이 그쪽으로 옮겨간다 — 배치도가 가리키는 방과
             // 화면에 뜬 방이 갈리면 그림이 오히려 헷갈리므로 원래 방으로 돌아온다.
             self.switch_window(0);
@@ -2924,7 +2823,6 @@ impl App {
             if !self.git.col_visible {
                 self.toggle_git_col();
             }
-            self.info.tab = crate::state::SideTab::Info;
             self.info.scroll = 0.0;
             eprintln!("[autoinfo] Info 탭 열림 (col_visible={})", self.git.col_visible);
             return;
@@ -3203,52 +3101,35 @@ impl App {
     /// 밀어야만 나온다 — 스크롤이 0 이면 첫 행이 마침 경계에 딱 붙어 있어 클리핑이
     /// 있으나 없으나 그림이 같고, 그래서 **없는 클리핑이 통과해 버린다**.
     ///
-    /// - `KASATERM_AUTOCOLSCROLL="<탭>:<px>"` — 우측 칼럼을 열고 그 탭으로 바꾼 뒤
-    ///   본문을 `px` 만큼 민다. 탭은 `sessions` | `mcp` | `info` | `git`.
+    /// - `KASATERM_AUTOCOLSCROLL="[info:]<px>"` — 우측 칼럼(Info)을 열고 본문을 `px` 만큼 민다.
     /// - `KASATERM_AUTOFTSCROLL="<px>"` — 파일트리를 켜고 그만큼 민다.
-    /// - `KASATERM_AUTOGITSCROLL="<px>"` — `AUTOCOLSCROLL="git:<px>"` 의 준말.
     /// - `_MS` 로 시각을 옮긴다(기본 5000). 캡처(`AUTOCAPTURE_MS`)보다 앞에 둘 것.
     ///
     /// 스크롤 값은 그리기 쪽 `clamp` 가 다시 잡는다 — 목록이 짧아 밀 데가 없으면
     /// 0 으로 돌아오고, 로그에 요청값과 실제값이 함께 찍혀 "하네스는 돌았는데
     /// 화면이 안 움직인 것"과 "하네스가 안 돈 것"이 구분된다.
     ///
-    /// **두 단계로 나뉜다.** 먼저 칼럼을 열어 탭만 세우고, 1.5초 뒤에 스크롤을
-    /// 넣는다. 세션·MCP·Info 목록은 전부 워커 스레드가 채우므로(디스크 stat·`ps`),
-    /// 탭을 연 프레임에는 아직 0행이다 — 그 자리에서 밀면 clamp 가 통째로 먹고
-    /// **스크롤이 0 인 화면을 "밀어 봤다"고 찍게 된다**.
-    /// `AUTOCOLSCROLL`(또는 `AUTOGITSCROLL` 준말)을 `(탭, 픽셀)` 로. 두 단계가
-    /// 같은 해석을 쓰도록 여기 한 곳에 둔다 — 열 때와 밀 때가 다른 탭을 고르면
-    /// 「열긴 열었는데 안 밀린다」로 끝난다.
-    fn autocolscroll_spec() -> Option<(crate::state::SideTab, f32)> {
-        use crate::state::SideTab;
-        let spec = std::env::var("KASATERM_AUTOCOLSCROLL").ok().or_else(|| {
-            std::env::var("KASATERM_AUTOGITSCROLL").ok().map(|px| format!("git:{px}"))
-        })?;
-        let Some((tab, px)) = spec.split_once(':') else {
-            eprintln!("[autocolscroll] 형식은 \"<탭>:<px>\" 다 — 받은 것: {spec:?}");
-            return None;
+    /// **두 단계로 나뉜다.** 먼저 칼럼을 열고, 1.5초 뒤에 스크롤을 넣는다. Info 목록은
+    /// 워커 스레드가 채우므로(`ps`) 칼럼을 연 프레임에는 아직 0행이다 — 그 자리에서
+    /// 밀면 clamp 가 통째로 먹고 **스크롤이 0 인 화면을 "밀어 봤다"고 찍게 된다**.
+    /// 옛 「<탭>:<px>」 꼴은 `info`(옛 「원격」 `machines`·`share` 포함)만 받는다 — 다른 탭은 없어졌다.
+    fn autocolscroll_px() -> Option<f32> {
+        let spec = std::env::var("KASATERM_AUTOCOLSCROLL").ok()?;
+        let px = match spec.split_once(':') {
+            Some(("info" | "machines" | "share", px)) => px,
+            Some((other, _)) => {
+                eprintln!("[autocolscroll] 모르는 탭 {other:?} — 오른쪽 열은 info 하나다");
+                return None;
+            }
+            None => spec.as_str(),
         };
-        let px = match px.trim().parse::<f32>() {
-            Ok(v) => v,
+        match px.trim().parse::<f32>() {
+            Ok(v) => Some(v),
             Err(_) => {
                 eprintln!("[autocolscroll] 픽셀이 숫자가 아니다: {px:?}");
-                return None;
+                None
             }
-        };
-        let tab = match tab.trim() {
-            "sessions" => SideTab::Sessions,
-            "mcp" => SideTab::Mcp,
-            "share" => SideTab::Info,
-            // 옛 「원격」 탭은 Info 의 「다른 기계」 절이 됐다 — 이름은 그대로 받는다.
-            "info" | "machines" => SideTab::Info,
-            "git" => SideTab::Git,
-            other => {
-                eprintln!("[autocolscroll] 모르는 탭 {other:?} — sessions|mcp|info|git|machines");
-                return None;
-            }
-        };
-        Some((tab, px))
+        }
     }
 
     pub(crate) fn run_pending_autocolscroll(&mut self) {
@@ -3256,12 +3137,10 @@ impl App {
         use std::sync::OnceLock;
         static DUE: OnceLock<Option<Instant>> = OnceLock::new();
         static OPENED: AtomicBool = AtomicBool::new(false);
-        static DIFFED: AtomicBool = AtomicBool::new(false);
         static FIRED: AtomicBool = AtomicBool::new(false);
         let due = DUE.get_or_init(|| {
             let any = std::env::var_os("KASATERM_AUTOCOLSCROLL").is_some()
-                || std::env::var_os("KASATERM_AUTOFTSCROLL").is_some()
-                || std::env::var_os("KASATERM_AUTOGITSCROLL").is_some();
+                || std::env::var_os("KASATERM_AUTOFTSCROLL").is_some();
             any.then(|| {
                 let ms: u64 = std::env::var("KASATERM_AUTOCOLSCROLL_MS")
                     .ok()
@@ -3276,11 +3155,10 @@ impl App {
             return;
         }
         if !OPENED.swap(true, Ordering::Relaxed) {
-            if let Some(tab) = Self::autocolscroll_spec().map(|(t, _)| t) {
+            if Self::autocolscroll_px().is_some() {
                 if !self.git.col_visible {
                     self.toggle_git_col();
                 }
-                self.info.tab = tab;
                 self.chrome_dirty = true;
                 eprintln!("[autocolscroll] 칼럼 열림 — 목록이 차기를 1.5초 기다린다");
             }
@@ -3289,50 +3167,11 @@ impl App {
         if Instant::now() < *due + std::time::Duration::from_millis(1500) {
             return;
         }
-        // `KASATERM_AUTOCOLDIFF=<개수>` — 변경 목록에서 그만큼의 파일 diff 를 펼친다.
-        // git 칼럼에서 「끝까지 스크롤이 닿나」를 물으려면 목록이 화면보다 길어야 하는데,
-        // 이 레포의 변경 파일 몇 개로는 절대 안 넘친다(11행 = 263px vs 화면 1152px).
-        // 펼친 diff 만이 그 길이를 만든다.
-        //
-        // ⚠️ **칼럼을 여는 단계에서는 못 한다** — git 스캔은 칼럼이 보이게 된 뒤에
-        // 돌아서, 그 시점의 `col_data` 는 아직 비어 있다(실측: 「펼치기 0개」).
-        // 그래서 목록이 찬 뒤인 여기서 걸고, 본문은 워커가 가져오므로 다시 1.5초
-        // 기다렸다가 잰다.
-        if !DIFFED.swap(true, Ordering::Relaxed) {
-            if let Some(n) = std::env::var("KASATERM_AUTOCOLDIFF")
-                .ok()
-                .and_then(|s| s.trim().parse::<usize>().ok())
-            {
-                let picks: Vec<(bool, String)> = self
-                    .git
-                    .col_data
-                    .lock()
-                    .map(|g| {
-                        g.staged
-                            .iter()
-                            .map(|(_, p)| (true, p.clone()))
-                            .chain(g.unstaged.iter().map(|(_, p)| (false, p.clone())))
-                            .take(n)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                eprintln!("[autocolscroll] diff 펼치기 {}개", picks.len());
-                for (staged, path) in picks {
-                    self.toggle_git_diff(staged, path);
-                }
-                return;
-            }
-        }
-        if std::env::var_os("KASATERM_AUTOCOLDIFF").is_some()
-            && Instant::now() < *due + std::time::Duration::from_millis(3000)
-        {
-            return;
-        }
         // 로그는 한 번만, **세우는 것은 매 틱**이다. 목록을 채우는 pump 들이
         // 자기 판단으로 스크롤을 0 으로 되돌리기 때문이다 — `pump_info` 는 pane
-        // 집합이 달라지면(첫 수집이 곧 그 경우다), `pump_sessions_col` 은 cwd 가
-        // 달라지면 되돌린다. 한 번만 세우면 그 되돌림이 캡처 직전에 끼어들어
-        // **스크롤이 0 인 화면을 「밀어 봤다」고 찍는다**(실측: Info 탭이 그랬다).
+        // 집합이 달라지면(첫 수집이 곧 그 경우다) 되돌린다. 한 번만 세우면 그
+        // 되돌림이 캡처 직전에 끼어들어 **스크롤이 0 인 화면을 「밀어 봤다」고
+        // 찍는다**(실측: Info 탭이 그랬다).
         let first = !FIRED.swap(true, Ordering::Relaxed);
         if let Ok(px) = std::env::var("KASATERM_AUTOFTSCROLL") {
             match px.trim().parse::<f32>() {
@@ -3360,10 +3199,7 @@ impl App {
                 Err(_) => {}
             }
         }
-        use crate::state::SideTab;
-        let Some((tab, px)) = Self::autocolscroll_spec() else { return };
-        // 탭도 매 틱 다시 세운다 — 칼럼을 여는 다른 경로가 탭을 갈아 끼울 수 있다.
-        self.info.tab = tab;
+        let Some(px) = Self::autocolscroll_px() else { return };
         // `KASATERM_AUTOCOLWHEEL=<노치>` — 스크롤을 **손으로 세우는 대신 칼럼 위에서
         // 휠을 굴린다.** 값을 대입하는 길은 스크롤 상한 계산을 통째로 건너뛰므로,
         // 「끝까지 스크롤이 닿나」는 이 길로만 물을 수 있다. 음수면 위로 굴린다.
@@ -3374,12 +3210,7 @@ impl App {
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok());
         if wheel.is_none() || first {
-            match tab {
-                SideTab::Sessions => self.sessions_col.scroll = px,
-                SideTab::Mcp => self.mcp_col.scroll = px,
-                SideTab::Info => self.info.scroll = px,
-                SideTab::Git => self.git.col_scroll = px,
-            }
+            self.info.scroll = px;
         }
         self.chrome_dirty = true;
         self.render_frame();
@@ -3397,74 +3228,14 @@ impl App {
             self.render_frame();
         }
         // 읽는 것은 휠까지 굴린 **뒤**다. 앞에서 읽으면 대입한 값을 그대로 되읽어
-        // 「휠이 안 먹었다」와 구분이 안 된다.
-        let actual = match tab {
-            SideTab::Sessions => self.sessions_col.scroll,
-            SideTab::Mcp => self.mcp_col.scroll,
-            SideTab::Info => self.info.scroll,
-            SideTab::Git => self.git.col_scroll,
-        };
-        // 행 수를 함께 찍는 이유: 요청과 실제가 갈렸을 때 「clamp 이 먹었다」와
-        // 「목록이 아직 안 찼다」를 구분하는 유일한 단서다.
-        let rows = match tab {
-            SideTab::Sessions => self.sessions_col.view.len(),
-            SideTab::Mcp => self.mcp_col.row_rects.len(),
-            SideTab::Info => self.info.proc_rects.len(),
-            SideTab::Git => self.git.col_file_rects.len(),
-        };
-        let (vis_h, content_h) = self.git.col_list_extent;
-        // 펼침·캐시를 함께 찍는다: 내용 높이가 안 자랐을 때 「diff 를 안 펼쳤다」와
-        // 「펼쳤는데 캐시가 아직 안 왔다」는 화면으로 구분이 안 된다(둘 다 파일 목록만
-        // 보인다).
+        // 「휠이 안 먹었다」와 구분이 안 된다. 행 수는 요청과 실제가 갈렸을 때
+        // 「clamp 이 먹었다」와 「목록이 아직 안 찼다」를 가르는 단서다.
         eprintln!(
-            "[autocolscroll] 요청={px} 실제={actual} 행={rows} git기하=(보임 {vis_h:.0} / 내용 {content_h:.0} / 상한 {:.0}) 펼침={} 캐시={}",
-            (content_h - vis_h).max(0.0),
-            self.git.col_expanded.len(),
-            self.git.col_diff_cache.len()
+            "[autocolscroll] 요청={px} 실제={} 행={} 내용={:.0}",
+            self.info.scroll,
+            self.info.proc_rects.len(),
+            self.info.content_h
         );
-    }
-    /// `KASATERM_AUTOCOMMITSDRAG="<px>"` (+ `_MS`) — 칼럼 발치 「최근 커밋」 구역의
-    /// 손잡이를 그 시각에 **실제로 잡아** 위로 `px` 만큼 끌고 놓는다(양수면 커진다).
-    ///
-    /// 높이를 직접 대입하지 않는 건 손잡이 자리 판정까지 지나야 하기 때문이다 —
-    /// rect 가 어긋나 있으면 높이는 멀쩡히 바뀌는데 실제 클릭은 그 아래 첫 커밋 행에
-    /// 먹히고, 그 어긋남은 스크린샷에 안 찍힌다.
-    ///
-    /// 늘어난 만큼 커밋이 더 오는지는 **이 함수가 끝난 뒤** 확인해야 한다. 요청 개수는
-    /// 다음 렌더가 쓰고 목록은 폴러(1.2초)가 채우므로, 캡처는 넉넉히 뒤에 걸 것.
-    pub(crate) fn run_pending_autocommitsdrag(&mut self) {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::OnceLock;
-        static DUE: OnceLock<Option<(Instant, f32)>> = OnceLock::new();
-        static FIRED: AtomicBool = AtomicBool::new(false);
-        let due = DUE.get_or_init(|| {
-            let px: f32 = std::env::var("KASATERM_AUTOCOMMITSDRAG").ok()?.trim().parse().ok()?;
-            let ms: u64 = std::env::var("KASATERM_AUTOCOMMITSDRAG_MS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(6000);
-            Some((Instant::now() + std::time::Duration::from_millis(ms), px))
-        });
-        let Some((due, px)) = *due else { return };
-        if Instant::now() < due || FIRED.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        let Some(gr) = self.git.col_commits_grip else {
-            eprintln!("[autocommitsdrag] 손잡이 없음 — Git 탭이 아니거나 커밋 목록이 비었다");
-            return;
-        };
-        let (x, y) = (gr.0 + gr.2 / 2.0, gr.1 + gr.3 / 2.0);
-        let pressed = self.commits_grip_press(x, y);
-        let moved = self.commits_grip_drag(y - px);
-        let released = self.commits_grip_release();
-        // 요청 개수는 아직 옛값이다(렌더가 다음 프레임에 쓴다) — 그래서 여기선 높이만
-        // 믿을 값이고, 개수는 캡처한 그림으로 센다.
-        eprintln!(
-            "[autocommitsdrag] 손잡이=({x:.0},{y:.0}) 누름={pressed} 끌림={moved:?} 놓음={released} 높이={:?}",
-            self.git.col_commits_h
-        );
-        self.chrome_dirty = true;
-        self.render_frame();
     }
     /// `KASATERM_FORCE_HANDLE_MENU=*` → 활성 pane 의 ⋮ 메뉴를 연다. 이 env 는
     /// 생성자에서 pane id 를 그대로 받는데(main.rs), 로컬 PTY 모드의 leaf id 는
@@ -5832,7 +5603,6 @@ impl App {
                 if !self.git.col_visible {
                     self.toggle_git_col();
                 }
-                self.info.tab = crate::state::SideTab::Info;
                 // 펼침은 애니메이션이라 첫 프레임엔 카드가 납작해 칸 rect 가 하나도
                 // 안 실린다 — 다 펴질 때까지 프레임을 돌린다(autostash 와 같은 이유).
                 for _ in 0..40 {

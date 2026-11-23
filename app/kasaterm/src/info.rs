@@ -1823,7 +1823,7 @@ impl App {
         // 늦춘다(수집이 `ps` + `lsof` fork 라 상시 1.5초는 비싸고, 칩의 숫자는
         // 초 단위로 맞을 이유가 없다).
         // 맨 위 카드는 감시 스레드가 따로 채운다. 아래 「모든 방」 목록은 펼쳤을 때만 자주 모은다.
-        let info_open = self.info.runtime_page() && self.git.col_visible;
+        let info_open = self.git.col_visible;
         let (target, hint) = self.info_focus_target();
         self.info.focus_alt = self.ws.lock().ok().and_then(|ws| ws.active().and_then(|p| p.term()).map(|t| t.alt_screen)).unwrap_or(false);
         self.info.focus.aim(target, hint, info_open);
@@ -2195,13 +2195,12 @@ impl App {
     }
 }
 
-/// 좁은 칼럼에서도 탭이 닫기 버튼에 가려지지 않게 머리를 여러 줄로 쓴다.
-/// 배경 pill은 글자 폭을 먹으므로 활성 탭은 밑줄로 구분한다.
+/// 오른쪽 열 머리 — 다시 읽기·확대 단추 한 줄. 본문은 그 아래에서 시작한다.
 ///
 /// `App` 메서드가 아니라 자유 함수인 건 빌림 때문이다 — 호출부는 이미
 /// `self.gpu.as_mut()` 로 gpu 필드를 빌린 상태라 `self.method(g)` 는 self 를
 /// 통째로 다시 빌려 E0499 가 난다. 쓰는 필드만 따로 받으면 서로 겹치지 않는다.
-pub(crate) fn draw_side_tabs(
+pub(crate) fn draw_side_head(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     info: &mut state::InfoState,
@@ -2213,31 +2212,14 @@ pub(crate) fn draw_side_tabs(
     let bi = crate::native_controls::CONTROL_HEIGHT;
     let expand_x = x + w - 12.0 - bi;
     let button_y = top + 4.0;
-    // 다시 읽기는 Info 본문의 머리줄이 들고 있었는데, 그 줄(요약 숫자)이 걷히면서
-    // 탭 줄의 단추 자리로 올라왔다 — 확대와 한 벌이다.
     let refresh_x = expand_x - bi - 8.0;
-    info.refresh_rect = None;
-    if info.runtime_page() {
-        info.refresh_rect = Some(crate::native_controls::icon_button(
-            g, (refresh_x, button_y, bi, bi), cursor, "rotate-cw", Default::default(),
-        ));
-    }
+    info.refresh_rect = Some(crate::native_controls::icon_button(
+        g, (refresh_x, button_y, bi, bi), cursor, "rotate-cw", Default::default(),
+    ));
     git.col_expand_rect = Some(crate::native_controls::icon_button(
         g, (expand_x, button_y, bi, bi), cursor, "maximize", Default::default(),
     ));
-    info.tab_rects.clear();
-    let left=x+14.0;let line_h=38.0;let mut tx=left;let mut ty=top+4.0;let mut row=0;
-    let controls_left=if info.runtime_page(){refresh_x}else{expand_x};
-    for (tab,label) in [(state::SideTab::Git,"Git"),(state::SideTab::Info,"Info"),(state::SideTab::Sessions,"기록"),(state::SideTab::Mcp,"Addon")] {
-        let active=info.tab==tab;
-        let bw=crate::native_controls::button_width(g,label,bi,true);
-        let limit=if row==0 {controls_left-8.0}else{x+w-14.0};
-        if (row==0 || tx>left) && tx+bw>limit {row+=1;ty+=line_h;tx=left;}
-        let r=crate::native_controls::text_button(g,(tx,ty,bw.min((x+w-14.0-tx).max(0.0)),bi),cursor,label,crate::native_controls::Style{active,..Default::default()});
-        info.tab_rects.push((tab,r));tx+=bw+6.0;
-    }
-    (ty+bi+10.0).max(button_y+bi+10.0)
-
+    button_y + bi + 10.0
 }
 
 pub(crate) const ROW_H: f32 = 22.0;

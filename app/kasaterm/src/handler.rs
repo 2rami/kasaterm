@@ -1017,23 +1017,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::SocketToggleGit => {
-                // 아로나 타이틀바 버튼 → 터미널 GUI git 소스컨트롤 패널. 메인 창을 띄우고
-                // (숨겨져 있으면) 둘을 타일링한 뒤 git 컬럼 토글(사용자).
+            UserEvent::SocketToggleSideColumn => {
                 if let Some(w) = &self.window {
                     w.set_visible(true);
                     w.focus_window();
                     w.request_redraw();
                 }
+                // 인라인 웹을 덮고 있던 열은 닫지 않는다 — 누른 사람은 열을 보려던 것이다.
                 let replacing_inline = self.inline_web.is_some();
                 self.close_inline_web();
-                self.info.tab = state::SideTab::Git;
-                if crate::chrome::side_column_should_toggle(
-                    replacing_inline,
-                    self.git.col_visible,
-                    self.info.tab == state::SideTab::Git,
-                ) || !self.git.col_visible
-                {
+                if !(replacing_inline && self.git.col_visible) {
                     self.toggle_git_col();
                 }
                 self.chrome_dirty = true;
@@ -1977,19 +1970,6 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::GitOpFailed(why) => {
-                self.git.op = None;
-                self.set_toast(why.clone());
-                self.chrome_dirty = true;
-                self.render_frame();
-                return;
-            }
-            UserEvent::GitOpDone => {
-                self.git.op = None;
-                self.chrome_dirty = true;
-                self.render_frame();
-                return;
-            }
             UserEvent::NlCommand { pane, seq, result } => {
                 self.nl_command_done(pane.clone(), *seq, result.clone());
                 self.render_frame();
@@ -2247,7 +2227,7 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(windows)]
         crate::session_end::watch(self.proxy.clone());
         // macOS menu bar: app submenu (About/Quit) + a "보기" submenu with
-        // the "Git 패널" toggle. Built once (NSApp exists by resumed). Clicks
+        // the right-column toggle. Built once (NSApp exists by resumed). Clicks
         // arrive on muda's global channel, drained in about_to_wait. Stored
         // on self so the menu outlives this function.
         #[cfg(target_os = "macos")]
@@ -2272,10 +2252,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
             let _ = app_m.append_items(&[&PredefinedMenuItem::separator(), &quit_item]);
             let view_m = Submenu::new("보기", true);
-            let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
-            let session_item = MenuItem::new("세션 패널 켜기/끄기", true, None);
-            let _ = view_m.append(&git_item);
-            let _ = view_m.append(&session_item);
+            let side_item = MenuItem::new("오른쪽 패널 켜기/끄기", true, None);
+            let _ = view_m.append(&side_item);
             // 편집 메뉴 — macOS 는 이 메뉴(Cmd+V/Cmd+C 단축키)가 있어야 아로나
             // webview 입력창 붙여넣기가 먹는다. 다만 PredefinedMenuItem::paste/copy 는
             // 그 단축키 keyDown 을 NSMenu 가 가로채 winit 까지 안 내려보내 터미널
@@ -2301,8 +2279,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = menu.append(&view_m);
             }
             menu.init_for_nsapp();
-            self.git_menu_item = Some(git_item);
-            self.session_menu_item = Some(session_item);
+            self.side_menu_item = Some(side_item);
             self.copy_menu_item = Some(copy_item);
             self.paste_menu_item = Some(paste_item);
             self.update_menu_item = Some(update_item);
@@ -2557,16 +2534,6 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
-        let git_wake = self.git.col_wake.clone();
-        kasa_git::git_watch::set_listener(move || git_wake.kick());
-        crate::git_panel::spawn_poller(
-            self.proxy.clone(),
-            self.git.col_context.clone(),
-            self.git.col_data.clone(),
-            self.git.col_commit_want.clone(),
-            self.git.col_wake.clone(),
-        );
-        crate::git_panel::spawn_remote_watcher(self.git.col_context.clone(), self.git.col_wake.clone());
         // 디스크 지키기 — 뒤 스레드가 남은 공간을 재고 빌드 산출물을 치운다(docs/disk-guard.md). 리그도 남은 공간은
         // 재지만(경고 카드를 그려 본다) 정리는 `KASATERM_DISK_ROOTS` 없이는 하지 않는다.
         if !self.lite {
@@ -3355,13 +3322,13 @@ impl ApplicationHandler<UserEvent> for App {
                     (left, TITLE_HEIGHT, (size.width as f32 / scale - left).max(0.0),
                         (size.height as f32 / scale - TITLE_HEIGHT - self.status_h()).max(0.0))
                 });
-                if blocks_obscured_button(*button, self.main_pointer_modal(), workspace, self.cursor_px) {
+                if blocks_obscured_button(*button, self.main_confirmation_modal(), workspace, self.cursor_px) {
                     return;
                 }
             }
         }
         if main_window {
-            let allow_image = !self.main_pointer_modal() && !self.internal_room_active_any()
+            let allow_image = !self.main_confirmation_modal() && !self.internal_room_active_any()
                 && self.handle_menu.is_none() && self.statusbar.popover.is_none() && !self.account_menu
                 && self.file_tree.ctx_menu.is_none() && self.sidebar_menu.is_none()
                 && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
@@ -3462,7 +3429,6 @@ impl ApplicationHandler<UserEvent> for App {
         if main_window {
             self.note_human_touch(&event);
         }
-        if main_window && !self.main_pointer_modal() && self.sessions_panel_event(&event) { return; }
         // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
@@ -3512,7 +3478,7 @@ impl ApplicationHandler<UserEvent> for App {
             if used { window.request_redraw(); return; }
         }
         if matches!(event, WindowEvent::MouseInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. })
-            && !self.main_pointer_modal()
+            && !self.main_confirmation_modal()
             && self.screen_pointer_event(&event)
         {
             window.request_redraw();
@@ -3710,7 +3676,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_pinch(delta);
             }
             WindowEvent::CursorMoved { .. } => {
-                let main_modal = self.main_pointer_modal();
+                let main_modal = self.main_confirmation_modal();
                 if !main_modal && self.room_rename_pointer_drag(self.cursor_px.0) {
                     window.set_cursor(CursorIcon::Text);
                     window.request_redraw();
@@ -3721,7 +3687,6 @@ impl ApplicationHandler<UserEvent> for App {
                     let inside = |r: &(f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
-                    let text = self.git.commit_input_rect.as_ref().is_some_and(&inside);
                     let pointer = self.confirm_btn_rects.iter().any(|(_, r)| inside(r))
                         || self.restore_btn_rects.iter().any(|(_, r)| inside(r))
                         || self
@@ -3734,12 +3699,9 @@ impl ApplicationHandler<UserEvent> for App {
                             .filter(|pending| {
                                 pending.surface == crate::session::ConfirmSurface::Main
                             })
-                            .is_some_and(|pending| pending.rects.iter().any(|(_, r)| inside(r)))
-                        || self.git.commit_modal_rects.iter().any(|(_, r)| inside(r));
-                    self.text_cursor_shown = text;
-                    window.set_cursor(if text {
-                        CursorIcon::Text
-                    } else if pointer {
+                            .is_some_and(|pending| pending.rects.iter().any(|(_, r)| inside(r)));
+                    self.text_cursor_shown = false;
+                    window.set_cursor(if pointer {
                         CursorIcon::Pointer
                     } else {
                         CursorIcon::Default
@@ -3939,7 +3901,7 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                     }
                 }
-                // Git column hover — repaint so the row + button highlights
+                // Right column hover — repaint so the row + button highlights
                 // track the cursor (the render reads cursor_px live). Only
                 // while the cursor is actually over the column, so it costs
                 // nothing elsewhere.
@@ -3977,7 +3939,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Git column resize drag in progress. Its grip is the LEFT edge
+                // Right column resize drag in progress. Its grip is the LEFT edge
                 // (flush-right column), so dragging left widens it — hence the
                 // negated delta versus the left-hand columns.
                 if let Some((start_x, start_w)) = self.git.col_resize {
@@ -3989,16 +3951,6 @@ impl ApplicationHandler<UserEvent> for App {
                         self.resize_backend(cols, rows);
                         self.chrome_dirty = true;
                         window.set_cursor(CursorIcon::ColResize);
-                        window.request_redraw();
-                    }
-                    return;
-                }
-                // 「최근 커밋」 구역 높이 드래그. 손잡이가 구역 **머리**라 위로 끌수록
-                // 커진다 — 폭 드래그와 같은 이유로 델타는 시작점 기준이다. 셀 격자와
-                // 무관한 chrome 안쪽이라 PTY resize 는 없다.
-                if let Some(moved) = self.commits_grip_drag(self.cursor_px.1) {
-                    if moved {
-                        window.set_cursor(CursorIcon::RowResize);
                         window.request_redraw();
                     }
                     return;
@@ -4393,11 +4345,7 @@ impl ApplicationHandler<UserEvent> for App {
                         && cy > TITLE_HEIGHT
                         && cy < bar_top
                         && (cx - self.git_col_x()).abs() <= 3.0;
-                    // 「최근 커밋」 구역 손잡이 — 세로로 끄는 것이라 ColResize 가 아니다.
-                    let on_commits_grip = self.git.col_commits_grip.is_some_and(|gr| {
-                        cx >= gr.0 && cx <= gr.0 + gr.2 && cy >= gr.1 && cy <= gr.1 + gr.3
-                    });
-                    let icon = if on_commits_grip || self.on_info_split(cx, cy) {
+                    let icon = if self.on_info_split(cx, cy) {
                         CursorIcon::RowResize
                     } else if on_sidebar_edge || on_tree_edge || on_git_edge {
                         CursorIcon::ColResize
@@ -4569,10 +4517,8 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Info 탭 프로세스·포트 행 → 종료·복사 메뉴. 행 rect 는 Info 본문이
-                // 그릴 때만 갱신되므로 탭까지 확인한다(Git 탭에선 낡은 좌표).
+                // Info 프로세스·포트 행 → 종료·복사 메뉴.
                 if self.git.col_visible
-                    && self.info.runtime_page()
                     && cy > TITLE_HEIGHT
                     && cx >= self.git_col_x()
                 {
@@ -4735,7 +4681,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // (cursor left the row) released over a pane types that path
                 // into the shell; otherwise it just disarms — the row's
                 // expand/preview click already fired on press.
-                if matches!(state, ElementState::Pressed) && !self.main_pointer_modal()
+                if matches!(state, ElementState::Pressed) && !self.main_confirmation_modal()
                     && self.sidebar_menu.is_none() && self.info.navigation.room_menu.is_none()
                     && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
                     && self.info.machine_menu.is_none() && self.file_tree.ctx_menu.is_none()
@@ -4993,51 +4939,6 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Commit modal is a full-window dialog — handled before the git
-                // column (and everything else) so clicks outside the column
-                // still hit its buttons, and the scrim swallows the rest.
-                if self.git.commit_modal_open {
-                    if matches!(state, ElementState::Pressed) {
-                        let (cx, cy) = self.cursor_px;
-                        let inside = |r: &(f32, f32, f32, f32)| {
-                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                        };
-                        if let Some(btn) = self
-                            .git
-                            .commit_modal_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(b, _)| *b)
-                        {
-                            match btn {
-                                crate::GitModalBtn::Close | crate::GitModalBtn::Cancel => {
-                                    self.close_commit_modal()
-                                }
-                                crate::GitModalBtn::IncludeUnstaged => {
-                                    self.git.commit_modal_include_unstaged =
-                                        !self.git.commit_modal_include_unstaged;
-                                    window.request_redraw();
-                                }
-                                crate::GitModalBtn::Commit | crate::GitModalBtn::Confirm => {
-                                    self.run_commit_modal(false)
-                                }
-                                crate::GitModalBtn::CommitAndPush => self.run_commit_modal(true),
-                            }
-                            return;
-                        }
-                        if self
-                            .git
-                            .commit_input_rect
-                            .map(|r| inside(&r))
-                            .unwrap_or(false)
-                        {
-                            self.git.commit_focused = true;
-                            window.request_redraw();
-                            return;
-                        }
-                    }
-                    return;
-                }
                 if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
                     if matches!(state, ElementState::Pressed) {
                         self.last_input_at = Instant::now();
@@ -5056,7 +4957,7 @@ impl ApplicationHandler<UserEvent> for App {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
                     // 웹 pane 주소창 편집 중 그 pill 밖을 누르면 blur(취소).
-                    // git 커밋 칸과 같은 규칙 — 클릭은 이후 제 몫을 계속한다.
+                    // 클릭은 이후 제 몫을 계속한다.
                     // **가장 이른 Pressed 블록에 둔다** — 아래 설정 버튼처럼
                     // 자기 일만 하고 return 하는 경로 뒤에 두면, 그리로
                     // 나간 클릭이 blur 를 건너뛰어 보이지 않는 편집이 키보드를
@@ -5117,20 +5018,6 @@ impl ApplicationHandler<UserEvent> for App {
                             && !hit(self.file_tree.new_file_rect)
                         {
                             self.file_tree.new = None;
-                            self.chrome_dirty = true;
-                        }
-                    }
-                    // Any press outside the commit input blurs it, so typing
-                    // goes back to the PTY. A press on the input keeps focus
-                    // (the git-column handler re-asserts it below).
-                    if self.git.commit_focused {
-                        let on_input = self
-                            .git
-                            .commit_input_rect
-                            .map(|(x, y, w, h)| cx >= x && cx <= x + w && cy >= y && cy <= y + h)
-                            .unwrap_or(false);
-                        if !on_input {
-                            self.git.commit_focused = false;
                             self.chrome_dirty = true;
                         }
                     }
@@ -5270,7 +5157,7 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
-                    // Git column resize grip — its LEFT edge (the column is
+                    // Right column resize grip — its LEFT edge (the column is
                     // flush-right, so dragging the seam left widens it). Caught
                     // before the column click path.
                     if self.git.col_visible && cy > TITLE_HEIGHT && cy < bar_top {
@@ -5279,12 +5166,6 @@ impl ApplicationHandler<UserEvent> for App {
                             self.git.col_resize = Some((cx, self.git.col_w_logical));
                             return;
                         }
-                    }
-                    // 「최근 커밋」 구역 머리의 가로선 — 위로 끌면 구역이 커지고 그만큼
-                    // 커밋을 더 가져온다. 칼럼 클릭 경로보다 앞이어야 한다: 그 아래가
-                    // 바로 커밋 행이라, 뒤에 두면 손잡이를 눌러도 첫 행이 먼저 먹는다.
-                    if self.commits_grip_press(cx, cy) {
-                        return;
                     }
                     // Info 위아래 영역 경계 — 바로 위아래가 프롬프트·결과물 줄이라 칼럼 클릭보다 앞이다.
                     if self.info_split_press(cx, cy) {
@@ -5565,7 +5446,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // Empty tree space — swallow the click.
                         return;
                     }
-                    // Git column — right-hand chrome. Caught before the cell
+                    // Right column (Info). Caught before the cell
                     // grid so a click never falls through to the terminal.
                     if self.git.col_visible
                         && cy > TITLE_HEIGHT
@@ -5575,113 +5456,6 @@ impl ApplicationHandler<UserEvent> for App {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
-                        if self.info.tab != state::SideTab::Git {
-                            self.git.clear_panel_hit_targets();
-                            self.git.path_menu_open = false;
-                            self.git.branch_menu_open = false;
-                            self.git.commit_menu_open = false;
-                        }
-                        // Open dropdowns overlay everything — resolve their items
-                        // (and the header toggles) before the list/buttons under.
-                        if self.git.path_menu_open {
-                            if let Some(repo) = self
-                                .git
-                                .path_menu_repo_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(repo, _)| repo.clone())
-                            {
-                                if let Some(id) = self.git_active_pane() {
-                                    self.git.col_repo_choice.insert(id, repo);
-                                }
-                                self.git.col_pinned_cwd = None;
-                                self.git.path_menu_open = false;
-                                self.publish_git_col_cwd();
-                                window.request_redraw();
-                                return;
-                            }
-                            if let Some(key) = self
-                                .git
-                                .path_menu_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(k, _)| k.clone())
-                            {
-                                // None = "자동 추적" (unpin, 이 칸의 하위 레포 고르기도 풀기); Some = pin that repo.
-                                if key.is_none() {
-                                    if let Some(id) = self.git_active_pane() {
-                                        self.git.col_repo_choice.remove(&id);
-                                    }
-                                }
-                                self.git.col_pinned_cwd = key;
-                                self.git.path_menu_open = false;
-                                self.publish_git_col_cwd();
-                                window.request_redraw();
-                                return;
-                            }
-                        }
-                        if self.git.branch_menu_open {
-                            if let Some(back) = self.git.branch_page_rects.iter()
-                                .find(|(_, rect)| inside(rect)).map(|(back, _)| *back) {
-                                if back { self.git.branch_page = self.git.branch_page.saturating_sub(1); }
-                                else { self.git.branch_page += 1; }
-                                window.request_redraw();
-                                return;
-                            }
-                        }
-                        // Header rows toggle their dropdowns (mutually exclusive).
-                        if self.git.path_hdr_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            self.git.path_menu_open = !self.git.path_menu_open;
-                            self.git.branch_menu_open = false;
-                            window.request_redraw();
-                            return;
-                        }
-                        if self
-                            .git
-                            .branch_hdr_rect
-                            .map(|r| inside(&r))
-                            .unwrap_or(false)
-                        {
-                            self.git.branch_menu_open = !self.git.branch_menu_open;
-                            self.git.path_menu_open = false;
-                            window.request_redraw();
-                            return;
-                        }
-                        // A click elsewhere in the column dismisses an open menu
-                        // (swallowed, so it doesn't also hit the list/buttons).
-                        if self.git.path_menu_open || self.git.branch_menu_open {
-                            self.git.path_menu_open = false;
-                            self.git.branch_menu_open = false;
-                            window.request_redraw();
-                            return;
-                        }
-                        // Commit-button dropdown items (overlay) first.
-                        if self.git.commit_menu_open {
-                            if let Some(act) = self
-                                .git
-                                .commit_menu_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(a, _)| *a)
-                            {
-                                self.git.commit_menu_open = false;
-                                match act {
-                                    crate::GitCommitAction::Commit => self.open_commit_modal(),
-                                    crate::GitCommitAction::Push => {
-                                        self.run_git_col_action(crate::GitColBtn::Push)
-                                    }
-                                    crate::GitCommitAction::Pull => {
-                                        self.run_git_col_action(crate::GitColBtn::Pull)
-                                    }
-                                    crate::GitCommitAction::CreatePr => self.create_git_pr(),
-                                }
-                                window.request_redraw();
-                                return;
-                            }
-                            self.git.commit_menu_open = false;
-                            window.request_redraw();
-                            return;
-                        }
                         // 학생 줄 우클릭 메뉴. 테마를 고른 것은 **메뉴를 닫지 않고**
                         // 같은 자리에서 목록만 바꾼다 — 한 번 더 눌러 학생을 고르는
                         // 것이 이 메뉴의 본래 목적이라, 여기서 닫으면 매번 우클릭을
@@ -5758,247 +5532,203 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        // 칼럼 탭(Git / Info / 세션). 닫기·확장보다 먼저 봐야
-                        // 한다 — 셋 다 같은 머리 줄에 있고 탭이 가장 왼쪽이다.
-                        if let Some((tab, _)) = self
+                        if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.info.last_refresh = None;
+                            window.request_redraw();
+                            return;
+                        }
+                        // 「다른 기계」 밑 pane 줄 — 이쪽에 거울이 있으면 그리로, 없으면 연다.
+                        if let Some((_, act, local, _)) = self
                             .info
-                            .tab_rects
+                            .machine_pane_rects
+                            .iter()
+                            .find(|(_, _, _, r)| inside(r))
+                            .cloned()
+                        {
+                            // 동작(거울 열기·닫기)이 실려 있으면 그것이 먼저 — 거울 행의
+                            // × 도 여기로 온다. 동작 없는 거울 행만 그 pane 으로 간다.
+                            match (local, act) {
+                                // 거울 열기는 **두 번** 눌러야 한다 — 목록을 훑다 스친
+                                // 한 번에 탭이 생기면 닫는 일이 는다(2026-09-09 지시).
+                                // 한 번은 이미 있는 거울로만 간다.
+                                (_, Some(state::MachinesColBtn::Mirror { label, remote_id, name, cwd })) => {
+                                    let now = Instant::now();
+                                    let key = format!("{label}/{remote_id}");
+                                    let is_double = matches!(
+                                        self.info.machine_click.as_ref(),
+                                        Some((t, k)) if *k == key && now.duration_since(*t).as_millis() < 400
+                                    );
+                                    if is_double {
+                                        self.info.machine_click = None;
+                                        self.machines_col_act(state::MachinesColBtn::Mirror {
+                                            label,
+                                            remote_id,
+                                            name,
+                                            cwd,
+                                        });
+                                    } else {
+                                        self.info.machine_click = Some((now, key));
+                                        let existing = kasa_device::machines::find(&label).and_then(|m| {
+                                            kasa_pty::live_sessions().into_iter().find(|id| {
+                                                kasa_remote::remote::remote_info(id).is_some_and(|i| {
+                                                    i.base == m.base && i.remote_id == remote_id
+                                                })
+                                            })
+                                        });
+                                        if let Some(p) = existing {
+                                            self.reveal_pane_tab(&p);
+                                        }
+                                    }
+                                }
+                                (_, Some(btn)) => {
+                                    self.machines_col_act(btn);
+                                }
+                                (Some(p), None) => {
+                                    self.reveal_pane_tab(&p);
+                                }
+                                (None, None) => {}
+                            }
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
+                        // Device headings collapse; right-click opens the device menu.
+                        if let Some(label) = self
+                            .info
+                            .machine_rects
                             .iter()
                             .find(|(_, r)| inside(r))
-                            .map(|(t, r)| (*t, *r))
+                            .map(|(l, _)| l.clone())
                         {
-                            if self.info.tab != tab {
-                                self.info.tab = tab;
-                                self.git.clear_panel_hit_targets();
-                                self.git.path_menu_open = false;
-                                self.git.branch_menu_open = false;
-                                self.git.commit_menu_open = false;
-                                // Info 로 막 넘어왔으면 목록이 비어 있다 — 다음
-                                // 프레임의 pump_info 가 즉시 채우도록 놓아둔다.
-                                self.info.scroll = 0.0;
-                                // Git 탭에선 Info 본문이 안 그려져 메뉴도 안 뜨는데
-                                // 열린 채로 두면 그 뒤 클릭을 계속 삼킨다.
-                                self.info.ctx_menu = None;
-                                self.info.pane_menu = None;
-                                self.info.machine_menu = None;
+                            if !self.info.machine_collapsed.remove(&label) {
+                                self.info.machine_collapsed.insert(label);
                             }
-                            window.request_redraw();
-                            return;
-                        }
-                        if self.info.tab == state::SideTab::Mcp && self.mcp_col_click(cx, cy) {
                             self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }
-                        if self.info.tab == state::SideTab::Sessions
-                            && self.sessions_col_click(cx, cy)
+                        if let Some(sec) = self
+                            .info
+                            .sec_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(s, _)| *s)
                         {
+                            let flag = match sec {
+                                state::InfoSection::Dir => &mut self.info.dir_collapsed,
+                                state::InfoSection::Procs => &mut self.info.procs_collapsed,
+                            };
+                            *flag = !*flag;
+                            window.request_redraw();
+                            return;
+                        }
+                        if let Some(btn) = self
+                            .info
+                            .dir_btn_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(b, _)| *b)
+                        {
+                            if let Some(path) = self.info.root.clone() {
+                                match btn {
+                                    state::InfoDirBtn::Reveal => {
+                                        self.reveal_in_file_manager(&path)
+                                    }
+                                    state::InfoDirBtn::Editor => {
+                                        if let Some((_, target)) =
+                                            crate::proc::open_with_apps().first()
+                                        {
+                                            crate::proc::open_path_with(target, &path);
+                                        }
+                                    }
+                                    state::InfoDirBtn::CopyPath => {
+                                        let s = path.to_string_lossy().into_owned();
+                                        self.copy_to_clipboard(s, "경로 복사됨");
+                                    }
+                                }
+                            }
+                            window.request_redraw();
+                            return;
+                        }
+                        if let Some(hit) = self
+                            .info
+                            .focus_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(h, _)| h.clone())
+                        {
+                            self.run_focus_hit(hit);
+                            window.request_redraw();
+                            return;
+                        }
+                        if self.info_prompt_press(cx, cy) || self.info_output_press(cx, cy) {
+                            window.request_redraw();
+                            return;
+                        }
+                        // pane 그룹 머리 → 그 그룹만 접기.
+                        if let Some(pane) = self
+                            .info
+                            .group_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(p, _)| p.clone())
+                        {
+                            if pane.starts_with("runtime:") || pane.starts_with("pills:") || pane.starts_with("fold:") {
+                                if !self.info.pane_expanded.remove(&pane) {
+                                    self.info.pane_expanded.insert(pane);
+                                }
+                                self.info.last_group_click = None;
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
+                            // 한 번 = 접기/펴기, 두 번 = 그 학생으로 포커스.
+                            // 더블클릭이면 접기 토글이 두 번 걸려 제자리로
+                            // 돌아오므로, 여기선 포커스만 얹으면 된다.
+                            let now = Instant::now();
+                            let is_double = matches!(
+                                self.info.last_group_click.as_ref(),
+                                Some((t, k))
+                                    if *k == pane
+                                        && now.duration_since(*t).as_millis() < 400
+                            );
+                            // 방은 「접어둔 것」을, 학생은 「펴 둔 것」을 기억한다
+                            // — 기본값이 서로 반대(방=열림, 학생=닫힘)라 한 집합
+                            // 으로는 표현할 수 없다.
+                            if pane.starts_with("win:") {
+                                if !self.info.group_collapsed.remove(&pane) {
+                                    self.info.group_collapsed.insert(pane.clone());
+                                }
+                            } else if !self.info.pane_expanded.remove(&pane) {
+                                self.info.pane_expanded.insert(pane.clone());
+                            }
+                            if is_double {
+                                self.info.last_group_click = None;
+                                // 방 머리는 그 방으로, pane 머리는 그 pane 으로.
+                                match pane.strip_prefix("win:").and_then(|n| n.parse().ok()) {
+                                    Some(wi) => self.switch_window(wi),
+                                    None => {
+                                        self.focus_pane(&pane);
+                                    }
+                                }
+                            } else {
+                                self.info.last_group_click = Some((now, pane));
+                            }
                             self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }
-                        // 아래 hit rect 들은 Info 본문이 그릴 때만 갱신되므로,
-                        // Git 탭에서는 낡은 좌표가 남아 있다 — 탭을 확인하지
-                        // 않으면 git 목록 클릭을 Info 행이 가로챈다.
-                        if self.info.runtime_page() {
-                            if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
-                                self.info.last_refresh = None;
-                                window.request_redraw();
-                                return;
-                            }
-                            // 「다른 기계」 밑 pane 줄 — 이쪽에 거울이 있으면 그리로, 없으면 연다.
-                            if let Some((_, act, local, _)) = self
-                                .info
-                                .machine_pane_rects
-                                .iter()
-                                .find(|(_, _, _, r)| inside(r))
-                                .cloned()
-                            {
-                                // 동작(거울 열기·닫기)이 실려 있으면 그것이 먼저 — 거울 행의
-                                // × 도 여기로 온다. 동작 없는 거울 행만 그 pane 으로 간다.
-                                match (local, act) {
-                                    // 거울 열기는 **두 번** 눌러야 한다 — 목록을 훑다 스친
-                                    // 한 번에 탭이 생기면 닫는 일이 는다(2026-09-09 지시).
-                                    // 한 번은 이미 있는 거울로만 간다.
-                                    (_, Some(state::MachinesColBtn::Mirror { label, remote_id, name, cwd })) => {
-                                        let now = Instant::now();
-                                        let key = format!("{label}/{remote_id}");
-                                        let is_double = matches!(
-                                            self.info.machine_click.as_ref(),
-                                            Some((t, k)) if *k == key && now.duration_since(*t).as_millis() < 400
-                                        );
-                                        if is_double {
-                                            self.info.machine_click = None;
-                                            self.machines_col_act(state::MachinesColBtn::Mirror {
-                                                label,
-                                                remote_id,
-                                                name,
-                                                cwd,
-                                            });
-                                        } else {
-                                            self.info.machine_click = Some((now, key));
-                                            let existing = kasa_device::machines::find(&label).and_then(|m| {
-                                                kasa_pty::live_sessions().into_iter().find(|id| {
-                                                    kasa_remote::remote::remote_info(id).is_some_and(|i| {
-                                                        i.base == m.base && i.remote_id == remote_id
-                                                    })
-                                                })
-                                            });
-                                            if let Some(p) = existing {
-                                                self.reveal_pane_tab(&p);
-                                            }
-                                        }
-                                    }
-                                    (_, Some(btn)) => {
-                                        self.machines_col_act(btn);
-                                    }
-                                    (Some(p), None) => {
-                                        self.reveal_pane_tab(&p);
-                                    }
-                                    (None, None) => {}
-                                }
-                                self.chrome_dirty = true;
-                                window.request_redraw();
-                                return;
-                            }
-                            // Device headings collapse; right-click opens the device menu.
-                            if let Some(label) = self
-                                .info
-                                .machine_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(l, _)| l.clone())
-                            {
-                                if !self.info.machine_collapsed.remove(&label) {
-                                    self.info.machine_collapsed.insert(label);
-                                }
-                                self.chrome_dirty = true;
-                                window.request_redraw();
-                                return;
-                            }
-                            if let Some(sec) = self
-                                .info
-                                .sec_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(s, _)| *s)
-                            {
-                                let flag = match sec {
-                                    state::InfoSection::Dir => &mut self.info.dir_collapsed,
-                                    state::InfoSection::Procs => &mut self.info.procs_collapsed,
-                                };
-                                *flag = !*flag;
-                                window.request_redraw();
-                                return;
-                            }
-                            if let Some(btn) = self
-                                .info
-                                .dir_btn_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(b, _)| *b)
-                            {
-                                if let Some(path) = self.info.root.clone() {
-                                    match btn {
-                                        state::InfoDirBtn::Reveal => {
-                                            self.reveal_in_file_manager(&path)
-                                        }
-                                        state::InfoDirBtn::Editor => {
-                                            if let Some((_, target)) =
-                                                crate::proc::open_with_apps().first()
-                                            {
-                                                crate::proc::open_path_with(target, &path);
-                                            }
-                                        }
-                                        state::InfoDirBtn::CopyPath => {
-                                            let s = path.to_string_lossy().into_owned();
-                                            self.copy_to_clipboard(s, "경로 복사됨");
-                                        }
-                                    }
-                                }
-                                window.request_redraw();
-                                return;
-                            }
-                            if let Some(hit) = self
-                                .info
-                                .focus_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(h, _)| h.clone())
-                            {
-                                self.run_focus_hit(hit);
-                                window.request_redraw();
-                                return;
-                            }
-                            if self.info_prompt_press(cx, cy) || self.info_output_press(cx, cy) {
-                                window.request_redraw();
-                                return;
-                            }
-                            // pane 그룹 머리 → 그 그룹만 접기.
-                            if let Some(pane) = self
-                                .info
-                                .group_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(p, _)| p.clone())
-                            {
-                                if pane.starts_with("runtime:") || pane.starts_with("pills:") || pane.starts_with("fold:") {
-                                    if !self.info.pane_expanded.remove(&pane) {
-                                        self.info.pane_expanded.insert(pane);
-                                    }
-                                    self.info.last_group_click = None;
-                                    self.chrome_dirty = true;
-                                    window.request_redraw();
-                                    return;
-                                }
-                                // 한 번 = 접기/펴기, 두 번 = 그 학생으로 포커스.
-                                // 더블클릭이면 접기 토글이 두 번 걸려 제자리로
-                                // 돌아오므로, 여기선 포커스만 얹으면 된다.
-                                let now = Instant::now();
-                                let is_double = matches!(
-                                    self.info.last_group_click.as_ref(),
-                                    Some((t, k))
-                                        if *k == pane
-                                            && now.duration_since(*t).as_millis() < 400
-                                );
-                                // 방은 「접어둔 것」을, 학생은 「펴 둔 것」을 기억한다
-                                // — 기본값이 서로 반대(방=열림, 학생=닫힘)라 한 집합
-                                // 으로는 표현할 수 없다.
-                                if pane.starts_with("win:") {
-                                    if !self.info.group_collapsed.remove(&pane) {
-                                        self.info.group_collapsed.insert(pane.clone());
-                                    }
-                                } else if !self.info.pane_expanded.remove(&pane) {
-                                    self.info.pane_expanded.insert(pane.clone());
-                                }
-                                if is_double {
-                                    self.info.last_group_click = None;
-                                    // 방 머리는 그 방으로, pane 머리는 그 pane 으로.
-                                    match pane.strip_prefix("win:").and_then(|n| n.parse().ok()) {
-                                        Some(wi) => self.switch_window(wi),
-                                        None => {
-                                            self.focus_pane(&pane);
-                                        }
-                                    }
-                                } else {
-                                    self.info.last_group_click = Some((now, pane));
-                                }
-                                self.chrome_dirty = true;
-                                window.request_redraw();
-                                return;
-                            }
-                            // 종료(×)는 행보다 먼저 — 행 안에 겹쳐 있다.
-                            if let Some(pid) = self
-                                .info
-                                .kill_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(p, _)| *p)
-                            {
-                                self.kill_process(pid, false);
-                                window.request_redraw();
-                                return;
-                            }
+                        // 종료(×)는 행보다 먼저 — 행 안에 겹쳐 있다.
+                        if let Some(pid) = self
+                            .info
+                            .kill_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(p, _)| *p)
+                        {
+                            self.kill_process(pid, false);
+                            window.request_redraw();
+                            return;
                         }
                         if self
                             .git
@@ -6007,174 +5737,6 @@ impl ApplicationHandler<UserEvent> for App {
                             .unwrap_or(false)
                         {
                             self.toggle_git_col_expand();
-                            window.request_redraw();
-                            return;
-                        }
-                        if self.info.tab != state::SideTab::Git {
-                            return;
-                        }
-                        // Commit split button: main → modal, caret → dropdown.
-                        if self
-                            .git
-                            .commit_btn_rect
-                            .map(|r| inside(&r))
-                            .unwrap_or(false)
-                        {
-                            // Matches the render: with no changes but commits to
-                            // sync, the primary button is the sync action — 당길
-                            // 것이 있으면 Pull 이 먼저다(render 의 pull_mode 와 같은
-                            // 우선순위여야 「보이는 버튼」과 「눌리는 동작」이 안
-                            // 갈린다).
-                            let sync = self
-                                .git
-                                .col_data
-                                .lock()
-                                .ok()
-                                .filter(|g| g.staged.is_empty() && g.unstaged.is_empty())
-                                .map(|g| (g.behind > 0, g.ahead > 0))
-                                .unwrap_or((false, false));
-                            match sync {
-                                (true, _) => self.run_git_col_action(crate::GitColBtn::Pull),
-                                (false, true) => self.run_git_col_action(crate::GitColBtn::Push),
-                                _ => self.open_commit_modal(),
-                            }
-                            window.request_redraw();
-                            return;
-                        }
-                        if self
-                            .git
-                            .commit_caret_rect
-                            .map(|r| inside(&r))
-                            .unwrap_or(false)
-                        {
-                            self.git.commit_menu_open = !self.git.commit_menu_open;
-                            window.request_redraw();
-                            return;
-                        }
-                        // Row +/− button → stage / unstage that one file. Checked
-                        // before the file-preview path since it sits inside the
-                        // row rect. Off-thread; the poller repaints the lists.
-                        if let Some((stage, path)) = self
-                            .git
-                            .col_stage_rects
-                            .iter()
-                            .find(|(_, _, r)| inside(r))
-                            .map(|(s, p, _)| (*s, p.clone()))
-                        {
-                            if let Some(cwd) = self.local_git_panel_cwd("스테이지 변경") {
-                                let proxy = self.proxy.clone();
-                                let data = self.git.col_data.clone();
-                                let context = self.git.col_context.clone();
-                                let want = self
-                                    .git
-                                    .col_commit_want
-                                    .load(std::sync::atomic::Ordering::Relaxed);
-                                std::thread::spawn(move || {
-                                    let result = if stage {
-                                        kasa_git::git::git_add_path(&cwd, &path)
-                                    } else {
-                                        kasa_git::git::git_unstage_path(&cwd, &path)
-                                    };
-                                    if let Some(error) = crate::chrome::git_operation_error(&result) {
-                                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
-                                    }
-                                    // Re-read status right away so the row jumps
-                                    // sections immediately instead of waiting for
-                                    // the poller's fingerprint tick.
-                                    crate::git_panel::read_now(&context, &data, want);
-                                    let _ = proxy.send_event(UserEvent::Redraw);
-                                });
-                            }
-                            // The file jumps sections (staged↔changes); cached
-                            // diffs keyed by (staged, path) are now stale.
-                            self.invalidate_git_diffs();
-                            window.request_redraw();
-                            return;
-                        }
-                        // Row ↩ discard → restore the file (or delete if untracked).
-                        if let Some((path, untracked)) = self
-                            .git
-                            .col_discard_rects
-                            .iter()
-                            .find(|(_, _, r)| inside(r))
-                            .map(|(p, u, _)| (p.clone(), *u))
-                        {
-                            if let Some(cwd) = self.local_git_panel_cwd("변경 되돌리기") {
-                                let proxy = self.proxy.clone();
-                                let data = self.git.col_data.clone();
-                                let context = self.git.col_context.clone();
-                                let want = self
-                                    .git
-                                    .col_commit_want
-                                    .load(std::sync::atomic::Ordering::Relaxed);
-                                std::thread::spawn(move || {
-                                    let result = kasa_git::git::git_discard_path(&cwd, &path, untracked);
-                                    if let Some(error) = crate::chrome::git_operation_error(&result) {
-                                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
-                                    }
-                                    crate::git_panel::read_now(&context, &data, want);
-                                    let _ = proxy.send_event(UserEvent::Redraw);
-                                });
-                            }
-                            self.invalidate_git_diffs();
-                            window.request_redraw();
-                            return;
-                        }
-                        // Row ⤴ open → preview the file in a pane.
-                        if let Some(path) = self
-                            .git
-                            .col_open_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(p, _)| p.clone())
-                        {
-                            self.open_git_file(&path);
-                            return;
-                        }
-                        // File row → toggle its inline unified diff.
-                        if let Some((staged, path)) = self
-                            .git
-                            .col_file_rects
-                            .iter()
-                            .find(|(_, _, r)| inside(r))
-                            .map(|(s, p, _)| (*s, p.clone()))
-                        {
-                            self.toggle_git_diff(staged, path);
-                            return;
-                        }
-                        // Commit-detail file row (inside an expanded commit) →
-                        // toggle that file's diff.
-                        if let Some((hash, path)) = self
-                            .git
-                            .col_commit_file_rects
-                            .iter()
-                            .find(|(_, _, r)| inside(r))
-                            .map(|(h, p, _)| (h.clone(), p.clone()))
-                        {
-                            self.toggle_git_commit_file(hash, path);
-                            window.request_redraw();
-                            return;
-                        }
-                        // Recent-commit row → double-click expands its file list
-                        // (single click is just the preview, no action).
-                        if let Some(hash) = self
-                            .git
-                            .col_commit_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(h, _)| h.clone())
-                        {
-                            let now = Instant::now();
-                            let is_double = matches!(
-                                self.git.last_commit_click.as_ref(),
-                                Some((t, h)) if *h == hash && now.duration_since(*t).as_millis() < 400
-                            );
-                            if is_double {
-                                self.git.last_commit_click = None;
-                                self.toggle_git_commit(hash);
-                            } else {
-                                self.git.last_commit_click = Some((now, hash));
-                            }
                             window.request_redraw();
                             return;
                         }
@@ -7232,17 +6794,10 @@ impl ApplicationHandler<UserEvent> for App {
                             self.save_ui_state();
                             return;
                         }
-                        // End a git-column resize drag.
+                        // End a right-column resize drag.
                         if self.git.col_resize.take().is_some() {
                             window.set_cursor(CursorIcon::Default);
                             self.save_ui_state();
-                            return;
-                        }
-                        // 「최근 커밋」 구역 높이 드래그 끝 (놓는 김에 새 개수로 한 번
-                        // 바로 읽어 온다 — 원하는 개수는 렌더가 드래그 중에 써 뒀다).
-                        if self.commits_grip_release() {
-                            window.set_cursor(CursorIcon::Default);
-                            window.request_redraw();
                             return;
                         }
                         if self.info_split_release() {
@@ -7353,18 +6908,13 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                if self.git_commit_modal_ime(&ime) {
-                    window.request_redraw();
-                    return;
-                }
                 if self.settings_room_active() {
                     self.native_settings_ime(ime);
                     return;
                 }
                 if self.shared_ime(&ime) { window.request_redraw(); return; }
                 if self.screen_ime(&ime) { window.request_redraw(); return; }
-                if self.side_column_covers_workspace() && !self.git.commit_focused
-                    && self.mcp_col.add.is_none() {
+                if self.side_column_covers_workspace() {
                     self.discard_modal_ime(&ime);
                     return;
                 }
@@ -7533,10 +7083,6 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         window.request_redraw();
                     }
-                    return;
-                }
-                if self.git_commit_modal_key(&event) {
-                    window.request_redraw();
                     return;
                 }
                 if self.sidebar_navigation_key(&event) {
@@ -7891,8 +7437,8 @@ impl ApplicationHandler<UserEvent> for App {
                 });
             }
         }
-        // Drain menu clicks from muda's global channel. The "Git 패널" item
-        // toggles the in-window git column (open/close).
+        // Drain menu clicks from muda's global channel. The "오른쪽 패널" item
+        // toggles the in-window right column (open/close).
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
             if let Some(tray) = self.tray.as_ref() {
                 if tray.open.id() == &ev.id {
@@ -7916,10 +7462,8 @@ impl ApplicationHandler<UserEvent> for App {
             if self.aux_document_menu_action(ev.id.as_ref(), event_loop) {
                 continue;
             }
-            if self.git_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+            if self.side_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_git_col();
-            } else if self.session_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
-                self.toggle_session_panel(event_loop);
             } else if self.paste_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.paste_from_menu();
             } else if self.copy_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
@@ -7940,16 +7484,6 @@ impl ApplicationHandler<UserEvent> for App {
                 // (「경고창 있으면 왜 멈춰」). 시스템 대화상자를 다시 쓰지 마라.
                 self.quit_app(event_loop);
                 return;
-            }
-        }
-        // Headless git-panel demo (expand diff / open modal) before the capture.
-        if let Some((at, action)) = self.pending_autogit.clone() {
-            if std::time::Instant::now() >= at {
-                self.run_autogit(&action);
-                self.pending_autogit = None;
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
             }
         }
         // Headless verification: arm a GPU frame-readback capture once its
@@ -8188,7 +7722,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autocursor();
         self.run_pending_autoexpandclick();
         self.run_pending_autorowdrag();
-        self.run_pending_autocommitsdrag();
         self.run_pending_autotheme();
         // OS 의 밝게/어둡게가 바뀌었나 — `theme: system` 일 때만 실제로 조회한다
         // (게이트는 poll 안에 있다). 바뀐 순간에만 참이라 평소엔 아무 일도 없다.
@@ -8268,9 +7801,6 @@ impl ApplicationHandler<UserEvent> for App {
             if !self.pending_capture.is_empty() {
                 why.push("pending_capture");
             }
-            if self.pending_autogit.is_some() {
-                why.push("autogit");
-            }
             if self.autoquit_at.is_some() {
                 why.push("autoquit");
             }
@@ -8349,7 +7879,6 @@ impl ApplicationHandler<UserEvent> for App {
                     .any(|(id, a)| a.state.is_busy() && visible.contains(id))
             }
             || !self.pending_capture.is_empty()
-            || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()
             // 남은 md 스크립트 단계는 about_to_wait 이 다시 돌아야 발화한다.
             || crate::testkit::mdscript_pending()
@@ -8482,10 +8011,6 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
-    pub(crate) fn main_pointer_modal(&self) -> bool {
-        self.main_confirmation_modal() || self.git.commit_modal_open
-    }
-
     pub(crate) fn main_confirmation_modal(&self) -> bool {
         self.confirm_close.is_some() || self.restore_prompt.is_some()
             || self.character_swap_confirm.is_some()
@@ -8674,11 +8199,6 @@ fn redraw_live_usage(
     !redraw || proxy.send_event(UserEvent::Redraw).is_ok()
 }
 
-/// Build a git-column snapshot from `git_status`, split into Staged Changes /
-/// Changes (VSCode model; no dedup, so a partially-staged file shows in both).
-/// Returns `None` on a transient git failure so the caller keeps the last good
-/// snapshot. Shared by the 1.2s poller and the per-click stage/unstage refresh
-/// so a + / − press reflects immediately instead of waiting for the next tick.
 /// 로컬 `/claude-usage`(oauth/usage 프록시) 응답 — `usage` 본문에 `stale` 과
 /// `account_dir` 을 함께 돌려준다. curl 로 로컬 엔드포인트만 쳐 토큰은 서버(키체인)가
 /// 읽는다 — argv 유출 없음. 실패/토큰 없음/형식밖이면 None.
@@ -8889,19 +8409,6 @@ fn fetch_claude_usage(
         .unwrap_or_default()
         .to_string();
     Some((v.get("usage")?.clone(), stale, dir))
-}
-
-pub(crate) fn fetch_git_col_view(
-    cwd: &std::path::Path,
-    choice: Option<&std::path::Path>,
-    busy: &[(std::path::PathBuf, std::time::SystemTime)],
-    commits: usize,
-    same_refs: Option<&GitColView>,
-) -> Option<GitColView> {
-    let commits = if commits == 0 { crate::GIT_RECENT_COMMITS_DEFAULT } else { commits };
-    let prior = same_refs.and_then(|view| serde_json::to_value(view).ok());
-    let view = kasa_git::git_panel::panel_view(cwd, choice, busy, commits, kasa_git::git::PANEL_READ_TIMEOUT, prior.as_ref()).ok()?;
-    serde_json::from_value(view).ok()
 }
 
 #[cfg(test)]

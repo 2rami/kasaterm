@@ -3,7 +3,6 @@
 //! `GpuRenderer` 는 엔진을 `grid` 로 품고 `Deref` 로 그 메서드를 그대로 내보인다.
 
 use std::sync::Arc;
-mod curves;
 
 use anyhow::{Context, Result};
 use kasa_cells::pipeline::CellInstance;
@@ -3092,8 +3091,7 @@ impl GpuRenderer {
                 //
                 // 자리는 거터 맨 왼쪽이다. 오른쪽 끝은 접기 삼각형이 이미 쓰고
                 // (`gutter_w - base*0.62`) 그 왼쪽을 줄번호가 채우므로, 거기 끼우면
-                // 셋이 겹친다. 색은 git 컬럼의 어휘 그대로 — 같은 뜻이 두 화면에서
-                // 다른 색이면 각각 외워야 한다.
+                // 셋이 겹친다.
                 //
                 // 랩으로 이어진 행에도 그린다. 한 논리 줄이 바뀐 것이므로 그 줄이
                 // 차지한 화면 높이 전체가 표시를 받아야 띠가 끊겨 보이지 않는다.
@@ -3453,7 +3451,6 @@ impl GpuRenderer {
             "panel-bottom-dashed" => include_str!("../assets/icons/panel-bottom-dashed.svg"),
             "panel-top" => include_str!("../assets/icons/panel-top.svg"),
             "panel-top-dashed" => include_str!("../assets/icons/panel-top-dashed.svg"),
-            "git-commit-horizontal" => include_str!("../assets/icons/git-commit-horizontal.svg"),
             "ellipsis-vertical" => include_str!("../assets/icons/ellipsis-vertical.svg"),
             "ellipsis-horizontal" => include_str!("../assets/icons/ellipsis-horizontal.svg"),
             "arrow-up" => include_str!("../assets/icons/arrow-up.svg"),
@@ -3579,7 +3576,6 @@ impl GpuRenderer {
             "folder-plus" => include_str!("../assets/icons/pixel/folder-plus.svg"),
             "folder-tree" => include_str!("../assets/icons/pixel/folder-tree.svg"),
             "git-branch" => include_str!("../assets/icons/pixel/git-branch.svg"),
-            "git-commit-horizontal" => include_str!("../assets/icons/pixel/git-commit-horizontal.svg"),
             "image" => include_str!("../assets/icons/pixel/image.svg"),
             "info" => include_str!("../assets/icons/pixel/info.svg"),
             "layout-grid" => include_str!("../assets/icons/pixel/layout-grid.svg"),
