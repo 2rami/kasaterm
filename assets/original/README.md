@@ -50,7 +50,10 @@ new artwork.
 3. Add only the use: scene, framing, pose, outfit A or B, background.
 
 For app icons and other small sizes, generated drafts that stay readable at
-32 px share these traits: a saturated background instead of white, the figures
-filling about 85% of the canvas, outlines about three times thicker than the
-illustration, and a white sticker rim around the figures. Check every draft
-downscaled to 64 px and 32 px before choosing.
+32 px share these traits: a saturated flat background instead of white, the
+figures filling about 85% of the canvas, outlines somewhat bolder than the
+illustration, and a white rim around the figures. Asking for thicker outlines,
+a sticker rim and more contrast pushes the generator toward a glossy vinyl look
+with shine streaks; the matte line in the identity block keeps the surface flat,
+and repeating it in the use part helps. Check every draft downscaled to 64 px
+and 32 px before choosing.

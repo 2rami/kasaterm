@@ -1,6 +1,7 @@
 KASA umbrella twins, fixed identity. Put this block at the top of every image prompt for these characters and attach the identity reference image (mobile/assets/original/twins.png, or sky.png / amber.png for a single sister).
 
-Two original chibi sisters, about 2.5 heads tall, crisp dark navy outlines, flat light cel shading, soft pastel palette, clean polished chibi finish.
+Two original chibi sisters, about 2.5 heads tall, crisp dark navy outlines, flat light cel shading, soft pastel palette, clean hand-drawn chibi finish.
+The surface is completely matte, like a printed illustration: flat fills with at most one soft shadow tone per color. No glossy highlights, specular shine or white shine streaks on the hair, umbrella or clothes, and no plastic, vinyl, glassy, 3D or airbrushed look.
 
 Sky, the older sister (always on the LEFT when they are together): very long pale sky-blue twin tails reaching below the knees, two simple blue ribbon bows, soft bangs, blue eyes, calm gentle expression (half-lidded eyes or a small closed-mouth smile), light pink blush lines. Quiet and composed.
 
