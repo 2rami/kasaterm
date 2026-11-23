@@ -2375,6 +2375,8 @@ impl GridRenderer {
         let cap = if capture.is_some() {
             let w = self.config.width;
             let h = self.config.height;
+            // A pane capture only needs its pixels in the readback buffer, even on a 5K window.
+            let (x, y, w, h) = capture_region(self.capture_crop.take(), w, h);
             let bpr = w.div_ceil(64) * 256; // align(w*4, 256)
             let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("capture readback"),
@@ -2386,7 +2388,7 @@ impl GridRenderer {
                 wgpu::TexelCopyTextureInfo {
                     texture: &frame.texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
+                    origin: wgpu::Origin3d { x, y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyBufferInfo {
@@ -2428,25 +2430,13 @@ impl GridRenderer {
                 self.config.format,
                 wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
             );
-            // 크롭은 GPU 가 아니라 여기서 한다. copy_texture_to_buffer 의 origin 을
-            // 옮기면 bytes_per_row 256 정렬을 잘린 폭 기준으로 다시 맞춰야 하는데,
-            // 캡처는 드문 연산이라 전체를 읽고 잘라 내는 편이 훨씬 단순하다.
-            let (cx, cy, cw, chh) = match self.capture_crop.take() {
-                Some((x, y, cw, ch)) => (
-                    x.min(w.saturating_sub(1)),
-                    y.min(h.saturating_sub(1)),
-                    cw.min(w.saturating_sub(x)).max(1),
-                    ch.min(h.saturating_sub(y)).max(1),
-                ),
-                None => (0, 0, w, h),
-            };
             let max_w = std::mem::take(&mut self.capture_max_w);
             {
                 let data = buf.slice(..).get_mapped_range();
-                let mut rgba = Vec::with_capacity((cw * chh * 4) as usize);
-                for row in cy..cy + chh {
-                    let s = (row * bpr + cx * 4) as usize;
-                    let line = &data[s..s + (cw * 4) as usize];
+                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                for row in 0..h {
+                    let s = (row * bpr) as usize;
+                    let line = &data[s..s + (w * 4) as usize];
                     for px in line.chunks_exact(4) {
                         if bgra {
                             rgba.extend_from_slice(&[px[2], px[1], px[0], 0xFF]);
@@ -2455,22 +2445,16 @@ impl GridRenderer {
                         }
                     }
                 }
-                let saved = if max_w > 0 && cw > max_w {
-                    let nh = ((chh as u64 * max_w as u64) / cw as u64).max(1) as u32;
-                    match image::RgbaImage::from_raw(cw, chh, rgba.clone()) {
-                        Some(img) => {
-                            let small = image::imageops::resize(
-                                &img,
-                                max_w,
-                                nh,
-                                image::imageops::FilterType::Lanczos3,
-                            );
-                            save_rgba_png(&path, small.as_raw(), max_w, nh).map(|()| (max_w, nh))
-                        }
-                        None => save_rgba_png(&path, &rgba, cw, chh).map(|()| (cw, chh)),
-                    }
+                let saved = if max_w > 0 && w > max_w {
+                    let nh = ((h as u64 * max_w as u64) / w as u64).max(1) as u32;
+                    let img = image::RgbaImage::from_raw(w, h, rgba)
+                        .expect("readback contains four bytes per pixel");
+                    let small = image::imageops::resize(
+                        &img, max_w, nh, image::imageops::FilterType::Lanczos3,
+                    );
+                    save_rgba_png(&path, small.as_raw(), max_w, nh).map(|()| (max_w, nh))
                 } else {
-                    save_rgba_png(&path, &rgba, cw, chh).map(|()| (cw, chh))
+                    save_rgba_png(&path, &rgba, w, h).map(|()| (w, h))
                 };
                 match saved {
                     Ok((ow, oh)) => eprintln!("[capture] gpu readback → {path} ({ow}x{oh})"),
@@ -2480,6 +2464,26 @@ impl GridRenderer {
             buf.unmap();
         }
         Ok(instance_count)
+    }
+}
+
+fn capture_region(crop: Option<(u32, u32, u32, u32)>, w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let Some((x, y, width, height)) = crop else { return (0, 0, w, h) };
+    let x = x.min(w.saturating_sub(1));
+    let y = y.min(h.saturating_sub(1));
+    (x, y, width.min(w - x).max(1), height.min(h - y).max(1))
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::capture_region;
+
+    #[test]
+    fn capture_keeps_the_origin_and_clips_to_the_drawable() {
+        assert_eq!(capture_region(None, 5120, 2820), (0, 0, 5120, 2820));
+        assert_eq!(capture_region(Some((67, 101, 1000, 1201)), 5120, 2820), (67, 101, 1000, 1201));
+        assert_eq!(capture_region(Some((67, 101, 1000, 1201)), 120, 160), (67, 101, 53, 59));
+        assert_eq!(capture_region(Some((500, 900, 1000, 1201)), 120, 160), (119, 159, 1, 1));
     }
 }
 

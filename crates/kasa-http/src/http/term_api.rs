@@ -179,7 +179,11 @@ fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
     // 받는 쪽이 한 칸(덱)으로 접는다. 방 이름도 싣는다: 받는 쪽이 pane 마다 폴더
     // 꼬리로 방을 지어 한 방이 셋으로 갈라졌다(2026-09-16 지적).
     let mut rects: std::collections::HashMap<String, (serde_json::Value, Option<String>)> = Default::default();
+    let mut room_labels = std::collections::HashMap::new();
     for w in backend.windows_overview().unwrap_or_default() {
+        // The overview carries the published room labels, so polling doesn't need a second GUI round trip.
+        let label = if w.cwd.is_empty() { w.name } else { format!("{} · {}", w.name, w.cwd) };
+        room_labels.insert(w.idx, label);
         for r in &w.panes {
             let rect = serde_json::json!([r.x, r.y, r.w, r.h]);
             for pid in &r.tabs {
@@ -190,7 +194,6 @@ fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
             rects.insert(r.surface_id.clone(), (rect, None));
         }
     }
-    let room_labels = backend.sessions().labels;
     // cwd 도 board 만으론 순수 셸이 빠진다 — 셸 pid 에서 직접 읽는 폴백. 이 값이
     // 비면 그 pane 의 거울은 레포를 몰라 재접속 자동 따라잡기가 통째로 건너뛴다.
     let pane_cwds: std::collections::HashMap<String, String> =
@@ -253,7 +256,7 @@ fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
                     // 저쪽 방의 자리에 그려진다.
                     row["rect"] = rects.get(&id).map(|(r, _)| r.clone()).unwrap_or(serde_json::Value::Null);
                     row["tab_of"] = serde_json::json!(rects.get(&id).and_then(|(_, t)| t.clone()));
-                    row["room_label"] = serde_json::json!(pane_windows.get(&id).and_then(|w| room_labels.get(*w)));
+                    row["room_label"] = serde_json::json!(pane_windows.get(&id).and_then(|w| room_labels.get(w)));
                     return row;
                 }
             }
@@ -269,7 +272,7 @@ fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
                 "surface_key": kasa_collab::surface_keys::get(&id),
                 "rect": rects.get(&id).map(|(r, _)| r),
                 "tab_of": rects.get(&id).and_then(|(_, t)| t.clone()),
-                "room_label": pane_windows.get(&id).and_then(|w| room_labels.get(*w)),
+                "room_label": pane_windows.get(&id).and_then(|w| room_labels.get(w)),
                 "mirror_of": mirror_label,
                 "name": b.and_then(|p| p.character.clone()),
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),

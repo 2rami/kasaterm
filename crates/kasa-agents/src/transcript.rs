@@ -279,6 +279,9 @@ fn codex_rollout_snapshot_part(text: &str) -> CodexRolloutSnapshotParts {
                 }
             }
         }
+        if out.model_seen && out.mode_seen && out.rate_seen && out.plan_seen {
+            break;
+        }
     }
     out
 }
@@ -286,8 +289,19 @@ fn codex_rollout_snapshot_part(text: &str) -> CodexRolloutSnapshotParts {
 /// Codex rollout의 현재 공개 상태. tail의 최신 turn을 우선하고, 대형 출력에 밀려난
 /// 경우에만 head를 보조값으로 쓴다.
 pub fn codex_rollout_snapshot(head: &str, tail: &str) -> CodexRolloutSnapshot {
-    let mut newest = codex_rollout_snapshot_part(tail);
-    let older = codex_rollout_snapshot_part(head);
+    merge_codex_rollout_parts(codex_rollout_snapshot_part(tail), codex_rollout_snapshot_part(head))
+}
+
+/// The board only needs to open the head of the rollout when tail metadata is incomplete.
+pub fn codex_board_snapshot(tail: &str, read_head: impl FnOnce() -> String) -> CodexRolloutSnapshot {
+    let newest = codex_rollout_snapshot_part(tail);
+    if newest.model_seen && newest.mode_seen {
+        return newest.snapshot;
+    }
+    merge_codex_rollout_parts(newest, codex_rollout_snapshot_part(&read_head()))
+}
+
+fn merge_codex_rollout_parts(mut newest: CodexRolloutSnapshotParts, older: CodexRolloutSnapshotParts) -> CodexRolloutSnapshot {
     if !newest.model_seen && older.model_seen {
         newest.snapshot.model = older.snapshot.model;
         newest.snapshot.effort = older.snapshot.effort;
@@ -1775,6 +1789,17 @@ mod codex_tests {
         assert_eq!(snapshot.rate_window_minutes, Some(300));
         assert_eq!(snapshot.rate_resets_at, Some(1786400000));
         assert_eq!(snapshot.plan_type.as_deref(), Some("plus"));
+        assert_eq!(codex_board_snapshot(&tail, || panic!("the tail is complete")), snapshot);
+    }
+
+    #[test]
+    fn board_reads_head_only_for_missing_model_or_mode() {
+        let head = r#"{"type":"turn_context","payload":{"model":"old","effort":"low","collaboration_mode":{"mode":"plan"}}}"#;
+        let tail = r#"{"type":"turn_context","payload":{"model":"new","effort":"high"}}"#;
+        let snapshot = codex_board_snapshot(tail, || head.into());
+        assert_eq!(snapshot.model, "new");
+        assert_eq!(snapshot.effort, "high");
+        assert_eq!(snapshot.collaboration_mode, "plan");
     }
 
     #[test]

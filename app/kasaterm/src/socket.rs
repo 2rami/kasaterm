@@ -3567,7 +3567,7 @@ impl Backend for PtyBackend {
                 .and_then(|pid|kasa_pty::agent_for_shell(&table,pid)).map(|kind|kind.as_str().to_owned());
             let supported = harness.as_deref().is_some_and(|h|matches!(h,"claude"|"codex"|"agy"));
             let meta = binding.as_ref().filter(|_|supported).map(|path| {
-                let mut activity = tail_snapshot(&id, path, 128 * 1024);
+                let mut activity = tail_snapshot(&id, path, TranscriptView::Activity).activity;
                 if harness.as_deref() == Some("codex") { activity.subagents = codex_live_children(path); }
                 activity
             }).unwrap_or_default();
@@ -3751,7 +3751,7 @@ impl Backend for PtyBackend {
                 // 512KB: 64KB 윈도는 background/subagent 런치(run_in_background·Monitor·Task)가
                 // 그 뒤 대량 출력에 밀려나 윈도 밖이면 못 잡았다(사용자: 유즈 background 빔 —
                 // 최근 런치가 파일 끝에서 ~269KB 지점). 작은 transcript 는 전체라 부담 없음.
-                let mut row = tail_snapshot(sid, path, 512 * 1024);
+                let TranscriptSnapshot { activity: mut row, codex } = tail_snapshot(sid, path, TranscriptView::Board);
                 // 훅이 본 것을 얹는다. 512KB 도 충분히 큰 세션에선 밀려나는데(24MB 짜리가
                 // 실재한다), 훅은 그 순간 오므로 파일 크기와 무관하다. 꼬리를 지우지 않고
                 // **합치는** 이유: 훅은 앱이 뜬 뒤에 시작한 것만 알아서, 그 전부터 돌던
@@ -3773,7 +3773,7 @@ impl Backend for PtyBackend {
                     row.background = background;
                     row.subagents = subagents;
                 }
-                if codex_sid_from_rollout(path).is_some() { row.subagents = codex_live_children(path); }
+                if codex.is_some() { row.subagents = codex_live_children(path); }
                 row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
                 row.room_number = pane_window.get(sid.as_str()).and_then(|w| room_numbers.get(*w)).and_then(|n| n.shown);
                 // pane_window 는 모든 방의 split 트리 leaf 집합이다(publish_pty_layout).
@@ -3793,21 +3793,7 @@ impl Backend for PtyBackend {
                         i.label
                     }
                 });
-                // Codex의 model·effort·협업 mode는 같은 turn_context에 실린다. 대형
-                // 도구 출력이 그 줄을 tail 밖으로 밀면 head를 보조로 쓰되, tail에서
-                // 잡힌 최신 turn은 절대 첫 turn의 캐시로 덮지 않는다.
-                if codex_sid_from_rollout(path).is_some() {
-                    const HEAD: u64 = 384 * 1024;
-                    let (tail, _) = read_tail(path, 512 * 1024);
-                    let tail_snapshot = crate::transcript::codex_rollout_snapshot("", &tail);
-                    let snapshot = if tail_snapshot.model.is_empty()
-                        || tail_snapshot.collaboration_mode.is_empty()
-                    {
-                        let head = read_head(path, HEAD);
-                        crate::transcript::codex_rollout_snapshot(&head, &tail)
-                    } else {
-                        tail_snapshot
-                    };
+                if let Some(snapshot) = codex {
                     let has_snapshot = !snapshot.model.is_empty()
                         || !snapshot.effort.is_empty()
                         || !snapshot.collaboration_mode.is_empty()
@@ -4800,44 +4786,59 @@ mod key_to_bytes_tests {
     }
 }
 
-/// Read the last `max_bytes` of a file as lossy UTF-8, plus whether it's gone
-/// idle (no write in 60s — claude transcripts are append-only, so file mtime
-/// is the last activity time; no need to parse ISO timestamps). The leading
-/// (possibly mid-line) fragment of a tail read just fails to parse in
-/// `snapshot_from_tail`, so it's harmless. Any IO error → empty + idle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum TranscriptView {
+    Activity,
+    Board,
+}
+
+#[derive(Clone)]
+struct TranscriptSnapshot {
+    activity: PaneActivity,
+    codex: Option<CodexRolloutSnapshot>,
+}
 
 /// 기록 꼬리의 판정. 보드는 다른 기기의 폴링·학생의 `board`·폰이 수시로 묻는데, 물을 때마다 칸마다 꼬리를 읽어
 /// 줄마다 JSON 으로 풀었다(집 PC 0.2.244 덤프에서 tokio 일꾼이 이 자리에 있었다). 판정은 꼬리와 쉼 여부만으로
 /// 정해지므로, 파일 길이·수정 시각·쉼이 그대로면 지난 판정을 준다 — 물은 순간만큼 신선한 것은 그대로다.
-fn tail_snapshot(sid: &str, path: &std::path::Path, max_bytes: u64) -> PaneActivity {
+fn tail_snapshot(sid: &str, path: &std::path::Path, view: TranscriptView) -> TranscriptSnapshot {
     struct Seen {
         len: u64,
         modified: Option<std::time::SystemTime>,
         idle: bool,
         used: std::time::Instant,
-        row: PaneActivity,
+        snapshot: TranscriptSnapshot,
     }
     // 닫힌 칸의 판정이 쌓이지 않게, 이만큼 안 물은 것은 새로 넣을 때 걷는다.
     const FORGET: std::time::Duration = std::time::Duration::from_secs(600);
-    static SEEN: LazyLock<Mutex<HashMap<(String, PathBuf, u64), Seen>>> = LazyLock::new(Default::default);
+    static SEEN: LazyLock<Mutex<HashMap<(String, PathBuf, TranscriptView), Seen>>> =
+        LazyLock::new(Default::default);
     let meta = std::fs::metadata(path).ok();
     let len = meta.as_ref().map_or(0, |m| m.len());
     let modified = meta.as_ref().and_then(|m| m.modified().ok());
     let idle = modified.and_then(|t| t.elapsed().ok()).is_none_or(|d| d.as_secs() >= 60);
-    let key = (sid.to_string(), path.to_path_buf(), max_bytes);
+    let key = (sid.to_string(), path.to_path_buf(), view);
     let now = std::time::Instant::now();
     if let Some(seen) = SEEN.lock().unwrap().get_mut(&key)
         .filter(|seen| seen.len == len && seen.modified == modified && seen.idle == idle)
     {
-        seen.used = now;
-        return seen.row.clone();
+        seen.used = seen.used.max(now);
+        return seen.snapshot.clone();
     }
+    let max_bytes = match view {
+        TranscriptView::Activity => 128 * 1024,
+        TranscriptView::Board => 512 * 1024,
+    };
     let (tail, tail_idle) = read_tail(path, max_bytes);
-    let row = snapshot_from_tail(sid, &tail, tail_idle);
+    let codex = (view == TranscriptView::Board && codex_sid_from_rollout(path).is_some())
+        .then(|| crate::transcript::codex_board_snapshot(&tail, || read_head(path, 384 * 1024)));
+    let snapshot = TranscriptSnapshot { activity: snapshot_from_tail(sid, &tail, tail_idle), codex };
     let mut seen = SEEN.lock().unwrap();
-    seen.retain(|_, s| now.duration_since(s.used) < FORGET);
-    seen.insert(key, Seen { len, modified, idle, used: now, row: row.clone() });
-    row
+    seen.retain(|_, s| now.saturating_duration_since(s.used) < FORGET);
+    if seen.get(&key).is_none_or(|entry| entry.used <= now) {
+        seen.insert(key, Seen { len, modified, idle, used: now, snapshot: snapshot.clone() });
+    }
+    snapshot
 }
 
 #[cfg(test)]
@@ -4860,7 +4861,7 @@ mod tail_snapshot_tests {
         let path = dir.join("session.jsonl");
         std::fs::write(&path, turn("first question", "first answer")).unwrap();
         let sid = format!("%tail-{}", uuid::Uuid::new_v4());
-        let first = tail_snapshot(&sid, &path, 128 * 1024);
+        let first = tail_snapshot(&sid, &path, TranscriptView::Activity).activity;
         assert_eq!(first.last_reply, snapshot_from_tail(&sid, &read_tail(&path, 128 * 1024).0, false).last_reply);
 
         // 같은 길이로 바꾼 내용은 열쇠가 같아 지난 판정이 나온다 — 다시 읽지 않았다는 증거다.
@@ -4868,14 +4869,41 @@ mod tail_snapshot_tests {
         let same_length = turn("first question", "FIRST ANSWER");
         std::fs::write(&path, &same_length).unwrap();
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
-        assert_eq!(tail_snapshot(&sid, &path, 128 * 1024).last_reply, first.last_reply);
+        assert_eq!(tail_snapshot(&sid, &path, TranscriptView::Activity).activity.last_reply, first.last_reply);
 
         std::fs::write(&path, same_length + &turn("second question", "second answer")).unwrap();
-        assert_eq!(tail_snapshot(&sid, &path, 128 * 1024).last_reply, "second answer");
+        assert_eq!(tail_snapshot(&sid, &path, TranscriptView::Activity).activity.last_reply, "second answer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn board_reuses_codex_metadata_until_the_rollout_changes() {
+        let dir = std::env::temp_dir().join(format!("kt-codex-snapshot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-fixture-{}.jsonl", uuid::Uuid::new_v4()));
+        let event = |model| format!("{}\n", serde_json::json!({
+            "timestamp": "t", "type": "turn_context",
+            "payload": { "model": model, "effort": "high", "collaboration_mode": { "mode": "plan" } },
+        }));
+        let read = || tail_snapshot("%1", &path, TranscriptView::Board).codex.unwrap();
+        std::fs::write(&path, event("first")).unwrap();
+        assert_eq!(read().model, "first");
+
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, event("stale")).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        assert_eq!(read().model, "first");
+
+        std::fs::write(&path, event("first") + &event("new model")).unwrap();
+        let new = read();
+        assert_eq!(new.model, "new model");
+        assert_eq!(new.effort, "high");
+        assert_eq!(new.collaboration_mode, "plan");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
+/// The log's mtime supplies the idle hint even when timestamps in the log are unreadable.
 pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool) {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(path) else {
