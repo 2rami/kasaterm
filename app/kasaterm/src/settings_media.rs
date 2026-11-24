@@ -876,9 +876,9 @@ mod tests {
     #[test]
     fn plan_deduplicates_faces_and_normalizes_base_theme() {
         let mut plan = MediaPlan::new();
-        plan.include_face("", "midori")
-            .include_face(kasa_characters::character::BASE_THEME_KEY, "midori")
-            .include_face("theme", "midori");
+        plan.include_face("", "kasa_tsuyu")
+            .include_face(kasa_characters::character::BASE_THEME_KEY, "kasa_tsuyu")
+            .include_face("theme", "kasa_tsuyu");
         assert_eq!(plan.faces.len(), 2);
         assert_eq!(plan.faces[0].theme, kasa_characters::character::BASE_THEME_KEY);
     }
@@ -942,14 +942,14 @@ mod tests {
     }
 
     #[test]
-    fn bundled_face_and_motion_fit_the_cache_budget() {
+    fn bundled_portrait_and_standing_art_fit_the_cache_budget() {
         let mut plan = MediaPlan::new();
-        plan.include_student_detail("", "midori");
+        plan.include_student_detail("", "kasa_tsuyu");
         let mut cache = SettingsMediaCache::default();
         cache.refresh(&plan);
-        assert!(cache.face_status("", "midori").is_ready());
-        assert!(cache.motion_status("", "midori", "idle").is_ready());
-        assert!(cache.motion_status("", "midori", "gif").is_ready());
+        assert!(cache.face_status("", "kasa_tsuyu").is_ready());
+        assert!(cache.motion_status("", "kasa_tsuyu", "idle").is_ready());
+        assert_eq!(cache.motion_status("", "kasa_tsuyu", "gif"), MediaStatus::Missing);
         assert!(cache.decoded_bytes() <= MAX_CACHE_BYTES);
     }
 
@@ -976,7 +976,7 @@ mod tests {
     #[test]
     fn ensuring_the_same_plan_reuses_decoded_entries() {
         let mut plan = MediaPlan::new();
-        plan.include_student_detail("", "midori");
+        plan.include_student_detail("", "kasa_tsuyu");
         let mut cache = SettingsMediaCache::default();
         cache.refresh(&plan);
         let before = (cache.generation, cache.entries.len(), cache.decoded_bytes());
