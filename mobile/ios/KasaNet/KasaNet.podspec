@@ -11,7 +11,8 @@ Pod::Spec.new do |s|
   s.platform = :ios, '15.0'
   s.vendored_frameworks = 'KasaNet.xcframework'
   s.frameworks = 'SystemConfiguration', 'Security'
-  s.libraries = 'c++'
+  # The embedded DNS resolver uses iOS's res_9 symbols.
+  s.libraries = 'c++', 'resolv'
   syms = %w[kasanet_start kasanet_id kasanet_open kasanet_state kasanet_close
             kasanet_network_changed kasanet_stop kasanet_last_error kasanet_free_string]
   s.user_target_xcconfig = {
