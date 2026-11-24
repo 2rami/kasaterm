@@ -417,6 +417,12 @@ window.kasatermEditor = {
 };
 document.addEventListener('keydown', e => {
   if (e.defaultPrevented || e.isComposing || composing) return;
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.code === 'KeyM'
+      && document.querySelector('.vault-disabled')) {
+    e.preventDefault();
+    if (!e.repeat) send('open-memory');
+    return;
+  }
   if (editor && !root.hidden && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
     e.preventDefault(); find(); return;
   }

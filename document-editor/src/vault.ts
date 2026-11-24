@@ -1,5 +1,5 @@
 import { mountGraph, type VaultGraph } from './graph';
-export type VaultEntry = { id: string; name: string; kind: 'folder' | 'markdown' | 'image' | 'pdf' | 'file' };
+export type VaultEntry = { id: string; name: string; kind: 'folder' | 'markdown' | 'image' | 'pdf' | 'file'; snippet?: { head: string; text: string } };
 export type VaultState = { id?: string; name?: string; available: boolean; loading?: boolean; error?: string; activeId?: string; hasDocument: boolean; entries?: VaultEntry[]; nextCursor?: number; recent?: { id: string; name: string }[] };
 export type VaultChildren = { parentId: string; entries: VaultEntry[]; nextCursor?: number; error?: string };
 export type VaultSearch = { query: string; requestId: string; entries: VaultEntry[]; nextCursor?: number; error?: string };
@@ -49,7 +49,8 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
   const heading = document.createElement('div'); heading.className = 'vault-heading';
   const title = document.createElement('strong');
   const change = action('바꾸기', () => choose()); change.title = '다른 볼트 열기'; heading.append(icon('folder'), title, change);
-  const search = document.createElement('input'); search.className = 'vault-search'; search.type = 'search'; search.placeholder = '파일 찾기'; search.setAttribute('aria-label', '볼트 파일명 검색');
+  const search = document.createElement('input'); search.className = 'vault-search'; search.type = 'search'; search.placeholder = '볼트에서 찾기'; search.setAttribute('aria-label', '볼트에서 찾기');
+  search.maxLength = 256;
   const status = document.createElement('p'); status.className = 'vault-status'; status.setAttribute('role', 'status');
   const tree = document.createElement('div'); tree.className = 'vault-tree'; tree.setAttribute('role', 'tree'); tree.setAttribute('aria-label', '폴더와 문서');
   const rowsRoot = document.createElement('div'); tree.append(rowsRoot); aside.append(heading, search, status, tree);
@@ -80,7 +81,6 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
       if (requestId === String(graphRequest)) graph.set({ vaultId, requestId, nodes: [], edges: [], truncated: false, error: '응답이 늦어지고 있어요.' });
     }, 30000);
   }
-  const rowHeight = 32;
   function choose(id?: string) { if (picking) return; picking = true; renderWelcome(); send('vault-choose', id ? { nodeId: id } : {}); }
   function renderWelcome() {
     if (!state) return;
@@ -125,17 +125,29 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
     renderRows();
   }
   function renderRows() {
+    const rowHeight = searchResult?.entries.some(entry => entry.snippet) ? 64 : 32;
     const start = Math.max(0, Math.floor(tree.scrollTop / rowHeight) - 5), count = Math.ceil((tree.clientHeight || 640) / rowHeight) + 12;
     rowsRoot.replaceChildren(); rowsRoot.style.paddingTop = `${start * rowHeight}px`; rowsRoot.style.paddingBottom = `${Math.max(0, rows.length - start - count) * rowHeight}px`;
     rows.slice(start, start + count).forEach(row => {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'vault-row'; b.style.paddingInlineStart = `${12 + row.depth * 16}px`;
+      b.style.height = `${rowHeight}px`;
       if (!row.entry) {
         b.textContent = row.loading ? '불러오는 중…' : row.error ? '읽지 못했어요 · 다시 시도' : '더 보기'; b.disabled = Boolean(row.loading); b.title = row.error ?? '';
         b.addEventListener('click', () => { if (search.value.trim()) send('vault-search', { query: search.value.trim(), requestId: String(queryId), cursor: row.more }); else requestFolder(row.parentId ?? '', row.more); });
       } else {
         const entry = row.entry; b.dataset.nodeId = entry.id; b.setAttribute('role', 'treeitem'); b.setAttribute('aria-level', String(row.depth + 1)); b.setAttribute('aria-selected', String(state?.activeId === entry.id));
         const disclosure = icon('chevron'); disclosure.classList.add('vault-disclosure'); if (entry.kind !== 'folder') disclosure.style.visibility = 'hidden'; else { b.setAttribute('aria-expanded', String(expanded.has(entry.id))); if (expanded.has(entry.id)) disclosure.classList.add('expanded'); }
-        const name = document.createElement('span'); name.textContent = entry.name; b.title = entry.id; b.append(disclosure, icon(entry.kind), name); b.addEventListener('click', () => open(entry));
+        const label = document.createElement('span'); label.className = 'vault-row-copy';
+        const name = document.createElement('span'); name.className = 'vault-row-name'; name.textContent = entry.name;
+        label.append(name);
+        b.title = entry.id;
+        if (entry.snippet) {
+          const snippet = document.createElement('span'); snippet.className = 'vault-row-snippet';
+          snippet.textContent = entry.snippet.text;
+          b.title = [entry.id, entry.snippet.head, entry.snippet.text].filter(Boolean).join('\n');
+          label.append(snippet);
+        }
+        b.append(disclosure, icon(entry.kind), label); b.addEventListener('click', () => open(entry));
         b.addEventListener('keydown', e => {
           if (e.key === 'ArrowRight' && entry.kind === 'folder' && !expanded.has(entry.id)) { e.preventDefault(); open(entry); }
           if (e.key === 'ArrowLeft' && entry.kind === 'folder' && expanded.has(entry.id)) { e.preventDefault(); open(entry); }
@@ -146,7 +158,12 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
     });
   }
   tree.addEventListener('scroll', renderRows, { passive: true });
-  search.addEventListener('input', () => { clearTimeout(searchTimer); searchResult = undefined; queryId++; tree.scrollTop = 0; updateRows(); const query = search.value.trim(), requestId = String(queryId); if (query) searchTimer = setTimeout(() => send('vault-search', { query, requestId }), 180); });
+  search.addEventListener('input', () => {
+    clearTimeout(searchTimer); searchResult = undefined; queryId++; tree.scrollTop = 0; updateRows();
+    const query = search.value.trim(), requestId = String(queryId);
+    if (query) searchTimer = setTimeout(() => send('vault-search', { query, requestId }), 350);
+    else send('vault-search', { query, requestId });
+  });
   window.addEventListener('resize', renderRows);
   shell.classList.add('vault-disabled');
   return {

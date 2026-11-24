@@ -2250,6 +2250,9 @@ impl ApplicationHandler<UserEvent> for App {
             let view_m = Submenu::new("보기", true);
             let side_item = MenuItem::new("오른쪽 패널 켜기/끄기", true, None);
             let _ = view_m.append(&side_item);
+            let memory_item = MenuItem::with_id("open-memory-workspace", "메모리 열기", true,
+                "CmdOrCtrl+Shift+M".parse::<Accelerator>().ok());
+            let _ = view_m.append(&memory_item);
             // 편집 메뉴 — macOS 는 이 메뉴(Cmd+V/Cmd+C 단축키)가 있어야 아로나
             // webview 입력창 붙여넣기가 먹는다. 다만 PredefinedMenuItem::paste/copy 는
             // 그 단축키 keyDown 을 NSMenu 가 가로채 winit 까지 안 내려보내 터미널
@@ -7237,7 +7240,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let _turn = crate::turn_probe::TurnEnd;
-        self.poll_viewer_vault();
+        self.poll_vault();
         self.poll_document_theme();
         if self.viewer_only {
             self.flush_aux_opens(event_loop);

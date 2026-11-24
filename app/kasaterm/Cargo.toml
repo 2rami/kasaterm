@@ -62,6 +62,8 @@ kasa-cast.workspace = true
 kasa-cast-host.workspace = true
 kasa-castview.workspace = true
 kasa-remote.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 kasa-students.workspace = true
 kasa-git.workspace = true
 kasa-http.workspace = true
