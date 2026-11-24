@@ -4785,20 +4785,12 @@ impl App {
                     body_rect: &mut self.account_menu_body_rect,
                     scroll: &mut self.account_menu_scroll,
                     scroll_max: &mut self.account_menu_scroll_max,
-                    submenu_rect: &mut self.account_menu_submenu_rect,
-                    submenu_body_rect: &mut self.account_menu_submenu_body_rect,
-                    corridor_rect: &mut self.account_menu_corridor_rect,
-                    submenu_scroll: &mut self.account_menu_submenu_scroll,
-                    submenu_scroll_max: &mut self.account_menu_submenu_scroll_max,
-                    submenu_hit_start: &mut self.account_menu_submenu_hit_start,
                 },
                 &account_popover::Frame {
                     open: self.account_menu,
                     anchor: self.account_menu_anchor.or(self.account_chip_rect),
                     viewport: (win_px.0 / scale, win_px.1 / scale),
-                    status_h,
                     cursor: self.cursor_px,
-                    compact: self.set_usage_compact,
                     accounts: AccountSettings {
                         claude: &self.set_claude_account,
                         claude_list: &self.set_claude_accounts,
@@ -6110,6 +6102,19 @@ fn codex_run_summary(s: &crate::transcript::CodexRolloutSnapshot) -> String {
     parts.join(" · ")
 }
 
+/// 사용량 임계 색. 60/80 이 경계고 그 아래는 초록이 아니라 **중립**이다 — 초록은
+/// 「좋다」는 신호라 늘 켜져 있으면 아무 말도 안 하는 색이 된다.
+pub(crate) fn usage_pct_color(pct: f32) -> [u8; 4] {
+    if pct >= 80.0 {
+        theme::danger()
+    } else if pct >= 60.0 {
+        theme::syn_number()
+    } else {
+        theme::text_dim()
+    }
+}
+
+
 /// Pane header는 모델명보다 지금 고른 추론 강도와 모드를 먼저 읽히게 한다.
 fn codex_header_summary(s: &crate::transcript::CodexRolloutSnapshot) -> Option<String> {
     let mut parts = Vec::new();
@@ -6232,30 +6237,6 @@ mod tests {
     }
 }
 
-/// 사용량 임계 색. 60/80 이 경계고 그 아래는 초록이 아니라 **중립**이다 — 초록은
-/// 「좋다」는 신호라 늘 켜져 있으면 아무 말도 안 하는 색이 된다.
-pub(crate) fn usage_pct_color(pct: f32) -> [u8; 4] {
-    if pct >= 80.0 {
-        theme::danger()
-    } else if pct >= 60.0 {
-        theme::syn_number()
-    } else {
-        theme::text_dim()
-    }
-}
-
-/// 여유 구간의 막대는 강조색이다 — 설정의 토글·탭 색선과 같은 파랑이라 「지금
-/// 어디까지 찼나」가 한 색으로 읽히고, 한도가 다가오면 노랑·빨강으로 갈아탄다
-/// (플랫 정리 2026-09-14, 안 B).
-pub(crate) fn usage_bar_color(pct: f32) -> [u8; 4] {
-    if pct >= 80.0 {
-        theme::danger()
-    } else if pct >= 60.0 {
-        theme::syn_number()
-    } else {
-        theme::accent()
-    }
-}
 
 /// `[창 이름][막대][퍼센트]` 를 창마다 하나씩 왼쪽부터. 5시간이 앞이다 — 지금 당장
 /// 막히는 건 그쪽이고 주간은 「이번 주가 어떻게 흘러가나」라 참고에 가깝다.
@@ -6366,151 +6347,6 @@ pub(crate) fn paint_character_swap_confirm(
         ("다시 띄우기", CharacterSwapBtn::Relaunch, relaunch),
         ("취소", CharacterSwapBtn::Cancel, Default::default()),
     ], CharacterSwapBtn::Relaunch)
-}
-
-/// 창 목록을 [이름][막대][퍼센트] 로 늘어놓는다. claude 의 배지와 codex 의
-/// rollout 은 자료 모양이 다르지만 **화면에서는 같은 것**이라, 그리는 자리를
-/// 하나로 둔다 — 코덱스만 글자로 나오던 동안 한도가 찬 것이 눈에 안 띄었다.
-pub(crate) fn draw_window_gauges(
-    g: &mut gpu::GpuRenderer,
-    x: f32,
-    y: f32,
-    right: f32,
-    font: f32,
-    wins: &[(String, f32)],
-    stale: bool,
-) -> f32 {
-    const GW: f32 = 40.0;
-    const GH: f32 = 4.0;
-    let gy = y + (font - GH) / 2.0;
-    let mut bx = x;
-    for (label, pct) in wins {
-        let (label, pct) = (label.as_str(), *pct);
-        let need = g.measure_chrome_text(label, font, false)
-            + 6.0
-            + GW
-            + 6.0
-            + g.measure_chrome_text("100%", font, false);
-        if bx + need > right {
-            break;
-        }
-        g.draw_text(
-            bx,
-            y,
-            label,
-            gpu::DrawOpts {
-                font_size: font,
-                color: theme::text_mute(),
-                bold: false,
-                italic: false,
-            },
-        );
-        let gx = bx + g.measure_chrome_text(label, font, false) + 6.0;
-        round_rect(g, gx, gy, GW, GH, GH / 2.0, theme::with_alpha(theme::text_dim(), 0x59));
-        let w = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(GH);
-        round_rect(g, gx, gy, w, GH, GH / 2.0, usage_bar_color(pct));
-        // stale 은 `~` 로만 말한다 — 색까지 흐리면 「급하지 않다」로 읽힌다.
-        let pt = if stale {
-            format!("~{pct:.0}%")
-        } else {
-            format!("{pct:.0}%")
-        };
-        g.draw_text(
-            gx + GW + 6.0,
-            y,
-            &pt,
-            gpu::DrawOpts {
-                font_size: font,
-                color: usage_pct_color(pct),
-                bold: false,
-                italic: false,
-            },
-        );
-        bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, font, false) + 12.0;
-    }
-    bx
-}
-
-/// 사용량 팝오버의 창 한 줄: `[창][막대][퍼센트][풀리는 때]`. 칸 너비가 고정이라
-/// 5h 줄과 7d 줄의 막대가 같은 자리에 서고, 두 줄을 위아래로 견줄 수 있다.
-/// 모델별 창(`sub`)은 글자를 낮추고 흐리게 — 계정 전체의 창이 아니라 그 안의 한 칸이다.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_usage_win_row(
-    g: &mut gpu::GpuRenderer,
-    x: f32,
-    y: f32,
-    right: f32,
-    h: f32,
-    f: f32,
-    lab: &str,
-    pct: f32,
-    rs: &str,
-    sub: bool,
-    stale: bool,
-) {
-    const LAB_W: f32 = 22.0;
-    const GG_W: f32 = 64.0;
-    const GG_H: f32 = 4.0;
-    const PCT_W: f32 = 34.0;
-    const GAP: f32 = 8.0;
-    let rf = if sub { f - 2.5 } else { f - 2.0 };
-    let ty = y + (h - rf) / 2.0 - 1.0;
-    g.draw_text(
-        x,
-        ty,
-        lab,
-        gpu::DrawOpts { font_size: rf, color: theme::text_mute(), bold: false, italic: false },
-    );
-    let gx = x + LAB_W + GAP;
-    let gy = y + (h - GG_H) / 2.0;
-    round_rect(g, gx, gy, GG_W, GG_H, GG_H / 2.0, theme::with_alpha(theme::text_dim(), 0x59));
-    let w = (GG_W * (pct / 100.0).clamp(0.0, 1.0)).max(GG_H);
-    round_rect(g, gx, gy, w, GG_H, GG_H / 2.0, usage_bar_color(pct));
-    // stale 은 `~` 로만 말한다 — 색까지 흐리면 「급하지 않다」로 읽힌다.
-    let pt = if stale { format!("~{pct:.0}%") } else { format!("{pct:.0}%") };
-    let px = gx + GG_W + GAP;
-    let pw = g.measure_chrome_text(&pt, rf, false);
-    g.draw_text(
-        px + PCT_W - pw,
-        ty,
-        &pt,
-        gpu::DrawOpts {
-            font_size: rf,
-            color: if sub { theme::text_mute() } else { usage_pct_color(pct) },
-            bold: false,
-            italic: false,
-        },
-    );
-    if !rs.is_empty() {
-        let rx = px + PCT_W + GAP;
-        let sf = f - 2.5;
-        let t = crate::info::fit_text(g, rs, (right - rx).max(20.0), sf, false);
-        g.draw_text(
-            rx,
-            y + (h - sf) / 2.0 - 1.0,
-            &t,
-            gpu::DrawOpts { font_size: sf, color: theme::text_mute(), bold: false, italic: false },
-        );
-    }
-}
-
-/// 창 줄 자리에 놓는 한 줄 안내(「기록 없음」·「한도 확인 중」). 줄 높이를 창 줄과 같게
-/// 맞춰 블록 높이 계산이 한 가지로 남는다.
-pub(crate) fn draw_usage_note(
-    g: &mut gpu::GpuRenderer,
-    x: f32,
-    y: f32,
-    h: f32,
-    f: f32,
-    t: &str,
-    col: [u8; 4],
-) {
-    g.draw_text(
-        x,
-        y + (h - f) / 2.0 - 1.0,
-        t,
-        gpu::DrawOpts { font_size: f, color: col, bold: false, italic: false },
-    );
 }
 
 #[cfg(test)]

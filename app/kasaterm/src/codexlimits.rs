@@ -129,16 +129,6 @@ pub(crate) fn reauth_required_for(account_id: &str) -> bool {
         .is_some_and(|slots| slots.get(account_id).is_some_and(|slot| slot.reauth_required))
 }
 
-/// 마지막으로 읽은 값. **현재 고른 계정에서 읽은 값만** 내준다.
-///
-/// 코덱스 계정을 바꾼 직후 옛 계정의 퍼센트를 새 이메일 옆에 그리면, 한도를 보고
-/// 옮기는 기능이 정반대 답을 준다. Claude 배지가 `account_dir` 을 대조하는 것과 같은
-/// 경계다.
-pub(crate) fn snapshot() -> Option<CodexLimits> {
-    let account_id = current_account_id();
-    snapshot_for(&account_id)
-}
-
 /// 마지막으로 읽은 특정 계정의 값. 빈 id는 기본 `~/.codex` 로그인이다.
 pub(crate) fn snapshot_for(account_id: &str) -> Option<CodexLimits> {
     let cached = cache().lock().ok()?;
@@ -283,13 +273,15 @@ pub(crate) fn spawn_poller(proxy: winit::event_loop::EventLoopProxy<crate::UserE
         while !kasa_socket::session_end::is_ending() {
             let visible = crate::handler::watching_account_usage();
             let every = Duration::from_secs(if visible { 60 } else { 300 });
+            let active_every = if visible { Duration::from_secs(15) } else { every };
             let mut order = vec![String::new()];
             order.extend(crate::socket::read_codex_accounts().into_iter().map(|slot| slot.id));
             let current = current_account_id();
             let mut seen = std::collections::HashSet::new();
             // An unresponsive CLI in another slot must not delay the current account's result.
             for id in std::iter::once(&current).chain(&order).filter(|id| seen.insert(*id)) {
-                if stale_for(id, every) && refresh_for(id)
+                let interval = if id == &current { active_every } else { every };
+                if stale_for(id, interval) && refresh_for(id)
                     && proxy.send_event(crate::UserEvent::Redraw).is_err()
                 {
                     return;

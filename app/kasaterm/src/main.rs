@@ -1533,27 +1533,11 @@ enum ActionKind {
 /// 타이틀바 사용량 pill 드롭다운의 한 줄.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum AccountMenuItem {
-    /// 로스터 한 행 = 제공자 하나. 누르면 그 제공자의 계정 목록이 옆으로 열린다.
-    ///
-    /// 계정을 첫 화면에 죽 늘어놓지 않는 건 Orca 하단바를 그대로 따른 것이다(사용자
-    /// 2026-08-12 「똑같이 하라니까」). 첫 화면이 답하는 질문은 «어느 쪽이 얼마나
-    /// 찼나» 고, «누구로 바꿀까» 는 그 다음이다 — 제공자가 늘수록 이 차이가 커진다.
     Provider(AccountProvider),
-    /// 서브메뉴 안의 계정 행. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
     Select(AccountProvider, String),
-    /// 계정 행의 곁 단추 둘 — 다시 로그인, 목록에서 빼기. 설정 화면에만 있던
-    /// 것을 여기에도 둔다(2026-09-07 「하단바랑 설정이랑 완전 똑같이 떠야해」):
-    /// 로그인이 풀린 것을 **여기서** 보게 됐으니 고치는 것도 여기여야 한다.
     Reauth(AccountProvider, String),
-    Forget(AccountProvider, String),
-    /// 로스터 하단 액션 둘. Orca 와 같은 자리·같은 순서.
-    UsageDetails,
     ManageAccounts,
-    /// 표시 밀도 — `true` = Compact(가장 빡빡한 창 하나만).
-    Density(bool),
-    /// claude 블록의 초기화권 줄 곁 단추 — claude.ai 사용량 페이지를 연다.
     UseLimitReset,
-    /// 바닥의 판 번호 줄 — 이 기기의 업데이터로 최신 판을 확인·받는다(`version::update_entry`).
     CheckUpdates,
 }
 
@@ -5273,12 +5257,6 @@ struct App {
     account_menu: bool,
     account_menu_rect: Option<(f32, f32, f32, f32)>,
     account_menu_body_rect: Option<(f32, f32, f32, f32)>,
-    account_menu_submenu_rect: Option<(f32, f32, f32, f32)>,
-    account_menu_submenu_body_rect: Option<(f32, f32, f32, f32)>,
-    account_menu_corridor_rect: Option<(f32, f32, f32, f32)>,
-    account_menu_submenu_scroll: f32,
-    account_menu_submenu_scroll_max: f32,
-    account_menu_submenu_hit_start: usize,
     account_menu_scroll: f32,
     account_menu_scroll_max: f32,
     account_menu_suppressed_buttons: Vec<MouseButton>,
@@ -5865,7 +5843,6 @@ struct App {
     set_codex_accounts: Vec<socket::CodexAccount>,
     set_codex_account: String,
     /// 계정 메뉴 표시 밀도 — `true` = Compact(가장 빡빡한 창 하나만, 막대 없이).
-    set_usage_compact: bool,
     /// 창 하단바 표시 순서·숨김·색·사용량 세부 항목. 프레임마다 파일을 읽지 않는다.
     set_statusbar: statusbar_config::Prefs,
     /// 날씨(리퀴드 비) 설정·창별 덮어쓰기·시뮬레이션 — `weather/`.
@@ -6216,12 +6193,6 @@ impl App {
             account_menu: std::env::var_os("KASATERM_FORCE_ACCOUNT_MENU").is_some(),
             account_menu_rect: None,
             account_menu_body_rect: None,
-            account_menu_submenu_rect: None,
-            account_menu_submenu_body_rect: None,
-            account_menu_corridor_rect: None,
-            account_menu_submenu_scroll: 0.0,
-            account_menu_submenu_scroll_max: 0.0,
-            account_menu_submenu_hit_start: 0,
             account_menu_scroll: 0.0,
             account_menu_scroll_max: 0.0,
             account_menu_suppressed_buttons: Vec::new(),
@@ -6416,7 +6387,6 @@ impl App {
             set_claude_account: socket::read_claude_account(),
             set_codex_accounts: socket::read_codex_accounts(),
             set_codex_account: socket::read_codex_account(),
-            set_usage_compact: socket::read_usage_compact(),
             set_statusbar: statusbar_config::Prefs::from_settings(&socket::read_settings()),
             weather: weather::WeatherState::with_settings(weather::WeatherState::load(socket::read_settings().get("weather"))),
             account_menu_provider: None,

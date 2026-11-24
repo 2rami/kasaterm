@@ -119,35 +119,13 @@ enum AccountMenuPress {
 
 fn account_menu_press(
     rect: Option<(f32, f32, f32, f32)>,
-    submenu: Option<(f32, f32, f32, f32)>,
-    corridor: Option<(f32, f32, f32, f32)>,
     hits: &[(AccountMenuItem, (f32, f32, f32, f32))],
-    submenu_hit_start: usize,
     point: (f32, f32),
 ) -> AccountMenuPress {
-    // The first frame has not published its bounds yet, so an empty hit list
-    // must not turn a quick second event into an accidental outside click.
-    if rect.is_none() {
-        return AccountMenuPress::Blank;
-    }
-    let in_submenu = account_menu_contains(submenu, point);
-    let in_parent = account_menu_contains(rect, point);
-    if !in_submenu && !in_parent && !account_menu_contains(corridor, point) {
-        return AccountMenuPress::Dismiss;
-    }
-    // The flyout paints over its parent on narrow windows, including its
-    // padding. A parent control under that padding must never activate.
-    let split = if submenu.is_some() { submenu_hit_start.min(hits.len()) } else { hits.len() };
-    let (parent_hits, child_hits) = hits.split_at(split);
-    let hits = if in_submenu { child_hits } else if in_parent { parent_hits } else { &[] };
-    let hit = |(_, rect): &&(AccountMenuItem, (f32, f32, f32, f32))| {
-        account_menu_contains(Some(*rect), point)
-    };
-    // Row actions overlap their parent account row and must win regardless of
-    // the order in which the renderer adds the parent hit rectangle.
-    hits.iter().rev().filter(hit)
-        .find(|(item, _)| matches!(item, AccountMenuItem::Reauth(..) | AccountMenuItem::Forget(..) | AccountMenuItem::UseLimitReset))
-        .or_else(|| hits.iter().rev().find(hit))
+    // The opening frame has not published bounds yet.
+    if rect.is_none() { return AccountMenuPress::Blank; }
+    if !account_menu_contains(rect, point) { return AccountMenuPress::Dismiss; }
+    hits.iter().rev().find(|(_, rect)| account_menu_contains(Some(*rect), point))
         .map(|(item, _)| AccountMenuPress::Action(item.clone()))
         .unwrap_or(AccountMenuPress::Blank)
 }
@@ -356,13 +334,7 @@ impl App {
         self.account_menu_anchor = None;
         self.account_menu_rect = None;
         self.account_menu_body_rect = None;
-        self.account_menu_submenu_rect = None;
-        self.account_menu_submenu_body_rect = None;
-        self.account_menu_corridor_rect = None;
-        self.account_menu_submenu_scroll = 0.0;
-        self.account_menu_submenu_scroll_max = 0.0;
         self.account_menu_hits.clear();
-        self.account_menu_submenu_hit_start = 0;
         self.account_menu_scroll = 0.0;
         self.account_menu_scroll_max = 0.0;
     }
@@ -406,13 +378,7 @@ impl App {
                 self.account_menu = true;
                 self.account_menu_anchor = Some(anchor);
                 self.account_menu_rect = None;
-                self.account_menu_submenu_rect = None;
-                self.account_menu_submenu_body_rect = None;
-                self.account_menu_corridor_rect = None;
-                self.account_menu_submenu_scroll = 0.0;
-                self.account_menu_submenu_scroll_max = 0.0;
                 self.account_menu_hits.clear();
-                self.account_menu_submenu_hit_start = 0;
                 self.account_menu_scroll = 0.0;
                 // 하단바가 「로그인 필요」를 띄운 채 눌렸으면 Claude 계정 목록을 펼쳐 연다 —
                 // 풀린 줄이 바로 보여야 한 번 더 눌러 그 슬롯 로그인으로 간다.
@@ -429,7 +395,7 @@ impl App {
                 return false;
             }
             if opening_anchor.is_none() && self.account_menu && *state == ElementState::Pressed {
-                let pick = account_menu_press(self.account_menu_rect, self.account_menu_submenu_rect, self.account_menu_corridor_rect, &self.account_menu_hits, self.account_menu_submenu_hit_start, self.cursor_px);
+                let pick = account_menu_press(self.account_menu_rect, &self.account_menu_hits, self.cursor_px);
                 if pick == AccountMenuPress::Dismiss
                     || account_menu_contains(self.account_menu_anchor, self.cursor_px)
                 {
@@ -462,13 +428,7 @@ impl App {
                         self.account_menu_scroll, self.account_menu_scroll_max,
                         self.account_menu_body_rect.map_or(0.0, |rect| rect.3)) {
                         self.account_menu_scroll = scroll;
-                        // Paging reads the main result list; stale flyout hits must not select an account.
-                        self.account_menu_provider = None;
                         self.account_menu_hits.clear();
-                        self.account_menu_submenu_rect = None;
-                        self.account_menu_submenu_body_rect = None;
-                        self.account_menu_corridor_rect = None;
-                        self.account_menu_submenu_hit_start = 0;
                         self.chrome_dirty = true;
                         if let Some(window) = &self.window { window.request_redraw(); }
                         return true;
@@ -488,7 +448,7 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.effective_scale();
                 self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
-                let pick = account_menu_press(self.account_menu_rect, self.account_menu_submenu_rect, self.account_menu_corridor_rect, &self.account_menu_hits, self.account_menu_submenu_hit_start, self.cursor_px);
+                let pick = account_menu_press(self.account_menu_rect, &self.account_menu_hits, self.cursor_px);
                 let pointer = matches!(pick, AccountMenuPress::Action(_));
                 self.text_cursor_shown = false;
                 self.chrome_dirty = true;
@@ -499,18 +459,13 @@ impl App {
                 true
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let in_submenu = account_menu_contains(self.account_menu_submenu_rect, self.cursor_px);
-                let body = if in_submenu { self.account_menu_submenu_body_rect } else { self.account_menu_body_rect };
-                if account_menu_contains(body, self.cursor_px) {
+                if account_menu_contains(self.account_menu_body_rect, self.cursor_px) {
                     let dy = match delta {
                         MouseScrollDelta::LineDelta(_, y) => *y * 36.0,
                         MouseScrollDelta::PixelDelta(position) => position.y as f32 / self.effective_scale(),
                     };
-                    if in_submenu {
-                        self.account_menu_submenu_scroll = (self.account_menu_submenu_scroll - dy).clamp(0.0, self.account_menu_submenu_scroll_max.max(0.0));
-                    } else {
-                        self.account_menu_scroll = (self.account_menu_scroll - dy).clamp(0.0, self.account_menu_scroll_max.max(0.0));
-                    }
+                    self.account_menu_scroll = (self.account_menu_scroll - dy).clamp(0.0, self.account_menu_scroll_max.max(0.0));
+                    self.account_menu_hits.clear();
                     self.chrome_dirty = true;
                     if let Some(window) = &self.window { window.request_redraw(); }
                 }
@@ -525,20 +480,10 @@ impl App {
     fn account_menu_action(&mut self, action: AccountMenuItem) {
         match action {
             AccountMenuItem::Provider(provider) => {
-                self.account_menu_provider = (self.account_menu_provider != Some(provider)).then_some(provider);
-                self.account_menu_submenu_scroll = 0.0;
-                self.account_menu_submenu_rect = None;
-                self.account_menu_submenu_body_rect = None;
-                self.account_menu_corridor_rect = None;
-                self.account_menu_hits.truncate(self.account_menu_submenu_hit_start);
-            }
-            AccountMenuItem::Density(compact) => {
-                self.set_usage_compact = compact;
-                self.settings_save();
-            }
-            AccountMenuItem::UsageDetails => {
-                self.set_usage_compact = !self.set_usage_compact;
-                self.settings_save();
+                self.account_menu_provider = Some(provider);
+                self.account_menu_scroll = 0.0;
+                self.account_menu_hits.clear();
+                crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
             }
             AccountMenuItem::ManageAccounts => {
                 self.close_account_menu();
@@ -572,13 +517,7 @@ impl App {
                 self.close_account_menu();
                 self.check_for_updates_now();
             }
-            AccountMenuItem::Forget(provider, id) => {
-                self.close_account_menu();
-                self.settings_apply(match provider {
-                    AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(id),
-                    AccountProvider::Codex => SettingsAction::RemoveCodexAccount(id),
-                });
-            }
+
         }
     }
 }
@@ -602,72 +541,24 @@ mod account_menu_input_tests {
     }
 
     #[test]
-    fn reopened_parent_keeps_actions_without_a_flyout() {
-        let panel = Some((0.0, 0.0, 100.0, 100.0));
-        let hits = vec![(AccountMenuItem::ManageAccounts, (10.0, 60.0, 80.0, 24.0))];
-        assert!(account_menu_press(panel, None, None, &hits, 0, (40.0, 70.0))
-            == AccountMenuPress::Action(AccountMenuItem::ManageAccounts));
-    }
-
-    #[test]
     fn popup_distinguishes_outside_padding_and_controls() {
         let rect = Some((10.0, 10.0, 100.0, 100.0));
-        let hits = vec![(AccountMenuItem::UsageDetails, (20.0, 20.0, 50.0, 20.0))];
-        assert!(account_menu_press(rect, None, None, &hits, hits.len(), (5.0, 30.0)) == AccountMenuPress::Dismiss);
-        assert!(account_menu_press(rect, None, None, &hits, hits.len(), (15.0, 15.0)) == AccountMenuPress::Blank);
-        assert!(account_menu_press(None, None, None, &[], 0, (15.0, 15.0)) == AccountMenuPress::Blank);
-        assert!(account_menu_press(rect, None, None, &hits, hits.len(), (25.0, 25.0)) == AccountMenuPress::Action(AccountMenuItem::UsageDetails));
+        let provider = AccountMenuItem::Provider(AccountProvider::Claude);
+        let hits = vec![(provider.clone(), (20.0, 20.0, 50.0, 20.0))];
+        assert!(account_menu_press(rect, &hits, (5.0, 30.0)) == AccountMenuPress::Dismiss);
+        assert!(account_menu_press(rect, &hits, (15.0, 15.0)) == AccountMenuPress::Blank);
+        assert!(account_menu_press(None, &[], (15.0, 15.0)) == AccountMenuPress::Blank);
+        assert!(account_menu_press(rect, &hits, (25.0, 25.0)) == AccountMenuPress::Action(provider));
     }
 
     #[test]
-    fn popup_actions_win_over_parent_rows_and_topmost_control_wins() {
+    fn popup_action_hit_takes_precedence_over_account_row() {
         let rect = Some((0.0, 0.0, 100.0, 100.0));
-        let hits = vec![
-            (AccountMenuItem::Forget(AccountProvider::Claude, "a".into()), (50.0, 20.0, 20.0, 20.0)),
-            (AccountMenuItem::Select(AccountProvider::Claude, "a".into()), (10.0, 20.0, 80.0, 20.0)),
-        ];
-        assert!(account_menu_press(rect, rect, None, &hits, 0, (55.0, 25.0)) == AccountMenuPress::Action(hits[0].0.clone()));
-        let hits = vec![(AccountMenuItem::Density(true), rect.unwrap()), (AccountMenuItem::Density(false), rect.unwrap())];
-        assert!(account_menu_press(rect, None, None, &hits, hits.len(), (50.0, 50.0)) == AccountMenuPress::Action(AccountMenuItem::Density(false)));
-        // 초기화권 단추는 제공자 블록 안에 서고, 블록 hit 이 그 뒤에 쌓인다.
-        let hits = vec![
-            (AccountMenuItem::UseLimitReset, (60.0, 40.0, 30.0, 18.0)),
-            (AccountMenuItem::Provider(AccountProvider::Claude), (0.0, 0.0, 100.0, 60.0)),
-        ];
-        assert!(account_menu_press(rect, None, None, &hits, hits.len(), (70.0, 45.0)) == AccountMenuPress::Action(AccountMenuItem::UseLimitReset));
-        assert!(account_menu_press(rect, None, None, &hits, hits.len(), (20.0, 45.0)) == AccountMenuPress::Action(AccountMenuItem::Provider(AccountProvider::Claude)));
-    }
-
-    #[test]
-    fn flyout_and_bridge_are_inside_but_surrounding_blank_space_is_outside() {
-        let parent = Some((10.0, 10.0, 100.0, 200.0));
-        let child = Some((114.0, 30.0, 100.0, 100.0));
-        let bridge = Some((110.0, 30.0, 4.0, 30.0));
-        let hits = vec![
-            (AccountMenuItem::Provider(AccountProvider::Claude), (20.0, 30.0, 80.0, 30.0)),
-            (AccountMenuItem::Select(AccountProvider::Claude, "fixture".into()), (124.0, 40.0, 80.0, 30.0)),
-        ];
-        let classify = |point| account_menu_press(parent, child, bridge, &hits, 1, point);
-        assert!(classify((30.0, 40.0)) == AccountMenuPress::Action(hits[0].0.clone()));
-        assert!(classify((130.0, 50.0)) == AccountMenuPress::Action(hits[1].0.clone()));
-        assert!(classify((115.0, 31.0)) == AccountMenuPress::Blank);
-        assert!(classify((112.0, 40.0)) == AccountMenuPress::Blank);
-        assert!(classify((112.0, 100.0)) == AccountMenuPress::Dismiss);
-        assert!(classify((180.0, 180.0)) == AccountMenuPress::Dismiss);
-    }
-
-    #[test]
-    fn flyout_padding_masks_parent_actions_in_narrow_windows() {
-        let parent = Some((10.0, 10.0, 100.0, 200.0));
-        let child = Some((60.0, 30.0, 100.0, 100.0));
-        let hits = vec![
-            (AccountMenuItem::Provider(AccountProvider::Claude), (20.0, 30.0, 80.0, 30.0)),
-            (AccountMenuItem::ManageAccounts, (80.0, 40.0, 70.0, 30.0)),
-        ];
-        let classify = |point| account_menu_press(parent, child, None, &hits, 1, point);
-        assert!(classify((65.0, 35.0)) == AccountMenuPress::Blank);
-        assert!(classify((85.0, 45.0)) == AccountMenuPress::Action(AccountMenuItem::ManageAccounts));
-        assert!(classify((30.0, 40.0)) == AccountMenuPress::Action(hits[0].0.clone()));
+        let row = AccountMenuItem::Select(AccountProvider::Claude, "a".into());
+        let action = AccountMenuItem::Reauth(AccountProvider::Claude, "a".into());
+        let hits = vec![(row.clone(), (10.0, 20.0, 80.0, 20.0)), (action.clone(), (50.0, 20.0, 20.0, 20.0))];
+        assert!(account_menu_press(rect, &hits, (55.0, 25.0)) == AccountMenuPress::Action(action));
+        assert!(account_menu_press(rect, &hits, (25.0, 25.0)) == AccountMenuPress::Action(row));
     }
 
     #[test]

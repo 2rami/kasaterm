@@ -128,10 +128,6 @@ impl App {
             serde_json::Value::String(self.set_codex_account.clone()),
         );
         socket::write_setting(
-            "usage_compact",
-            serde_json::Value::Bool(self.set_usage_compact),
-        );
-        socket::write_setting(
             "claude_account_autoswitch",
             serde_json::Value::Bool(self.set_account_autoswitch),
         );

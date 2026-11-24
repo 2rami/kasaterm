@@ -806,7 +806,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
       backgroundColor: Colors.transparent,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        title: const Text('Claude · Codex 계정'),
+        title: const Text('코딩 에이전트'),
         actions: [
           IconButton(
             tooltip: '새로고침',
@@ -907,7 +907,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
           )
         else if (_accounts.isNotEmpty)
           SettingsGroup(
-            title: 'Claude · ${_name(device)}',
+            title: 'Claude',
             children: [
               for (final account in _accounts)
                 SettingsRow(
@@ -924,27 +924,29 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
                     if (account.relogin != null)
                       claudeReloginReason(account.relogin),
                   ].join(' · '),
-                  below: Align(
-                    alignment: Alignment.centerLeft,
-                    child: OutlinedButton(
-                      key: Key('claude-login-${account.id}'),
-                      onPressed:
-                          _busy ||
-                              _disconnected ||
-                              (_pending && _slot?.id != account.id)
-                          ? null
-                          : () => _start(account),
-                      child: Text(
-                        _busy && _slot?.id == account.id
-                            ? '시작하는 중'
-                            : _pending && _slot?.id == account.id
-                            ? _pendingStart!.abandoned
-                                  ? '취소 다시 확인'
-                                  : '로그인 상태 확인'
-                            : '다시 로그인',
-                      ),
-                    ),
-                  ),
+                  below: account.needsLogin || (_pending && _slot?.id == account.id)
+                      ? Align(
+                          alignment: Alignment.centerLeft,
+                          child: OutlinedButton(
+                            key: Key('claude-login-${account.id}'),
+                            onPressed:
+                                _busy ||
+                                    _disconnected ||
+                                    (_pending && _slot?.id != account.id)
+                                ? null
+                                : () => _start(account),
+                            child: Text(
+                              _busy && _slot?.id == account.id
+                                  ? '시작하는 중'
+                                  : _pending && _slot?.id == account.id
+                                  ? _pendingStart!.abandoned
+                                        ? '취소 다시 확인'
+                                        : '로그인 상태 확인'
+                                  : '다시 로그인',
+                            ),
+                          ),
+                        )
+                      : null,
                 ),
             ],
           ),
@@ -985,8 +987,8 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     final theme = Theme.of(context);
     final summary = device.online ? _summaries[device.id] : null;
     final problem = summary?.followProblem;
-    final target = summary?.reloginTarget;
     final selected = device.id == _device?.id;
+    final target = selected ? null : summary?.reloginTarget;
     final free = !_locked && !_busy && !_disconnected;
     return SettingsRow(
       key: Key('claude-device-${device.id}'),

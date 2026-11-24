@@ -872,12 +872,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.textContaining('같은 요청'), findsOneWidget);
       final request = fake.posts.single;
-      expect(
-        tester
-            .widget<OutlinedButton>(find.byKey(const Key('claude-login-work')))
-            .onPressed,
-        isNull,
-      );
+      expect(find.byKey(const Key('claude-login-work')), findsNothing);
       expect(
         tester
             .widget<IconButton>(
@@ -1151,12 +1146,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('로그인을 취소했어요.'), findsNothing);
       expect(find.textContaining('요청이 없어졌어요'), findsOneWidget);
-      expect(
-        tester
-            .widget<OutlinedButton>(find.byKey(const Key('claude-login-work')))
-            .onPressed,
-        isNotNull,
-      );
+      expect(find.byKey(const Key('claude-login-work')), findsNothing);
       await _end(tester);
     },
   );

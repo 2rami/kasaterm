@@ -7184,16 +7184,6 @@ pub struct CodexAccount {
     pub label: String,
 }
 
-/// 계정 메뉴 표시 밀도. `true` = Compact — 창별 막대를 접고 가장 빡빡한 창 하나만.
-/// 기본은 Detailed(false): 처음 여는 사람에게는 전부 보이는 편이 낫고, 좁게 쓰고 싶은
-/// 사람은 메뉴 안에서 바로 바꾼다.
-pub fn read_usage_compact() -> bool {
-    read_settings()
-        .get("usage_compact")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false)
-}
-
 /// 하단바에 안 쓰는 계정의 한도까지 세울지. **기본은 끔.**
 ///
 /// 켜 놓고 써 보니 이 줄이 늘 무거웠다(2026-08-29 지시: 「누르기전엔 다른거

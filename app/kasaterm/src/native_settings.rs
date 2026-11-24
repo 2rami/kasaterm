@@ -397,7 +397,7 @@ fn codex_window_label(minutes: u32) -> String {
     }
 }
 
-fn codex_usage_windows(limits: &crate::codexlimits::CodexLimits) -> Vec<crate::UsageWindowBadge> {
+pub(crate) fn codex_usage_windows(limits: &crate::codexlimits::CodexLimits) -> Vec<crate::UsageWindowBadge> {
     let mut windows: Vec<crate::UsageWindowBadge> = limits
         .windows
         .iter()
@@ -4384,10 +4384,10 @@ fn paint_claude(
     w: f32,
 ) {
     account_group(g, s, hits, caret, x, y, w, AccountProvider::Claude);
-    *y += 14.0;
-    autoswitch_rows(g, s, hits, x, y, w);
-    *y += 14.0;
+    *y += 18.0;
     account_group(g, s, hits, caret, x, y, w, AccountProvider::Codex);
+    *y += 18.0;
+    autoswitch_rows(g, s, hits, x, y, w);
     *y += 14.0;
     section_title(g, x, *y, "에이전트 기본값", "새로 띄우는 Claude와 Codex 작업에 적용됩니다");
     *y += 54.0;
@@ -5796,113 +5796,30 @@ fn account_group(
     });
     let show_code_input = needs_code || (running && manual_claude_login);
 
-    g.queue_icon(provider.icon(), x, *y - 1.0, 17.0, theme::text());
-    draw_text(g, x + 24.0, *y, provider.label(), 14.5, theme::text(), true);
-    if crate::verification_run()
-        && std::env::var("KASATERM_AUTOSETTINGS_ACTION")
-            .is_ok_and(|value| value.starts_with("account-usage-"))
-    {
-        let label = "검증용 예시";
-        let label_w = g.measure_chrome_text(label, 10.5, false);
-        draw_text(
-            g,
-            x + w - label_w,
-            *y + 2.0,
-            label,
-            10.5,
-            theme::text_mute(),
-            false,
-        );
-    }
-    *y += 23.0;
-    let blurb = match provider {
-        AccountProvider::Claude => {
-            "등록한 계정을 선택해 사용합니다. 계정이 2개 이상이면 한도에 맞춰 자동 전환할 수 있어요."
-        }
-        AccountProvider::Codex => {
-            "코덱스도 같은 방식으로 여러 계정을 둘 수 있습니다. 인증은 이 기기에 남습니다."
-        }
-    };
-    let blurb = fit(g, blurb, w, 11.0, false);
-    draw_text(g, x, *y, &blurb, 11.0, theme::text_dim(), false);
-    *y += 26.0;
-    // 기계를 고르는 두 칸. claude 는 **양쪽에서 돌기 때문에** 한쪽만 보여 주면
-    // 하단 상태줄(늘 이 기계 것)과 어긋난다(2026-09-05 사용자 「설정창이랑 하단이랑
-    // 왜 다른데」). 본진이 없거나 꺼져 있으면 칸을 안 그린다 — 고를 것이 하나뿐인
-    // 화면에 선택지를 세우면 그 자체가 물음이 된다.
-    if provider == AccountProvider::Claude {
-        if let Some(view) = s.home_accounts.as_ref() {
-            segmented(
-                g,
-                s,
-                hits,
-                x,
-                *y,
-                w.min(360.0),
-                &[
-                    (
-                        "이 맥북",
-                        !s.account_scope_home,
-                        SettingsAction::AccountScopeHome(false),
-                    ),
-                    (
-                        &view.label,
-                        s.account_scope_home,
-                        SettingsAction::AccountScopeHome(true),
-                    ),
-                ],
-            );
-            *y += 40.0;
-            let note = if s.account_scope_home {
-                format!("{} 에서 도는 claude 의 계정이에요", view.label)
-            } else {
-                "이 맥북에서 도는 claude 의 계정이에요 — 하단 막대에 뜨는 숫자가 이것".to_string()
-            };
-            for line in wrap_words(g, &note, w, 10.5) {
-                draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
-                *y += 15.0;
-            }
-            *y += 9.0;
-        }
-    }
-
-    // 목록 머리. 추가 단추는 **목록 위 오른쪽** — 새 줄이 어디에 생기는지가
-    // 단추 자리로 설명되고, 계정이 늘어도 단추가 화면 아래로 도망가지 않는다.
     let add = match provider {
         AccountProvider::Claude => SettingsAction::AddClaudeAccount,
         AccountProvider::Codex => SettingsAction::AddCodexAccount,
     };
-    draw_text(g, x, *y + 5.0, "계정", 12.5, theme::text(), true);
+    g.queue_icon(provider.icon(), x, *y + 6.0, 18.0, theme::text_dim());
+    draw_text(g, x + 26.0, *y + 5.0, provider.label(), 16.0, theme::text(), true);
     if !needs_code && !running {
-        button(
-            g,
-            s,
-            hits,
-            (x + w - 104.0, *y, 104.0, 30.0),
-            "계정 추가",
-            Target::Setting(add),
-            false,
-        );
+        let width = crate::native_controls::button_width(g, "계정 추가", 28.0, false);
+        button(g, s, hits, (x + w - width, *y, width, 28.0),
+            "계정 추가", Target::Setting(add), false);
     }
-    *y += 26.0;
+    *y += 38.0;
+    if provider == AccountProvider::Claude {
+        if let Some(view) = s.home_accounts.as_ref() {
+            segmented(g, s, hits, x, *y, w.min(360.0), &[
+                ("이 기기", !s.account_scope_home, SettingsAction::AccountScopeHome(false)),
+                (&view.label, s.account_scope_home, SettingsAction::AccountScopeHome(true)),
+            ]);
+            *y += 40.0;
+        }
+    }
     let rows: Vec<&AccountChoice> = home.map_or(s.accounts.as_ref(), |h| h.accounts.as_ref())
         .iter().filter(|row| row.provider == provider && (provider != AccountProvider::Claude || !row.id.is_empty())).collect();
-    let selection_note = if provider == AccountProvider::Claude && !rows.iter().any(|row| row.active) {
-        "계정 선택 필요 · 외부 CLI 로그인은 그대로 유지됩니다"
-    } else {
-        "계정을 눌러 선택하고 사용량을 펼쳐 확인하세요"
-    };
-    let selection_note = fit(g, selection_note, w, 10.5, false);
-    draw_text(
-        g,
-        x,
-        *y,
-        &selection_note,
-        10.5,
-        theme::text_mute(),
-        false,
-    );
-    *y += 22.0;
+    g.rect(x, *y - 2.0, w, 1.0, theme::border());
 
     if let Some(h) = home {
         if let Some(why) = h.error.as_deref() {
@@ -6056,304 +5973,141 @@ fn account_row(
     row: &AccountChoice,
     (index, count): (usize, usize),
 ) {
-    let editing = s
-        .account_label_edit
-        .as_ref()
+    let editing = s.account_label_edit.as_ref()
         .is_some_and(|(provider, id, _)| *provider == row.provider && id == &row.id);
-    let busy = s.login_job.as_ref().is_some_and(|job| {
-        matches!(
-            job.state,
-            crate::settings::LoginState::Running | crate::settings::LoginState::NeedCode
-        )
-    }) || s.home_accounts.as_ref().is_some_and(|h| {
-        h.login
-            .as_ref()
-            .is_some_and(|(_, st, _)| st == "running" || st == "need_code")
-    });
-    // 별명·격리·제거는 **등록한 슬롯**의 것이다 — 기본 로그인은 목록에 없는
-    // 암묵적 줄이라 이름을 붙일 데도 지울 대상도 없다.
-    let show_slot_actions = row.slot && !editing && !busy;
-    // 다시 로그인은 **모든 줄**에 있다. 기본 로그인도 만료되면 똑같이 풀리는데,
-    // 그 줄에만 단추가 없어 고치러 갈 데가 없었다(2026-09-07 「코덱슨 왜 재인증
-    // 이런거없어」 — codex 는 등록 슬롯이 없어 늘 이 줄뿐이다).
-    let show_actions = !editing && !busy;
-    let usage_key = account_usage_key(row.provider, &row.id);
-    let expanded = !editing && s.account_usage_expanded.contains(&usage_key);
-    let detail_lines = expanded.then(|| account_usage_lines(row)).unwrap_or_default();
-    let detail_h = if expanded {
-        match row.usage_state {
-            AccountUsageState::Ready => 16.0 + detail_lines.len().max(1) as f32 * 54.0,
-            _ => 58.0,
-        }
-    } else {
-        0.0
-    };
-    let rect = (x, *y, w, if editing { 62.0 } else { 84.0 + detail_h });
-    choice_card(
-        g,
-        s,
-        hits,
-        rect,
-        row.active,
-        Target::Setting(SettingsAction::SwitchAccount(row.provider, row.id.clone())),
-    );
-    g.queue_icon(
-        row.provider.icon(),
-        rect.0 + 12.0,
-        rect.1 + 12.0,
-        17.0,
-        if row.active {
-            theme::accent()
-        } else {
-            theme::text_mute()
-        },
-    );
     if editing {
-        let value = s
-            .account_label_edit
-            .as_ref()
-            .map(|(_, _, value)| value.as_str())
-            .unwrap_or_default();
-        text_field(
-            g,
-            s,
-            hits,
-            caret,
-            rect.0 + 40.0,
-            rect.1 + 4.0,
-            (w - 54.0).max(120.0),
-            "별명",
-            value,
-            SettingsInput::AccountLabel,
-            s.settings_caret,
-            false,
-        );
-        *y += rect.3 + 6.0;
+        text_field(g, s, hits, caret, x + 10.0, *y + 4.0, (w - 20.0).max(120.0), "별명",
+            s.account_label_edit.as_ref().map(|(_, _, value)| value.as_str()).unwrap_or_default(),
+            SettingsInput::AccountLabel, s.settings_caret, false);
+        *y += 66.0;
         return;
     }
 
-    // 오른쪽 단추 묶음의 폭을 **먼저** 재 둔다 — 이름과 부제가 그 자리를 넘지
-    // 않게 잘라야 하는데, 글자 단추는 라벨 길이에 따라 폭이 달라진다.
-    let w_remove = g.measure_chrome_text("제거", 10.5, false) + 32.0;
+    let busy = s.login_job.as_ref().is_some_and(|job| matches!(job.state,
+        crate::settings::LoginState::Running | crate::settings::LoginState::NeedCode))
+        || s.home_accounts.as_ref().and_then(|h| h.login.as_ref())
+            .is_some_and(|(_, state, _)| state == "running" || state == "need_code");
     let needs_login = row.usage_state == AccountUsageState::LoggedOut;
-    let reauth_label = if needs_login { "다시 로그인" } else { "재인증" };
-    let w_reauth = g.measure_chrome_text(reauth_label, 10.5, false) + 32.0;
-    // 차례 화살표는 고를 차례가 있을 때만 — 계정이 하나면 옮길 곳이 없다.
+    let login_label = if row.email.is_empty() && !row.slot { "로그인" } else { "다시 로그인" };
+    let show_slot_actions = row.slot && !busy;
     let movable = show_slot_actions && count > 1;
-    let actions_w = if show_slot_actions {
-        w_remove + w_reauth + 2.0 + 60.0 + if movable { 60.0 } else { 0.0 } + 10.0
-    } else if show_actions {
-        w_reauth + 10.0
-    } else {
-        14.0
-    };
-    let text_x = rect.0 + 40.0;
-    let avail = (rect.0 + rect.2 - actions_w - text_x).max(80.0);
+    let login_width = if needs_login && !busy {
+        crate::native_controls::button_width(g, login_label, 26.0, true) + 4.0
+    } else { 0.0 };
+    let actions_w = login_width + if show_slot_actions { if movable { 122.0 } else { 62.0 } } else { 0.0 };
+    let separate_actions = actions_w > 0.0 && w - actions_w < 240.0;
+    let actions_y = *y + if separate_actions { 49.0 } else { 8.0 };
+    let label_width = if separate_actions { w - 24.0 } else { w - actions_w - 24.0 };
 
-    // 선택만으로 로그인 완료를 단정할 수 없다.
-    let badge = if row.active { Some("선택됨") } else { None };
-    let badge_w = badge
-        .map(|t| g.measure_chrome_text(t, 9.5, false) + 22.0)
-        .unwrap_or(0.0);
-    let shown = fit(g, &row.name, w - 54.0 - badge_w, 12.0, row.active);
-    let name_w = g.measure_chrome_text(&shown, 12.0, row.active);
-    draw_text(g, text_x, rect.1 + 8.0, &shown, 12.0, theme::text(), row.active);
-    if let Some(t) = badge {
-        pill(g, text_x + name_w + 8.0, rect.1 + 7.0, t, true);
+    let lines = if needs_login { Vec::new() } else { account_usage_lines(row) };
+    let usage_key = account_usage_key(row.provider, &row.id);
+    let expanded = s.account_usage_expanded.contains(&usage_key);
+    let visible = if expanded { lines.len() } else { lines.len().min(2) };
+    let more = lines.len() > 2;
+    let cols = if w >= 540.0 { 2 } else { 1 };
+    let rail_y = *y + if separate_actions { 83.0 } else { 55.0 };
+    let height = rail_y - *y + visible.div_ceil(cols) as f32 * crate::native_controls::QUOTA_RAIL_HEIGHT
+        + if more { 28.0 } else { 8.0 };
+    let rect = (x, *y, w, height);
+    let selectable = !row.active && !needs_login && !busy;
+    let hover = selectable && contains(rect, s.cursor);
+    if hover {
+        round_rect(g, x, *y + 2.0, w, height - 4.0, theme::radius_md(), theme::surface_hover());
+    }
+    if row.active {
+        round_rect(g, x, *y + 9.0, 3.0, 32.0, 1.5, theme::accent());
+    }
+    if selectable {
+        register_clipped(g, hits, Target::Setting(SettingsAction::SwitchAccount(row.provider, row.id.clone())),
+            rect, HitCursor::Pointer);
+    }
+    g.hover_pointer |= hover;
+    g.rect(x, *y + height - 1.0, w, 1.0, theme::border());
+
+    let text_x = x + 12.0;
+    let in_use = row.active && !needs_login;
+    let badge = "사용 중";
+    let badge_w = if in_use { g.measure_chrome_text(badge, 10.0, false) + 10.0 } else { 0.0 };
+    let brand = (!row.email.is_empty()).then(|| crate::account_brand::Brand::from_email(&row.email));
+    let brand_width = brand.map_or(0.0, |brand| brand.width(14.0) + 6.0);
+    if let Some(brand) = brand { brand.paint(g, text_x, *y + 12.0, 14.0); }
+    let name_x = text_x + brand_width;
+    let name = fit(g, &row.name, (label_width - brand_width - badge_w).max(0.0), 13.0, true);
+    draw_text(g, name_x, *y + 11.0, &name, 13.0, theme::text(), true);
+    if in_use {
+        let name_w = g.measure_chrome_text(&name, 13.0, true);
+        draw_text(g, name_x + name_w + 8.0, *y + 14.0, badge, 10.0, theme::text_dim(), false);
     }
 
-    // 긴 신원 문자열이 관리 단추에 가리지 않도록 사용량과 동작은 다음 줄에 둔다.
-    let home_sub = s.home_accounts.as_ref().and_then(|h| {
-        let (id, state, err) = h.login.as_ref()?;
-        (id == &row.id).then(|| match state.as_str() {
+    let home_status = s.home_accounts.as_ref().filter(|_| row.provider == AccountProvider::Claude && s.account_scope_home)
+        .and_then(|home| home.login.as_ref()).and_then(|(id, state, error)| (id == &row.id).then(|| match state.as_str() {
             "running" => "로그인 진행 중".to_string(),
             "need_code" => "코드를 기다리는 중".to_string(),
             "ok" => "로그인을 마쳤어요".to_string(),
-            _ => err.clone().unwrap_or_else(|| "로그인이 실패했어요".to_string()),
-        })
-    });
-    let job_sub = home_sub.or_else(|| {
-        s.login_job
-            .as_ref()
-            .filter(|job| job.provider == row.provider && job.id == row.id)
-            .map(|job| match &job.state {
-                crate::settings::LoginState::Running => "로그인 진행 중".to_string(),
-                crate::settings::LoginState::NeedCode => "코드를 기다리는 중".to_string(),
-                crate::settings::LoginState::Ok => "로그인을 마쳤어요".to_string(),
-                crate::settings::LoginState::Err(error) => error.clone(),
-            })
-    });
-    let (usage_text, usage_pct) = account_usage_summary(row);
-    let usage_text = fit(g, &usage_text, (avail - 20.0).max(24.0), 10.5, false);
-    let usage_w = g.measure_chrome_text(&usage_text, 10.5, false) + 22.0;
-    let usage_left = text_x;
-    let usage_right = usage_left + usage_w.min(avail);
-    let sub_value = job_sub.as_deref().unwrap_or(&row.sub);
-    let mut sub_x = text_x;
-    // 메일 서비스 표지는 **부제가 그 계정을 말할 때만** — 로그인 진행 같은 상태
-    // 문구 앞에 세우면 그게 주소인 줄로 읽힌다.
-    if job_sub.is_none() && !row.email.is_empty() && w >= 100.0 {
-        let brand = crate::account_brand::Brand::from_email(&row.email);
-        brand.paint(g, sub_x, rect.1 + 27.0, 14.0);
-        sub_x += brand.width(14.0) + 6.0;
-    }
-    let sub_room = rect.0 + w - 14.0 - sub_x;
-    if !sub_value.is_empty() && sub_room >= 24.0 {
-        let sub = fit(g, sub_value, sub_room, 10.5, false);
-        draw_text(
-            g,
-            sub_x,
-            rect.1 + 29.0,
-            &sub,
-            10.5,
-            if row.sub_kind == "danger" {
-                theme::danger()
-            } else {
-                theme::text_mute()
-            },
-            false,
-        );
-    }
-    draw_text(
-        g,
-        usage_left,
-        rect.1 + 58.0,
-        &usage_text,
-        10.5,
-        usage_pct.map_or_else(
-            || account_usage_state_color(row.usage_state),
-            account_usage_pct_color,
-        ),
-        false,
-    );
-    g.queue_icon(
-        if expanded { "chevron-up" } else { "chevron-down" },
-        usage_right - 14.0,
-        rect.1 + 57.0,
-        13.0,
-        theme::text_mute(),
-    );
-    let usage_hit = (
-        usage_left - 6.0,
-        rect.1 + 51.0,
-        (usage_right - usage_left + 8.0).max(34.0),
-        27.0,
-    );
-    register_clipped(
-        g,
-        hits,
-        Target::AccountUsage(usage_key.clone()),
-        usage_hit,
-        HitCursor::Pointer,
-    );
-    g.hover_pointer |= contains(usage_hit, s.cursor);
-
-    if expanded {
-        let detail = (rect.0 + 8.0, rect.1 + 85.0, rect.2 - 16.0, detail_h - 8.0);
-        g.rect(detail.0, detail.1 - 1.0, detail.2, 1.0, theme::border());
+            _ => error.clone().unwrap_or_else(|| "로그인이 실패했어요".to_string()),
+        }));
+    let local_status = s.login_job.as_ref().filter(|job| job.provider == row.provider && job.id == row.id)
+        .map(|job| match &job.state {
+            crate::settings::LoginState::Running => "로그인 진행 중".to_string(),
+            crate::settings::LoginState::NeedCode => "코드를 기다리는 중".to_string(),
+            crate::settings::LoginState::Ok => "로그인을 마쳤어요".to_string(),
+            crate::settings::LoginState::Err(error) => error.clone(),
+        });
+    let status = home_status.or(local_status).unwrap_or_else(|| {
         match row.usage_state {
-            AccountUsageState::Ready => {
-                let mut line_y = detail.1 + 10.0;
-                for line in &detail_lines {
-                    draw_account_usage_line(g, line, detail.0 + 32.0, line_y, detail.2 - 44.0, row.usage.as_ref().is_some_and(|usage| usage.stale));
-                    line_y += 54.0;
-                }
-            }
-            state => {
-                let text = account_usage_state_text(state);
-                draw_text(
-                    g,
-                    detail.0 + 32.0,
-                    detail.1 + 18.0,
-                    text,
-                    11.5,
-                    account_usage_state_color(state),
-                    false,
-                );
+            AccountUsageState::LoggedOut => "로그인 필요".to_string(),
+            AccountUsageState::Loading => "한도 조회 중…".to_string(),
+            AccountUsageState::Failed if lines.is_empty() => account_usage_summary(row).0,
+            AccountUsageState::Failed => "이전 조회".to_string(),
+            AccountUsageState::Ready if lines.is_empty() => "표시할 사용량 없음".to_string(),
+            AccountUsageState::Ready => row.sub.clone(),
+        }
+    });
+    let status = fit(g, &status, label_width.max(0.0), 10.5, false);
+    draw_text(g, text_x, *y + 31.0, &status, 10.5,
+        if needs_login { theme::danger() } else { theme::text_dim() }, false);
+
+    let mut right = x + w - 10.0;
+    if show_slot_actions {
+        let remove = match row.provider {
+            AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(row.id.clone()),
+            AccountProvider::Codex => SettingsAction::RemoveCodexAccount(row.id.clone()),
+        };
+        for (icon, action) in [
+            ("trash-2", remove),
+            ("pencil", SettingsAction::FocusAccountLabel(row.provider, row.id.clone())),
+        ] {
+            right -= 28.0;
+            mini_icon_button(g, s, hits, (right, actions_y, 26.0, 26.0), icon, Target::Setting(action));
+        }
+        if movable {
+            for (direction, active, icon) in [(1, index + 1 < count, "arrow-down"), (-1, index > 0, "arrow-up")] {
+                right -= 28.0;
+                move_button(g, s, hits, (right, actions_y, 26.0, 26.0),
+                    SettingsAction::MoveAccount(row.provider, row.id.clone(), direction), active, icon);
             }
         }
-        register_clipped(
-            g,
-            hits,
-            Target::AccountUsage(usage_key),
-            detail,
-            HitCursor::Pointer,
-        );
-        g.hover_pointer |= contains(detail, s.cursor);
+    }
+    if login_width > 0.0 {
+        right -= login_width;
+        button(g, s, hits, (right, actions_y, login_width - 4.0, 26.0), login_label,
+            Target::Setting(SettingsAction::ReauthAccount(row.provider, row.id.clone(), settings::LoginBrowser::Default)), true);
     }
 
-    if show_actions {
-        let by = rect.1 + 51.0;
-        let mut rx = rect.0 + rect.2 - 8.0 - w_reauth;
-        if show_slot_actions {
-            rx = rect.0 + rect.2 - 8.0 - w_remove;
-            let action = match row.provider {
-                AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(row.id.clone()),
-                AccountProvider::Codex => SettingsAction::RemoveCodexAccount(row.id.clone()),
-            };
-            mini_text_button(
-                g,
-                s,
-                hits,
-                rx,
-                by,
-                "trash-2",
-                "제거",
-                Target::Setting(action),
-                true,
-            );
-            rx -= w_reauth + 2.0;
-        }
-        let action = Target::Setting(SettingsAction::ReauthAccount(
-            row.provider, row.id.clone(), settings::LoginBrowser::Default,
-        ));
-        if needs_login {
-            button(g, s, hits, (rx - 6.0, by - 2.0, w_reauth + 10.0, 26.0),
-                reauth_label, action, true);
-        } else {
-            mini_text_button(g, s, hits, rx, by, "rotate-cw", reauth_label, action, false);
-        }
-        // 별명과 격리 로그인은 어쩌다 한 번이라 아이콘으로 남긴다 — 글자까지
-        // 세우면 이름이 들어갈 자리가 사라진다.
-        if !show_slot_actions {
-            *y += rect.3 + 6.0;
-            return;
-        }
-        rx -= 30.0;
-        mini_icon_button(
-            g,
-            s,
-            hits,
-            (rx, by, 26.0, 26.0),
-            "shield",
-            Target::Setting(SettingsAction::ReauthAccount(
-                row.provider,
-                row.id.clone(),
-                settings::LoginBrowser::Isolated,
-            )),
-        );
-        rx -= 30.0;
-        mini_icon_button(
-            g,
-            s,
-            hits,
-            (rx, by, 26.0, 26.0),
-            "pencil",
-            Target::Setting(SettingsAction::FocusAccountLabel(
-                row.provider,
-                row.id.clone(),
-            )),
-        );
-        if movable {
-            rx -= 30.0;
-            move_button(g, s, hits, (rx, by - 1.0, 28.0, 28.0),
-                SettingsAction::MoveAccount(row.provider, row.id.clone(), 1), index + 1 < count, "arrow-down");
-            rx -= 30.0;
-            move_button(g, s, hits, (rx, by - 1.0, 28.0, 28.0),
-                SettingsAction::MoveAccount(row.provider, row.id.clone(), -1), index > 0, "arrow-up");
-        }
+    let gap = 20.0;
+    let rail_width = ((w - 24.0 - (cols - 1) as f32 * gap) / cols as f32).max(0.0);
+    let stale = row.usage_state == AccountUsageState::Failed || row.usage.as_ref().is_some_and(|badge| badge.stale);
+    for (i, line) in lines.iter().take(visible).enumerate() {
+        let px = text_x + (i % cols) as f32 * (rail_width + gap);
+        let py = rail_y + (i / cols) as f32 * crate::native_controls::QUOTA_RAIL_HEIGHT;
+        crate::native_controls::usage_rail(g, (px, py, rail_width, crate::native_controls::QUOTA_RAIL_HEIGHT),
+            &line.label, line.pct, line.resets_at, stale);
     }
-    *y += rect.3 + 6.0;
+    if more {
+        let label = if expanded { "모델별 사용량 접기" } else { "모델별 사용량" };
+        button(g, s, hits, (text_x, *y + height - 29.0, 140.0, 24.0), label, Target::AccountUsage(usage_key), false);
+    }
+    *y += height;
 }
 
 #[derive(Clone)]
@@ -6423,45 +6177,6 @@ fn account_usage_summary(row: &AccountChoice) -> (String, Option<f32>) {
         ),
         (state, _) => (account_usage_state_text(state).to_string(), None),
     }
-}
-
-fn account_usage_pct_color(pct: f32) -> [u8; 4] {
-    if pct >= 90.0 {
-        theme::danger()
-    } else if pct >= 70.0 {
-        theme::attention()
-    } else {
-        theme::text_dim()
-    }
-}
-
-fn account_usage_state_color(state: AccountUsageState) -> [u8; 4] {
-    match state {
-        AccountUsageState::Failed | AccountUsageState::LoggedOut => theme::danger(),
-        _ => theme::text_mute(),
-    }
-}
-
-fn draw_account_usage_line(
-    g: &mut gpu::GpuRenderer,
-    line: &AccountUsageLine,
-    x: f32,
-    y: f32,
-    w: f32,
-    stale: bool,
-) {
-    let text = format!("{}{:.0}%", if stale { "~" } else { "" }, line.pct);
-    let pct_w = g.measure_chrome_text(&text, 11.0, true);
-    let label = fit(g, &line.label, (w - pct_w - 14.0).max(0.0), 11.5, true);
-    draw_text(g, x, y, &label, 11.5, theme::text(), true);
-    draw_text(g, x + w - pct_w, y, &text, 11.0, account_usage_pct_color(line.pct), true);
-    round_rect(g, x, y + 21.0, w, 5.0, 2.5, theme::surface_active());
-    round_rect(g, x, y + 21.0, w * (line.pct / 100.0).clamp(0.0, 1.0), 5.0, 2.5, account_usage_pct_color(line.pct));
-    let reset = line.resets_at.and_then(|at| crate::resets_in_label(Some(at)))
-        .map(|value| format!("{value} 뒤 초기화")).unwrap_or_default();
-    let reset = if stale { format!("최근 값 · {reset}").trim_end_matches(" · ").to_string() } else { reset };
-    let reset = fit(g, &reset, w, 10.0, false);
-    draw_text(g, x, y + 34.0, &reset, 10.0, theme::text_mute(), false);
 }
 
 fn cursor_shape_label(shape: cursor::CursorShape) -> &'static str {

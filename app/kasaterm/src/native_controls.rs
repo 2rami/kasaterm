@@ -10,6 +10,55 @@ pub(crate) const CONTROL_PADDING_X: f32 = 12.0;
 pub(crate) const TOOLBAR_SIZE: f32 = 26.0;
 pub(crate) const TOOLBAR_GAP: f32 = 4.0;
 
+pub(crate) const QUOTA_RAIL_HEIGHT: f32 = 34.0;
+
+pub(crate) fn usage_rail(
+    g: &mut gpu::GpuRenderer,
+    rect: Rect,
+    label: &str,
+    pct: f32,
+    resets_at: Option<u64>,
+    stale: bool,
+) {
+    let (x, y, w, _) = rect;
+    let accent = if stale { theme::text_mute() } else if pct >= 90.0 { theme::danger() }
+        else if pct >= 70.0 { theme::attention() } else { theme::accent() };
+    let percent = format!("{pct:.0}%");
+    let pw = g.measure_chrome_text(&percent, 11.5, true);
+    let localized = [("5h ", "5시간"), ("7d ", "7일")].into_iter()
+        .find_map(|(prefix, duration)| label.strip_prefix(prefix).map(|model| format!("{model} · {duration}")));
+    let label = localized.as_deref().unwrap_or(match label {
+        "5h" => "5시간",
+        "7d" => "7일",
+        other => other,
+    });
+    let label = crate::info::fit_text(g, label, (w - pw - 10.0).max(0.0), 11.5, false);
+    let gray = theme::text_dim();
+    g.draw_text(x, y, &label, gpu::DrawOpts {
+        font_size: 11.5, color: gray, bold: false, italic: false,
+    });
+    g.draw_text(x + w - pw, y, &percent, gpu::DrawOpts {
+        font_size: 11.5, color: theme::enforce_contrast_at(accent, theme::bg(), 4.5), bold: true, italic: false,
+    });
+    let reset = resets_at.and_then(|at| crate::resets_in_label(Some(at)))
+        .map(|at| format!("{at} 뒤 초기화"));
+    if !stale {
+        if let Some(reset) = reset {
+            let reset_width = g.measure_chrome_text(&reset, 10.0, false);
+            let label_width = g.measure_chrome_text(&label, 11.5, false);
+            if label_width + reset_width + pw + 24.0 <= w {
+                g.draw_text(x + w - pw - reset_width - 10.0, y + 1.0, &reset, gpu::DrawOpts {
+                    font_size: 10.0, color: gray, bold: false, italic: false,
+                });
+            }
+        }
+    }
+    g.round_rect_fill(x, y + 19.0, w, 4.0, 2.0, theme::surface_active());
+    if pct > 0.0 {
+        g.round_rect_fill(x, y + 19.0, w * (pct / 100.0).clamp(0.0, 1.0), 4.0, 2.0, accent);
+    }
+}
+
 pub(crate) fn toolbar_button(g: &mut gpu::GpuRenderer, rect: Rect, cursor: (f32, f32), icon: &str, active: bool) {
     let hover = contains(rect, cursor);
     if hover || active {

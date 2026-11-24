@@ -4048,7 +4048,7 @@ impl App {
         }
         let Some(window) = self.window.as_ref() else { return };
         let wid = window.id();
-        let scale = window.scale_factor();
+        let scale = f64::from(self.effective_scale());
         let outside = (window.inner_size().width as f32 / scale as f32 - 8.0, TITLE_HEIGHT + 8.0);
         let step = state.1;
         state.1 += 1;
@@ -4078,15 +4078,6 @@ impl App {
                 } else { check(false, "panel and anchor geometry available"); }
             }
             1 | 2 => {
-                if step == 2 {
-                    if let (Some(parent), Some(child)) = (self.account_menu_rect, self.account_menu_submenu_rect) {
-                        let width = outside.0 + 8.0;
-                        if parent.0 + parent.2 + 4.0 + child.2 <= width - 8.0 {
-                            check(child.0 >= parent.0 + parent.2, "account flyout opens right when space permits");
-                        }
-                        check(child.0 >= 0.0 && child.0 + child.2 <= width, "account flyout stays inside window");
-                    } else { check(false, "account flyout geometry available"); }
-                }
                 let provider = if step == 1 { AccountProvider::Codex } else { AccountProvider::Claude };
                 let hit = self.account_menu_hits.iter().find(|(item, _)| *item == AccountMenuItem::Provider(provider)).map(|(_, rect)| *rect);
                 if let Some(rect) = hit {
@@ -4102,15 +4093,6 @@ impl App {
                     click(self, (rect.0 + 2.0, rect.1 + 2.0), MouseButton::Left);
                     check(self.account_menu, "blank popup padding does not dismiss");
                 } else { check(false, "blank popup test has geometry"); }
-                if let Some(rect) = self.account_menu_submenu_rect {
-                    let provider = self.account_menu_provider;
-                    click(self, (rect.0 + 2.0, rect.1 + 2.0), MouseButton::Left);
-                    check(self.account_menu && self.account_menu_provider == provider, "child padding masks parent actions");
-                }
-                if let Some(rect) = self.account_menu_corridor_rect {
-                    click(self, center(rect), MouseButton::Left);
-                    check(self.account_menu, "panel bridge does not dismiss or click through");
-                }
             }
             4 => {
                 let before = self.ws.lock().unwrap().active_pane.clone();
@@ -4134,12 +4116,12 @@ impl App {
                 } else { check(false, "statusbar hit exists"); }
             }
             7 => {
-                let hit = self.account_menu_hits.iter().find(|(item, _)| *item == AccountMenuItem::UsageDetails).map(|(_, rect)| *rect);
-                let was = self.set_usage_compact;
-                if let Some(rect) = hit {
-                    click(self, center(rect), MouseButton::Left);
-                    check(self.account_menu && self.set_usage_compact != was, "usage detail stays here and changes density");
-                } else { check(false, "usage detail hit exists"); }
+                let any_healthy_reauth = self.account_menu_hits.iter().any(|(item, _)| matches!(item,
+                    AccountMenuItem::Reauth(AccountProvider::Claude, id) if !crate::settings::claude_signed_out(id)));
+                let expired_reauth = self.account_menu_hits.iter().any(|(item, _)| matches!(item,
+                    AccountMenuItem::Reauth(AccountProvider::Claude, id) if id == "acct-3"));
+                let any_provider = self.account_menu_hits.iter().any(|(item, _)| matches!(item, AccountMenuItem::Provider(_)));
+                check(self.account_menu && any_provider && expired_reauth && !any_healthy_reauth, "account tabs and only required login actions remain visible");
             }
             8 => {
                 let hit = self.account_menu_hits.iter().find(|(item, _)| *item == AccountMenuItem::ManageAccounts).map(|(_, rect)| *rect);
@@ -8928,7 +8910,6 @@ impl App {
         // Codex 계정별 상세. 기본 계정은 5h·7d 둘 다, 둘째 계정은 실물처럼
         // 7d 하나만 심어 「5h 미제공」과 그래프가 같은 줄을 다투지 않는지 본다.
         if step == 0 && want.starts_with("accounts-codex") {
-            self.set_usage_compact = want.ends_with("compact");
             self.set_codex_accounts = vec![crate::socket::CodexAccount {
                 id: "codex-1".to_string(),
                 label: "업무용".to_string(),
@@ -8964,9 +8945,7 @@ impl App {
         // 계정 목록(서브메뉴). **고르기 전에** 각 슬롯의 5h·7일이 다 보이는지 보는
         // 것이 목적이라, 슬롯마다 다른 값을 심고 하나는 값 자체를 비워 둔다
         // (「한도 모름」 자리 표시가 나와야 한다 — 빈칸은 「여유 있음」으로 읽힌다).
-        // `accounts-compact` 는 「간단히」 밀도 — 행이 한 줄로 접히는 쪽을 본다.
         if step == 0 && want.starts_with("accounts") {
-            self.set_usage_compact = want.ends_with("compact");
             self.set_claude_accounts = vec![
                 crate::socket::ClaudeAccount {
                     id: "acct-1".to_string(),
