@@ -1398,6 +1398,8 @@ impl App {
         let cats = [
             ("일반", SettingsCat::General),
             ("외형", SettingsCat::Appearance),
+            ("날씨", SettingsCat::Weather),
+            ("앱 하단바", SettingsCat::Statusbar),
             ("에이전트", SettingsCat::Claude),
             ("계정", SettingsCat::Accounts),
             ("기계", SettingsCat::Machines),
@@ -4436,7 +4438,7 @@ impl App {
         }
     }
 
-    /// `KASATERM_AUTOSETTINGS_TOUR=<폴더>` — 설정이 열린 뒤 옆 목록의 칸(+캐릭터 테마)을
+    /// `KASATERM_AUTOSETTINGS_TOUR=<폴더>` — 설정이 열린 뒤 옆 목록의 칸과 하위 페이지를
     /// 차례로 열고 `<번호>-<칸>-<쪽>.png` 로 찍는다. 0쪽은 사람이 처음 보는 접힌 화면이고,
     /// 1쪽부터는 보이는 펼침을 다 열고 한 화면씩 내려간다 — 접힌 칸 안의 잔재가 안 보이면
     /// 정리할 목록에서 빠진다. 그림·한도 같은 캐시가 늦게 차므로 한 걸음마다 0.8초를 둔다.
@@ -4452,8 +4454,8 @@ impl App {
             };
             let _ = std::fs::create_dir_all(&dir);
             let mut cats = SettingsCat::nav().to_vec();
-            if !cats.contains(&SettingsCat::Theme) {
-                cats.push(SettingsCat::Theme);
+            if !crate::lite_mode() {
+                cats.extend([SettingsCat::Weather, SettingsCat::Statusbar, SettingsCat::Theme]);
             }
             *guard = Some(SettingsTour {
                 dir: dir.into(),

@@ -16,37 +16,38 @@ void main() {
 
   Finder inGroup(String group, Finder row) => find.descendant(of: find.byKey(Key(group)), matching: row);
 
-  testWidgets('첫 화면은 화면·에이전트·앱 묶음 차례에 PC 와 같은 페이지 이름', (tester) async {
+  testWidgets('첫 화면은 데스크톱과 같은 주제별 묶음과 페이지 이름', (tester) async {
     await phone(tester);
     final fx = SettingsFixture();
     addTearDown(fx.server.close);
     await tester.pumpWidget(fx.screen());
     await tester.pumpAndSettle();
 
-    final titles = ['화면', '에이전트', '앱'];
+    final titles = ['화면', '에이전트', '계정·기기', '앱'];
     final ys = [for (final t in titles) tester.getTopLeft(find.text(t)).dy];
-    expect(ys, orderedEquals([...ys]..sort()), reason: '묶음 차례는 화면 → 에이전트 → 앱');
+    expect(ys, orderedEquals([...ys]..sort()), reason: '묶음 차례는 화면 → 에이전트 → 계정·기기 → 앱');
     expect(find.text('데스크톱'), findsNothing, reason: '옛 「데스크톱」 묶음은 걷었다');
 
     for (final (group, rows) in [
-      ('group-screen', ['settings-look', 'settings-weather']),
-      ('group-agent', ['settings-account', 'claude-accounts', 'character-picks']),
-      ('group-app', ['settings-devices', 'app-release']),
+      ('group-screen', ['settings-look']),
+      ('group-agent', ['claude-accounts', 'character-picks']),
+      ('group-connection', ['settings-account', 'settings-devices']),
+      ('group-app', ['app-release']),
     ]) {
       final rowYs = [
         for (final key in rows) tester.getTopLeft(inGroup(group, find.byKey(Key(key)))).dy,
       ];
       expect(rowYs, orderedEquals([...rowYs]..sort()), reason: '$group 안의 차례');
     }
-    expect(inGroup('group-agent', find.text('계정')), findsOneWidget);
+    expect(inGroup('group-connection', find.text('계정')), findsOneWidget);
     expect(inGroup('group-agent', find.text('코딩 에이전트')), findsOneWidget);
     expect(inGroup('group-agent', find.text('캐릭터')), findsOneWidget);
-    expect(inGroup('group-app', find.text('연결 기기')), findsOneWidget);
-    expect(inGroup('group-app', find.byType(Divider)), findsOneWidget, reason: '설치 기록이 없으면 끝에 빈 줄 선을 남기지 않는다');
+    expect(inGroup('group-connection', find.text('연결 기기')), findsOneWidget);
+    expect(inGroup('group-app', find.byType(Divider)), findsNothing, reason: '설치 기록이 없으면 끝에 빈 줄 선을 남기지 않는다');
     expect(find.text('Google·아이디 로그인 · 일 권한'), findsOneWidget, reason: '계정 줄은 이어진 로그인 방법을 요약');
 
     // 페이지 안의 줄은 첫 화면에 없다.
-    for (final key in ['change-login', 'work-permissions', 'approval-key', 'device-names', 'phone-brightness']) {
+    for (final key in ['change-login', 'work-permissions', 'approval-key', 'device-names', 'phone-brightness', 'settings-weather']) {
       expect(find.byKey(Key(key)), findsNothing, reason: key);
     }
   });
@@ -93,6 +94,15 @@ void main() {
     expect(find.byKey(const Key('phone-brightness')), findsOneWidget);
     expect(find.text('강조색'), findsOneWidget);
     expect(find.text('둥글게 · 데스크톱 모양'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('settings-weather')));
+    await tester.pumpAndSettle();
+    expect(find.byType(BottomSheet), findsOneWidget);
+    expect(find.text('날씨 켜기'), findsOneWidget);
+    await tester.tapAt(const Offset(195, 24));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(AppBar, '외형'), findsOneWidget);
+    expect(find.byType(BottomSheet), findsNothing);
   });
 
   testWidgets('계정 없이 붙은 주소 연결은 계정·캐릭터·기기 이름·비밀 승인을 감춘다', (tester) async {
@@ -164,11 +174,18 @@ void main() {
     expect(tester.getTopLeft(work).dx, greaterThan(settingsNavWidth), reason: '하위 화면도 오른쪽 칸 안');
     expect(find.byKey(const Key('group-screen')), findsOneWidget);
 
+    await tester.tap(find.byKey(const Key('settings-look')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('settings-weather')));
     await tester.pumpAndSettle();
     expect(find.widgetWithText(AppBar, '날씨'), findsOneWidget, reason: '두 칸이면 날씨도 시트 대신 페이지');
+    expect(selected('settings-look'), isTrue);
+    expect(tester.getTopLeft(find.widgetWithText(AppBar, '날씨')).dx, greaterThan(settingsNavWidth));
     expect(find.byType(BottomSheet), findsNothing);
     expect(find.widgetWithText(AppBar, '일 권한'), findsNothing);
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(brightness, findsOneWidget, reason: '날씨에서 뒤로 가면 외형으로 돌아온다');
   });
 
   testWidgets('좁은 스플릿 뷰는 폰 판 그대로 — 줄을 누르면 들어간다', (tester) async {

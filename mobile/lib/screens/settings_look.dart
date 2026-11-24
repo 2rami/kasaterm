@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../look.dart';
@@ -5,6 +7,9 @@ import '../main.dart' show designTokens;
 import '../server.dart';
 import '../theme_prefs.dart';
 import '../twins_loading.dart';
+import '../weather/model.dart';
+import '../weather/sheet.dart';
+import '../weather/store.dart';
 import 'controls.dart';
 import 'hub.dart' show parseHexColor;
 
@@ -21,11 +26,12 @@ String _modeLabel(ThemeMode mode) => switch (mode) {
   ThemeMode.dark => '어둡게 · 같은 테마 색을 어둡게',
 };
 
-/// 설정 「화면」 → 「외형」 — 이 폰의 밝기와 데스크톱 강조색·모서리. 데스크톱 설정 「외형」과 같은 자리다.
+/// 설정 「외형」 — 이 폰의 밝기, 날씨, 데스크톱 강조색과 모서리.
 class LookSettingsScreen extends StatefulWidget {
-  const LookSettingsScreen({super.key, required this.server});
+  const LookSettingsScreen({super.key, required this.server, this.embedded = false});
 
   final Server server;
+  final bool embedded;
 
   @override
   State<LookSettingsScreen> createState() => _LookSettingsScreenState();
@@ -81,6 +87,14 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
     if (problem != null) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(problem)));
   }
 
+  void _openWeather() {
+    if (widget.embedded) {
+      unawaited(Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const WeatherSettingsScreen())));
+    } else {
+      unawaited(showWeatherSheet(context));
+    }
+  }
+
   @override
   Widget build(BuildContext context) => TwinBackdrop(
     child: Scaffold(
@@ -101,6 +115,25 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
                   options: phoneModes,
                   selected: phoneThemeMode.value,
                   onSelect: _setMode,
+                ),
+              ),
+            ],
+          ),
+          SettingsGroup(
+            children: [
+              ValueListenableBuilder<WeatherSettings>(
+                valueListenable: weather.settings,
+                builder: (context, value, _) => SettingsRow(
+                  key: const Key('settings-weather'),
+                  icon: Icons.umbrella_outlined,
+                  title: '날씨',
+                  subtitle: !value.enabled
+                      ? '꺼짐'
+                      : value.style == RainStyle.showers
+                          ? '상태별 날씨와 프로세스바'
+                          : '${value.amount.label} · ${value.target.label}',
+                  chevron: true,
+                  onTap: _openWeather,
                 ),
               ),
             ],

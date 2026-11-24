@@ -418,6 +418,7 @@ fn english(value: &str) -> Option<&'static str> {
         "픽셀" => "Pixel",
         "화면" => "Display",
         "에이전트" => "Agents",
+        "계정·기기" => "Account & devices",
         "예약" => "Schedules",
         "세부 터미널 · 셸 경로, 커서 굵기와 마우스 포인터" => "Terminal details · shell path, cursor width, mouse pointer",
         "셸 경로는 실행 파일 하나만 적습니다. 명령 옵션은 각 칸에서 직접 붙여 주세요." => "Enter a single executable for the shell path. Add command options in each pane.",

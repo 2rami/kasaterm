@@ -64,7 +64,7 @@ pub(crate) struct SettingsScene {
 impl Default for SettingsScene {
     fn default() -> Self {
         Self {
-            category: SettingsCat::Students,
+            category: SettingsCat::NAV[0],
             weather_phase: crate::weather::indicator::Phase::Working,
             return_pane: None,
             cache: crate::native_settings::SettingsCache::default(),
@@ -1060,6 +1060,7 @@ mod tests {
     fn keyboard_focus_cycles_forward_backward_and_rejects_stale_categories() {
         use crate::native_settings::Target;
         let mut scene = SettingsScene::default();
+        scene.set_category(SettingsCat::Claude);
         let first = Target::Setting(SettingsAction::ToggleCharacterAppearance);
         let second = Target::Setting(SettingsAction::ToggleClaudePersona);
         keyboard_test_paint(&mut scene, vec![keyboard_test_hit(first.clone(), 0.0), keyboard_test_hit(second.clone(), 40.0)]);

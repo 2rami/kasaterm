@@ -615,6 +615,7 @@ pub(crate) enum Target {
     FinishInput,
     CancelInput,
     Category(SettingsCat),
+    AppearanceTab(SettingsCat),
     WeatherPhase(crate::weather::indicator::Phase),
     NavigationScroll(u32),
     Disclosure(&'static str),
@@ -1220,7 +1221,7 @@ impl App {
             Some(Target::WeatherPhase(phase)) => self.settings_scene.weather_phase = phase,
             Some(Target::DropdownDismiss) => {}
             Some(Target::NavigationScroll(_)) => {}
-            Some(Target::Category(cat)) => {
+            Some(Target::Category(cat) | Target::AppearanceTab(cat)) => {
                 self.native_settings_blur();
                 self.device_account.hide();
                 self.settings_scene.set_category(cat);
@@ -1921,9 +1922,8 @@ impl App {
             }
             let nav = matching_categories(&self.settings_scene.query);
             if nav.is_empty() { return true; }
-            let at = nav
-                .iter()
-                .position(|cat| *cat == self.settings_scene.category());
+            let active = active_navigation_category(&nav, self.settings_scene.category());
+            let at = nav.iter().position(|cat| *cat == active);
             let next = match event.logical_key {
                 Key::Named(NamedKey::ArrowUp) => at.map_or(0, |at| at.saturating_sub(1)),
                 Key::Named(NamedKey::ArrowDown) => at.map_or(0, |at| (at + 1).min(nav.len() - 1)),
@@ -2572,7 +2572,9 @@ struct NavigationLayout {
 }
 
 /// 옆 목록의 묶음 머리 — (`SettingsCat::NAV` 에서 그 묶음이 시작하는 자리, 이름).
-pub(crate) const NAV_GROUPS: [(usize, &str); 3] = [(0, "화면"), (3, "에이전트"), (6, "앱")];
+pub(crate) const NAV_GROUPS: [(usize, &str); 4] = [
+    (0, "화면"), (1, "에이전트"), (3, "계정·기기"), (5, "앱"),
+];
 const NAV_GROUP_H: f32 = 24.0;
 
 fn nav_groups_before(index: usize) -> usize {
@@ -2586,7 +2588,10 @@ fn search_text(value: &str) -> String {
 
 fn matching_categories(query: &str) -> Vec<SettingsCat> {
     if query.trim().is_empty() { return SettingsCat::nav().to_vec(); }
-    let mut result: Vec<_> = SettingsCat::nav().iter().copied().filter(|cat| category_matches(*cat, query)).collect();
+    let children = if crate::lite_mode() { &[][..] } else { &SettingsCat::APPEARANCE_PAGES[1..] };
+    let mut result: Vec<_> = SettingsCat::nav().iter().chain(children).copied()
+        .filter(|cat| category_matches(*cat, query))
+        .collect();
     let needle = search_text(query);
     result.sort_by_key(|cat| {
         let title = search_text(category_meta(*cat).0);
@@ -2597,13 +2602,17 @@ fn matching_categories(query: &str) -> Vec<SettingsCat> {
     result
 }
 
+fn active_navigation_category(nav: &[SettingsCat], current: SettingsCat) -> SettingsCat {
+    if nav.contains(&current) { current } else { current.navigation_parent() }
+}
+
 fn category_matches(cat: SettingsCat, query: &str) -> bool {
     let (title, _, detail) = category_meta(cat);
     let aliases = match cat {
         SettingsCat::General | SettingsCat::Shell => "시작 폴더 경로 셸 shell cwd 파일 열기 저장 편집 general directory editor autosave",
         SettingsCat::Appearance => "테마 theme 색상 밝기 다크 폰트 font 글꼴 커서 배율 크기 기기 아이콘 appearance color cursor scale",
         SettingsCat::Statusbar => "하단 상태줄 상태바 사용량 cpu 메모리 계정 표시 statusbar usage memory",
-        SettingsCat::Weather => "날씨 비 애니메이션 움직임 투명도 weather rain motion",
+        SettingsCat::Weather => "날씨 비 물방울 프로세스바 애니메이션 움직임 투명도 weather rain motion",
         SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth kasa 구글 github 프로필 account login password profile",
         SettingsCat::Claude => "클로드 claude 코덱스 codex 계정 로그인 재인증 자동 전환 한도 사용량 차례 순서 기본 에이전트 권한 상태줄 account login order permission",
         SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
@@ -2693,7 +2702,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             "x", Target::ClearSearch);
     }
     let nav = matching_categories(&snapshot.query);
-    let mut navigation = navigation_layout((ax, ay, aw, ah), nav_w, nav.len());
+    let mut navigation = navigation_layout((ax, ay, aw, ah), nav_w, nav.len().max(1));
     if !snapshot.query.trim().is_empty() {
         navigation.groups = false;
         navigation.content_height = nav.len().div_ceil(navigation.columns) as f32 * navigation.row_step;
@@ -2702,6 +2711,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let navigation_scroll = snapshot.navigation_scroll.clamp(0.0, navigation_max);
     register(&mut hits, Target::NavigationScroll(navigation_max.ceil() as u32), navigation.viewport, HitCursor::Arrow);
     g.push_clip(navigation.viewport.0, navigation.viewport.1, navigation.viewport.2, navigation.viewport.3);
+    let active = active_navigation_category(&nav, snapshot.cat);
     for (index, &cat) in nav.iter().enumerate() {
         let rect = navigation_row(&navigation, index, navigation_scroll);
         if let Some((_, group)) = NAV_GROUPS.iter().find(|(start, _)| *start == index).filter(|_| navigation.groups) {
@@ -2717,9 +2727,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 _ => label,
             };
         }
-        // 테마 페이지는 「캐릭터」 밑으로 들어갔다 — 거기 있는 동안도 캐릭터 칸이 켜진다.
-        let selected = cat == snapshot.cat
-            || (cat == SettingsCat::Students && snapshot.cat == SettingsCat::Theme);
+        let selected = cat == active;
         let hover = contains(navigation.viewport, snapshot.cursor) && contains(rect, snapshot.cursor);
         if selected || hover {
             round_rect(
@@ -2769,7 +2777,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         g.hover_pointer |= hover;
     }
     if nav.is_empty() {
-        let message = fit(g, "검색 결과 없음", (nav_w - 40.0).max(0.0), 11.0, false);
+        let message = fit(g, "검색 결과 없음", (navigation.viewport.2 - 24.0).max(0.0), 11.0, false);
         draw_text(g, ax + 20.0, navigation.viewport.1 + 8.0, &message, 11.0, theme::text_dim(), false);
     }
     g.pop_clip();
@@ -2811,11 +2819,25 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let _body_layer = theme::settings_layer(body_fill);
 
     let (content_x, content_w) = if snapshot.cat==SettingsCat::Appearance { content_column_with_max(ax,aw,nav_w,1100.0) } else { content_column(ax,aw,nav_w) };
-    let (title, _, _blurb) = category_meta(snapshot.cat);
+    let appearance = snapshot.cat.navigation_parent() == SettingsCat::Appearance;
+    let (header_x, header_w) = if appearance && !crate::lite_mode() {
+        content_column(ax, aw, nav_w)
+    } else {
+        (content_x, content_w)
+    };
+    let (title, _, _) = category_meta(if appearance { SettingsCat::Appearance } else { snapshot.cat });
     let title_y = if compact { navigation.viewport.1 + navigation.viewport.3 + 12.0 } else { ay + 24.0 };
-    draw_text(g, content_x, title_y, title, 24.0, theme::text(), true);
+    draw_text(g, header_x, title_y, title, 24.0, theme::text(), true);
 
-    let body_top = if compact { title_y + 32.0 } else { ay + HEADER_H + 14.0 };
+    let mut body_top = if compact { title_y + 32.0 } else { ay + HEADER_H + 14.0 };
+    if appearance && !crate::lite_mode() {
+        let tabs = SettingsCat::APPEARANCE_PAGES.map(|cat| {
+            let label = if cat == SettingsCat::Appearance { "기본" } else { category_meta(cat).0 };
+            (label, Target::AppearanceTab(cat), cat == snapshot.cat)
+        });
+        body_top += button_row(g, snapshot, &mut hits, (header_x, body_top, header_w, 0.0),
+            &tabs, crate::native_layout::Align::Start) + 14.0;
+    }
     let input_footer = snapshot.input.is_some_and(|field| !matches!(field,
         SettingsInput::Search | SettingsInput::MachineLabel | SettingsInput::MachineAddress | SettingsInput::LoginCode)
         && !device_account::owns(field));
@@ -7960,9 +7982,9 @@ mod navigation_layout_tests {
         use crate::SettingsCat;
         let nav = SettingsCat::NAV;
         let starts: Vec<SettingsCat> = super::NAV_GROUPS.iter().map(|(start, _)| nav[*start]).collect();
-        assert_eq!(starts, [SettingsCat::Appearance, SettingsCat::Accounts, SettingsCat::General]);
+        assert_eq!(starts, [SettingsCat::Appearance, SettingsCat::Claude, SettingsCat::Accounts, SettingsCat::General]);
         let layout = navigation_layout((0.0, 36.0, 1000.0, 900.0), 200.0, nav.len());
-        assert_eq!(layout.content_height, nav.len() as f32 * 36.0 + 72.0);
+        assert_eq!(layout.content_height, nav.len() as f32 * 36.0 + 96.0);
     }
 }
 
@@ -7991,6 +8013,22 @@ mod tests {
         assert_eq!(matching_categories("account").first(), Some(&SettingsCat::Accounts));
         assert_eq!(matching_categories("연결기기").first(), Some(&SettingsCat::Machines));
         assert_eq!(matching_categories("계정").first(), Some(&SettingsCat::Accounts));
+    }
+
+    #[test]
+    fn appearance_children_have_direct_search_results_and_share_the_root_selection() {
+        let root = matching_categories("");
+        for (cat, keyword, key) in [
+            (SettingsCat::Weather, "프로세스바", "weather"),
+            (SettingsCat::Statusbar, "앱 하단바", "statusbar"),
+        ] {
+            assert!(!root.contains(&cat));
+            assert_eq!(active_navigation_category(&root, cat), SettingsCat::Appearance);
+            let results = matching_categories(keyword);
+            assert_eq!(results.first(), Some(&cat));
+            assert_eq!(active_navigation_category(&results, cat), cat);
+            assert_eq!(matching_categories(key).first(), Some(&cat));
+        }
     }
 
     #[test]
