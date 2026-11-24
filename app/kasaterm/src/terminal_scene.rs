@@ -75,7 +75,9 @@ fn compose_student_banners(
         replace_banner_title(composed, br, bc, lcols, lrows, title, name, accent);
         // 웰컴 배너("Welcome back <user>!")면 도트 위 인사말 행을
         // 배정 학생 페르소나 인사말로 — launcher 화면에선 no-op.
-        replace_welcome_greeting(composed, br, name, accent);
+        replace_welcome_greeting(
+            composed, br, name, accent, kasa_characters::character::user_name().as_deref(),
+        );
         // 배너 박스 보더도 학생색 — 인사말 치환과 **분리**해서
         // 무조건 부른다. 인사말 함수 안에 뒀던 동안 인사말
         // 로스터에 없는 학생 pane 은 치환이 조기 반환하며

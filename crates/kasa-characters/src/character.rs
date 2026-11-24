@@ -2608,7 +2608,7 @@ mod persona_text_tests {
         let chars = serde_json::json!({
             "members": [{ "name": "치나츠", "persona": "너는 치나츠." }]
         });
-        assert_eq!(persona_for(&chars, "치나츠").as_deref(), Some("너는 치나츠."));
+        assert_eq!(raw_persona_for(&chars, "치나츠").as_deref(), Some("너는 치나츠."));
     }
 
     /// 덧붙임은 말투·정체성만 싣는다(2026-10-07 사용자 결정). 내장 명단에 일하는 방식

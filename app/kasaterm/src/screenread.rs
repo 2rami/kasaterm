@@ -3151,6 +3151,7 @@ pub(crate) fn replace_welcome_greeting(
     br: isize,
     name: &str,
     accent: Option<[u8; 4]>,
+    addressee_override: Option<&str>,
 ) {
     const PREFIX: [char; 13] =
         ['W', 'e', 'l', 'c', 'o', 'm', 'e', ' ', 'b', 'a', 'c', 'k', ' '];
@@ -3203,7 +3204,7 @@ pub(crate) fn replace_welcome_greeting(
                 .unwrap_or(row.len());
             (wc, excl, user.trim().to_string(), limit, row[wc].clone())
         };
-        let Some(greet) = crate::theme::character_welcome(name, &user) else {
+        let Some(greet) = crate::theme::character_welcome(name, &user, addressee_override) else {
             return; // 로스터 밖 이름 — 배너당 한 번, 원문 유지
         };
         if let Some([rr, gg, bb, _]) = accent {
@@ -5051,13 +5052,16 @@ mod clawd_banner_tests {
             row_from("  ▝▜█████▛▘"),
             row_from("    ▘▘ ▝▝"),
         ];
-        replace_welcome_greeting(&mut rows, 1, "아메", Some([200, 50, 50, 255]));
+        let mut personalized = rows.clone();
+        replace_welcome_greeting(&mut rows, 1, "아메", Some([200, 50, 50, 255]), None);
         let line = row_text(&rows[0]);
         assert!(line.contains("어서 오세요"), "인사말 치환됨: {line}");
         assert!(line.contains("한글"), "이름 추출·삽입: {line}");
         assert!(!line.contains("Welcome back"), "원문 제거: {line}");
         let first = rows[0].iter().find(|c| !matches!(c.ch, ' ' | '\0')).unwrap();
         assert_eq!(first.fg, kasa_bridge::screen::Color::Rgb(200, 50, 50));
+        replace_welcome_greeting(&mut personalized, 1, "아메", None, Some("별칭"));
+        assert!(row_text(&personalized[0]).contains("별칭"));
     }
 
     // 2컬럼(넓은 폭): "Welcome back" 뒤 박스 세로 보더 │ 는 인사말이 길어도 안 밀린다.
@@ -5070,7 +5074,7 @@ mod clawd_banner_tests {
             row_from("  ▘▘ ▝▝"),
         ];
         let border = rows[0].iter().rposition(|c| c.ch == '│').unwrap();
-        replace_welcome_greeting(&mut rows, 1, "아루", None); // 아루 인사말 = 긴 편
+        replace_welcome_greeting(&mut rows, 1, "아루", None, None); // 아루 인사말 = 긴 편
         assert_eq!(rows[0][border].ch, '│', "우측 보더 보존");
         assert!(
             rows[0][border + 1..].iter().all(|c| matches!(c.ch, ' ' | '\0')),
@@ -5088,7 +5092,7 @@ mod clawd_banner_tests {
         ];
         let tips_col = rows[0].iter().position(|c| c.ch == 'T').unwrap();
         let tips_before: Vec<char> = rows[0][tips_col..].iter().map(|c| c.ch).collect();
-        replace_welcome_greeting(&mut rows, 1, "아루", None);
+        replace_welcome_greeting(&mut rows, 1, "아루", None, None);
         let tips_after: Vec<char> = rows[0][tips_col..].iter().map(|c| c.ch).collect();
         assert_eq!(tips_before, tips_after, "오른쪽 Tips 컬럼 보존");
     }
@@ -5102,7 +5106,7 @@ mod clawd_banner_tests {
             row_from("▝▜█████▛▘"),
         ];
         let before = rows.clone();
-        replace_welcome_greeting(&mut rows, 1, "코하루", None);
+        replace_welcome_greeting(&mut rows, 1, "코하루", None, None);
         assert_eq!(rows, before, "웰컴 행 없으면 무변경");
     }
 
@@ -5116,7 +5120,7 @@ mod clawd_banner_tests {
             wide_row(&format!("  Welcome back 한글!{pad}")),
             row_from(" ▐▛███▛█"),
         ];
-        replace_welcome_greeting(&mut rows, 1, "히나", Some([200, 50, 50, 255]));
+        replace_welcome_greeting(&mut rows, 1, "히나", Some([200, 50, 50, 255]), None);
         let line = row_text(&rows[0]);
         assert!(line.contains("어서 오세요"), "범용 인사말 치환: {line}");
         assert!(line.contains("한글"), "이름 추출·삽입: {line}");
@@ -5137,7 +5141,7 @@ mod clawd_banner_tests {
             row_from("╰───────────────╯"),
             row_from("╭─ other box ─╮"),
         ];
-        replace_welcome_greeting(&mut rows, 2, "코하루", Some(acc));
+        replace_welcome_greeting(&mut rows, 2, "코하루", Some(acc), None);
         tint_welcome_box(&mut rows, 2, 5, acc);
         let want = kasa_bridge::screen::Color::Rgb(80, 160, 240);
         assert_eq!(rows[0][0].fg, want, "상단 보더 ╭ 틴트");
@@ -5165,7 +5169,7 @@ mod clawd_banner_tests {
             row_from("╰──────────────────────────────────────╯"),
         ];
         let br = 3isize; // 아트 머리 행
-        replace_welcome_greeting(&mut rows, br, "히나", Some(acc));
+        replace_welcome_greeting(&mut rows, br, "히나", Some(acc), None);
         tint_welcome_box(&mut rows, br as usize, (br + 3) as usize, acc);
         let want = kasa_bridge::screen::Color::Rgb(120, 90, 200);
         assert_eq!(rows[0][0].fg, want, "상단 보더 틴트");
