@@ -1112,8 +1112,16 @@ class Server {
   }
 
   /// 그 기기의 Claude 계정 칸 — 등록 슬롯과 지금 계정, 공통 선택을 못 따라간 사정.
-  Future<ClaudeDeviceAccounts> claudeDeviceAccounts({String? machine}) async {
-    final raw = await _getJson('settings/values', machine: machine, timeout: const Duration(seconds: 15));
+  Future<ClaudeDeviceAccounts> claudeDeviceAccounts({
+    String? machine,
+    bool watching = false,
+  }) async {
+    final raw = await _getJson(
+      'settings/values',
+      machine: machine,
+      query: watching ? const {'watch_accounts': '1'} : null,
+      timeout: const Duration(seconds: 15),
+    );
     try {
       return ClaudeDeviceAccounts.parse(raw);
     } on FormatException {

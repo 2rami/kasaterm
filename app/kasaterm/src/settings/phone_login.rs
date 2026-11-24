@@ -911,6 +911,7 @@ impl App {
                 &slot,
                 crate::session::AccountIdentity::from_verified(actual),
             );
+            super::refresh_claude_observation(&slot, flow.runtime_updated);
             crate::session::retry_choice_after_login(&slot);
             super::finish_login(AccountProvider::Claude, &slot, LoginState::Ok,
                 super::LOGIN_ATTEMPT.load(std::sync::atomic::Ordering::Acquire));

@@ -4764,13 +4764,14 @@ impl App {
             // 열자마자 최신을 보는 것이 이 화면의 첫 인상이다.
             {
                 use std::sync::atomic::Ordering;
-                let was =
-                    crate::handler::usage_menu_open().swap(self.account_menu, Ordering::Relaxed);
-                if self.account_menu && !was {
+                let visible = self.account_menu || settings_snapshot.as_ref()
+                    .is_some_and(|snapshot| snapshot.cat == SettingsCat::Claude);
+                let was = crate::handler::usage_menu_open().swap(visible, Ordering::Relaxed);
+                if visible && !was {
                     crate::handler::usage_poke().store(true, Ordering::Relaxed);
                     // 판 확인도 여는 순간에 붙인다 — 상시 폴링을 안 하는 대신
                     // 사람이 궁금해서 연 그 자리에서 한 바퀴 돈다(30분 캐시).
-                    crate::version::ensure_check();
+                    if self.account_menu { crate::version::ensure_check(); }
                 }
             }
             // 앵커는 **연 손잡이**를 따라간다. 손잡이가 둘이라(Info 탭 계정 행 ·

@@ -37,6 +37,12 @@ pub(crate) struct CodexLimits {
     pub plan: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryFailure {
+    Unavailable,
+    ReauthRequired,
+}
+
 #[derive(Clone)]
 struct CachedLimits {
     at: Instant,
@@ -44,6 +50,7 @@ struct CachedLimits {
     /// 메뉴가 열린 5초마다 다시 띄우지 않는다.
     limits: Option<CodexLimits>,
     probe: bool,
+    reauth_required: bool,
 }
 
 fn cache() -> &'static Mutex<HashMap<String, CachedLimits>> {
@@ -78,7 +85,7 @@ fn cached_stale(cached: &HashMap<String, CachedLimits>, account_id: &str, every:
 fn store_result(
     cached: &mut HashMap<String, CachedLimits>,
     account_id: &str,
-    limits: Option<CodexLimits>,
+    result: Result<CodexLimits, QueryFailure>,
     started_generation: u64,
     current_generation: u64,
 ) -> bool {
@@ -86,47 +93,40 @@ fn store_result(
         return false;
     }
     let now = Instant::now();
-    match limits {
-        Some(mut limits) => {
+    match result {
+        Ok(mut limits) => {
             limits.stale = false;
-            cached.insert(
-                account_id.to_string(),
-                CachedLimits {
-                    at: now,
-                    limits: Some(limits),
-                    probe: false,
-                },
-            );
+            cached.insert(account_id.to_string(), CachedLimits {
+                at: now,
+                limits: Some(limits),
+                probe: false,
+                reauth_required: false,
+            });
             true
         }
-        None => match cached.get_mut(account_id) {
-            Some(previous) => {
-                previous.at = now;
-                previous.probe = false;
-                let changed = previous
-                    .limits
-                    .as_ref()
-                    .is_some_and(|limits| !limits.stale);
-                if let Some(limits) = previous.limits.as_mut() {
-                    limits.stale = true;
-                }
-                changed
+        Err(failure) => {
+            let entry = cached.entry(account_id.to_string()).or_insert(CachedLimits {
+                at: now,
+                limits: None,
+                probe: false,
+                reauth_required: false,
+            });
+            entry.at = now;
+            entry.probe = false;
+            if failure == QueryFailure::ReauthRequired {
+                entry.reauth_required = true;
+                entry.limits = None;
+            } else if let Some(limits) = entry.limits.as_mut() {
+                limits.stale = true;
             }
-            None => {
-                // 값이 없는 실패도 기록한다. 화면은 이를 첫 조회 전과 구분하고,
-                // 폴러는 메뉴가 열려 있어도 같은 로그아웃 슬롯을 5초마다 안 띄운다.
-                cached.insert(
-                    account_id.to_string(),
-                    CachedLimits {
-                        at: now,
-                        limits: None,
-                        probe: false,
-                    },
-                );
-                true
-            }
-        },
+            true
+        }
     }
+}
+
+pub(crate) fn reauth_required_for(account_id: &str) -> bool {
+    cache().lock().ok()
+        .is_some_and(|slots| slots.get(account_id).is_some_and(|slot| slot.reauth_required))
 }
 
 /// 마지막으로 읽은 값. **현재 고른 계정에서 읽은 값만** 내준다.
@@ -155,7 +155,8 @@ pub(crate) fn attempted_for(account_id: &str) -> bool {
 }
 
 pub(crate) fn missing_note_for(account_id: &str) -> &'static str {
-    if attempted_for(account_id) { "한도 조회 실패" } else { "한도 확인 중…" }
+    if reauth_required_for(account_id) { "다시 로그인 필요" }
+    else if attempted_for(account_id) { "한도 조회 실패" } else { "한도 확인 중…" }
 }
 
 /// 화면 리그가 계정별 그래프를 확인할 때만 쓰는 값 주입구.
@@ -176,6 +177,7 @@ pub(crate) fn seed_for_probe(account_id: &str, windows: Vec<Window>) -> bool {
                 ..Default::default()
             }),
             probe: true,
+            reauth_required: false,
         },
     );
     true
@@ -195,6 +197,7 @@ pub(crate) fn seed_named_for_probe(account_id: &str, windows: Vec<NamedWindow>) 
             at: Instant::now(),
             limits: Some(CodexLimits::default()),
             probe: true,
+            reauth_required: false,
         });
     entry.at = Instant::now();
     entry.probe = true;
@@ -225,12 +228,11 @@ pub(crate) fn stale_for(account_id: &str, every: Duration) -> bool {
 }
 
 /// 로그인 완료 직후에는 같은 계정이어도 옛 한도를 버리고 바로 다시 묻는다.
-pub(crate) fn invalidate() {
-    // 먼저 세대를 올린다. 이미 app-server 응답을 기다리는 폴러가 있으면, 아래 clear
-    // 뒤에 옛 값을 다시 넣지 못하고 자기 응답을 버린다.
+pub(crate) fn invalidate(account_id: &str) {
+    // Reject app-server replies already in flight when this login finished.
     generation().fetch_add(1, Ordering::AcqRel);
     if let Ok(mut cached) = cache().lock() {
-        cached.clear();
+        cached.remove(account_id);
     }
 }
 
@@ -280,6 +282,40 @@ fn pick_autoswitch<'a>(
     Some((to.strip_prefix(KEY)?.to_string(), pct))
 }
 
+pub(crate) fn spawn_poller(proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>) {
+    std::thread::spawn(move || {
+        let mut last_switch: Option<Instant> = None;
+        while !kasa_socket::session_end::is_ending() {
+            let visible = crate::handler::watching_account_usage();
+            let every = Duration::from_secs(if visible { 60 } else { 300 });
+            let mut order = vec![String::new()];
+            order.extend(crate::socket::read_codex_accounts().into_iter().map(|slot| slot.id));
+            let current = current_account_id();
+            let mut seen = std::collections::HashSet::new();
+            // An unresponsive CLI in another slot must not delay the current account's result.
+            for id in std::iter::once(&current).chain(&order).filter(|id| seen.insert(*id)) {
+                if stale_for(id, every) && refresh_for(id)
+                    && proxy.send_event(crate::UserEvent::Redraw).is_err()
+                {
+                    return;
+                }
+            }
+            if crate::socket::read_account_autoswitch()
+                && last_switch.is_none_or(|at| at.elapsed() >= Duration::from_secs(300))
+            {
+                let from = current_account_id();
+                if let Some((to, pct)) = autoswitch_target(&from, &order, crate::socket::read_account_autoswitch_pct()) {
+                    last_switch = Some(Instant::now());
+                    if proxy.send_event(crate::UserEvent::CodexAccountAutoswitch { from, to, pct }).is_err() {
+                        return;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+}
+
 /// 특정 계정의 코덱스를 띄워 캐시를 채운다. **블로킹이라 폴러 스레드에서만 부른다.**
 pub(crate) fn refresh_for(account_id: &str) -> bool {
     let started = generation().load(Ordering::Acquire);
@@ -306,7 +342,7 @@ fn app_server_args(slot: bool) -> Vec<&'static str> {
     args
 }
 
-fn ask(account_home: Option<&std::path::Path>) -> Option<CodexLimits> {
+fn ask(account_home: Option<&std::path::Path>) -> Result<CodexLimits, QueryFailure> {
     // Finder에서 띄운 앱의 PATH에는 npm 전역 설치가 없다. 로그인과 같은 탐색기를
     // 써야 계정은 붙었는데 한도만 영영 비는 두 경로가 생기지 않는다.
     let mut command = crate::proc::command(crate::codex_binary());
@@ -328,39 +364,57 @@ fn ask(account_home: Option<&std::path::Path>) -> Option<CodexLimits> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .ok()?;
-    {
-        let stdin = child.stdin.as_mut()?;
-        // initialize 를 먼저 보내지 않으면 그 뒤 요청이 통째로 거부된다.
-        let _ = writeln!(
-            stdin,
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"clientInfo":{{"name":"kasaterm","title":"kasaterm","version":"{}"}}}}}}"#,
-            env!("CARGO_PKG_VERSION")
-        );
-        let _ = writeln!(
-            stdin,
-            r#"{{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{{}}}}"#
-        );
-        let _ = stdin.flush();
-    }
-    let stdout = child.stdout.take()?;
-    let mut out = None;
-    // 응답 사이에 알림(remoteControl/status 등)이 섞여 오므로 id 로 고른다.
-    for line in std::io::BufReader::new(stdout)
-        .lines()
-        .map_while(Result::ok)
-    {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if v.get("id").and_then(|x| x.as_i64()) == Some(2) {
-            out = v.get("result").cloned();
-            break;
-        }
-    }
+        .map_err(|_| QueryFailure::Unavailable)?;
+    let result = query_limits(&mut child);
     let _ = child.kill();
     let _ = child.wait();
-    parse(&out?)
+    result
+}
+
+fn query_limits(child: &mut std::process::Child) -> Result<CodexLimits, QueryFailure> {
+    let stdin = child.stdin.as_mut().ok_or(QueryFailure::Unavailable)?;
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"clientInfo":{{"name":"kasaterm","title":"kasaterm","version":"{}"}}}}}}"#,
+        env!("CARGO_PKG_VERSION")
+    ).map_err(|_| QueryFailure::Unavailable)?;
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{{}}}}"#
+    ).and_then(|()| stdin.flush()).map_err(|_| QueryFailure::Unavailable)?;
+
+    let stdout = child.stdout.take().ok_or(QueryFailure::Unavailable)?;
+    let (send, response) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            if value["id"].as_i64() == Some(2) {
+                let _ = send.send(parse_limits_reply(&value));
+                break;
+            }
+        }
+    });
+    // The worker's pipe is closed when the caller kills this child on timeout.
+    response.recv_timeout(Duration::from_secs(6)).unwrap_or(Err(QueryFailure::Unavailable))
+}
+
+fn parse_limits_reply(value: &serde_json::Value) -> Result<CodexLimits, QueryFailure> {
+    if let Some(error) = value.get("error") {
+        let message = error["message"].as_str().unwrap_or_default().to_ascii_lowercase();
+        let code = error.pointer("/data/code").and_then(|code| code.as_str())
+            .or_else(|| error.pointer("/data/error/code").and_then(|code| code.as_str()));
+        let auth_codes = ["token_expired", "token_revoked", "invalid_grant", "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated"];
+        if code.is_some_and(|code| auth_codes.contains(&code))
+            || auth_codes.iter().any(|code| message.contains(code))
+            || message.contains("not logged in")
+            || message.contains("401 unauthorized")
+            || message.contains("access token could not be refreshed")
+        {
+            return Err(QueryFailure::ReauthRequired);
+        }
+        return Err(QueryFailure::Unavailable);
+    }
+    value.get("result").and_then(parse).ok_or(QueryFailure::Unavailable)
 }
 
 fn parse(result: &serde_json::Value) -> Option<CodexLimits> {
@@ -504,6 +558,7 @@ mod tests {
                 at: Instant::now(),
                 limits: Some(CodexLimits::default()),
                 probe: false,
+                reauth_required: false,
             },
         );
         assert!(cached_snapshot(&cached, "codex-1").is_some());
@@ -521,6 +576,7 @@ mod tests {
                 at: Instant::now(),
                 limits: None,
                 probe: false,
+                reauth_required: false,
             },
         );
         assert!(cached_snapshot(&cached, "logged-out").is_none());
@@ -537,14 +593,14 @@ mod tests {
         assert!(store_result(
             &mut cached,
             "codex-1",
-            Some(CodexLimits {
+            Ok(CodexLimits {
                 windows: vec![(300, 17.0, Some(123))],
                 ..Default::default()
             }),
             1,
             1,
         ));
-        assert!(store_result(&mut cached, "codex-1", None, 1, 1));
+        assert!(store_result(&mut cached, "codex-1", Err(QueryFailure::Unavailable), 1, 1));
         let kept = cached_snapshot(&cached, "codex-1").expect("마지막 성공값 유지");
         assert_eq!(kept.windows, vec![(300, 17.0, Some(123))]);
         assert!(kept.stale, "실패 뒤에는 낡은 값임을 표시");
@@ -554,7 +610,7 @@ mod tests {
     #[test]
     fn 첫_실패도_조회완료로_기록한다() {
         let mut cached = HashMap::new();
-        assert!(store_result(&mut cached, "logged-out", None, 1, 1));
+        assert!(store_result(&mut cached, "logged-out", Err(QueryFailure::Unavailable), 1, 1));
         assert!(cached.contains_key("logged-out"));
         assert!(cached_snapshot(&cached, "logged-out").is_none());
     }
@@ -565,7 +621,7 @@ mod tests {
         assert!(!store_result(
             &mut cached,
             "codex-1",
-            Some(CodexLimits::default()),
+            Ok(CodexLimits::default()),
             4,
             5,
         ));
@@ -574,11 +630,31 @@ mod tests {
         assert!(store_result(
             &mut cached,
             "codex-1",
-            Some(CodexLimits::default()),
+            Ok(CodexLimits::default()),
             5,
             5,
         ));
         assert!(cached_snapshot(&cached, "codex-1").is_some());
+    }
+
+    #[test]
+    fn rejected_codex_credentials_clear_only_that_slots_quotas() {
+        let mut cached = HashMap::new();
+        let expired = serde_json::json!({"id":2,"error":{"code":-32000,"data":{"code":"token_expired"}}});
+        let network = serde_json::json!({"id":2,"error":{"code":-32000,"message":"request timed out"}});
+        let _ = store_result(&mut cached, "first", Ok(CodexLimits::default()), 1, 1);
+        let _ = store_result(&mut cached, "next", Ok(CodexLimits::default()), 1, 1);
+        let _ = store_result(&mut cached, "first", parse_limits_reply(&network), 1, 1);
+        assert!(cached["first"].limits.as_ref().unwrap().stale);
+        assert!(!cached["first"].reauth_required);
+        let _ = store_result(&mut cached, "first", parse_limits_reply(&expired), 1, 1);
+        assert!(cached["first"].reauth_required);
+        assert!(cached["first"].limits.is_none());
+        assert!(cached["next"].limits.is_some());
+        let _ = store_result(&mut cached, "first", parse_limits_reply(&network), 1, 1);
+        assert!(cached["first"].reauth_required);
+        let _ = store_result(&mut cached, "first", Ok(CodexLimits::default()), 1, 1);
+        assert!(!cached["first"].reauth_required);
     }
 
     /// 공용 Codex는 명시적인 `codex`를 고르고, 이름 달린 추가 bucket은 서버 원문을

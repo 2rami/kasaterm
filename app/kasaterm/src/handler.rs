@@ -2570,6 +2570,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 남았다 — 사용자: "누를때마다 바뀐다는 표시가 없고".
         // lite 는 HTTP 서버가 없어 칠 곳이 없고, 자동 계정 전환도 안 한다.
         if !self.lite && !crate::verification_run() {
+            crate::codexlimits::spawn_poller(self.proxy.clone());
             let usage_proxy = self.proxy.clone();
             let usage_cache = self.claude_usage.clone();
             let usage_all = self.claude_usage_all.clone();
@@ -2584,7 +2585,6 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut fresh_usage = crate::quota_alerts::FreshUsageCache::default();
                 // 방금 전환했으면 잠시 **자동 전환 판정만** 쉰다(표시는 계속 갱신).
                 let mut last_switch: Option<std::time::Instant> = None;
-                let mut last_codex_switch: Option<std::time::Instant> = None;
                 let mut seen_account = socket::read_claude_account();
                 let mut badge_account = seen_account.clone();
                 // 비활성 계정을 마지막으로 친 시각. `None` 이면 아직 안 쳤다는
@@ -2633,65 +2633,11 @@ impl ApplicationHandler<UserEvent> for App {
                     // 이 사이클이 「펼쳐 놓고 보는 중」인가. 한 번만 읽어 활성·비활성
                     // 조회가 같은 판정을 쓰게 한다 — 도중에 닫히면 반쪽만 캐시를
                     // 건너뛰어, 같은 화면의 숫자가 서로 다른 시각의 것이 된다.
-                    let menu_open = usage_menu_open().load(std::sync::atomic::Ordering::Relaxed);
+                    let menu_open = watching_account_usage();
                     let read = if menu_open { UsageRead::Fresh } else { UsageRead::Usual };
                     // 관문이 갱신을 못 해 곧 끊길 Claude 로그인 — 관문이 멈추면 관문은 못 알리니 기기가 띄운다.
                     for alert in kasa_device::agent_chains::take_alerts() {
                         let _ = usage_proxy.send_event(UserEvent::AgentChainAlert(alert.title, alert.body));
-                    }
-                    // 코덱스 한도는 **코덱스에게 직접 묻는다** — 대화 기록에서
-                    // 읽던 길이 2026-09-05 무렵 막혔다(그 뒤 세션에 한도 줄이
-                    // 없다). app-server 를 띄우는 값이라 자주 부를 자리가 아니라,
-                    // 평소에는 활성 계정만 5분에 한 번 묻는다. 계정 메뉴를 펼친
-                    // 동안에만 기본+등록 슬롯을 1분마다 채운다 — Claude와 마찬가지로
-                    // 누르기 전에 어느 계정으로 옮길지 숫자를 보고 골라야 한다.
-                    let codex_every = if menu_open {
-                        std::time::Duration::from_secs(60)
-                    } else {
-                        std::time::Duration::from_secs(300)
-                    };
-                    // 설정의 계정 카드는 드롭다운을 먼저 열지 않아도 전부 보여야 한다.
-                    // 닫힌 동안에도 전 슬롯을 묻되 5분 캐시를 지켜 호출량은 Claude의
-                    // 비활성 슬롯과 같은 상한이다. 펼친 동안만 1분으로 좁아진다.
-                    let mut codex_ids = vec![String::new()];
-                    codex_ids.extend(
-                        socket::read_codex_accounts()
-                            .into_iter()
-                            .map(|account| account.id),
-                    );
-                    let codex_order = codex_ids.clone();
-                    codex_ids.sort();
-                    codex_ids.dedup();
-                    let mut codex_changed = false;
-                    for id in codex_ids {
-                        if crate::codexlimits::stale_for(&id, codex_every)
-                            && crate::codexlimits::refresh_for(&id)
-                        {
-                            codex_changed = true;
-                        }
-                    }
-                    if codex_changed {
-                        let _ = usage_proxy.send_event(UserEvent::Redraw);
-                    }
-                    // Codex 도 기준을 넘으면 다음 로그인으로 옮긴다. 위에서 전 슬롯을 물었으니 후보의
-                    // 숫자도 5분 안의 것이다. 방금 옮겼으면 Claude 와 같이 5분 쉰다.
-                    if socket::read_account_autoswitch()
-                        && last_codex_switch.is_none_or(|at| at.elapsed().as_secs() >= 300)
-                    {
-                        let from = socket::read_codex_account();
-                        if let Some((to, pct)) = crate::codexlimits::autoswitch_target(
-                            &from,
-                            &codex_order,
-                            socket::read_account_autoswitch_pct(),
-                        ) {
-                            last_codex_switch = Some(std::time::Instant::now());
-                            if usage_proxy
-                                .send_event(UserEvent::CodexAccountAutoswitch { from, to, pct })
-                                .is_err()
-                            {
-                                break 'poll;
-                            }
-                        }
                     }
                     let active_id = socket::read_claude_account();
                     let generation = crate::session::selection_generation();
@@ -2725,12 +2671,18 @@ impl ApplicationHandler<UserEvent> for App {
                     // 도는 pane 들의 토큰을 죽인다(runtime_dir_for 주석).
                     let active_dir = crate::claude_auth::runtime_dir_for(&active_id, &active_id)
                         .map_or(String::new(), |p| p.to_string_lossy().into_owned());
-                    let fetched =
-                        fetch_claude_usage(&crate::mcp_panel_port(), &active_dir, read);
-                    if socket::read_claude_account() != active_id {
+                    let epoch = claude_usage_epoch().load(std::sync::atomic::Ordering::Acquire);
+                    let result = fetch_claude_usage(&crate::mcp_panel_port(), &active_dir, read);
+                    if socket::read_claude_account() != active_id
+                        || epoch != claude_usage_epoch().load(std::sync::atomic::Ordering::Acquire)
+                    {
                         continue;
                     }
-                    record_claude_usage_attempt(&active_dir, fetched.is_some());
+                    let attempt = usage_attempt(&result);
+                    if record_claude_usage_attempt(&active_dir, &active_id, attempt, epoch) {
+                        let _ = usage_proxy.send_event(UserEvent::Redraw);
+                    }
+                    let fetched = result.ok();
                     let polled_at = std::time::Instant::now();
                     fresh_usage.record(&active_dir, &active_id, fetched.as_ref(), polled_at);
                     if let Some((u, stale, _)) = fetched.as_ref() {
@@ -2862,6 +2814,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // 성공이 `all` 에 들어가 뒤가 걸러졌지만, 한꺼번에 띄우면 둘 다
                         // 나가 같은 답을 두 번 받는다.
                         let mut seen = std::collections::HashSet::new();
+                        let epoch = claude_usage_epoch().load(std::sync::atomic::Ordering::Acquire);
                         let jobs: Vec<_> = dirs
                             .into_iter()
                             .filter(|d| !all.contains_key(d) && seen.insert(d.clone()))
@@ -2879,12 +2832,14 @@ impl ApplicationHandler<UserEvent> for App {
                         for (asked_dir, j) in jobs {
                             // 스레드가 패닉했으면 그 슬롯만 건너뛴다 — 한 슬롯의 사고가
                             // 나머지 표를 통째로 못 가져오게 두면 병렬화가 손해가 된다.
-                            let Ok(result) = j.join() else {
-                                record_claude_usage_attempt(&asked_dir, false);
+                            let result = j.join().unwrap_or(Err(ClaudeUsageAttempt::Failed));
+                            if epoch != claude_usage_epoch().load(std::sync::atomic::Ordering::Acquire) {
                                 continue;
-                            };
-                            record_claude_usage_attempt(&asked_dir, result.is_some());
-                            let Some((u, stale, dir)) = result else {
+                            }
+                            if record_claude_usage_attempt(&asked_dir, "", usage_attempt(&result), epoch) {
+                                let _ = usage_proxy.send_event(UserEvent::Redraw);
+                            }
+                            let Ok((u, stale, dir)) = result else {
                                 continue;
                             };
                             if let Some(badge) = usage_badge(&u, stale, dir.clone()) {
@@ -3065,7 +3020,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // 돈다. 잠 안에서 **매번** 다시 읽는 것이 중요하다 — 사이클
                         // 머리의 `menu_open` 을 재사용하면, 자는 동안 열린 목록은
                         // 남은 55초를 그대로 굳은 채 기다린다.
-                        if rested && usage_menu_open().load(std::sync::atomic::Ordering::Relaxed) {
+                        if rested && watching_account_usage() {
                             break;
                         }
                         let now = socket::read_claude_account();
@@ -7974,7 +7929,7 @@ fn redraw_live_usage(
     }
     let dir = crate::claude_auth::runtime_dir_for(account, account)
         .map_or(String::new(), |p| p.to_string_lossy().into_owned());
-    let Some((usage, stale, dir)) = fetch_claude_usage(&crate::mcp_panel_port(), &dir, UsageRead::Held) else {
+    let Ok((usage, stale, dir)) = fetch_claude_usage(&crate::mcp_panel_port(), &dir, UsageRead::Held) else {
         return true;
     };
     if socket::read_claude_account() != account {
@@ -8048,22 +8003,52 @@ pub(crate) fn usage_poke() -> &'static std::sync::atomic::AtomicBool {
     &POKE
 }
 
-fn claude_usage_states() -> &'static std::sync::Mutex<HashMap<String, bool>> {
-    static STATES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, bool>>> =
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClaudeUsageAttempt { Ready, Failed, ReauthRequired }
+
+fn claude_usage_epoch() -> &'static std::sync::atomic::AtomicU64 {
+    static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &EPOCH
+}
+
+fn claude_usage_states() -> &'static std::sync::Mutex<HashMap<String, ClaudeUsageAttempt>> {
+    static STATES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, ClaudeUsageAttempt>>> =
         std::sync::OnceLock::new();
     STATES.get_or_init(Default::default)
 }
 
-fn record_claude_usage_attempt(dir: &str, succeeded: bool) {
+fn usage_attempt_key(dir: &str, account: &str) -> String {
+    if dir.is_empty() { format!("workbench:{account}") } else { dir.to_string() }
+}
+
+pub(crate) fn invalidate_claude_usage_attempt(account: &str, workbench_updated: bool) {
+    use std::sync::atomic::Ordering;
+    claude_usage_epoch().fetch_add(1, Ordering::AcqRel);
     if let Ok(mut states) = claude_usage_states().lock() {
-        states.insert(dir.to_string(), succeeded);
+        if workbench_updated {
+            states.insert(usage_attempt_key("", account), ClaudeUsageAttempt::Failed);
+        }
+        if let Some(dir) = crate::socket::claude_account_dir(account) {
+            states.insert(dir.to_string_lossy().into_owned(), ClaudeUsageAttempt::Failed);
+        }
     }
 }
 
-/// `None`=아직 조회 전, `Some(true)`=값을 받음, `Some(false)`=조회했지만 실패.
-/// 설정 계정 카드가 「확인 중」과 「한도를 못 읽음」을 영구히 혼동하지 않게 한다.
-pub(crate) fn claude_usage_attempt(dir: &str) -> Option<bool> {
-    claude_usage_states().lock().ok()?.get(dir).copied()
+fn record_claude_usage_attempt(dir: &str, account: &str, attempt: ClaudeUsageAttempt, epoch: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    let Ok(mut states) = claude_usage_states().lock() else { return false };
+    if epoch != claude_usage_epoch().load(Ordering::Acquire) {
+        return false;
+    }
+    let key = usage_attempt_key(dir, account);
+    if states.get(&key) == Some(&ClaudeUsageAttempt::ReauthRequired) && attempt == ClaudeUsageAttempt::Failed {
+        return false;
+    }
+    states.insert(key, attempt) != Some(attempt)
+}
+
+pub(crate) fn claude_usage_attempt(dir: &str, account: &str) -> Option<ClaudeUsageAttempt> {
+    claude_usage_states().lock().ok()?.get(&usage_attempt_key(dir, account)).copied()
 }
 
 /// 계정 목록이 **펼쳐져 있다**. 폴러는 GUI 상태를 직접 못 보므로 원자값으로
@@ -8079,6 +8064,22 @@ pub(crate) fn claude_usage_attempt(dir: &str) -> Option<bool> {
 pub(crate) fn usage_menu_open() -> &'static std::sync::atomic::AtomicBool {
     static OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     &OPEN
+}
+
+static PHONE_ACCOUNT_VIEW: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+pub(crate) fn watch_account_usage() {
+    if let Ok(mut viewed) = PHONE_ACCOUNT_VIEW.lock() {
+        *viewed = Some(Instant::now());
+    }
+}
+
+pub(crate) fn watching_account_usage() -> bool {
+    use std::sync::atomic::Ordering;
+    usage_menu_open().load(Ordering::Relaxed)
+        || PHONE_ACCOUNT_VIEW.lock().is_ok_and(|viewed| {
+            viewed.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(15))
+        })
 }
 
 fn merge_usage_badges(
@@ -8175,16 +8176,24 @@ mod usage_badge_merge_tests {
 /// `KASATERM_CLAUDE_ACCOUNT_DIR` env 로 떨어져 엉뚱한(또는 **다른 인스턴스의**)
 /// 계정을 조회하는데, 그게 자동전환을 통째로 멈춰 세운 버그였다(2026-08-13).
 /// `Option` 을 없애 그 실수를 타입으로 막는다.
+type PolledClaudeUsage = (serde_json::Value, bool, String);
+
+fn usage_attempt(result: &Result<PolledClaudeUsage, ClaudeUsageAttempt>) -> ClaudeUsageAttempt {
+    match result {
+        Ok((_, false, _)) => ClaudeUsageAttempt::Ready,
+        Ok((_, true, _)) => ClaudeUsageAttempt::Failed,
+        Err(reason) => *reason,
+    }
+}
+
 fn fetch_claude_usage(
     port: &str,
     dir: &str,
     read: UsageRead,
-) -> Option<(serde_json::Value, bool, String)> {
-    // 세션 끝 중엔 띄워도 데스크톱이 내려가 실패한다(kasa_socket::session_end).
+) -> Result<PolledClaudeUsage, ClaudeUsageAttempt> {
     if kasa_socket::session_end::is_ending() {
-        return None;
+        return Err(ClaudeUsageAttempt::Failed);
     }
-    // 슬롯 경로엔 공백·한글이 들어올 수 있어 쿼리로 넘기기 전에 퍼센트 인코딩한다.
     let url = format!(
         "http://127.0.0.1:{port}/claude-usage?dir={}{}",
         urlencode(dir),
@@ -8197,21 +8206,51 @@ fn fetch_claude_usage(
     let out = crate::proc::command("curl")
         .args(["-s", "--max-time", "5", &url])
         .output()
-        .ok()?;
+        .map_err(|_| ClaudeUsageAttempt::Failed)?;
     if !out.status.success() {
-        return None;
+        return Err(ClaudeUsageAttempt::Failed);
     }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
-        return None;
+    let value = serde_json::from_slice(&out.stdout).map_err(|_| ClaudeUsageAttempt::Failed)?;
+    parse_claude_usage(&value, dir)
+}
+
+fn parse_claude_usage(value: &serde_json::Value, dir: &str) -> Result<PolledClaudeUsage, ClaudeUsageAttempt> {
+    if value["account_dir"].as_str() != Some(dir) {
+        return Err(ClaudeUsageAttempt::Failed);
     }
-    let stale = v.get("stale").and_then(|b| b.as_bool()).unwrap_or(false);
-    let dir = v
-        .get("account_dir")
-        .and_then(|s| s.as_str())
-        .unwrap_or_default()
-        .to_string();
-    Some((v.get("usage")?.clone(), stale, dir))
+    if value["ok"].as_bool() != Some(true) {
+        return Err(match value["reason"].as_str() {
+            Some("logged_out" | "token_rejected") => ClaudeUsageAttempt::ReauthRequired,
+            _ => ClaudeUsageAttempt::Failed,
+        });
+    }
+    let usage = value.get("usage").ok_or(ClaudeUsageAttempt::Failed)?.clone();
+    Ok((usage, value["stale"].as_bool().unwrap_or(false), dir.to_string()))
+}
+
+#[cfg(test)]
+mod account_usage_observation_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_quotas_do_not_request_login() {
+        for (reason, expected) in [
+            ("logged_out", ClaudeUsageAttempt::ReauthRequired),
+            ("token_rejected", ClaudeUsageAttempt::ReauthRequired),
+            ("rate_limited", ClaudeUsageAttempt::Failed),
+            ("network", ClaudeUsageAttempt::Failed),
+        ] {
+            let value = serde_json::json!({"ok":false, "reason":reason, "account_dir":"vault"});
+            assert_eq!(parse_claude_usage(&value, "vault"), Err(expected));
+            assert_eq!(parse_claude_usage(&value, "other"), Err(ClaudeUsageAttempt::Failed));
+        }
+    }
+
+    #[test]
+    fn workbench_usage_is_keyed_by_account() {
+        assert_ne!(usage_attempt_key("", "one"), usage_attempt_key("", "two"));
+        assert_eq!(usage_attempt_key("vault", ""), usage_attempt_key("vault", "one"));
+    }
 }
 
 #[cfg(test)]

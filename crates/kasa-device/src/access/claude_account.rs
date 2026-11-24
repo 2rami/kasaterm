@@ -651,10 +651,10 @@ async fn claude_usage_handler(
     // 관문이 갱신하는 슬롯은 갱신 토큰 없이 접근 토큰만 쥔다. 사슬이 끊겨(`reconnect_required`) 그 토큰이 끝나면
     // 사용량 창구는 401 이 아니라 429 를 돌려줘(2026-11-12 실측: 29시간 지난 토큰에 `Retry-After` 와 함께 429,
     // 같은 토큰의 프로필은 401) 하루 넘게 「조회가 막혔다」로 보였다. 쓸 수 없는 토큰은 묻지 않고 로그인 문제로 알린다.
-    let token = token.filter(|_| claude_slot_login(Some(dir.as_str())) != SlotLogin::LoggedOut);
-    // 왜 못 읽었는지를 남긴다. 전에는 어떤 실패든 「rate-limited」 한 문구라, 정작
-    // 로그아웃된 슬롯도 「한도 초과」로 보여 사용자가 기다리면 될 줄 알았다.
-    let mut why = if token.is_some() { "usage_unavailable" } else { "logged_out" };
+    let login = claude_slot_login(Some(dir.as_str()));
+    let token = token.filter(|_| login != SlotLogin::LoggedOut);
+    let mut why = if login == SlotLogin::LoggedOut { "logged_out" } else { "usage_unavailable" };
+    let has_primary = token.is_some();
     // 토큰 후보. 작업대(빈 dir)가 429 면 같은 계정의 금고로 한 번 더 묻는다 —
     // 다른 토큰이라 한도가 따로 돌고, 숫자는 어차피 같은 계정 것이다.
     let mut tokens: Vec<String> = token.into_iter().collect();
@@ -679,7 +679,12 @@ async fn claude_usage_handler(
         });
     }
     let mut fresh: Option<serde_json::Value> = None;
-    for token in &tokens {
+    for (index, token) in tokens.iter().enumerate() {
+        let primary = has_primary && index == 0;
+        // A vault may supply quotas during a rate limit. Its token cannot prove the workbench login.
+        if !primary && why != "rate_limited" {
+            break;
+        }
         // 막힌 동안은 이 토큰으로 아예 안 친다 — 두드림 자체가 한도 창을 되살린다.
         // 다음 후보는 다른 토큰이라 그대로 시도한다.
         let key = token_key(token);
@@ -716,11 +721,13 @@ async fn claude_usage_handler(
             }
             Ok(r) => {
                 let code = r.status().as_u16();
-                why = match code {
-                    429 => "rate_limited",
-                    401 | 403 => "token_rejected",
-                    _ => "usage_unavailable",
-                };
+                if primary {
+                    why = match code {
+                        429 => "rate_limited",
+                        401 if read_claude_token_from(Some(&dir)).as_deref() == Some(token.as_str()) => "token_rejected",
+                        _ => "usage_unavailable",
+                    };
+                }
                 if code == 429 {
                     if let Ok(mut g) = backoff.lock() {
                         g.insert(key, retry_after::deadline(r.headers(), Instant::now(), std::time::SystemTime::now()));
@@ -735,7 +742,7 @@ async fn claude_usage_handler(
                 eprintln!("[claude-usage] upstream {code} — slot={}", slot_label(&dir));
             }
             Err(e) => {
-                why = "network";
+                if primary { why = "network"; }
                 eprintln!("[claude-usage] 요청 실패: {e}");
             }
         }
@@ -754,17 +761,13 @@ async fn claude_usage_handler(
         return (cors, Json(ok(&v, false, Some(Instant::now()))));
     }
 
-    // 3) upstream 실패 — 만료됐어도 이 슬롯의 마지막 성공값이 있으면 stale 로
-    //    폴백(pill 유지). **다른 슬롯 값으로는 절대 폴백하지 않는다** — 그게 전에
-    //    한 계정의 숫자를 세 계정에 전부 붙여 보이던 경로다.
-    if let Ok(g) = cache.lock() {
-        if let Some((at, v)) = g.get(&cache_slot) {
+    // A rejected login takes precedence over saved quotas.
+    if let Ok(mut g) = cache.lock() {
+        if matches!(why, "logged_out" | "token_rejected") {
+            g.remove(&cache_slot);
+        } else if let Some((at, v)) = g.get(&cache_slot) {
             return (cors, Json(ok(v, true, *at)));
         }
-    }
-    // 갱신이 죽은 슬롯은 429 를 맞았더라도 **로그인 문제**다 — 기다려서 안 풀린다.
-    if dead_refresh().lock().is_ok_and(|g| g.contains(&dir)) {
-        why = "token_rejected";
     }
     let msg = match why {
         "rate_limited" => "한도 조회가 잠시 막혔어요 — 곧 다시 시도해요",

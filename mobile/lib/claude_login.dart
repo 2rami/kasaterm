@@ -39,9 +39,10 @@ class ClaudeAccount {
   /// 「7d 34%」 — 사용률을 모르면 빈 값.
   String get usageText {
     final pct = usage;
-    if (pct == null) return '';
+    if (pct == null || status == '다시 로그인 필요') return '';
     final window = usageLabel.isEmpty ? '' : '$usageLabel ';
-    return '$window${pct.round()}%';
+    final previous = usageState == 'failed' || usageState == 'error' ? '이전 조회 · ' : '';
+    return '$previous$window${pct.round()}%';
   }
 
   String get title => label.isNotEmpty
@@ -91,15 +92,16 @@ class ClaudeAccount {
     return parts.join(' · ');
   }
 
-  static List<ClaudeAccount> parse(Object? raw) {
+  static List<ClaudeAccount> parse(Object? raw, {bool codex = false}) {
     final claude = raw is Map ? raw['claude'] : null;
-    final accounts = claude is Map ? claude['accounts'] : null;
+    final accounts = claude is Map ? claude[codex ? 'codex_accounts' : 'accounts'] : null;
+    if (codex && accounts == null) return const [];
     if (accounts is! List) throw const FormatException('claude_accounts');
     return [
       for (final account in accounts)
         if (account is Map &&
             account['id'] is String &&
-            (account['id'] as String).isNotEmpty)
+            (codex || (account['id'] as String).isNotEmpty))
           ClaudeAccount(
             id: account['id'] as String,
             label: account['label'] is String ? account['label'] as String : '',
@@ -166,6 +168,8 @@ class ClaudeDeviceAccounts {
   const ClaudeDeviceAccounts({
     required this.accounts,
     required this.activeId,
+    this.codexAccounts = const [],
+    this.activeCodexId = '',
     this.sync,
     this.sharedName,
     this.followsShared,
@@ -173,6 +177,8 @@ class ClaudeDeviceAccounts {
 
   final List<ClaudeAccount> accounts;
   final String activeId;
+  final List<ClaudeAccount> codexAccounts;
+  final String activeCodexId;
   final ClaudeSyncNotice? sync;
 
   /// 관문 공통 선택의 이름(조직명 또는 이메일). 공통 선택이 없거나 옛 판이면 null.
@@ -214,6 +220,10 @@ class ClaudeDeviceAccounts {
     final shared = claude is Map ? claude['shared'] : null;
     return ClaudeDeviceAccounts(
       accounts: ClaudeAccount.parse(raw),
+      codexAccounts: ClaudeAccount.parse(raw, codex: true),
+      activeCodexId: claude is Map && claude['codex_account'] is String
+          ? claude['codex_account'] as String
+          : '',
       activeId: claude is Map && claude['account'] is String
           ? claude['account'] as String
           : '',

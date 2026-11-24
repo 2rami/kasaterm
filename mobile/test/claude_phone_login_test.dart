@@ -286,6 +286,47 @@ void main() {
     },
   );
 
+  testWidgets('account state refreshes while visible and Codex reauth targets the selected device', (tester) async {
+    final fake = _Fake()..remotes = false;
+    final session = <String, Object?>{
+      'id': '',
+      'name': '기본 로그인',
+      'logged_in': true,
+      'usage_state': 'ready',
+    };
+    fake.claudeOf['book'] = {'accounts': [], 'codex_accounts': [session]};
+    await _show(tester, fake);
+    final reauth = find.byKey(const Key('codex-login-'));
+    expect(reauth, findsNothing);
+
+    session['usage_state'] = 'failed';
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('조회 실패'), findsOneWidget);
+    expect(reauth, findsNothing);
+
+    session['logged_in'] = false;
+    session['usage_state'] = 'logged_out';
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(reauth, findsOneWidget);
+    expect(fake.posts, isEmpty, reason: 'refresh never starts a login');
+    await tester.tap(reauth);
+    await tester.pumpAndSettle();
+    expect(fake.posts.single.path, contains('/m/~book/'));
+    expect(fake.posts.single.body, containsPair('label', 'codex'));
+    expect(fake.posts.single.body, containsPair('action', 'reauth-account'));
+    expect(fake.posts.single.body, containsPair('id', ''));
+    expect(fake.opened, isEmpty, reason: 'Codex callback runs on the selected desktop');
+
+    session['logged_in'] = true;
+    session['usage_state'] = 'ready';
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(reauth, findsNothing);
+    await _end(tester);
+  });
+
   test('backend phone-login error codes use actionable safe messages', () {
     expect(
       claudeLoginError('phone_login_identity_mismatch'),

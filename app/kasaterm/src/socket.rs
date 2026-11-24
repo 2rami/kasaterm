@@ -2994,6 +2994,10 @@ impl Backend for PtyBackend {
         Ok(serde_json::json!({"provider":selected.provider,"account_id":selected.account_id,"env":env}))
     }
 
+    fn watch_account_usage(&self) {
+        crate::handler::watch_account_usage();
+    }
+
     /// 값은 GUI 스레드의 `App` 이 정본이라(UI 배율처럼 파일에 없는 값이 있다) 여기서
     /// 파일을 직접 읽지 않는다. `values` 액션이 그 스레드에서 스냅샷을 굽고, 회신이
     /// 돌아온 **뒤에** 그것을 집어 온다 — 액션 왕복이 동기라 이 순서가 보장된다.

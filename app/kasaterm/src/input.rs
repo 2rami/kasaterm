@@ -416,8 +416,13 @@ impl App {
                 self.account_menu_scroll = 0.0;
                 // 하단바가 「로그인 필요」를 띄운 채 눌렸으면 Claude 계정 목록을 펼쳐 연다 —
                 // 풀린 줄이 바로 보여야 한 번 더 눌러 그 슬롯 로그인으로 간다.
-                self.account_menu_provider = crate::settings::claude_signed_out(&self.set_claude_account)
-                    .then_some(AccountProvider::Claude);
+                self.account_menu_provider = if crate::settings::claude_signed_out(&self.set_claude_account) {
+                    Some(AccountProvider::Claude)
+                } else if crate::codexlimits::reauth_required_for(&self.set_codex_account) {
+                    Some(AccountProvider::Codex)
+                } else {
+                    None
+                };
                 self.chrome_dirty = true;
             }
             if !account_menu_capture_button(self.account_menu, &mut self.account_menu_suppressed_buttons, *state, *button) {
@@ -543,6 +548,9 @@ impl App {
             // 도는 학생들이 다음 요청에서 전부 로그인 화면에 걸린다.
             AccountMenuItem::Select(AccountProvider::Claude, id) if crate::settings::claude_signed_out(&id) => {
                 self.account_menu_action(AccountMenuItem::Reauth(AccountProvider::Claude, id));
+            }
+            AccountMenuItem::Select(AccountProvider::Codex, id) if !crate::settings::codex_logged_in(&id) => {
+                self.account_menu_action(AccountMenuItem::Reauth(AccountProvider::Codex, id));
             }
             AccountMenuItem::Select(provider, id) => {
                 self.close_account_menu();

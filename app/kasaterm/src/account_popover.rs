@@ -1189,39 +1189,23 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                     );
                 }
             }
-            // 활성 표시는 오른쪽 배지. 체크 아이콘이나 왼쪽 막대와 달리,
-            // 그 자리에 다른 계정이 쓰는 한도 숫자와 같은 층으로 읽힌다.
-            if active {
-                let t = if p == AccountProvider::Claude {
-                    "선택됨"
-                } else {
-                    "사용 중"
-                };
-                let tw = g.measure_chrome_text(t, tf, true);
+            let needs_login = match p {
+                AccountProvider::Claude => crate::settings::claude_signed_out(&id),
+                AccountProvider::Codex => !crate::settings::codex_logged_in(&id)
+                    && !crate::codexlimits::seeded_for_probe(&id),
+            };
+            if needs_login || active {
+                let label = if needs_login { "로그인 필요" }
+                    else if p == AccountProvider::Claude { "선택됨" }
+                    else { "사용 중" };
+                let width = g.measure_chrome_text(label, tf, true);
                 g.draw_text(
-                    right - tw,
+                    right - width,
                     line1 + if two_line { 0.0 } else { (f - tf) / 2.0 },
-                    t,
+                    label,
                     gpu::DrawOpts {
                         font_size: tf,
-                        color: theme::text_mute(),
-                        bold: true,
-                        italic: false,
-                    },
-                );
-            } else if p == AccountProvider::Codex
-                && !crate::settings::codex_logged_in(&id)
-                && !crate::codexlimits::seeded_for_probe(&id)
-            {
-                let t = "로그인";
-                let tw = g.measure_chrome_text(t, tf, true);
-                g.draw_text(
-                    right - tw,
-                    line1 + if two_line { 0.0 } else { (f - tf) / 2.0 },
-                    t,
-                    gpu::DrawOpts {
-                        font_size: tf,
-                        color: theme::danger(),
+                        color: if needs_login { theme::danger() } else { theme::text_mute() },
                         bold: true,
                         italic: false,
                     },
@@ -1464,15 +1448,16 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                 let bf = tf - 0.5;
                 let by = sry + base_row_h - 22.0;
                 let mut bx = right;
-                for (label, item, skip) in [
+                for (label, item, skip, highlight) in [
                     (
                         "빼기",
                         AccountMenuItem::Forget(p, id.clone()),
                         // 기본 로그인은 뺄 수 있는 것이 아니다 — 목록에
                         // 없는 암묵적 첫 줄이라 지울 대상이 없다.
                         id.is_empty(),
+                        false,
                     ),
-                    ("다시 로그인", AccountMenuItem::Reauth(p, id.clone()), false),
+                    ("다시 로그인", AccountMenuItem::Reauth(p, id.clone()), false, needs_login),
                 ] {
                     if skip {
                         continue;
@@ -1486,7 +1471,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                         && hmy >= r.1
                         && hmy <= r.1 + r.3;
                     g.hover_pointer |= hot;
-                    if hot {
+                    if hot || highlight {
                         round_rect(
                             g,
                             r.0,

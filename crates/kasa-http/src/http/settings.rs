@@ -109,13 +109,25 @@ async fn settings_characters_handler(backend: Arc<dyn Backend>) -> impl IntoResp
 /// 값은 여기서 파일을 읽어 만들지 않는다 — 정본이 GUI 프로세스의 메모리라서다.
 /// 파일에 애초에 저장되지 않는 값(UI 배율은 세션 한정)이 섞여 있어, 파일에서 읽으면
 /// 그 칸만 늘 기본값을 보여 준다.
-async fn settings_values_handler(backend: Arc<dyn Backend>, auth: Option<MobileAuth>) -> impl IntoResponse {
+async fn settings_values_handler(
+    backend: Arc<dyn Backend>,
+    auth: Option<MobileAuth>,
+    params: std::collections::HashMap<String, String>,
+) -> impl IntoResponse {
+    if params.get("watch_accounts").is_some_and(|value| value == "1")
+        && auth.as_ref().is_none_or(|auth| auth.0.owner)
+    {
+        backend.watch_account_usage();
+    }
     let mut values = backend.settings_values();
     if auth.as_ref().is_some_and(|auth| !auth.0.owner) {
         if let Some(values) = values.as_object_mut() { values.remove("lid_away"); }
     }
     (
-        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        [
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         Json(values),
     )
 }
@@ -603,7 +615,9 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         )
         .route(
             "/settings/values",
-            get(move |auth: Option<axum::Extension<MobileAuth>>| settings_values_handler(settings_values_backend.clone(), auth.map(|value| value.0))),
+            get(move |auth: Option<axum::Extension<MobileAuth>>, Query(params)| {
+                settings_values_handler(settings_values_backend.clone(), auth.map(|value| value.0), params)
+            }),
         )
         .route(
             "/onboarding/state",

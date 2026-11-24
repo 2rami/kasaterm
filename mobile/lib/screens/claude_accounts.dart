@@ -143,6 +143,12 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   int _generation = 0;
   int _operation = 0;
   Timer? _timer;
+  Timer? _accountsTimer;
+  bool _refreshingAccounts = false;
+  String? _accountsError;
+  String? _codexStarting;
+  static const _accountsEvery = Duration(seconds: 5);
+
 
   Server get _server => widget.server;
   bool get _active => _flow != null && !_flow!.state.terminal;
@@ -165,6 +171,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
         WidgetsBinding.instance.lifecycleState == null ||
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     _server.addCloseListener(_closed);
+    _scheduleAccounts();
     if (_server.isClosed) {
       _closed();
     } else if (_restorePending()) {
@@ -195,6 +202,9 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     _pendingStart = null;
     _busy = false;
     _polling = false;
+    _refreshingAccounts = false;
+    _accountsError = null;
+    _codexStarting = null;
     _disconnected = false;
     if (previous != null && !previous.settled) {
       _unconfirmedPrevious.add(previous);
@@ -212,6 +222,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
       }
     }
     _server.addCloseListener(_closed);
+    _scheduleAccounts();
     if (_server.isClosed) {
       _closed();
     } else if (_restorePending()) {
@@ -247,6 +258,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   void _closed() {
     _generation++;
     _timer?.cancel();
+    _accountsTimer?.cancel();
     _code.clear();
     if (!mounted) return;
     setState(() {
@@ -271,6 +283,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   void dispose() {
     _generation++;
     _timer?.cancel();
+    _accountsTimer?.cancel();
     _server.removeCloseListener(_closed);
     _abandon(_server);
     WidgetsBinding.instance.removeObserver(this);
@@ -282,14 +295,44 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _foreground = state == AppLifecycleState.resumed;
     _timer?.cancel();
-    if (_foreground) unawaited(_poll());
+    _accountsTimer?.cancel();
+    if (_foreground) {
+      unawaited(_poll());
+      unawaited(_refreshAccounts());
+      _scheduleAccounts();
+    }
+  }
+
+  void _scheduleAccounts() {
+    _accountsTimer?.cancel();
+    if (!_foreground || _disconnected || _server.isClosed) return;
+    _accountsTimer = Timer.periodic(_accountsEvery, (_) => unawaited(_refreshAccounts()));
+  }
+
+  Future<void> _refreshAccounts() async {
+    final device = _device;
+    if (!mounted || !_foreground || _disconnected || _loading || _locked ||
+        _busy || _refreshingAccounts || device == null || !device.online ||
+        ModalRoute.of(context)?.isCurrent == false) {
+      return;
+    }
+    final generation = _generation;
+    final server = _server;
+    _refreshingAccounts = true;
+    try {
+      // A poll only reads the selected device. Starting a login always requires a tap.
+      await _loadAccounts(device, generation, quiet: true);
+    } finally {
+      if (_server == server) _refreshingAccounts = false;
+    }
   }
 
   Future<void> _load() async {
-    if (_disconnected || _locked || _busy) return;
+    if (_disconnected || _locked || _busy || _codexStarting != null) return;
     final generation = ++_generation;
     setState(() {
       _loading = true;
+      _accountsError = null;
       _polling = false;
       _accounts = const [];
       _error = null;
@@ -368,7 +411,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     }
   }
 
-  Future<void> _loadAccounts(_Device device, int generation) async {
+  Future<void> _loadAccounts(_Device device, int generation, {bool quiet = false}) async {
     try {
       if (!device.online) {
         throw const ServerException(
@@ -377,22 +420,32 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
       }
       final summary = await _server.claudeDeviceAccounts(
         machine: device.route,
+        watching: true,
       );
-      if (!_current(generation)) return;
+      if (!_current(generation) || (quiet && _locked)) return;
       setState(() {
         _summaries[device.id] = summary;
         if (_device?.id == device.id) _accounts = summary.accounts;
+        _accountsError = null;
         _loading = false;
       });
     } on ServerException catch (e) {
       if (_current(generation)) {
         setState(() {
-          _error = switch (e.status) {
+          if (quiet && _locked) return;
+          _summaries.remove(device.id);
+          if (_device?.id == device.id) _accounts = const [];
+          final message = switch (e.status) {
             400 || 404 => '이 기기의 KASA를 새 판으로 업데이트해 주세요.',
             401 || 403 => '접근할 수 없어요. KASA 계정과 기기 연결을 확인해 주세요.',
             502 || 503 || 504 => '이 기기에 연결하지 못했어요. KASA를 켠 뒤 새로고침해 주세요.',
             _ => e.message,
           };
+          if (quiet) {
+            _accountsError = message;
+          } else {
+            _error = message;
+          }
           _loading = false;
         });
       }
@@ -438,19 +491,20 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   }
 
   void _select(_Device device) {
-    if (device.id == _device?.id || _locked || _busy || _disconnected) return;
+    if (device.id == _device?.id || _locked || _busy || _disconnected || _codexStarting != null) return;
     final summary = _summaries[device.id];
     final generation = ++_generation;
     setState(() {
       _device = device;
       _accounts = summary?.accounts ?? const [];
+      _accountsError = null;
       _flow = null;
       _slot = null;
       _pendingStart = null;
       _error = null;
       _loading = summary == null;
     });
-    if (summary == null) unawaited(_loadAccounts(device, generation));
+    unawaited(_loadAccounts(device, generation));
   }
 
   /// 기기 줄의 [다시 로그인] — 기기를 고르고 그 슬롯 로그인을 한 번에 시작한다.
@@ -480,7 +534,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   }
 
   Future<void> _start(ClaudeAccount slot) async {
-    if (_busy || _active || _disconnected) return;
+    if (_busy || _active || _disconnected || _codexStarting != null) return;
     if (_pending && _pendingStart!.slot.id != slot.id) return;
     if (_pending && _pendingStart!.abandoned) return _cancelPending();
     final device = _device;
@@ -724,13 +778,35 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     unawaited(_load());
   }
 
+  Future<void> _startCodexLogin(_Device device, ClaudeAccount account) async {
+    if (_codexStarting != null || _locked || _busy || _disconnected) return;
+    final generation = _generation;
+    setState(() => _codexStarting = account.id);
+    try {
+      await _server.settingsAction(
+        'reauth-account',
+        id: account.id,
+        label: 'codex',
+        machine: device.route,
+      );
+      if (!mounted || !_current(generation)) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('선택한 기기의 브라우저에서 Codex 로그인을 마쳐 주세요.')),
+      );
+    } on ServerException catch (error) {
+      if (_current(generation)) setState(() => _error = error.message);
+    } finally {
+      if (_current(generation)) setState(() => _codexStarting = null);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => TwinBackdrop(
     child: Scaffold(
       backgroundColor: Colors.transparent,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        title: const Text('Claude 계정'),
+        title: const Text('Claude · Codex 계정'),
         actions: [
           IconButton(
             tooltip: '새로고침',
@@ -766,6 +842,8 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     }
     final device = _device!;
     final flow = _flow;
+    final summary = _summaries[device.id];
+    final codex = summary?.codexAccounts ?? const [];
     return ListView(
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: const EdgeInsets.fromLTRB(
@@ -789,6 +867,8 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
             text:
                 '이전 연결의 로그인 취소 여부를 확인하지 못했어요. 복구하지 못하면 서버 요청이 최대 10분 동안 남을 수 있어요.',
           ),
+        if (_accountsError != null && !_locked)
+          ErrorBand(text: _accountsError!, onRetry: _load),
         if (_error != null)
           ErrorBand(
             text: _error!,
@@ -813,7 +893,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
             padding: EdgeInsets.all(Look.groupGap),
             child: TwinsLoading(label: '계정 확인', size: Look.twinsSmall),
           )
-        else if (_accounts.isEmpty && _error == null)
+        else if (_accounts.isEmpty && codex.isEmpty && _error == null && _accountsError == null)
           Padding(
             padding: const EdgeInsets.only(top: Look.groupGap),
             child: TwinsNotice(
@@ -827,7 +907,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
           )
         else if (_accounts.isNotEmpty)
           SettingsGroup(
-            title: '${_name(device)}에 등록된 계정',
+            title: 'Claude · ${_name(device)}',
             children: [
               for (final account in _accounts)
                 SettingsRow(
@@ -865,6 +945,35 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
                       ),
                     ),
                   ),
+                ),
+            ],
+          ),
+        if (flow == null && !_loading && codex.isNotEmpty)
+          SettingsGroup(
+            title: 'Codex',
+            children: [
+              for (final account in codex)
+                SettingsRow(
+                  key: Key('codex-account-${account.id}'),
+                  icon: Icons.terminal_rounded,
+                  title: account.title.isEmpty ? '기본 로그인' : account.title,
+                  subtitle: [
+                    if (account.id == summary?.activeCodexId) '지금 쓰는 계정',
+                    account.detail,
+                    if (account.usageText.isNotEmpty) account.usageText,
+                  ].join(' · '),
+                  below: account.needsLogin
+                      ? Align(
+                          alignment: Alignment.centerLeft,
+                          child: FilledButton.tonal(
+                            key: Key('codex-login-${account.id}'),
+                            onPressed: _codexStarting != null || _locked || _busy || _disconnected
+                                ? null
+                                : () => _startCodexLogin(device, account),
+                            child: Text(_codexStarting == account.id ? '여는 중' : 'PC에서 다시 로그인'),
+                          ),
+                        )
+                      : null,
                 ),
             ],
           ),

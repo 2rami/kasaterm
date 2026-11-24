@@ -23,22 +23,20 @@ fn open_path(path: &std::path::Path) {
 
 impl App {
     pub(crate) fn claude_account_usage(&self, id: &str) -> Option<crate::UsageBadge> {
-        let probe = (!id.is_empty()).then(|| auth_probe(id)).flatten();
-        if id.is_empty()
-            || !self.set_claude_accounts.iter().any(|account| account.id == id)
-            || probe.as_ref().is_some_and(|probe| probe.verified && !probe.logged_in)
-        {
+        if id.is_empty() || !self.set_claude_accounts.iter().any(|account| account.id == id) {
             return None;
         }
-        let dir = crate::claude_auth::runtime_dir_for_cached(id, &self.set_claude_account)
-            .map_or(String::new(), |path| path.to_string_lossy().into_owned());
-        // 전환 직후의 옛 계정 숫자와 실패 전의 캐시가 최신 관측을 덮지 않게 한다.
+        let probe = auth_probe(id);
+        let dir = claude_runtime_usage_dir(id, &self.set_claude_account);
+        if claude_observed_login(id, &dir, probe.as_ref()) == Some(false) {
+            return None;
+        }
         let active = self.claude_usage.lock().ok().and_then(|value| value.clone())
             .filter(|badge| id == self.set_claude_account && badge.account_dir == dir);
         active.or_else(|| self.claude_usage_all.lock().ok()?.get(&dir).cloned())
             .map(|mut badge| {
                 badge.stale |= probe.as_ref().is_some_and(|p| !p.verified)
-                    || crate::handler::claude_usage_attempt(&dir) == Some(false);
+                    || claude_usage_succeeded(id, &dir) == Some(false);
                 badge
             })
     }
@@ -48,10 +46,9 @@ impl App {
             return "unselected";
         }
         let probe = auth_probe(id);
-        let logged_in = probe.filter(|p| p.verified).map(|p| p.logged_in);
-        let dir = crate::claude_auth::runtime_dir_for_cached(id, &self.set_claude_account)
-            .map_or(String::new(), |path| path.to_string_lossy().into_owned());
-        claude_usage_state(logged_in, self.claude_account_usage(id).as_ref(), crate::handler::claude_usage_attempt(&dir))
+        let dir = claude_runtime_usage_dir(id, &self.set_claude_account);
+        claude_usage_state(claude_observed_login(id, &dir, probe.as_ref()),
+            self.claude_account_usage(id).as_ref(), claude_usage_succeeded(id, &dir))
     }
 
     pub(crate) fn settings_btn_rect(&self, _win_h_logical: f32) -> Rect {
@@ -2380,6 +2377,9 @@ impl App {
             // `CODEX_HOME=<슬롯> codex login`) 어느 쪽인지를 label 로 받는다.
             // 이름 없는 쪽이 기본 = **쓰던 브라우저**고, `-isolated` 가 쿠키 없는 창이다.
             "reauth-account" | "reauth-account-isolated" => {
+                if hidden_login_running() {
+                    return Err("이 기기에서 진행 중인 로그인을 마친 뒤 다시 시도해 주세요".to_string());
+                }
                 let claude = match arg.as_str() {
                     "claude" => true,
                     "codex" => false,
@@ -2388,7 +2388,7 @@ impl App {
                 let known = if claude {
                     self.set_claude_accounts.iter().any(|a| a.id == id)
                 } else {
-                    self.set_codex_accounts.iter().any(|a| a.id == id)
+                    id.is_empty() || self.set_codex_accounts.iter().any(|a| a.id == id)
                 };
                 if !known {
                     return Err(no_slot(id));
@@ -2605,11 +2605,10 @@ impl App {
             .map(|(i, a)| (a.id.clone(), a.label.clone(), i))
             .map(|(id, label, idx)| {
                 let probe = auth_probe(&id);
-                let dir = crate::claude_auth::runtime_dir_for_cached(&id, &active_acct)
-                    .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+                let dir = claude_runtime_usage_dir(&id, &active_acct);
                 let usage = self.claude_account_usage(&id);
-                let logged_in = probe.as_ref().filter(|p| p.verified).map(|p| p.logged_in);
-                let usage_state = claude_usage_state(logged_in, usage.as_ref(), crate::handler::claude_usage_attempt(&dir));
+                let logged_in = claude_observed_login(&id, &dir, probe.as_ref());
+                let usage_state = claude_usage_state(logged_in, usage.as_ref(), claude_usage_succeeded(&id, &dir));
                 // 답이 아직 없는 두 경우(첫 조회 중 · 토큰 갱신 중)에 비우지 않는다.
                 // 비우면 계정이 사라진 것처럼 보인다 — 없다고 말하지 말고 아직
                 // 모른다고 말한다.
@@ -2617,8 +2616,8 @@ impl App {
                 // 코드가 붙는 것은 우리가 지어낸 말 셋뿐이다. 이메일·조직명은
                 // 데이터라 옮길 것이 없다.
                 let (mut sub, mut kind, mut sub_code) = match &probe {
-                    Some(p) if p.verified && !p.logged_in => {
-                        ("로그인 필요".to_string(), "danger", Some("account_login_required"))
+                    _ if logged_in == Some(false) => {
+                        ("다시 로그인 필요".to_string(), "danger", Some("account_login_required"))
                     }
                     Some(p) if !p.email.is_empty() => (p.email.clone(), "mute", None),
                     _ => ("확인 중…".to_string(), "faint", Some("account_checking")),
@@ -2732,6 +2731,8 @@ impl App {
                     });
                     let usage_state = if !logged_in {
                         "logged_out"
+                    } else if limits.as_ref().is_some_and(|limits| limits.stale) {
+                        "failed"
                     } else if limits.is_some() {
                         "ready"
                     } else if crate::codexlimits::attempted_for(&id) {
@@ -2778,6 +2779,7 @@ impl App {
                         "usage_resets_at": pressure
                             .and_then(|(_, _, at)| at.and_then(|value| u64::try_from(value).ok())),
                         "usage_state": usage_state,
+                        "relogin": (!logged_in).then_some("account_login_required"),
                         "usage_windows": limits.as_ref().map(|_| usage_windows.iter().map(|(label, pct, at)| serde_json::json!({
                             "label": label,
                             "pct": pct,
@@ -4765,17 +4767,25 @@ fn finish_login(provider: AccountProvider, id: &str, state: LoginState, attempt:
     // 바로 바뀐계정으로 나와야지 한도랑」).
     if state == LoginState::Ok {
         if provider == AccountProvider::Claude {
+            refresh_claude_observation(id, true);
             crate::session::retry_choice_after_login(id);
+        } else {
+            crate::codexlimits::invalidate(id);
+            crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        probe_cache().lock().unwrap().remove(id);
-        // 활성 계정은 작업대를 물으므로 그쪽 키도 함께 비운다.
-        probe_cache().lock().unwrap().remove("");
-        crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
-        crate::codexlimits::invalidate();
         kasa_device::agent_accounts::poke();
         // 새 로그인의 사슬을 곧 관문에 맡긴다 — 다른 기기가 바로 쓸 수 있게.
         kasa_device::agent_chains::poke();
     }
+}
+
+fn refresh_claude_observation(id: &str, workbench_updated: bool) {
+    if let Ok(mut cache) = probe_cache().lock() {
+        cache.remove(id);
+        if workbench_updated { cache.remove(""); }
+    }
+    crate::handler::invalidate_claude_usage_attempt(id, workbench_updated);
+    crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn finish_login_state(
@@ -5189,7 +5199,7 @@ pub(crate) fn seed_auth_probe(id: &str, probe: Option<AuthProbe>) {
 pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
     use std::time::{Duration, Instant};
     let cache = probe_cache();
-    let stale = {
+    let (asked_at, stale) = {
         let mut m = cache.lock().unwrap();
         let prev = match m.get(id) {
             Some((at, v)) if at.elapsed() < Duration::from_secs(20) => return v.clone(),
@@ -5197,8 +5207,9 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
             None => None,
         };
         // 시각만 새로 박아 다음 프레임이 또 스폰하지 않게 하고, 값은 그대로 둔다.
-        m.insert(id.to_string(), (Instant::now(), prev.clone()));
-        prev
+        let at = Instant::now();
+        m.insert(id.to_string(), (at, prev.clone()));
+        (at, prev)
     };
     let key = id.to_string();
     // ⚠️ 활성 계정은 금고가 아니라 **작업대**를 물어야 한다(env 를 안 붙인다).
@@ -5231,8 +5242,12 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
         // 작업대 조회는 화면에만 쓴다. 슬롯 신원 표(statusline·관문 목록·받기 후보가 읽는다)에는 그 슬롯 자기
         // 금고의 답, 또는 소유 표식이 같은 UUID 로 적어 둔 작업대의 답만 남긴다 — 바깥 `/login` 이 바꾼 작업대의
         // 신원이 그 슬롯 이름으로 굳으면 다른 기기와 받기 루프가 그 계정을 이 슬롯으로 안다.
+        let result = slot_identity_full(dir.as_deref());
+        if !probe_cache().lock().is_ok_and(|cache| cache.get(&key).is_some_and(|(at, _)| *at == asked_at)) {
+            return;
+        }
         let mut owned = dir.is_some();
-        let probe = match slot_identity_full(dir.as_deref()) {
+        let probe = match result {
             SlotIdentity::Known { email, org, sync_identity } => {
                 if dir.is_some() {
                     remember_account_sync_identity(&key, sync_identity);
@@ -5272,8 +5287,11 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
             .or_else(|| same_account_note(&key, &email, &org, &slots));
         org_notes().lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), note);
         {
-            probe_generation().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut m = probe_cache().lock().unwrap();
+            if !m.get(&key).is_some_and(|(at, _)| *at == asked_at) {
+                return;
+            }
+            probe_generation().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // 조회 자체가 실패했으면(셸이 안 뜸·JSON 이 아님) 알던 값을 유지한다 —
             // 답을 못 받은 것과 "로그인 안 됐다" 는 답을 받은 것은 다르다.
             let v = probe.or_else(|| m.get(&key).and_then(|(_, v)| v.clone()).map(|mut old| {
@@ -5505,7 +5523,7 @@ fn codex_auth_path(id: &str) -> Option<std::path::PathBuf> {
 
 /// 토큰 값은 직렬화·저장·로그하지 않고 알려진 자리가 비어 있지 않은지만 본다.
 pub(crate) fn codex_logged_in(id: &str) -> bool {
-    codex_auth_facts(id).0
+    codex_auth_facts(id).0 && !crate::codexlimits::reauth_required_for(id)
 }
 
 pub(crate) fn codex_identity(id: &str) -> Option<String> {
@@ -5655,11 +5673,28 @@ fn label_is_auto(label: &str) -> bool {
             .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// 화면에 띄울 조직명 — 팀 조직일 때만 Some. 개인 조직은 이름이 `<이메일>'s
-/// Organization` 이라 이메일을 한 번 더 읽는 것과 다름없어 노이즈만 된다.
-/// 그 Claude 슬롯이 로그인 풀림으로 **확인**됐나. 조회 중·일시 실패는 아니다.
+pub(crate) fn claude_runtime_usage_dir(id: &str, active: &str) -> String {
+    crate::claude_auth::runtime_dir_for_cached(id, active)
+        .map_or(String::new(), |path| path.to_string_lossy().into_owned())
+}
+
+pub(crate) fn claude_observed_login(id: &str, dir: &str, probe: Option<&AuthProbe>) -> Option<bool> {
+    if crate::handler::claude_usage_attempt(dir, id) == Some(crate::handler::ClaudeUsageAttempt::ReauthRequired) {
+        Some(false)
+    } else {
+        probe.filter(|p| p.verified).map(|p| p.logged_in)
+    }
+}
+
+pub(crate) fn claude_usage_succeeded(id: &str, dir: &str) -> Option<bool> {
+    crate::handler::claude_usage_attempt(dir, id)
+        .map(|attempt| attempt == crate::handler::ClaudeUsageAttempt::Ready)
+}
+
 pub(crate) fn claude_signed_out(id: &str) -> bool {
-    auth_probe(id).is_some_and(|p| p.verified && !p.logged_in)
+    let active = crate::socket::read_claude_account();
+    let dir = claude_runtime_usage_dir(id, &active);
+    claude_observed_login(id, &dir, auth_probe(id).as_ref()) == Some(false)
 }
 
 type OrgNotes = std::sync::Mutex<std::collections::HashMap<String, Option<String>>>;

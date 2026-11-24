@@ -460,13 +460,12 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             Some(note) => format!("{sub} · {note}"),
             None => sub,
         };
-        let dir = crate::claude_auth::runtime_dir_for_cached(&account.id, &active_id)
-            .map_or(String::new(), |path| path.to_string_lossy().into_owned());
+        let dir = crate::settings::claude_runtime_usage_dir(&account.id, &active_id);
         let usage = app.claude_account_usage(&account.id);
         let usage_state = match crate::settings::claude_usage_state(
-            probe.as_ref().filter(|value| value.verified).map(|value| value.logged_in),
+            crate::settings::claude_observed_login(&account.id, &dir, probe.as_ref()),
             usage.as_ref(),
-            crate::handler::claude_usage_attempt(&dir),
+            crate::settings::claude_usage_succeeded(&account.id, &dir),
         ) {
             "logged_out" => AccountUsageState::LoggedOut,
             "failed" => AccountUsageState::Failed,
@@ -529,7 +528,8 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
         usage_state: account_usage_state(
             Some(default_codex_logged_in),
             default_codex_limits.is_some(),
-            crate::codexlimits::attempted_for("").then_some(false),
+            default_codex_limits.as_ref().map(|limits| !limits.stale)
+                .or_else(|| crate::codexlimits::attempted_for("").then_some(false)),
         ),
         usage: default_codex_usage,
         usage_windows: default_codex_windows,
@@ -572,7 +572,8 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             usage_state: account_usage_state(
                 Some(logged_in),
                 limits.is_some(),
-                crate::codexlimits::attempted_for(&account.id).then_some(false),
+                limits.as_ref().map(|limits| !limits.stale)
+                    .or_else(|| crate::codexlimits::attempted_for(&account.id).then_some(false)),
             ),
             usage,
             usage_windows,
@@ -6135,7 +6136,9 @@ fn account_row(
     // 오른쪽 단추 묶음의 폭을 **먼저** 재 둔다 — 이름과 부제가 그 자리를 넘지
     // 않게 잘라야 하는데, 글자 단추는 라벨 길이에 따라 폭이 달라진다.
     let w_remove = g.measure_chrome_text("제거", 10.5, false) + 32.0;
-    let w_reauth = g.measure_chrome_text("재인증", 10.5, false) + 32.0;
+    let needs_login = row.usage_state == AccountUsageState::LoggedOut;
+    let reauth_label = if needs_login { "다시 로그인" } else { "재인증" };
+    let w_reauth = g.measure_chrome_text(reauth_label, 10.5, false) + 32.0;
     // 차례 화살표는 고를 차례가 있을 때만 — 계정이 하나면 옮길 곳이 없다.
     let movable = show_slot_actions && count > 1;
     let actions_w = if show_slot_actions {
@@ -6302,22 +6305,15 @@ fn account_row(
             );
             rx -= w_reauth + 2.0;
         }
-        mini_text_button(
-            g,
-            s,
-            hits,
-            rx,
-            by,
-            "rotate-cw",
-            // 풀린 줄에서는 이 단추가 할 일이 「다시 인증」이 아니라 「로그인」이다.
-            if matches!(row.usage_state, AccountUsageState::LoggedOut) { "로그인" } else { "재인증" },
-            Target::Setting(SettingsAction::ReauthAccount(
-                row.provider,
-                row.id.clone(),
-                settings::LoginBrowser::Default,
-            )),
-            false,
-        );
+        let action = Target::Setting(SettingsAction::ReauthAccount(
+            row.provider, row.id.clone(), settings::LoginBrowser::Default,
+        ));
+        if needs_login {
+            button(g, s, hits, (rx - 6.0, by - 2.0, w_reauth + 10.0, 26.0),
+                reauth_label, action, true);
+        } else {
+            mini_text_button(g, s, hits, rx, by, "rotate-cw", reauth_label, action, false);
+        }
         // 별명과 격리 로그인은 어쩌다 한 번이라 아이콘으로 남긴다 — 글자까지
         // 세우면 이름이 들어갈 자리가 사라진다.
         if !show_slot_actions {

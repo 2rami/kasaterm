@@ -28,7 +28,7 @@ class FixtureServer extends Server {
   @override
   Future<List<Machine>> machines() async => [];
   @override
-  Future<ClaudeDeviceAccounts> claudeDeviceAccounts({String? machine}) async =>
+  Future<ClaudeDeviceAccounts> claudeDeviceAccounts({String? machine, bool watching = false}) async =>
       const ClaudeDeviceAccounts(
         activeId: 'personal',
         accounts: [
