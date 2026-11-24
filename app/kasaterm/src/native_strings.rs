@@ -350,6 +350,8 @@ fn english(value: &str) -> Option<&'static str> {
         "열대 폭풍" => "Tropical storm",
         "허리케인" => "Hurricane",
         "토네이도" => "Tornado",
+        "날씨 켜기" => "Enable weather",
+        "효과 조절" => "Effect controls",
         "날씨 효과" => "Weather effect",
         "날씨 표현" => "Weather style",
         "작업 날씨" => "Task weather",

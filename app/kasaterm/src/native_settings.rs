@@ -2669,13 +2669,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let mut hits = Vec::new();
     let mut caret_rect = None;
 
-    let nav_fill = theme::settings_nav();
-    let body_fill = if snapshot.cat == SettingsCat::Weather {
-        theme::lerp(theme::settings_body(), theme::accent(), 0.035)
+    let [canvas, nav_fill, body_fill] = if snapshot.cat == SettingsCat::Weather {
+        theme::weather_settings_plates()
     } else {
-        theme::settings_body()
+        [theme::settings_canvas(), theme::settings_nav(), theme::settings_body()]
     };
-    g.rect(outer_x, outer_y, outer_w, outer_h, theme::settings_canvas());
+    g.rect(outer_x, outer_y, outer_w, outer_h, canvas);
     if !compact {
         g.rect(ax, ay, nav_w, ah, nav_fill);
         g.rect(ax + nav_w, ay, (aw - nav_w).max(0.0), ah, body_fill);
@@ -4659,19 +4658,20 @@ fn machines_view() -> Vec<MachineRow> {
 fn paint_weather_sample(g: &mut gpu::GpuRenderer, s: &Snapshot, rect: Rect) {
     let (x, y, w, h) = rect;
     if w < 80.0 { return; }
-    let tint = theme::lerp(theme::settings_body(), theme::accent(), 0.16);
-    let sky = theme::lerp(theme::settings_body(), theme::accent(), 0.07);
+    let [canvas, _, body] = theme::weather_settings_plates();
+    let tint = theme::lerp(body, theme::accent(), 0.10);
+    let sky = theme::lerp(canvas, theme::accent(), 0.10);
     round_rect(g, x, y, w, h, ctrl_radius(), tint);
     stroke_round(g, rect, ctrl_radius(), theme::edge_on(tint));
     g.queue_icon("umbrella", x + 13.0, y + 10.0, 16.0, theme::text());
     draw_text(g, x + 36.0, y + 12.0, "미리보기", 12.0, theme::text(), true);
 
-    let pane = (x + 9.0, y + 36.0, w - 18.0, h - 45.0);
+    let pane = (x + 10.0, y + 39.0, w - 20.0, h - 49.0);
     g.rect(pane.0, pane.1, pane.2, pane.3, sky);
     let icon = if s.weather.style == crate::weather::model::RainStyle::Showers {
         s.weather.indicator(s.weather_phase).weather.map_or("monitor", weather_icon)
     } else { "umbrella" };
-    let icon_size = (pane.3 * 0.79).min(pane.2 * 0.52);
+    let icon_size = (pane.3 * 0.66).min(pane.2 * 0.44);
     g.queue_icon(icon, pane.0 + (pane.2 - icon_size) * 0.5,
         pane.1 + (pane.3 - icon_size) * 0.5, icon_size, theme::enforce_contrast_at(theme::accent(), sky, 3.0));
     g.queue_icon("terminal", pane.0 + 11.0, pane.1 + 11.0, 14.0, theme::text_dim());
@@ -4708,9 +4708,30 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         RainAmount::ALL.iter().map(|&a| (a.label(), current == a, act(make(a)))).collect()
     };
 
-    *y += 6.0;
-    toggle_row_hint(g, s, hits, x, y, w, "날씨", "창과 카드에 표시할 날씨 효과를 고릅니다",
-        ws.enabled, act(Change::Enabled(!ws.enabled)));
+    use wm::RainStyle;
+    let panel = theme::lerp(theme::bg(), theme::text(), 0.045);
+    let work = ws.style == RainStyle::Showers;
+    let modes = [
+        ("리퀴드 비", !work, act(Change::Style(RainStyle::Liquid))),
+        ("작업 날씨", work, act(Change::Style(RainStyle::Showers))),
+    ];
+    let setup_wide = w >= 550.0;
+    let setup_h = if setup_wide { 64.0 } else { 108.0 };
+    round_rect(g, x, *y, w, setup_h, ctrl_radius(), panel);
+    {
+        let _panel = theme::settings_layer(panel);
+        let mut row_y = *y + 8.0;
+        if setup_wide {
+            let left = (w - 310.0).min(216.0);
+            toggle_row(g, s, hits, x + 10.0, &mut row_y, left, "날씨 켜기", ws.enabled, act(Change::Enabled(!ws.enabled)));
+            row_y = *y + 8.0;
+            seg_row(g, s, hits, x + left + 30.0, &mut row_y, w - left - 44.0, "날씨 표현", &modes);
+        } else {
+            toggle_row(g, s, hits, x + 10.0, &mut row_y, w - 20.0, "날씨 켜기", ws.enabled, act(Change::Enabled(!ws.enabled)));
+            segmented(g, s, hits, x + 12.0, row_y + 8.0, w - 24.0, &modes);
+        }
+    }
+    *y += setup_h;
     let os_off = !ws.ignore_os && ws.enabled && (s.weather_os.reduce_transparency || s.weather_os.reduce_motion);
     if os_off {
         *y += 8.0;
@@ -4722,25 +4743,25 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         });
     }
 
-    use wm::RainStyle;
-    seg_row(g, s, hits, x, y, w, "날씨 표현", &[
-        ("리퀴드 비", ws.style == RainStyle::Liquid, act(Change::Style(RainStyle::Liquid))),
-        ("작업 날씨", ws.style == RainStyle::Showers, act(Change::Style(RainStyle::Showers))),
-    ]);
-
-    *y += 16.0;
+    *y += 18.0;
     let phase = s.weather_phase;
-    let work = ws.style == RainStyle::Showers;
-    let rule = ws.indicator(phase);
-    let wide = work && w >= 608.0;
-    let preview_w = if wide { w * 0.45 } else { w };
+    let wide = work && w >= 660.0;
+    let preview_w = if wide { w * 0.51 } else { w };
     let preview_x = x + w - preview_w;
     let top = *y;
-    paint_weather_sample(g, s, (preview_x, top, preview_w, if wide { 200.0 } else { 156.0 }));
-    if !wide { *y += 168.0; }
+    let editor_h = 252.0;
+    paint_weather_sample(g, s, (preview_x, top, preview_w, if wide { editor_h } else { 178.0 }));
+    if !wide { *y += 188.0; }
 
     if work {
-        let controls_w = if wide { w - preview_w - 20.0 } else { w };
+        let controls_w = if wide { w - preview_w - 16.0 } else { w };
+        if wide { round_rect(g, x, top, controls_w, editor_h, ctrl_radius(), panel); }
+        let _panel = theme::settings_layer(if wide { panel } else { theme::bg() });
+        let pad = if wide { 10.0 } else { 0.0 };
+        if wide { *y += 24.0; }
+        let x = x + pad;
+        let controls_w = controls_w - 2.0 * pad;
+        let rule = ws.indicator(phase);
         dropdown_row(g, s, hits, x, y, controls_w, "상태", &crate::native_strings::text(phase.label()), DropdownId::WeatherPhase);
         let label = rule.weather.map_or("날씨 없음", |c| c.label());
         dropdown_row(g, s, hits, x, y, controls_w, "날씨 효과", &crate::native_strings::text(label), DropdownId::WeatherCondition(phase));
@@ -4748,25 +4769,42 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
             .map(|(label, side)| (label, rule.edges & side != 0, act(Change::StateEdge(phase, side)))).collect();
         seg_row(g, s, hits, x, y, controls_w, "프로세스바 위치", &cells);
         toggle_row(g, s, hits, x, y, controls_w, "표면에 물방울 맺힘", ws.beads, act(Change::Beads(!ws.beads)));
-        if wide { *y = (*y).max(top + 200.0); }
-        *y += 12.0;
-        let levels = ["없음", "약하게", "보통", "강하게"];
-        let cells: Vec<_> = RainAmount::ALL.iter().map(|&a| (levels[a.index()], a == ws.amount, act(Change::Amount(a)))).collect();
-        seg_row(g, s, hits, x, y, w, "효과 강도", &cells);
-    } else {
-        seg_row(g, s, hits, x, y, w, "비 양", &amounts(ws.amount, &|a| Change::Amount(a)));
+        if wide { *y = (*y).max(top + editor_h); }
     }
-    let dir = wm::quarters(ws.wind_dir);
-    let dir_text = match dir {
-        0 => crate::native_strings::text("없음").into_owned(),
-        d if d < 0 => format!("{} {:.2}", crate::native_strings::text("왼쪽"), -d as f32 / 4.0),
-        d => format!("{} {:.2}", crate::native_strings::text("오른쪽"), d as f32 / 4.0),
-    };
-    stepper_row(g, s, hits, x, y, w, "바람 방향", &dir_text,
-        act(Change::WindDir((dir - 1).max(-4))), act(Change::WindDir((dir + 1).min(4))));
-    let strength = (ws.wind_strength * 4.0).round() as u8;
-    stepper_row(g, s, hits, x, y, w, "바람 세기", &format!("{}%", strength as u32 * 25),
-        act(Change::WindStrength(strength.saturating_sub(1))), act(Change::WindStrength((strength + 1).min(4))));
+    *y += 18.0;
+
+    let grouped = w >= 420.0;
+    if grouped {
+        round_rect(g, x, *y, w, ROW_H * 3.0 + 42.0, ctrl_radius(), panel);
+    }
+    {
+        let _panel = theme::settings_layer(if grouped { panel } else { theme::bg() });
+        let pad = if grouped { 10.0 } else { 0.0 };
+        let x = x + pad;
+        let w = w - 2.0 * pad;
+        draw_text(g, x + 10.0, *y + 11.0, "효과 조절", 12.0, theme::text_dim(), true);
+        *y += 30.0;
+        if work {
+            let levels = ["없음", "약하게", "보통", "강하게"];
+            let cells: Vec<_> = RainAmount::ALL.iter().map(|&a| (levels[a.index()], a == ws.amount, act(Change::Amount(a)))).collect();
+            seg_row(g, s, hits, x, y, w, "효과 강도", &cells);
+        } else {
+            seg_row(g, s, hits, x, y, w, "비 양", &amounts(ws.amount, &|a| Change::Amount(a)));
+        }
+        let dir = wm::quarters(ws.wind_dir);
+        let dir_text = match dir {
+            0 => crate::native_strings::text("없음").into_owned(),
+            d if d < 0 => format!("{} {:.2}", crate::native_strings::text("왼쪽"), -d as f32 / 4.0),
+            d => format!("{} {:.2}", crate::native_strings::text("오른쪽"), d as f32 / 4.0),
+        };
+        stepper_row(g, s, hits, x, y, w, "바람 방향", &dir_text,
+            act(Change::WindDir((dir - 1).max(-4))), act(Change::WindDir((dir + 1).min(4))));
+        let strength = (ws.wind_strength * 4.0).round() as u8;
+        stepper_row(g, s, hits, x, y, w, "바람 세기", &format!("{}%", strength as u32 * 25),
+            act(Change::WindStrength(strength.saturating_sub(1))), act(Change::WindStrength((strength + 1).min(4))));
+
+        if grouped { *y += 12.0; }
+    }
 
     if ws.style == RainStyle::Liquid {
         *y += 8.0;
@@ -4802,9 +4840,7 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         }
     }
 
-    *y += 8.0;
-    section_title(g, x, *y, "접근성", "");
-    *y += 54.0;
+    *y += 20.0;
     toggle_row_hint(g, s, hits, x, y, w, "OS 설정 무시", "켜면 macOS 「동작 줄이기」「투명도 줄이기」를 따르지 않습니다",
         ws.ignore_os, act(Change::IgnoreOs(!ws.ignore_os)));
 }
