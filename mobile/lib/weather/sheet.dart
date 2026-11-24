@@ -386,12 +386,16 @@ class WeatherPreview extends StatelessWidget {
     this.cornerRadius = Look.radius,
     this.terminal,
     this.accentOutline = false,
+    this.paneBackground,
+    this.paneForeground,
+    this.paneBorderColor,
     this.action,
   });
 
   final double height, cornerRadius;
   final Widget? terminal, action;
   final bool accentOutline;
+  final Color? paneBackground, paneForeground, paneBorderColor;
 
   final WeatherSettings settings;
   final IndicatorPhase phase;
@@ -401,7 +405,7 @@ class WeatherPreview extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final work = settings.style == RainStyle.showers;
-    final sky = Color.alphaBlend(scheme.primary.withValues(alpha: 0.09), theme.scaffoldBackgroundColor);
+    final sky = paneBackground ?? Color.alphaBlend(scheme.primary.withValues(alpha: 0.09), theme.scaffoldBackgroundColor);
     final label = settings.enabled && work ? phase.label : '작업실';
     final corners = BorderRadius.circular(cornerRadius);
     final paneCorners = BorderRadius.circular(cornerRadius * 2 / 3);
@@ -415,9 +419,9 @@ class WeatherPreview extends StatelessWidget {
               ? _conditionSymbol(settings.indicator(phase).weather, symbolSize, scheme.primary)
               : _OpenUmbrella(size: symbolSize, color: scheme.primary)),
           Positioned(top: 10, left: 12, right: 12, child: Row(children: [
-            Icon(Icons.terminal_outlined, size: 15, color: scheme.onSurfaceVariant),
+            Icon(Icons.terminal_outlined, size: 15, color: paneForeground ?? scheme.onSurfaceVariant),
             const SizedBox(width: 7),
-            Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelMedium)),
+            Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelMedium?.copyWith(color: paneForeground))),
           ])),
         ],
       ),
@@ -446,11 +450,18 @@ class WeatherPreview extends StatelessWidget {
               ?action,
             ]),
           ),
-          ClipRRect(
-            borderRadius: paneCorners,
-            child: ColoredBox(
-              color: sky,
-              child: SizedBox(height: height, child: WeatherScene(child: pane)),
+          DecoratedBox(
+            position: DecorationPosition.foreground,
+            decoration: BoxDecoration(
+              borderRadius: paneCorners,
+              border: paneBorderColor == null ? null : Border.all(color: paneBorderColor!),
+            ),
+            child: ClipRRect(
+              borderRadius: paneCorners,
+              child: ColoredBox(
+                color: sky,
+                child: SizedBox(height: height, child: WeatherScene(child: pane)),
+              ),
             ),
           ),
         ]),

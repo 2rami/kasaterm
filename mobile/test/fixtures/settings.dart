@@ -14,6 +14,8 @@ class SettingsFixture {
 
   final paths = <String>[];
   String accent = 'Blue';
+  final palette = List<String>.filled(27, '#455363');
+  final paletteSurfaces = List<String>.filled(5, '#233449');
 
   late final MockClient client = MockClient(answer);
 
@@ -55,11 +57,23 @@ class SettingsFixture {
         accent = action['id'] as String;
         return _json({'ok': true});
       }
+      if (action['action'] == 'palette-hex' && action['label'] is String) {
+        final index = int.parse(action['id'] as String);
+        final color = action['label'] as String;
+        if (index < 27) {
+          palette[index] = color;
+        } else {
+          paletteSurfaces[index - 27] = color;
+        }
+        return _json({'ok': true});
+      }
     }
     if (path.endsWith('settings/values')) {
       return _json({
         'appearance': {
           'accent': accent,
+          'palette_hex': palette,
+          'palette_surface_hex': paletteSurfaces,
           'accents': [
             {'name': 'Blue', 'hex': '#5B9BF5'},
             {'name': 'Pink', 'hex': '#F28DB2'},

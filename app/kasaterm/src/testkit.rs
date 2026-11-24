@@ -4590,7 +4590,7 @@ impl App {
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
             "custom-color-probe" if crate::verification_run() => self.probe_custom_colors(),
-            "appearance-shell-probe" | "appearance-accent-probe" if crate::verification_run() => {
+            "appearance-shell-probe" | "appearance-accent-probe" | "appearance-border-probe" if crate::verification_run() => {
                 let target = self.settings_scene.hits().iter()
                     .find(|hit| hit.target == crate::native_settings::Target::PreviewShell)
                     .map(|hit| hit.rect);
@@ -4599,13 +4599,22 @@ impl App {
                     self.settings_scene.appearance_shell.send(br#"printf '\033[36m%s%s\033[0m\n' KASA_ PTY_OK"#);
                     self.settings_scene.appearance_shell.send(b"\r");
                 }
-                if std::env::var("KASATERM_AUTOSETTINGS_ACTION").as_deref() == Ok("appearance-accent-probe") {
+                let role = match std::env::var("KASATERM_AUTOSETTINGS_ACTION").as_deref() {
+                    Ok("appearance-accent-probe") => Some(crate::native_settings::Target::AccentPreset("purple")),
+                    Ok("appearance-border-probe") => Some(crate::native_settings::Target::Setting(SettingsAction::FocusPaletteHex(5))),
+                    _ => None,
+                };
+                if let Some(role) = role {
                     self.prime_hit_areas();
                     let target = self.settings_scene.hits().iter()
-                        .find(|hit| hit.target == crate::native_settings::Target::AccentPreset("purple"))
+                        .find(|hit| hit.target == role)
                         .map(|hit| hit.rect);
                     if let Some((x, y, w, h)) = target {
                         self.native_settings_click(x + w * 0.5, y + h * 0.5);
+                    }
+                    if role == crate::native_settings::Target::Setting(SettingsAction::FocusPaletteHex(5)) {
+                        self.picker_preview(&SettingsAction::PickerHue(SettingsInput::PaletteHex(5)), (0.0, 0.0, 100.0, 20.0), (48.0, 10.0));
+                        self.picker_preview(&SettingsAction::PickerSV(SettingsInput::PaletteHex(5)), (0.0, 0.0, 100.0, 100.0), (72.0, 14.0));
                     }
                 }
             }

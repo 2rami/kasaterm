@@ -311,7 +311,7 @@ impl SettingsScene {
     pub(crate) fn field_is_current(&self, field: SettingsInput) -> bool {
         self.pending_field_focus == Some(field)
             || self.hits.iter().any(|hit| hit.target == crate::native_settings::Target::Focus(field))
-            || (field == SettingsInput::AccentHex && self.hits.iter().any(|hit| {
+            || (field.is_preview_color() && self.hits.iter().any(|hit| {
                 hit.target == crate::native_settings::Target::Setting(SettingsAction::PickerSV(field))
             }))
     }

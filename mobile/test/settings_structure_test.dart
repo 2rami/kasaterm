@@ -170,6 +170,39 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('테두리 미리보기는 강조색과 별도로 적용한다', (tester) async {
+    await phone(tester);
+    final fx = SettingsFixture();
+    addTearDown(fx.server.close);
+    await tester.pumpWidget(MaterialApp(home: LookSettingsScreen(server: fx.server)));
+    await tester.pumpAndSettle();
+
+    final preview = find.byKey(const Key('appearance-preview'));
+    final border = find.byKey(const ValueKey('appearance-color-border'));
+    final plane = find.byKey(const Key('appearance-accent-plane'));
+    final original = tester.widget<WeatherPreview>(preview).paneBorderColor;
+    await tester.tap(border);
+    await tester.pumpAndSettle();
+    await tester.tapAt(tester.getRect(plane).topLeft + const Offset(100, 32));
+    await tester.pumpAndSettle();
+    expect(tester.widget<WeatherPreview>(preview).paneBorderColor, isNot(original));
+    expect(fx.palette[5], '#455363');
+
+    await tester.tap(find.text('취소'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<WeatherPreview>(preview).paneBorderColor, original);
+    await tester.tap(border);
+    await tester.pumpAndSettle();
+    await tester.tapAt(tester.getRect(plane).topLeft + const Offset(100, 32));
+    await tester.pumpAndSettle();
+    final draft = tester.widget<WeatherPreview>(preview).paneBorderColor;
+    await tester.tap(find.text('적용'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<WeatherPreview>(preview).paneBorderColor, draft);
+    expect(fx.palette[5], isNot('#455363'));
+    expect(fx.accent, 'Blue');
+  });
+
   testWidgets('계정 없이 붙은 주소 연결은 계정·캐릭터·기기 이름·비밀 승인을 감춘다', (tester) async {
     await phone(tester);
     final server = Server(Uri.parse('http://127.0.0.1:9/'));

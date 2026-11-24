@@ -1182,10 +1182,15 @@ impl App {
                 self.settings_input = Some(SettingsInput::CustomThemeLabel);
             }
             SettingsAction::FocusPaletteHex(i) => {
+                let preview = SettingsInput::PaletteHex(i).is_preview_color();
                 if self.settings_scene.category() == SettingsCat::Appearance {
-                    self.settings_scene.appearance_jump = Some(SettingsCat::Appearance);
+                    if preview {
+                        self.settings_scene.reset_scroll();
+                    } else {
+                        self.settings_scene.appearance_jump = Some(SettingsCat::Appearance);
+                    }
                 }
-                if theme::active_custom_slug().is_none() {
+                if !preview && theme::active_custom_slug().is_none() {
                     self.settings_apply(SettingsAction::StartCustomTheme);
                 }
                 self.set_palette_edit = self.palette_hex_at(i);
@@ -2093,17 +2098,15 @@ impl App {
                         "없는 색 칸이에요".to_string(),
                     ));
                 }
-                if theme::parse_hex(&arg).is_none() {
+                let Some(rgb) = theme::parse_hex(&arg) else {
                     return Err(reject(
                         "hex_invalid",
                         "#rrggbb 꼴로 적어 주세요".to_string(),
                     ));
+                };
+                if theme::parse_hex(&self.palette_hex_at(i)) != Some(rgb) {
+                    self.commit_palette_color(i, rgb);
                 }
-                // 네이티브는 타이핑 버퍼(`set_palette_edit`)를 거쳐 굳힌다. 웹에는 그
-                // 버퍼가 없으니 완성된 값을 심고 같은 커밋을 태운다.
-                self.set_palette_edit = arg.clone();
-                self.apply_palette_edit(i);
-                self.settings_input = None;
                 Ok(self.palette_hex_at(i).eq_ignore_ascii_case(&arg))
             }
             // 화면 어디서나 색 집기. 스포이드를 띄우기만 하고 끝난다 — 사용자가
@@ -2818,6 +2821,7 @@ impl App {
         };
         #[cfg(not(target_os = "macos"))]
         let lid_away = serde_json::json!({"supported": false});
+        let palette_hex = palette_hex_list(&s, theme::active_custom_slug().as_deref());
         serde_json::json!({
             "lid_away": lid_away,
             "general": {
@@ -2882,7 +2886,8 @@ impl App {
                     .map(|(n, c)| serde_json::json!({ "name": n, "hex": hex(*c) }))
                     .collect::<Vec<_>>(),
                 "palette_keys": theme::PALETTE_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
-                "palette_hex": palette_hex_list(&s, theme::active_custom_slug().as_deref()).into_iter().take(theme::SURFACE_PALETTE_START).collect::<Vec<_>>(),
+                "palette_hex": &palette_hex[..theme::SURFACE_PALETTE_START],
+                "palette_surface_hex": &palette_hex[theme::SURFACE_PALETTE_START..],
                 "palette_surface_keys": theme::SURFACE_PALETTE_KEYS.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
                 "accent": theme::accent_name(),
                 "accents": theme::ACCENT_PRESETS
@@ -3213,6 +3218,10 @@ impl App {
             return;
         };
         self.sync_picker_hsv(c);
+        self.commit_palette_color(i, c);
+    }
+
+    fn commit_palette_color(&mut self, i: usize, c: [u8; 3]) {
         let (list, idx, _) = self.palette_edited_list(i, c);
         let key = format!("custom:{}", theme::custom_slug(&list[idx]));
         write_custom_themes(list);
@@ -3246,7 +3255,7 @@ impl App {
     /// 콜백은 `App` 을 못 들고 오므로 색만 통에 놓고 가고, 꺼내는 건 여기다.
     pub(crate) fn pump_eyedropper(&mut self) {
         let Some((field, rgb)) = crate::eyedropper::take_picked() else { return; };
-        if !field.is_color() || (field == SettingsInput::AccentHex && self.settings_input != Some(field)) { return; }
+        if !field.is_color() || (field.is_preview_color() && self.settings_input != Some(field)) { return; }
         let previous = self.set_palette_edit.clone();
         let previous_hsv = self.set_picker_hsv;
         self.set_palette_edit = theme::hex_str(rgb);
@@ -3271,7 +3280,7 @@ impl App {
     }
 
     pub(crate) fn update_color_edit(&mut self, field: SettingsInput) {
-        if field == SettingsInput::AccentHex {
+        if field.is_preview_color() {
             if let Some(rgb) = theme::parse_hex(&self.set_palette_edit) {
                 self.sync_picker_hsv(rgb);
                 self.preview_color_edit(field, rgb);
@@ -3286,7 +3295,11 @@ impl App {
         self.sync_picker_hsv(rgb);
         let hex = theme::hex_str(rgb);
         match field {
-            SettingsInput::PaletteHex(slot) => self.apply_palette_edit(slot),
+            SettingsInput::PaletteHex(slot) => {
+                if !field.is_preview_color() || theme::parse_hex(&self.palette_hex_at(slot)) != Some(rgb) {
+                    self.apply_palette_edit(slot);
+                }
+            }
             SettingsInput::AccentHex => {
                 let accent = theme::ACCENT_PRESETS.iter()
                     .find(|(_, color)| color[..3] == rgb)
@@ -3300,6 +3313,7 @@ impl App {
 
     pub(crate) fn preview_color_edit(&mut self, field: SettingsInput, rgb: [u8; 3]) {
         match field {
+            SettingsInput::PaletteHex(_) if field.is_preview_color() => {}
             SettingsInput::PaletteHex(slot) => self.preview_palette_edit(slot, rgb),
             SettingsInput::AccentHex => theme::preview_accent(rgb),
             SettingsInput::StatusbarHex(id) => self.set_statusbar.set_color(id, &theme::hex_str(rgb)),

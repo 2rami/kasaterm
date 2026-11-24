@@ -40,6 +40,27 @@ class LookSettingsScreen extends StatefulWidget {
   State<LookSettingsScreen> createState() => _LookSettingsScreenState();
 }
 
+enum _LookColorRole {
+  accent('강조색', null),
+  border('테두리', 5),
+  background('터미널 배경', 27),
+  foreground('터미널 글자', 1);
+
+  const _LookColorRole(this.label, this.slot);
+  final String label;
+  final int? slot;
+
+  Color? read(Map<String, Object?> appearance) {
+    final index = slot;
+    if (index == null) return null;
+    final values = appearance[index < 27 ? 'palette_hex' : 'palette_surface_hex'];
+    final offset = index < 27 ? index : index - 27;
+    if (values is! List || offset >= values.length) return null;
+    final value = values[offset];
+    return value is String ? parseHexColor(value) : null;
+  }
+}
+
 class _LookSettingsScreenState extends State<LookSettingsScreen> {
   Server get server => widget.server;
 
@@ -50,7 +71,7 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
   IndicatorPhase _phase = IndicatorPhase.working;
   final _previewKey = GlobalKey();
   final _controls = ScrollController();
-  HSVColor? _accentDraft;
+  (_LookColorRole, HSVColor)? _colorDraft;
   final _command = TextEditingController();
   TermSession? _shell;
   bool _openingShell = false;
@@ -147,29 +168,36 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
         ?? fallback;
   }
 
-  void _chooseAccent(Color color) {
-    if (_accentDraft == null && _controls.hasClients) _controls.jumpTo(0);
-    setState(() => _accentDraft = HSVColor.fromColor(color));
+  void _chooseColor(_LookColorRole role, Color color) {
+    if (_colorDraft == null && _controls.hasClients) _controls.jumpTo(0);
+    setState(() => _colorDraft = (role, HSVColor.fromColor(color)));
   }
 
-  Future<void> _commitAccent() async {
-    final draft = _accentDraft;
+  Future<void> _commitColor() async {
+    final draft = _colorDraft;
     if (draft == null || _pending != null) return;
-    final argb = draft.toColor().toARGB32();
-    final preset = _entries(_appearance ?? const {}, 'accents')
-        .where((entry) => parseHexColor(entry['hex'] as String?)?.toARGB32() == argb)
-        .firstOrNull?['name'];
-    if (await _apply('accent', preset as String? ?? AccentPicker.hex(draft.toColor())) && mounted) {
-      _closeAccent();
+    final (role, hsv) = draft;
+    final color = hsv.toColor();
+    final hex = AccentPicker.hex(color);
+    final slot = role.slot;
+    bool saved;
+    if (slot != null) {
+      saved = await _apply('palette-hex', '$slot', label: hex);
+    } else {
+      final preset = _entries(_appearance ?? const {}, 'accents')
+          .where((entry) => parseHexColor(entry['hex'] as String?)?.toARGB32() == color.toARGB32())
+          .firstOrNull?['name'];
+      saved = await _apply('accent', preset as String? ?? hex);
     }
+    if (saved && mounted) _closeColor();
   }
 
-  void _closeAccent() {
+  void _closeColor() {
     if (_controls.hasClients) _controls.jumpTo(0);
-    setState(() => _accentDraft = null);
+    setState(() => _colorDraft = null);
   }
 
-  Widget _shellGrid(TermSession shell, Color accent) => ListenableBuilder(
+  Widget _shellGrid(TermSession shell, Color accent, Color? background, Color? foreground) => ListenableBuilder(
     listenable: shell,
     builder: (context, _) {
       if (!shell.canSend && shell.grid.version == 0) {
@@ -180,7 +208,7 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
         version: shell.grid.version + shell.historyVersion,
         palette: TerminalPalette.forViewer(
           context, mode: phoneThemeMode.value, source: designTokens.value ?? shell.tokens, cursorOverride: accent,
-        ),
+        ).withTerminalColors(background: background, foreground: foreground),
         history: shell.history,
         historyVersion: shell.historyVersion,
         bottomTick: _bottomTick,
@@ -226,10 +254,10 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
   }
 
   /// 데스크톱에 액션을 보내고, 바뀐 색을 되받아 폰도 같은 얼굴로.
-  Future<bool> _apply(String action, String id) async {
+  Future<bool> _apply(String action, String id, {String? label}) async {
     setState(() => _pending = '$action:$id');
     try {
-      await server.settingsAction(action, id: id);
+      await server.settingsAction(action, id: id, label: label);
       final t = await server.designTokens();
       if (t != null && mounted && !server.isClosed) designTokens.value = t;
       return true;
@@ -259,8 +287,15 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
       body: LayoutBuilder(builder: (context, constraints) {
         final theme = Theme.of(context);
         final savedAccent = _accentColor(_appearance ?? const {}, theme.colorScheme.primary);
-        final draft = _accentDraft;
-        final previewAccent = draft?.toColor() ?? savedAccent;
+        final draft = _colorDraft;
+        final appearance = _appearance ?? const <String, Object?>{};
+        Color? previewColor(_LookColorRole role) {
+          if (draft != null && draft.$1 == role) return draft.$2.toColor();
+          return role == _LookColorRole.accent ? savedAccent : role.read(appearance);
+        }
+        final previewAccent = previewColor(_LookColorRole.accent) ?? savedAccent;
+        final background = previewColor(_LookColorRole.background);
+        final foreground = previewColor(_LookColorRole.foreground);
         final shell = _shell;
         final pinned = constraints.maxHeight >= (draft == null ? 430 : 300);
         final preview = Padding(
@@ -286,8 +321,11 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
                       'pixel' => 0,
                       _ => Look.radius,
                     },
-                    terminal: shell == null ? null : _shellGrid(shell, previewAccent),
-                    accentOutline: draft != null,
+                    terminal: shell == null ? null : _shellGrid(shell, previewAccent, background, foreground),
+                    accentOutline: draft?.$1 == _LookColorRole.accent,
+                    paneBackground: background,
+                    paneForeground: foreground,
+                    paneBorderColor: previewColor(_LookColorRole.border),
                     action: TextButton(
                       onPressed: _openingShell ? null : _toggleShell,
                       child: Text(shell != null ? '셸 닫기' : _openingShell ? '연결 중' : '셸 열기'),
@@ -310,7 +348,7 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
                   if (!pinned) SliverToBoxAdapter(child: preview),
                   if (_appearance case final appearance?)
                     SliverToBoxAdapter(
-                      child: _accentControls(appearance, savedAccent, draft, constraints.maxHeight < 640),
+                      child: _colorControls(appearance, savedAccent, draft, constraints.maxHeight < 640),
                     ),
                   _lookControls(),
                   WeatherSettingsControls(
@@ -327,8 +365,9 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
     ),
   );
 
-  Widget _accentControls(Map<String, Object?> appearance, Color saved, HSVColor? draft, bool compact) {
-    final selected = draft?.toColor() ?? saved;
+  Widget _colorControls(Map<String, Object?> appearance, Color saved, (_LookColorRole, HSVColor)? draft, bool compact) {
+    final selected = draft?.$1 == _LookColorRole.accent ? draft!.$2.toColor() : saved;
+    final savedRole = draft?.$1.read(appearance);
     final busy = _pending != null;
     return Padding(
       padding: const EdgeInsets.fromLTRB(Look.pagePad, 2, Look.pagePad, 6),
@@ -346,25 +385,44 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
                     name: entry['name'] as String? ?? '',
                     color: color,
                     selected: color.toARGB32() == selected.toARGB32(),
-                    onTap: busy ? null : () => _chooseAccent(color),
+                    onTap: busy ? null : () => _chooseColor(_LookColorRole.accent, color),
                   ),
               TextButton.icon(
                 key: const Key('appearance-custom-accent'),
-                onPressed: busy || draft != null ? null : () => _chooseAccent(saved),
+                onPressed: busy || draft?.$1 == _LookColorRole.accent ? null : () => _chooseColor(_LookColorRole.accent, saved),
                 icon: Icon(Icons.circle, color: selected, size: 17),
                 label: const Text('색 고르기'),
               ),
             ],
           ),
+          Wrap(
+            spacing: 6,
+            runSpacing: 4,
+            children: [
+              for (final role in _LookColorRole.values)
+                if (role.read(appearance) case final swatch?)
+                  OutlinedButton.icon(
+                    key: ValueKey('appearance-color-${role.name}'),
+                    style: OutlinedButton.styleFrom(
+                      backgroundColor: draft?.$1 == role ? Theme.of(context).colorScheme.secondaryContainer : null,
+                    ),
+                    icon: Icon(Icons.square_rounded,
+                      color: draft?.$1 == role ? draft!.$2.toColor() : swatch, size: 16),
+                    label: Text(role.label),
+                    onPressed: busy || draft?.$1 == role ? null : () => _chooseColor(role, swatch),
+                  ),
+            ],
+          ),
           if (draft != null)
             AccentPicker(
-              original: saved,
-              color: draft,
+              key: ValueKey(draft.$1),
+              original: savedRole ?? saved,
+              color: draft.$2,
               busy: busy,
               compact: compact,
-              onChanged: (next) => setState(() => _accentDraft = next),
-              onApply: _commitAccent,
-              onCancel: _closeAccent,
+              onChanged: (next) => setState(() => _colorDraft = (draft.$1, next)),
+              onApply: _commitColor,
+              onCancel: _closeColor,
             ),
         ],
       ),
