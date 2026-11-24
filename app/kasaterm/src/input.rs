@@ -1185,26 +1185,9 @@ impl App {
         // 계속 코어를 태우는 앱은 메모리와 **다른 축**이라 따로 말한다. 팬이
         // 도는 이유를 물었을 때 「메모리는 정상입니다」만 답하면 소용이 없다
         // (2026-08-27: 「안조용한데 위젯좀 잘만들어봐」).
-        // 가장 세게 태우는 하나만 말한다. 목록 순서에 기대면 안 된다 — 그 자루엔
-        // 메모리 잣대로 뽑힌 앱도 섞여 있다(2026-08-29).
-        let hog = self
-            .statusbar
-            .usage_outside
-            .iter()
-            .filter(|a| a.is_hog())
-            .max_by(|a, b| a.cpu.total_cmp(&b.cpu))
-            .cloned();
-        if let Some(a) = &hog {
-            let due = self
-                .statusbar
-                .hog_warned
-                .is_none_or(|(p, t)| p != a.pid || t.elapsed() >= std::time::Duration::from_secs(3600));
-            if due {
-                self.statusbar.hog_warned = Some((a.pid, Instant::now()));
-                self.set_toast(format!("{} 이(가) 계속 CPU 를 쓰는 중 · {:.0}%", a.name, a.cpu));
-            }
-        } else {
-            self.statusbar.hog_warned = None;
+        let sb = &mut self.statusbar;
+        if let Some(a) = hog_to_warn(&sb.usage_outside, &mut sb.hog_warned, Instant::now()) {
+            self.set_toast(format!("{} 이(가) 계속 CPU 를 쓰는 중 · {:.0}%", a.name, a.cpu));
         }
         if let Some(m) = self.statusbar.mem {
             let adv = m.advice();
@@ -4260,6 +4243,36 @@ impl AppUsage {
     }
 }
 
+/// 이번 폴에 CPU 폭주로 말할 앱. 가장 세게 태우는 하나만 말한다. 목록 순서에
+/// 기대면 안 된다 — 그 자루엔 메모리 잣대로 뽑힌 앱도 섞여 있다(2026-08-29).
+///
+/// 말할 때 지금 태우는 앱을 **모두** 말한 것으로 적는다. 코어 하나씩을 꽉
+/// 채우는 앱이 둘이면 1등이 폴마다 99.0 과 99.6 사이를 오가서, 마지막 하나만
+/// 기억하던 때는 5초마다 데스크톱 알림이 다시 떴다(2026-10-29, python 둘).
+/// 한 시간이 지났거나 처음 보는 앱이 태우기 시작하면 다시 말하고, 다 식으면
+/// 다음에 태울 때 처음처럼 말한다.
+pub(crate) fn hog_to_warn(
+    outside: &[AppUsage],
+    warned: &mut std::collections::HashMap<u32, Instant>,
+    now: Instant,
+) -> Option<AppUsage> {
+    let hogs: Vec<&AppUsage> = outside.iter().filter(|a| a.is_hog()).collect();
+    if hogs.is_empty() {
+        warned.clear();
+        return None;
+    }
+    warned.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(3600));
+    let fresh = hogs
+        .iter()
+        .filter(|a| !warned.contains_key(&a.pid))
+        .max_by(|a, b| a.cpu.total_cmp(&b.cpu))
+        .map(|a| (*a).clone())?;
+    for a in &hogs {
+        warned.insert(a.pid, now);
+    }
+    Some(fresh)
+}
+
 /// 상태줄 5초 표본 하나 — 터널·브라우저 기기·포트·사용량·물리 메모리.
 pub(crate) struct StatusSample {
     /// 이 표본을 부탁한 시각(`tunnel_checked` 와 견준다).
@@ -5493,8 +5506,10 @@ mod windows_paste_tests {
 #[cfg(test)]
 mod zoom_key_tests {
     use super::{
-        cpu_ms, current_uid, hog_polls, outside_apps, zoom_key, AppUsage, CpuTrack, Row, ZoomKey,
+        cpu_ms, current_uid, hog_polls, hog_to_warn, outside_apps, zoom_key, AppUsage, CpuTrack, Row,
+        ZoomKey,
     };
+    use std::time::Instant;
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -5627,6 +5642,32 @@ mod zoom_key_tests {
         assert!(!a(99.0, hog_polls() - 1).is_hog());
         // 1분 내내 코어 하나를 태우면 그때부터 팬 이유로 본다.
         assert!(a(99.0, hog_polls()).is_hog());
+    }
+
+    #[test]
+    fn 같이_태우는_둘은_1등이_바뀌어도_한_번만_말한다() {
+        let a = |pid: u32, cpu: f32| AppUsage {
+            pid,
+            rss: 0,
+            name: "python".into(),
+            procs: 1,
+            cpu,
+            hot: hog_polls(),
+        };
+        let mut warned = std::collections::HashMap::new();
+        let t0 = Instant::now();
+        let poll = |n: u64| t0 + std::time::Duration::from_secs(5 * n);
+        assert_eq!(hog_to_warn(&[a(1, 99.0), a(2, 99.6)], &mut warned, poll(0)).map(|h| h.pid), Some(2));
+        assert!(hog_to_warn(&[a(1, 99.6), a(2, 99.0)], &mut warned, poll(1)).is_none());
+        assert!(hog_to_warn(&[a(1, 99.0), a(2, 99.6)], &mut warned, poll(2)).is_none());
+        // 처음 보는 범인은 곧바로 말한다.
+        assert_eq!(hog_to_warn(&[a(1, 99.0), a(3, 50.0)], &mut warned, poll(3)).map(|h| h.pid), Some(3));
+        // 함께 적힌 시각(poll 3)에서 한 시간 뒤엔 같은 범인도 다시 말한다.
+        assert!(hog_to_warn(&[a(1, 99.0)], &mut warned, poll(722)).is_none());
+        assert_eq!(hog_to_warn(&[a(1, 99.0)], &mut warned, poll(723)).map(|h| h.pid), Some(1));
+        // 다 식었다가 다시 태우면 처음처럼 말한다.
+        assert!(hog_to_warn(&[], &mut warned, poll(724)).is_none());
+        assert_eq!(hog_to_warn(&[a(1, 99.0)], &mut warned, poll(725)).map(|h| h.pid), Some(1));
     }
 }
 

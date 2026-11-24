@@ -48,9 +48,9 @@ pub(crate) struct StatusbarState {
     /// 이 앱 **밖**의 앱들. 경고 구간에서만 팝오버에 펴고, 각 줄에 끄기 버튼이
     /// 붙는다. 평소에 늘 보여 줄 값은 아니다 — 답을 물었을 때만 답하면 된다.
     pub(crate) usage_outside: Vec<crate::input::AppUsage>,
-    /// 마지막으로 CPU 폭주를 말한 앱과 그 시각. 앱이 바뀌면 곧바로 다시 말한다
-    /// — 범인이 달라졌으면 닫을 것도 달라진다.
-    pub(crate) hog_warned: Option<(u32, std::time::Instant)>,
+    /// CPU 폭주를 이미 말한 앱(pid)과 그 시각. 새 범인이 오면 곧바로 다시
+    /// 말한다 — 범인이 달라졌으면 닫을 것도 달라진다. `input::hog_to_warn` 이 쓴다.
+    pub(crate) hog_warned: HashMap<u32, std::time::Instant>,
     /// 이 앱 트리 자신의 구간 사용률(%)과 그게 이어진 폴 수. 바깥 앱과 같은
     /// 잣대지만 목록에는 안 넣는다 — 자기에게 끄기 버튼을 붙일 수는 없다.
     pub(crate) usage_self: (f32, u16),
