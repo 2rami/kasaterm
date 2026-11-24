@@ -159,6 +159,7 @@ impl App {
                 && self.confirm_close.is_none()
                 && self.restore_prompt.is_none()
                 && self.character_swap_confirm.is_none()
+                && self.move_confirm.is_none()
                 && !self.account_switch_confirm.as_ref().is_some_and(|pending| {
                     pending.surface == crate::session::ConfirmSurface::Main
                 })

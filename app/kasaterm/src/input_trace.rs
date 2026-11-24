@@ -80,6 +80,7 @@ impl App {
         cover(self.confirm_close.is_some(), "confirm-close");
         cover(self.restore_prompt.is_some(), "restore-prompt");
         cover(self.character_swap_confirm.is_some(), "swap-confirm");
+        cover(self.move_confirm.is_some(), "move-confirm");
         cover(self.account_switch_confirm.is_some(), "account-confirm");
         cover(self.main_confirmation_modal(), "modal");
         cover(self.settings_room_active(), "settings");

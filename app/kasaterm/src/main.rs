@@ -5920,6 +5920,8 @@ struct App {
     account_switch_confirm: Option<session::PendingAccountSwitch>,
     /// 학생 교체 확인 카드 — 말투까지 바꾸려면 다시 띄워야 해서 먼저 묻는다.
     character_swap_confirm: Option<session::PendingCharacterSwap>,
+    /// 기기 간 끌어 이사 확인 카드 — 놓은 끌기를 붙든 채 「옮기기」를 기다린다.
+    move_confirm: Option<drag_transfer::PendingMove>,
     /// Per-frame hit rects for the terminal-pane right-side action cluster
     /// (new-terminal / web / split-v / split-h). Re-built each chrome
     /// paint alongside `image_btn_rects`; the mouse handler matches a
@@ -6392,6 +6394,7 @@ impl App {
             inline_web: None,
             account_switch_confirm: None,
             character_swap_confirm: None,
+            move_confirm: None,
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,

@@ -3696,6 +3696,10 @@ impl ApplicationHandler<UserEvent> for App {
                             .as_ref()
                             .is_some_and(|pending| pending.rects.iter().any(|(_, r)| inside(r)))
                         || self
+                            .move_confirm
+                            .as_ref()
+                            .is_some_and(|pending| pending.rects.iter().any(|(_, r)| inside(r)))
+                        || self
                             .account_switch_confirm
                             .as_ref()
                             .filter(|pending| {
@@ -4912,6 +4916,23 @@ impl ApplicationHandler<UserEvent> for App {
                         });
                         if let Some(btn) = hit {
                             self.character_swap_pick(btn);
+                            window.request_redraw();
+                        }
+                    }
+                    return;
+                }
+                // 기기 간 이사 확인 — 같은 「모든 클릭을 삼키는」 모달.
+                if self.move_confirm.is_some() {
+                    if matches!(state, ElementState::Pressed) {
+                        let (cx, cy) = self.cursor_px;
+                        let hit = self.move_confirm.as_ref().and_then(|p| {
+                            p.rects
+                                .iter()
+                                .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                                .map(|(b, _)| *b)
+                        });
+                        if let Some(btn) = hit {
+                            self.move_confirm_pick(btn);
                             window.request_redraw();
                         }
                     }
@@ -7045,6 +7066,18 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // 기기 간 이사 확인: Enter·Esc 모두 취소 — 카드를 못 보고 pane 에 치던 Enter 가
+                // 대화를 다른 기계로 보내면 안 된다. 나머지 키는 삼킨다.
+                if self.move_confirm.is_some() {
+                    if matches!(event.state, ElementState::Pressed) {
+                        use winit::keyboard::{Key, NamedKey};
+                        if matches!(event.logical_key, Key::Named(NamedKey::Enter | NamedKey::Escape)) {
+                            self.move_confirm_pick(crate::drag_transfer::MoveBtn::Cancel);
+                            window.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 // 학생 교체 확인: Enter = 다시 띄우기, Esc = 취소. 나머지는 삼킨다 —
                 // 스크림 뒤 pane 으로 새면 확인 중에 글자가 들어간다.
                 if self.character_swap_confirm.is_some() {
@@ -8016,6 +8049,7 @@ impl App {
     pub(crate) fn main_confirmation_modal(&self) -> bool {
         self.confirm_close.is_some() || self.restore_prompt.is_some()
             || self.character_swap_confirm.is_some()
+            || self.move_confirm.is_some()
             || self.account_switch_confirm.as_ref().is_some_and(|pending| {
                 pending.surface == crate::session::ConfirmSurface::Main
             })

@@ -2291,6 +2291,7 @@ impl App {
         )> = Vec::new();
         let mut swap_confirm_hits: Vec<(crate::session::CharacterSwapBtn, (f32, f32, f32, f32))> =
             Vec::new();
+        let mut move_confirm_hits: Vec<(crate::drag_transfer::MoveBtn, (f32, f32, f32, f32))> = Vec::new();
         let mut restore_btn_hits: Vec<(RestoreBtn, (f32, f32, f32, f32))> = Vec::new();
         let restore_toast_visible = self.restore_applying.is_some() || self.restore_progress.is_some();
         let restore_bottom_reserved = self.bottom_reserve_h();
@@ -4885,6 +4886,17 @@ impl App {
                     p,
                 );
             }
+            if let Some(p) = self.move_confirm.as_ref() {
+                use crate::drag_transfer::MoveBtn;
+                move_confirm_hits = paint_confirm_card(
+                    g,
+                    (win_px.0 / scale, win_px.1 / scale),
+                    self.cursor_px,
+                    &p.title,
+                    &p.lines,
+                    &[("옮기기", MoveBtn::Move, Some(theme::accent())), ("취소", MoveBtn::Cancel, None)],
+                );
+            }
             // File-tree drag ghost — a small pill trailing the cursor with the
             // dragged item's name, drawn last so it floats over everything.
             if let Some(drag) = self.file_tree.drag.as_ref() {
@@ -5035,6 +5047,11 @@ impl App {
         if let Some(p) = self.character_swap_confirm.as_mut() {
             if !swap_confirm_hits.is_empty() {
                 p.rects = swap_confirm_hits;
+            }
+        }
+        if let Some(p) = self.move_confirm.as_mut() {
+            if !move_confirm_hits.is_empty() {
+                p.rects = move_confirm_hits;
             }
         }
         self.confirm_btn_rects = confirm_btn_hits;
@@ -6288,7 +6305,9 @@ pub(crate) fn paint_confirm_card<B: Copy>(
         .map(|l| g.measure_chrome_text(l, 13.0, false))
         .fold(0.0_f32, f32::max);
     let card_w = (title_w.max(body_w) + pad * 2.0).clamp(380.0, (win_w - 48.0).max(380.0));
-    let card_h = 104.0 + lines.len() as f32 * line_h;
+    // 마지막 설명 줄과 단추 사이에 14px 를 둔다. 104 로는 그 줄 아래가 단추 위보다 2px 내려가,
+    // 줄이 길면 글자가 「취소」 밑으로 들어갔다(2026-11-24 이사 확인 카드).
+    let card_h = 120.0 + lines.len() as f32 * line_h;
     let cx0 = ((win_w - card_w) / 2.0).round();
     let cy0 = ((win_h - card_h) / 2.0).round();
     panel_rect_outlined(

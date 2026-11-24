@@ -334,17 +334,23 @@ struct Mailbox {
     previews: HashMap<DragEndpoint, HeldPreview>,
     /// 끝난 원격 자리 이동. GUI 가 미리보기를 거두거나 거울 칸을 옮겨 앉힌다.
     outcomes: Vec<Outcome>,
-    /// 「옮길까요?」 시트가 떠 있는 이사. 답이 오면 `drain_drag_transfers` 가 잇는다.
-    asking: Option<Asking>,
-    /// 시트의 답 — (고정 번호, 옮기기를 눌렀나). 완료 처리기가 둔다.
-    answered: Option<(u64, bool)>,
 }
 
-struct Asking {
+/// 기기 간 이사 확인 카드 — 놓은 끌기를 붙든 채 단추를 기다린다. 학생 교체 카드와 같은 층·모양이다.
+pub(crate) struct PendingMove {
     ticket: u64,
     source: DragEndpoint,
     destination: Destination,
     toward: String,
+    pub(crate) title: String,
+    pub(crate) lines: Vec<String>,
+    pub(crate) rects: Vec<(MoveBtn, (f32, f32, f32, f32))>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MoveBtn {
+    Move,
+    Cancel,
 }
 
 struct HeldPreview {
@@ -563,14 +569,14 @@ fn refusal(ticket: u64, destination: &Destination) -> Option<String> {
     }
 }
 
-/// 「옮길까요?」 시트의 제목과 설명. 이름을 모르면 대화라고만 한다.
-fn move_question(name: Option<&str>, from: &str, to: &str, new_room: bool) -> (String, String) {
+/// 「옮길까요?」 카드의 제목과 설명 줄. 이름을 모르면 대화라고만 한다.
+fn move_question(name: Option<&str>, from: &str, to: &str, new_room: bool) -> (String, Vec<String>) {
     let title = match name.map(str::trim).filter(|name| !name.is_empty()) {
         Some(name) => format!("{name}{} 옮길까요?", crate::chrome::josa(name, "을", "를")),
         None => "이 대화를 옮길까요?".to_string(),
     };
     let room = if new_room { " · 새 방" } else { "" };
-    (title, format!("{from} → {to}{room}\n하던 작업이 있으면 끝난 뒤 옮겨요."))
+    (title, vec![format!("{from} → {to}{room}"), "하던 작업이 있으면 끝난 뒤 옮겨요.".into()])
 }
 
 fn remote_drop_command(
@@ -1036,22 +1042,18 @@ impl App {
 
     /// 기기 간 이사는 놓은 뒤 한 번 묻는다 — 사이드바를 훑다 손이 미끄러진 끌기가 대화를
     /// 다른 기계로 보내 버리면 되돌리는 데 이사 한 번이 더 든다(2026-11-24 지시). 어차피
-    /// 거절될 끌기는 묻지 않고 바로 까닭을 알린다. 시트가 없는 환경(리눅스)은 묻지 않는다.
+    /// 거절될 끌기는 묻지 않고 바로 까닭을 알린다.
     fn ask_drag_transfer(&mut self, source: DragEndpoint, ticket: u64, destination: Destination, toward: String) {
         if let Some(reason) = refusal(ticket, &destination) {
             drop_pin(Some(ticket));
             self.set_toast(reason);
             return;
         }
-        if mailbox().lock().unwrap().asking.is_some() {
+        if self.move_confirm.is_some() {
             drop_pin(Some(ticket));
             self.set_toast("앞선 이사를 옮길지 아직 정하지 않았어요".into());
             return;
         }
-        let Some(window) = self.window.as_ref() else {
-            self.queue_drag_transfer(source, ticket, destination, toward);
-            return;
-        };
         let name = match &source {
             DragEndpoint::LocalPane(pane) => self.pane_character_if_known(pane),
             DragEndpoint::RemotePane { label, pane, .. } => kasa_device::machines::cached_pane(label, pane)
@@ -1068,40 +1070,24 @@ impl App {
             &destination,
             Destination::Machine(_) | Destination::Fixed(Arrival { landing: Landing::NewRoom, .. })
         );
-        let (title, info) = move_question(name.as_deref(), &device(source.host_label()), &device(&toward), new_room);
-        let spec = crate::native_settings::device_account::op::SheetSpec {
-            title: &title,
-            info: &info,
-            body: None,
-            buttons: &["옮기기", "취소"],
-            primary_enabled: true,
-        };
-        let proxy = self.proxy.clone();
-        let handle = crate::native_settings::device_account::op::decision_sheet(window, &spec, move |index| {
-            mailbox().lock().unwrap().answered = Some((ticket, index == Some(0)));
-            let _ = proxy.send_event(UserEvent::Redraw);
-        });
-        match handle {
-            Some(handle) => {
-                mailbox().lock().unwrap().asking = Some(Asking { ticket, source, destination, toward });
-                self.move_sheet_rig(handle);
-            }
-            None => self.queue_drag_transfer(source, ticket, destination, toward),
+        let (title, lines) = move_question(name.as_deref(), &device(source.host_label()), &device(&toward), new_room);
+        self.move_confirm = Some(PendingMove { ticket, source, destination, toward, title, lines, rects: Vec::new() });
+        self.chrome_dirty = true;
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
         }
     }
 
-    /// 검증 실행이 띄운 「옮길까요?」 시트를 찍고 `KASATERM_MOVE_SHEET_PRESS` 단추(0 옮기기, 1 취소)를 누른다 —
-    /// 사람 누름과 같은 완료 처리기를 탄다.
-    fn move_sheet_rig(&self, handle: usize) {
-        if !crate::verification_run() {
+    /// 카드에서 고른 결과. 취소는 놓은 끌기를 버리기만 한다.
+    pub(crate) fn move_confirm_pick(&mut self, btn: MoveBtn) {
+        let Some(pending) = self.move_confirm.take() else {
             return;
+        };
+        match btn {
+            MoveBtn::Move => self.queue_drag_transfer(pending.source, pending.ticket, pending.destination, pending.toward),
+            MoveBtn::Cancel => drop_pin(Some(pending.ticket)),
         }
-        if let Ok(path) = std::env::var("KASATERM_MOVE_SHEET_SHOT") {
-            crate::native_settings::device_account::op::shot_alert(handle, &path);
-        }
-        if let Some(index) = std::env::var("KASATERM_MOVE_SHEET_PRESS").ok().and_then(|v| v.trim().parse().ok()) {
-            crate::native_settings::device_account::op::press_sheet(handle, index);
-        }
+        self.chrome_dirty = true;
     }
 
     fn queue_drag_transfer(
@@ -1164,23 +1150,6 @@ impl App {
     }
 
     pub(crate) fn drain_drag_transfers(&mut self) {
-        let answer = {
-            let mut state = mailbox().lock().unwrap();
-            match (state.asking.as_ref().map(|asking| asking.ticket), state.answered) {
-                (Some(asking), Some((ticket, go))) if asking == ticket => {
-                    state.answered = None;
-                    state.asking.take().map(|asking| (asking, go))
-                }
-                _ => None,
-            }
-        };
-        if let Some((asking, go)) = answer {
-            if go {
-                self.queue_drag_transfer(asking.source, asking.ticket, asking.destination, asking.toward);
-            } else {
-                drop_pin(Some(asking.ticket));
-            }
-        }
         let (messages, refreshed_moves, moved, outcomes) = {
             let mut state = mailbox().lock().unwrap();
             let outcomes: Vec<(Outcome, Option<HeldPreview>)> = std::mem::take(&mut state.outcomes)
@@ -1228,13 +1197,13 @@ mod tests {
     fn the_move_question_names_the_student_and_both_devices() {
         assert_eq!(
             move_question(Some("미도리"), "이 기기", "맥미니", true),
-            ("미도리를 옮길까요?".into(), "이 기기 → 맥미니 · 새 방\n하던 작업이 있으면 끝난 뒤 옮겨요.".into())
+            ("미도리를 옮길까요?".into(), vec!["이 기기 → 맥미니 · 새 방".into(), "하던 작업이 있으면 끝난 뒤 옮겨요.".into()])
         );
         assert_eq!(move_question(Some("호시노"), "맥미니", "이 기기", false).0, "호시노를 옮길까요?");
         assert_eq!(move_question(Some("유우카"), "맥미니", "이 기기", false).0, "유우카를 옮길까요?");
         assert_eq!(move_question(Some("아론"), "맥미니", "이 기기", false).0, "아론을 옮길까요?");
         assert_eq!(move_question(Some(" "), "맥미니", "이 기기", false).0, "이 대화를 옮길까요?");
-        assert_eq!(move_question(None, "맥미니", "집 PC", false).1, "맥미니 → 집 PC\n하던 작업이 있으면 끝난 뒤 옮겨요.");
+        assert_eq!(move_question(None, "맥미니", "집 PC", false).1[0], "맥미니 → 집 PC");
     }
 
     #[test]
