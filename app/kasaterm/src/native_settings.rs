@@ -6800,8 +6800,14 @@ fn seg_row(
 ) {
     let label_w = g.measure_chrome_text(&crate::native_strings::text(label), 13.0, false)
         + crate::native_controls::CONTROL_PADDING_X + 1.0;
-    let controls_w = cells.iter().map(|(label, active, _)|
-        g.measure_chrome_text(&crate::native_strings::text(label), 13.0, *active) + 20.0).sum::<f32>() + 4.0;
+    let controls_w = if s.cat == SettingsCat::Weather {
+        cells.iter().map(|&(label, on, ref action)| weather_choice_width(g, label, on, action)).sum::<f32>()
+            + WEATHER_CHOICE_GAP * cells.len().saturating_sub(1) as f32
+    } else {
+        cells.iter().map(|(label, active, _)| {
+            g.measure_chrome_text(&crate::native_strings::text(label), 13.0, *active) + 20.0
+        }).sum::<f32>() + 4.0
+    };
     let stacked = label_w + controls_w + 13.0 > w;
     if stacked {
         row_label(g, x, y, label);
@@ -6866,12 +6872,97 @@ fn toggle_row_hint(
     for(i,(line,_))in labels.iter().enumerate(){draw_text(g,x+inset,ty+i as f32*20.0,line,13.0,theme::text(),false);}
     for(i,(line,_))in hints.iter().enumerate(){draw_text(g,x+inset,ty+labels.len() as f32*20.0+i as f32*18.0,line,11.0,theme::text_dim(),false);}
     g.rect(x+inset,*y+height-1.0,(w-inset*2.0).max(0.0),1.0,theme::with_alpha(theme::border(),45));
-    let hover=contains(rect,s.cursor);let toggle=(x+w-inset-40.0,*y+(height-22.0)/2.0,40.0,22.0);
-    let fill=if on{theme::accent()}else if hover{theme::surface_active()}else{theme::surface_hover()};
-    pill_rect(g,toggle.0,toggle.1,toggle.2,toggle.3,fill);
-    stroke_round(g,toggle,11.0*theme::roundness(),theme::with_alpha(theme::edge_on(fill),100));
-    circle_rect(g,toggle.0+if on{21.0}else{3.0},toggle.1+3.0,16.0,theme::control_knob(fill));
+    let hover = contains(rect, s.cursor);
+    if s.cat == SettingsCat::Weather {
+        let toggle = (x + w - inset - 44.0, *y + (height - 26.0) / 2.0, 44.0, 26.0);
+        let fill = if on { theme::accent() } else { theme::lerp(theme::bg(), theme::text(), 0.18) };
+        pill_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, fill);
+        circle_rect(g, toggle.0 + if on { 21.0 } else { 3.0 }, toggle.1 + 3.0, 20.0, [255; 4]);
+    } else {
+        let toggle = (x+w-inset-40.0,*y+(height-22.0)/2.0,40.0,22.0);
+        let fill = if on {theme::accent()} else if hover {theme::surface_active()} else {theme::surface_hover()};
+        pill_rect(g,toggle.0,toggle.1,toggle.2,toggle.3,fill);
+        stroke_round(g,toggle,11.0*theme::roundness(),theme::with_alpha(theme::edge_on(fill),100));
+        circle_rect(g,toggle.0+if on{21.0}else{3.0},toggle.1+3.0,16.0,theme::control_knob(fill));
+    }
     register_clipped(g,hits,Target::Setting(action),rect,HitCursor::Pointer);g.hover_pointer|=hover;*y+=height;
+}
+
+const WEATHER_CHOICE_GAP: f32 = 4.0;
+
+fn weather_control_fill() -> [u8; 4] {
+    theme::lerp(theme::bg(), theme::text(), 0.075)
+}
+
+fn weather_edge_bit(action: &SettingsAction) -> Option<u8> {
+    if let SettingsAction::Weather(crate::weather::model::Change::StateEdge(_, bit)) = action {
+        Some(*bit)
+    } else {
+        None
+    }
+}
+
+fn weather_choice_width(g: &mut gpu::GpuRenderer, label: &str, on: bool, action: &SettingsAction) -> f32 {
+    let text = g.measure_chrome_text(&crate::native_strings::text(label), 13.0, on);
+    text + if weather_edge_bit(action).is_some() { 34.0 } else { 22.0 }
+}
+
+fn paint_weather_edge_glyph(g: &mut gpu::GpuRenderer, x: f32, y: f32, bit: u8, ink: [u8; 4]) {
+    let rect = (x, y, 15.0, 11.0);
+    stroke_round(g, rect, 2.0, theme::with_alpha(ink, 105));
+    let edge = match bit {
+        1 => (x + 3.0, y, 9.0, 2.0),
+        4 => (x + 3.0, y + 9.0, 9.0, 2.0),
+        8 => (x, y + 3.0, 2.0, 5.0),
+        _ => (x + 13.0, y + 3.0, 2.0, 5.0),
+    };
+    g.rect(edge.0, edge.1, edge.2, edge.3, ink);
+}
+
+fn weather_choices(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    rect: Rect,
+    cells: &[(&str, bool, SettingsAction)],
+) {
+    let (x, y, w, h) = rect;
+    let widths: Vec<f32> = cells.iter().map(|(label, on, action)| weather_choice_width(g, label, *on, action)).collect();
+    let content_w = widths.iter().sum::<f32>();
+    let gaps = WEATHER_CHOICE_GAP * (cells.len() - 1) as f32;
+    if w <= gaps { return; }
+    let scale = ((w - gaps) / content_w).min(1.0);
+    let mut left = x + w - gaps - content_w * scale;
+    for ((label, selected, action), width) in cells.iter().zip(widths) {
+        let width = width * scale;
+        let rect = (left, y, width, h);
+        let hover = contains(rect, s.cursor);
+        let fill = if *selected {
+            theme::lerp(theme::bg(), theme::accent(), 0.19)
+        } else if hover {
+            theme::surface_hover()
+        } else {
+            weather_control_fill()
+        };
+        let ink = theme::enforce_contrast_at(if *selected { theme::accent() } else { theme::text_dim() }, fill, 4.5);
+        let radius = theme::radius_md().min(h * 0.5);
+        round_rect(g, left, y, width, h, radius, fill);
+        if *selected {
+            stroke_round(g, rect, radius, theme::with_alpha(theme::accent(), 122));
+        }
+        let glyph = weather_edge_bit(action).filter(|_| width >= 36.0);
+        let label_x = left + if glyph.is_some() { 19.0 } else { 0.0 };
+        let label_width = width - (label_x - left);
+        if let Some(bit) = glyph {
+            paint_weather_edge_glyph(g, left + 6.0, y + (h - 11.0) / 2.0, bit, ink);
+        }
+        let shown = fit(g, label, label_width - 8.0, 13.0, *selected);
+        g.centered_chrome_text((label_x, y, label_width, h), &shown,
+            gpu::DrawOpts { font_size: 13.0, color: ink, bold: *selected, italic: false });
+        register_clipped(g, hits, Target::Setting(action.clone()), rect, HitCursor::Pointer);
+        g.hover_pointer |= hover;
+        left += width + WEATHER_CHOICE_GAP;
+    }
 }
 
 fn segmented(
@@ -6884,6 +6975,10 @@ fn segmented(
     cells: &[(&str, bool, SettingsAction)],
 ) {
     if cells.is_empty() || w <= 4.0 {
+        return;
+    }
+    if s.cat == SettingsCat::Weather {
+        weather_choices(g, s, hits, (x, y, w, CTL_H), cells);
         return;
     }
     // 목업(플랫): 칸 너비는 글자에 맞추고 상자는 오른쪽 끝에 붙는다. 채움 없이
@@ -7106,11 +7201,28 @@ fn dropdown_row(
     };
     let open = s.dropdown == Some(id);
     let hover = contains(rect, s.cursor);
-    crate::native_controls::field(g,rect,open);
-    let shown=fit(g,value,(rect.2-42.0).max(0.0),13.0,false);
+    let is_weather = s.cat == SettingsCat::Weather;
+    if is_weather {
+        let radius = theme::radius_md();
+        round_rect(g, rect.0, rect.1, rect.2, rect.3, radius,
+            if hover { theme::surface_hover() } else { weather_control_fill() });
+        if open { stroke_round(g, rect, radius, theme::with_alpha(theme::accent(), 145)); }
+    } else {
+        crate::native_controls::field(g,rect,open);
+    }
+    let icon = if let DropdownId::WeatherCondition(phase) = id {
+        s.weather.indicator(phase).weather.map(weather_icon)
+    } else {
+        None
+    };
+    if let Some(icon) = icon {
+        g.queue_icon(icon, rect.0 + 10.0, rect.1 + (rect.3 - 16.0) / 2.0, 16.0, theme::text_dim());
+    }
+    let pad = if icon.is_some() { 34.0 } else { 12.0 };
+    let shown=fit(g,value,(rect.2 - pad - 30.0).max(0.0),13.0,false);
     let m=g.chrome_text_metrics(&shown,13.0,false);
     let (_,ty)=m.centered_origin(rect,g.scale());
-    draw_text(g,rect.0+12.0,ty,&shown,13.0,theme::text(),false);
+    draw_text(g,rect.0+pad,ty,&shown,13.0,theme::text(),false);
     g.queue_icon(if open {"chevron-up"}else{"chevron-down"},rect.0+rect.2-25.0,rect.1+(rect.3-14.0)/2.0,14.0,theme::text_dim());
     register_clipped(g, hits, Target::Dropdown(id), rect, HitCursor::Pointer);
     g.hover_pointer |= hover;
@@ -7244,17 +7356,30 @@ fn stepper_row(
     minus: SettingsAction,
     plus: SettingsAction,
 ) {
-    let bw=CTL_H;let vw=48.0;let control_w=bw*2.0+vw;
+    let weather = s.cat == SettingsCat::Weather;
+    let bw = CTL_H;
+    let vw = if weather { (g.measure_chrome_text(value, 13.0, false) + 22.0).max(48.0) } else { 48.0 };
+    let gap = if weather { WEATHER_CHOICE_GAP } else { 0.0 };
+    let control_w = bw * 2.0 + vw + gap * 2.0;
     flat_row(g,x,*y,w,label,"",(w-control_w-12.0).max(0.0));
     let boxr=(x+w-control_w,*y+(ROW_H-CTL_H)/2.0,control_w,CTL_H);
-    crate::native_controls::field(g,boxr,false);
-    for (rect,sign,action) in [((boxr.0,boxr.1,bw,CTL_H),"−",minus),((boxr.0+bw+vw,boxr.1,bw,CTL_H),"+",plus)] {
+    if weather {
+        round_rect(g, boxr.0 + bw + gap, boxr.1, vw, CTL_H, theme::radius_md(), weather_control_fill());
+    } else {
+        crate::native_controls::field(g,boxr,false);
+    }
+    for (rect,sign,action) in [((boxr.0,boxr.1,bw,CTL_H),"−",minus),((boxr.0+bw+vw+gap*2.0,boxr.1,bw,CTL_H),"+",plus)] {
         let hover=contains(rect,s.cursor);
-        if hover {round_rect(g,rect.0,rect.1,rect.2,rect.3,ctrl_radius(),theme::surface_hover());}
+        if weather {
+            round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md(),
+                if hover { theme::surface_active() } else { weather_control_fill() });
+        } else if hover {
+            round_rect(g,rect.0,rect.1,rect.2,rect.3,ctrl_radius(),theme::surface_hover());
+        }
         g.centered_chrome_text(rect,sign,gpu::DrawOpts{font_size:13.0,color:theme::text(),bold:false,italic:false});
         register_clipped(g,hits,Target::Setting(action),rect,HitCursor::Pointer);g.hover_pointer|=hover;
     }
-    g.centered_chrome_text((boxr.0+bw,boxr.1,vw,CTL_H),value,gpu::DrawOpts{font_size:13.0,color:theme::text(),bold:false,italic:false});
+    g.centered_chrome_text((boxr.0+bw+gap,boxr.1,vw,CTL_H),value,gpu::DrawOpts{font_size:13.0,color:theme::text(),bold:false,italic:false});
     *y+=ROW_H;
 }
 

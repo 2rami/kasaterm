@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../look.dart';
 import '../screens/controls.dart';
 import 'card.dart';
+import 'controls.dart';
 import 'model.dart';
 import 'scene.dart';
 import 'store.dart';
@@ -144,33 +145,25 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
         controller: widget.controller,
         padding: const EdgeInsets.fromLTRB(0, 0, 0, Look.groupGap),
         children: [
-          SwitchListTile(
-            title: const Text('날씨'),
+          WeatherToggle(
+            title: const Text('날씨 켜기'),
             secondary: const _OpenUmbrella(size: 22),
             value: s.enabled,
             onChanged: (v) => set(s.copyWith(enabled: v)),
           ),
-          _Title('날씨 표현'),
-          _Pad(
-            SegmentedButton<RainStyle>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: RainStyle.liquid, label: Text('리퀴드 비')),
-                ButtonSegment(value: RainStyle.showers, label: Text('작업 날씨')),
-              ],
-              selected: {s.style},
-              onSelectionChanged: (v) => set(s.copyWith(style: v.first)),
-            ),
-          ),
+          _Pad(WeatherChoices(
+            options: const [(RainStyle.liquid, '리퀴드 비'), (RainStyle.showers, '작업 날씨')],
+            selected: {s.style},
+            onPressed: (style) => set(s.copyWith(style: style)),
+          )),
           Padding(
             padding: const EdgeInsets.fromLTRB(Look.pagePad, 12, Look.pagePad, 0),
             child: _WeatherPreview(settings: s, phase: _phase),
           ),
           if (s.style == RainStyle.showers) ...[
             _Title('상태'),
-            _Pad(DropdownButton<IndicatorPhase>(
+            _Pad(WeatherPick(
               value: _phase,
-              isExpanded: true,
               items: [
                 for (final phase in IndicatorPhase.values) DropdownMenuItem(value: phase, child: Text(phase.label)),
               ],
@@ -179,20 +172,20 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
             _IndicatorControls(rule: s.indicator(_phase), onChanged: (rule) {
               set(s.copyWith(indicators: {...s.indicators, _phase: rule}));
             }),
-            SwitchListTile(
+            WeatherToggle(
               title: const Text('표면에 물방울 맺힘'), value: s.beads,
               onChanged: (v) => set(s.copyWith(beads: v)),
             ),
           ],
           _Title(s.style == RainStyle.showers ? '효과 강도' : '비 양'),
-          _Pad(
-            SegmentedButton<RainAmount>(
-              showSelectedIcon: false,
-              segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(s.style == RainStyle.liquid ? a.label : const ['없음', '약하게', '보통', '강하게'][a.index]))],
-              selected: {s.amount},
-              onSelectionChanged: (v) => set(s.copyWith(amount: v.first)),
-            ),
-          ),
+          _Pad(WeatherChoices(
+            options: [
+              for (final a in RainAmount.values)
+                (a, s.style == RainStyle.liquid ? a.label : const ['없음', '약하게', '보통', '강하게'][a.index]),
+            ],
+            selected: {s.amount},
+            onPressed: (amount) => set(s.copyWith(amount: amount)),
+          )),
           _Title('바람'),
           _Slider(
             label: '방향',
@@ -229,7 +222,7 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
               ),
             _Title('효과'),
             for (final e in Effect.values)
-              SwitchListTile(title: Text(e.label), value: s.has(e), onChanged: (v) => set(s.withEffect(e, v))),
+              WeatherToggle(title: Text(e.label), value: s.has(e), onChanged: (v) => set(s.withEffect(e, v))),
             _Title('젖는 시간'),
             _Slider(
               label: '',
@@ -241,7 +234,7 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
               onChanged: (v, commit) => weather.set(s.copyWith(rewetSecs: _rewet[v.round()]), commit: commit),
             ),
             _Title('학생 상태 날씨'),
-            SwitchListTile(
+            WeatherToggle(
               title: const Text('상태마다 비 양'),
               subtitle: const Text('비 양만 바꾸고 「어디에」는 그대로 따른다'),
               value: s.byStatus,
@@ -256,17 +249,16 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
                   ),
                 ),
                 _Pad(
-                  SegmentedButton<RainAmount>(
-                    showSelectedIcon: false,
-                    segments: [for (final a in RainAmount.values) ButtonSegment(value: a, label: Text(a.label))],
+                  WeatherChoices(
+                    options: [for (final a in RainAmount.values) (a, a.label)],
                     selected: {s.moodAmount(m)},
-                    onSelectionChanged: (v) => set(s.withMood(m, v.first)),
+                    onPressed: (amount) => set(s.withMood(m, amount)),
                   ),
                 ),
               ],
           ],
           _Title('접근성'),
-          SwitchListTile(
+          WeatherToggle(
             title: const Text('OS 설정 무시'),
             subtitle: Text(
               '「동작 줄이기」에서는 날씨가 멈추고, 「투명도 줄이기」에서는 날씨를 숨겨요.'
@@ -276,7 +268,7 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
             onChanged: (v) => set(s.copyWith(ignoreOs: v)),
           ),
           _Title('동기화'),
-          SwitchListTile(
+          WeatherToggle(
             title: const Text('날씨는 기기마다'),
             subtitle: const Text('켜면 이 폰만 따로 고른다(배터리). 끄면 계정으로 다른 기기와 같이 맞춘다'),
             value: weather.perDevice.value,
@@ -298,7 +290,7 @@ class _Title extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(Look.pagePad, Look.groupGap, Look.pagePad, Look.groupTitleGap),
+    padding: const EdgeInsets.fromLTRB(Look.pagePad, 15, Look.pagePad, 6),
     child: Text(
       text,
       style: TextStyle(
@@ -505,15 +497,15 @@ class _IndicatorControls extends StatelessWidget {
   const _IndicatorControls({required this.rule, required this.onChanged});
   final StateIndicator rule;
   final ValueChanged<StateIndicator> onChanged;
-  static const sides = [('위', 1), ('아래', 4), ('왼쪽', 8), ('오른쪽', 2)];
+  static const sides = [(1, '위'), (4, '아래'), (8, '왼쪽'), (2, '오른쪽')];
 
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       const _Title('날씨 효과'),
-      _Pad(DropdownButton<String>(
-        value: rule.weather?.name ?? '', isExpanded: true, menuMaxHeight: 360,
+      _Pad(WeatherPick(
+        value: rule.weather?.name ?? '',
         items: [for (final c in [null, ...WeatherCondition.values])
           DropdownMenuItem(value: c?.name ?? '', child: Row(children: [
             _conditionSymbol(c, 19, Theme.of(context).colorScheme.onSurfaceVariant),
@@ -529,12 +521,12 @@ class _IndicatorControls extends StatelessWidget {
         },
       )),
       const _Title('프로세스바 위치'),
-      _Pad(Wrap(spacing: 8, children: [
-        for (final (label, bit) in sides)
-          FilterChip(label: Text(label), selected: rule.edges & bit != 0, onSelected: (_) {
-            onChanged(StateIndicator(weather: rule.weather, edges: rule.edges ^ bit));
-          }),
-      ])),
+      _Pad(WeatherChoices(
+        options: sides,
+        selected: {for (final (side, _) in sides) if (rule.edges & side != 0) side},
+        symbol: WeatherEdgeGlyph.new,
+        onPressed: (side) => onChanged(StateIndicator(weather: rule.weather, edges: rule.edges ^ side)),
+      )),
     ],
   );
 }
