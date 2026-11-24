@@ -7599,15 +7599,8 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// 한도에 걸렸다(2026-11-16).
 pub const SWITCH_ROOM: f32 = 5.0;
 
-/// 위 차례 계정으로 돌아가려면 기준보다 이만큼(%p) 여유가 있어야 한다. 기준 바로 아래에서
-/// 돌아가면 곧 다시 넘어 두 계정을 오간다.
-pub const SWITCH_BACK_MARGIN: f32 = 20.0;
-
-/// 옮겨 갈 계정과 그것이 위 차례로 돌아가는 것인지. `slots` 는 사람이 정한 차례로 늘어놓은,
-/// 최신 사용량을 아는 로그인 슬롯(지금 계정 포함)과 그 사용률이다. 지금 계정이 기준을 넘었으면
-/// 차례상 가장 위의 여유 있는 계정, 넘지 않았어도 지금보다 위 차례에 넉넉히 여유가 생긴 계정이
-/// 있으면 그 계정이다(위 계정의 5시간 창이 풀렸을 때). 쿨다운이 남은 슬롯은 가지 않는다 —
-/// 갈 곳이 없는데 옮기면 멀쩡한 계정에서 소진된 계정으로 내려앉는다.
+/// 현재 계정이 기준에 닿으면 최신 사용량을 아는 로그인 계정 중 차례상 가장 위의
+/// 여유 있는 슬롯을 고른다. 계정 차례는 한도가 찬 뒤 다음 슬롯을 정하는 데 쓴다.
 pub fn pick_account_by_order(
     current: &str,
     current_pct: f32,
@@ -7615,19 +7608,16 @@ pub fn pick_account_by_order(
     threshold: f32,
     cooldowns: &std::collections::HashMap<String, u64>,
     now: u64,
-) -> Option<(String, bool)> {
-    let open = |(id, pct): &(String, f32)| {
-        !id.is_empty() && id != current && cooldowns.get(id).is_none_or(|&t| t <= now)
-            && account_has_capacity(*pct, threshold) && *pct <= threshold - SWITCH_ROOM
-    };
-    if current_pct >= threshold {
-        return slots.iter().find(|slot| open(slot)).map(|(id, _)| (id.clone(), false));
+) -> Option<String> {
+    if !current_pct.is_finite() || current_pct < threshold {
+        return None;
     }
-    let here = slots.iter().position(|(id, _)| id == current)?;
-    slots[..here]
-        .iter()
-        .find(|slot| open(slot) && slot.1 <= threshold - SWITCH_BACK_MARGIN)
-        .map(|(id, _)| (id.clone(), true))
+    slots.iter()
+        .find(|(id, pct)| {
+            !id.is_empty() && id != current && cooldowns.get(id).is_none_or(|&t| t <= now)
+                && account_has_capacity(*pct, threshold) && *pct <= threshold - SWITCH_ROOM
+        })
+        .map(|(id, _)| id.clone())
 }
 
 /// shim 주입 전역 스위치(설정 파일의 "shim_inject"). false 면 install_pane_shims 가 shim dir 를
@@ -9402,37 +9392,33 @@ mod account_autoswitch_tests {
     fn a_full_account_moves_to_the_highest_one_with_room() {
         let none = Default::default();
         let order = slots(&[("team", 100.0), ("icloud", 40.0), ("gmail", 10.0)]);
-        assert_eq!(pick_account_by_order("team", 100.0, &order, 100.0, &none, 0), Some(("icloud".into(), false)));
+        assert_eq!(pick_account_by_order("team", 100.0, &order, 100.0, &none, 0), Some("icloud".into()));
         let order = slots(&[("team", 30.0), ("icloud", 100.0), ("gmail", 10.0)]);
-        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &none, 0), Some(("team".into(), false)),
+        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &none, 0), Some("team".into()),
             "the top account with room comes first, not the next one in a rotation");
         assert_eq!(pick_account_by_order("gmail", 95.0, &slots(&[("gmail", 95.0)]), 95.0, &none, 0), None, "one login has nowhere to go");
         let order = slots(&[("team", 100.0), ("personal", 98.0), ("naver", 0.0)]);
-        assert_eq!(pick_account_by_order("team", 100.0, &order, 100.0, &none, 0), Some(("naver".into(), false)),
+        assert_eq!(pick_account_by_order("team", 100.0, &order, 100.0, &none, 0), Some("naver".into()),
             "an account a few points from the line fills up within minutes");
     }
 
     #[test]
-    fn a_higher_account_with_ample_room_takes_over_again() {
+    fn a_higher_account_with_room_waits_until_the_selected_account_reaches_the_limit() {
         let none = Default::default();
-        // The team's five-hour window reset while iCloud was in use.
-        let order = slots(&[("team", 5.0), ("icloud", 60.0)]);
-        assert_eq!(pick_account_by_order("icloud", 60.0, &order, 100.0, &none, 0), Some(("team".into(), true)));
-        let order = slots(&[("team", 85.0), ("icloud", 60.0)]);
-        assert_eq!(pick_account_by_order("icloud", 60.0, &order, 100.0, &none, 0), None,
-            "just under the line it would cross again soon");
-        let order = slots(&[("icloud", 60.0), ("team", 5.0)]);
-        assert_eq!(pick_account_by_order("icloud", 60.0, &order, 100.0, &none, 0), None, "a lower account never pulls");
-        assert_eq!(pick_account_by_order("", 60.0, &slots(&[("team", 5.0)]), 100.0, &none, 0), None,
-            "the default login is outside the order");
+        let order = slots(&[("team", 100.0), ("naver", 54.0), ("icloud", 7.0)]);
+        for usage in [7.0, 99.9, f32::NAN] {
+            assert_eq!(pick_account_by_order("icloud", usage, &order, 100.0, &none, 0), None);
+        }
+        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &none, 0), Some("naver".into()));
+        assert_eq!(pick_account_by_order("icloud", 85.0, &order, 85.0, &none, 0), Some("naver".into()));
     }
 
     #[test]
     fn cooled_down_slots_are_not_candidates() {
         let order = slots(&[("team", 10.0), ("icloud", 100.0), ("gmail", 20.0)]);
         let cool = std::collections::HashMap::from([("team".to_string(), 500u64)]);
-        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &cool, 100), Some(("gmail".into(), false)));
-        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &cool, 600), Some(("team".into(), false)));
+        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &cool, 100), Some("gmail".into()));
+        assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &cool, 600), Some("team".into()));
         let cool = std::collections::HashMap::from([("team".to_string(), 500u64), ("gmail".to_string(), 500)]);
         assert_eq!(pick_account_by_order("icloud", 100.0, &order, 100.0, &cool, 100), None);
     }

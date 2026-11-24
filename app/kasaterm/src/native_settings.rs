@@ -4478,8 +4478,7 @@ fn autoswitch_rows(
                 ),
             ],
         );
-        let back = socket::SWITCH_BACK_MARGIN.round() as u32;
-        plain_hint(g, x, y, w, &format!("계정 목록의 위에서부터 여유 있는 계정을 씁니다. 위 계정 사용량이 기준보다 {back}%p 낮아지면 그 계정으로 돌아갑니다."));
+        plain_hint(g, x, y, w, "지금 쓰는 계정이 기준에 닿으면 목록의 위에서부터 여유 있는 계정을 고릅니다.");
     }
 }
 

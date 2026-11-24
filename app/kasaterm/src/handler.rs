@@ -1981,14 +1981,13 @@ impl ApplicationHandler<UserEvent> for App {
                 to,
                 pct,
                 label,
-                back,
                 generation,
             } => {
                 if *generation != crate::session::selection_generation()
                     || !socket::read_account_autoswitch()
                     || *from != self.set_claude_account
                     || *from != socket::read_claude_account()
-                    || (!*back && *pct < socket::read_account_autoswitch_pct())
+                    || *pct < socket::read_account_autoswitch_pct()
                 {
                     return;
                 }
@@ -2006,13 +2005,8 @@ impl ApplicationHandler<UserEvent> for App {
                     if !same {
                         self.account_flash = Some(std::time::Instant::now());
                     }
-                    let why = if *back {
-                        format!("{to_label} 사용량에 여유가 돌아와 차례대로")
-                    } else {
-                        format!("{from_label} · {label} 사용량 {pct:.0}%")
-                    };
                     self.set_toast(format!(
-                    "{why} — {}",
+                    "{from_label} · {label} 사용량 {pct:.0}% — {}",
                     crate::session::account_switch_toast(
                         &to_label, same, restarted, deferred, focused, live
                     )
@@ -2943,8 +2937,7 @@ impl ApplicationHandler<UserEvent> for App {
                             // 토큰으로 나가므로 값이 있다는 건 로그인이 실재한다는 뜻이다.
                             // 로그인 안 된 자리로 옮기면 그 뒤 뜨는 claude 가 전부 로그아웃
                             // 상태가 되고(2026-09-05), 모르는 자리로 옮기느니 「갈 곳 없음」이 낫다.
-                            // 차례는 사람이 정한 것(`read_claude_accounts`)이고 지금 계정의
-                            // 자리는 위 차례로 돌아갈지 가르는 데 쓴다.
+                            // 다음 계정은 사용자가 지정한 차례(`read_claude_accounts`)에서 고른다.
                             let slots: Vec<(String, f32)> = {
                                 let g = usage_all.lock().ok();
                                 socket::read_claude_accounts()
@@ -2967,14 +2960,13 @@ impl ApplicationHandler<UserEvent> for App {
                             );
                             // 갈 곳이 없어도 여기서 따로 알리지 않는다 — 한도 경고가
                             // 위에서 이미 나갔고, 그쪽은 전환이 되는 경우까지 덮는다.
-                            if let Some((to, back)) = to {
+                            if let Some(to) = to {
                                 last_switch = Some(std::time::Instant::now());
                                 let ev = UserEvent::ClaudeAccountAutoswitch {
                                     from: active_id.clone(),
                                     to,
                                     pct: p.pct,
                                     label: p.label.clone(),
-                                    back,
                                     generation,
                                 };
                                 if usage_proxy.send_event(ev).is_err() {

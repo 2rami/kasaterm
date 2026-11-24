@@ -244,9 +244,7 @@ fn pressure(limits: &CodexLimits) -> Option<f32> {
 /// 한도 자동 전환이 옮겨 갈 Codex 로그인과 떠나는 계정의 사용률. `order` 는 기본
 /// 로그인(`""`)부터 등록 차례대로다.
 ///
-/// 지금 계정이 기준을 넘었을 때만 옮긴다. Claude 처럼 위 차례로 되돌아가면 사람이 방금
-/// 고른 계정을 다음 조회에서 뒤집는다. Plus·Pro 는 한도를 넘으면 크레딧 잔액에서 묻지
-/// 않고 빠지므로, 기준을 넘긴 채 머무는 것 자체가 비용이다.
+/// Plus·Pro 는 한도를 넘으면 크레딧 잔액에서 빠지므로 현재 계정이 기준에 닿으면 옮긴다.
 pub(crate) fn autoswitch_target(current: &str, order: &[String], threshold: f32) -> Option<(String, f32)> {
     let cached = cache().lock().ok()?;
     pick_autoswitch(
@@ -275,10 +273,7 @@ fn pick_autoswitch<'a>(
         .collect();
     let current = format!("{KEY}{current}");
     let pct = fresh.iter().find(|(id, _)| *id == current)?.1;
-    if pct < threshold {
-        return None;
-    }
-    let (to, _) = crate::socket::pick_account_by_order(&current, pct, &fresh, threshold, &HashMap::new(), 0)?;
+    let to = crate::socket::pick_account_by_order(&current, pct, &fresh, threshold, &HashMap::new(), 0)?;
     Some((to.strip_prefix(KEY)?.to_string(), pct))
 }
 

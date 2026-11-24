@@ -4239,16 +4239,14 @@ enum UserEvent {
         surface_id: String,
         reason: String,
     },
-    /// 사용량 폴러가 "지금 계정이 임계를 넘었거나 위 차례 계정에 여유가 돌아왔고, 갈 만한
-    /// 계정이 있다"고 판정했다. 실제 전환은 GUI 스레드 몫이다 — `settings_save` 가 shim 을 다시
+    /// 사용량 폴러가 현재 계정이 기준에 닿았고 옮길 계정이 있다고 판정했다.
+    /// 실제 전환은 GUI 스레드 몫이다 — `settings_save` 가 shim 을 다시
     /// 깔아야 이미 열려 있는 pane 도 다음 claude 부터 새 계정으로 뜬다.
     ClaudeAccountAutoswitch {
         from: String,
         to: String,
         pct: f32,
         label: String,
-        /// 한도가 아니라 위 차례 계정에 여유가 돌아와 옮긴다.
-        back: bool,
         /// 판단을 시작할 때의 계정 선택 세대 — 그 사이 계정이 바뀌었으면 이 판단은 낡았다.
         generation: u64,
     },
