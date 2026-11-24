@@ -5041,9 +5041,7 @@ impl App {
             crate::turn_probe::frame_end();
         }
         self.weather_take_spots(weather_spots);
-        if let Some(output) = settings_paint {
-            self.finish_native_settings_paint(output);
-        }
+        let settings_scrolled = settings_paint.is_some_and(|output| self.finish_native_settings_paint(output));
         if let Some(p) = self.account_switch_confirm.as_mut() {
             if !account_confirm_hits.is_empty() {
                 p.rects = account_confirm_hits;
@@ -5083,7 +5081,7 @@ impl App {
                 pane.dirty = false;
             }
         }
-        self.chrome_dirty = false;
+        self.chrome_dirty = settings_scrolled;
         // A bake that found no room during this frame left blank cells behind.
         // The repack happens at the top of the next frame — but an idle app
         // paints no next frame, so the blanks would just sit there. Ask for it.

@@ -75,8 +75,8 @@ class CardWeatherRow extends StatelessWidget {
   );
 }
 
-class WeatherSettingsList extends StatelessWidget {
-  const WeatherSettingsList({super.key, required this.phase, required this.onPhaseChanged});
+class WeatherSettingsControls extends StatelessWidget {
+  const WeatherSettingsControls({super.key, required this.phase, required this.onPhaseChanged});
 
   final IndicatorPhase phase;
   final ValueChanged<IndicatorPhase> onPhaseChanged;
@@ -98,10 +98,9 @@ class WeatherSettingsList extends StatelessWidget {
       final dim = Theme.of(context).colorScheme.onSurfaceVariant;
       final motion = weather.reduceMotion.value || MediaQuery.disableAnimationsOf(context);
       final glassOff = weather.reduceTransparency.value;
-      return ListView(
-        key: const PageStorageKey('appearance-weather-controls'),
-        padding: const EdgeInsets.fromLTRB(0, 0, 0, Look.groupGap),
+      return SliverList.list(
         children: [
+          const _Title('날씨'),
           WeatherToggle(
             title: const Text('날씨 켜기'),
             secondary: const SettingsMark(SettingsGlyph.weather, size: 22),

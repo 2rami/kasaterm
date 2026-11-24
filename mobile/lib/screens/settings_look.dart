@@ -5,13 +5,11 @@ import '../main.dart' show designTokens;
 import '../server.dart';
 import '../theme_prefs.dart';
 import '../twins_loading.dart';
-import '../weather/controls.dart';
 import '../weather/model.dart';
 import '../weather/sheet.dart';
 import '../weather/store.dart';
 import 'controls.dart';
 import 'hub.dart' show parseHexColor;
-import 'settings_glyph.dart';
 
 /// 폰 밝기의 고르기 칸 — 짧은 이름은 칸 말풍선과 최상위 「외형」 줄이 같이 쓴다.
 const phoneModes = [
@@ -43,7 +41,6 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
   Map<String, Object?>? _appearance;
   bool _loading = true;
   String? _pending;
-  bool _weatherTab = false;
   IndicatorPhase _phase = IndicatorPhase.working;
 
   @override
@@ -123,23 +120,18 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
                 ),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
-              child: WeatherChoices(
-                options: const [(false, '색과 모양'), (true, '날씨')],
-                selected: {_weatherTab},
-                symbol: (weather, ink) => SettingsMark(
-                  weather ? SettingsGlyph.weather : SettingsGlyph.appearance,
-                  size: 17,
-                  color: ink,
-                ),
-                onPressed: (value) => setState(() => _weatherTab = value),
-              ),
-            ),
             Expanded(
-              child: _weatherTab
-                  ? WeatherSettingsList(phase: _phase, onPhaseChanged: (phase) => setState(() => _phase = phase))
-                  : _lookControls(),
+              child: CustomScrollView(
+                key: const PageStorageKey('appearance-controls'),
+                slivers: [
+                  _lookControls(),
+                  WeatherSettingsControls(
+                    phase: _phase,
+                    onPhaseChanged: (phase) => setState(() => _phase = phase),
+                  ),
+                  const SliverToBoxAdapter(child: SizedBox(height: Look.groupGap)),
+                ],
+              ),
             ),
           ],
         );
@@ -147,10 +139,9 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
     ),
   );
 
-  Widget _lookControls() => ListView(
-    key: const PageStorageKey('appearance-look-controls'),
-    padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap * 2),
-    children: [
+  Widget _lookControls() => SliverPadding(
+    padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
+    sliver: SliverList.list(children: [
       SettingsGroup(
         title: '이 폰',
         children: [
@@ -168,7 +159,8 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
         ],
       ),
       SettingsGroup(title: '데스크톱', children: _desktopRows(1)),
-    ],
+      const SizedBox(height: Look.groupGap / 2),
+    ]),
   );
 
   /// 데스크톱 「외형」 값을 폰에서 바꾸는 줄 — 강조색·모서리는 누르면 데스크톱이 바뀐다.

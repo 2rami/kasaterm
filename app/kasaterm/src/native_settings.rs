@@ -615,7 +615,6 @@ pub(crate) enum Target {
     FinishInput,
     CancelInput,
     Category(SettingsCat),
-    AppearanceTab(SettingsCat),
     WeatherPhase(crate::weather::indicator::Phase),
     NavigationScroll(u32),
     Disclosure(&'static str),
@@ -705,6 +704,7 @@ pub(crate) struct PaintOutput {
     pub(crate) multiline_layouts: Vec<MultilineLayout>,
     pub(crate) motion_preview_visible: bool,
     pub(crate) weather_preview: Option<crate::weather::SettingsPreview>,
+    pub(crate) appearance_scroll: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -773,6 +773,7 @@ pub(crate) struct Snapshot {
     pub(crate) agent_statusline_customized: bool,
     pub(crate) area: Rect,
     pub(crate) cat: SettingsCat,
+    pub(crate) appearance_jump: Option<SettingsCat>,
     pub(crate) keyboard_focus: Option<Target>,
     pub(crate) keyboard_anchor: Option<Rect>,
     pub(crate) cursor: (f32, f32),
@@ -1025,6 +1026,7 @@ impl App {
             agent_statusline_customized: cache.agent_statusline_customized,
             area,
             cat: scene.category(),
+            appearance_jump: self.settings_scene.appearance_jump,
             keyboard_focus: scene.keyboard_focus().cloned(),
             keyboard_anchor: scene.keyboard_anchor(),
             cursor: self.cursor_px,
@@ -1150,7 +1152,7 @@ impl App {
         Some(snapshot)
     }
 
-    pub(crate) fn finish_native_settings_paint(&mut self, output: PaintOutput) {
+    pub(crate) fn finish_native_settings_paint(&mut self, output: PaintOutput) -> bool {
         self.settings_scene.finish_paint(
             output.hits,
             output.dropdown_scroll_max,
@@ -1160,6 +1162,12 @@ impl App {
             output.multiline_layouts,
             output.motion_preview_visible,
         );
+        if output.appearance_scroll.is_some_and(|scroll| self.settings_scene.finish_appearance_jump(scroll)) {
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+            return true;
+        }
         if let (Some(window), Some((x, y, w, h))) =
             (self.window.as_ref(), self.settings_scene.caret_rect())
         {
@@ -1169,6 +1177,7 @@ impl App {
                 winit::dpi::LogicalSize::new(w.max(1.0) as f64, h.max(1.0) as f64),
             );
         }
+        false
     }
 
     pub(crate) fn native_settings_contains(&self, x: f32, y: f32) -> bool {
@@ -1221,7 +1230,7 @@ impl App {
             Some(Target::WeatherPhase(phase)) => self.settings_scene.weather_phase = phase,
             Some(Target::DropdownDismiss) => {}
             Some(Target::NavigationScroll(_)) => {}
-            Some(Target::Category(cat) | Target::AppearanceTab(cat)) => {
+            Some(Target::Category(cat)) => {
                 self.native_settings_blur();
                 self.device_account.hide();
                 self.settings_scene.set_category(cat);
@@ -2588,7 +2597,7 @@ fn search_text(value: &str) -> String {
 
 fn matching_categories(query: &str) -> Vec<SettingsCat> {
     if query.trim().is_empty() { return SettingsCat::nav().to_vec(); }
-    let children = if crate::lite_mode() { &[][..] } else { &SettingsCat::APPEARANCE_PAGES[1..] };
+    let children = if crate::lite_mode() { &[][..] } else { &SettingsCat::APPEARANCE_SECTIONS };
     let mut result: Vec<_> = SettingsCat::nav().iter().chain(children).copied()
         .filter(|cat| category_matches(*cat, query))
         .collect();
@@ -2610,7 +2619,7 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
     let (title, _, detail) = category_meta(cat);
     let aliases = match cat {
         SettingsCat::General | SettingsCat::Shell => "시작 폴더 경로 셸 shell cwd 파일 열기 저장 편집 general directory editor autosave",
-        SettingsCat::Appearance => "테마 theme 색상 밝기 다크 폰트 font 글꼴 커서 배율 크기 기기 아이콘 appearance color cursor scale",
+        SettingsCat::Appearance => "색과 모양 테마 theme 색상 밝기 팔레트 모서리 다크 폰트 font 글꼴 커서 배율 크기 기기 아이콘 appearance color cursor scale",
         SettingsCat::Statusbar => "하단 상태줄 상태바 사용량 cpu 메모리 계정 표시 statusbar usage memory",
         SettingsCat::Weather => "날씨 비 물방울 프로세스바 애니메이션 움직임 투명도 weather rain motion",
         SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth kasa 구글 github 프로필 account login password profile",
@@ -2825,14 +2834,6 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     draw_text(g, content_x, title_y, title, 24.0, theme::text(), true);
 
     let mut body_top = if compact { title_y + 32.0 } else { ay + HEADER_H + 14.0 };
-    if appearance && !crate::lite_mode() {
-        let tabs = SettingsCat::APPEARANCE_PAGES.map(|cat| {
-            let label = if cat == SettingsCat::Appearance { "색과 모양" } else { category_meta(cat).0 };
-            (label, Target::AppearanceTab(cat), cat == snapshot.cat)
-        });
-        body_top += button_row(g, snapshot, &mut hits, (content_x, body_top, content_w, 0.0),
-            &tabs, crate::native_layout::Align::Start) + 14.0;
-    }
     let input_footer = snapshot.input.is_some_and(|field| !matches!(field,
         SettingsInput::Search | SettingsInput::MachineLabel | SettingsInput::MachineAddress | SettingsInput::LoginCode)
         && !device_account::owns(field));
@@ -2850,6 +2851,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         y += appearance_preview::paint(g, snapshot, &mut hits, content_x, y, content_w) + 16.0;
     }
 
+    let mut appearance_scroll = None;
     match snapshot.cat {
         SettingsCat::General | SettingsCat::Shell => paint_general(
             g,
@@ -2860,26 +2862,29 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             &mut y,
             content_w,
         ),
-        SettingsCat::Appearance => {
-            paint_appearance(
-                g,
-                snapshot,
-                &mut hits,
-                &mut caret_rect,
-                content_x,
-                &mut y,
-                content_w,
-            )
+        SettingsCat::Appearance | SettingsCat::Statusbar | SettingsCat::Weather => {
+            let (x, w) = (content_x, content_w);
+            paint_appearance(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
+            if disclosure(g, snapshot, &mut hits, x, &mut y, w, "appearance-palette", "팔레트·세부 색")
+                || snapshot.input == Some(SettingsInput::AccentHex)
+            {
+                paint_appearance_palette(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
+            }
+            if !crate::lite_mode() {
+                let weather_top = y;
+                appearance_section(g, x, &mut y, w, SettingsCat::Weather);
+                paint_weather(g, snapshot, &mut hits, x, &mut y, w);
+                let statusbar_top = y;
+                appearance_section(g, x, &mut y, w, SettingsCat::Statusbar);
+                paint_statusbar(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
+                appearance_scroll = match snapshot.appearance_jump {
+                    Some(SettingsCat::Weather) => Some(weather_top + snapshot.scroll - body_top),
+                    Some(SettingsCat::Statusbar) => Some(statusbar_top + snapshot.scroll - body_top),
+                    _ => None,
+                };
+            }
+            paint_appearance_details(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
         }
-        SettingsCat::Statusbar => paint_statusbar(
-            g,
-            snapshot,
-            &mut hits,
-            &mut caret_rect,
-            content_x,
-            &mut y,
-            content_w,
-        ),
         SettingsCat::Claude => paint_claude(
             g,
             snapshot,
@@ -2925,7 +2930,6 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             &mut y,
             content_w,
         ),
-        SettingsCat::Weather => paint_weather(g, snapshot, &mut hits, content_x, &mut y, content_w),
         SettingsCat::Feedback => paint_feedback(
             g,
             snapshot,
@@ -2987,6 +2991,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         multiline_layouts: feedback.multiline_layouts,
         motion_preview_visible: feedback.motion_preview_visible,
         weather_preview: feedback.weather_preview,
+        appearance_scroll,
     }
 }
 
@@ -3269,6 +3274,15 @@ fn paint_general(
     *y += 8.0;
 }
 
+fn appearance_section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, section: SettingsCat) {
+    let (title, icon, _) = category_meta(section);
+    *y += 10.0;
+    g.rect(x, *y, w, 1.0, theme::border());
+    g.queue_icon(icon, x, *y + 13.0, 18.0, theme::accent());
+    draw_text(g, x + 27.0, *y + 14.0, title, 14.0, theme::text(), true);
+    *y += 44.0;
+}
+
 fn paint_appearance(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -3286,6 +3300,18 @@ fn paint_appearance(
             (preset_label(label), s.shape == *key, SettingsAction::Shape(key))).collect();
         seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
     }
+}
+
+fn paint_appearance_palette(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    *y += 16.0;
     // 팔레트 방식을 바꾸는 설정은 프리셋을 고르기 전에 둔다.
     let follow = s.theme == "system";
     let fixed = if theme::system_theme_key() == "light" { &s.system_light } else { &s.system_dark };
@@ -3339,6 +3365,18 @@ fn paint_appearance(
     if disclosure(g, s, hits, x, y, w, "palette-advanced", "세부 색 · 기본색과 ANSI") {
         paint_palette_slots(g, s, hits, x, y, w);
     }
+}
+
+fn paint_appearance_details(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    *y += 12.0;
     if !disclosure(g, s, hits, x, y, w, "appearance", "글꼴·크기·기기와 창 배치") {
         return;
     }
@@ -3485,18 +3523,6 @@ fn paint_appearance(
             ("점 세 개", !s.pane_header_bar, SettingsAction::PaneHeader("handle")),
         ],
     );
-    stepper_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "앱 하단바 높이",
-        &format!("{:.0}px", s.status_h),
-        SettingsAction::StatusBarH((s.status_h - 2.0).max(socket::STATUS_H_MIN) as u32),
-        SettingsAction::StatusBarH((s.status_h + 2.0).min(socket::STATUS_H_MAX) as u32),
-    );
     paint_cursor(g, s, hits, x, y, w);
 }
 
@@ -3509,6 +3535,18 @@ fn paint_statusbar(
     y: &mut f32,
     w: f32,
 ) {
+    stepper_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "앱 하단바 높이",
+        &format!("{:.0}px", s.status_h),
+        SettingsAction::StatusBarH((s.status_h - 2.0).max(socket::STATUS_H_MIN) as u32),
+        SettingsAction::StatusBarH((s.status_h + 2.0).min(socket::STATUS_H_MAX) as u32),
+    );
     section_title(
         g,
         x,
@@ -6708,7 +6746,7 @@ fn seg_row(
 ) {
     let label_w = g.measure_chrome_text(&crate::native_strings::text(label), 13.0, false)
         + crate::native_controls::CONTROL_PADDING_X + 1.0;
-    let controls_w = if s.cat == SettingsCat::Weather {
+    let controls_w = if cells.iter().any(|(_, _, action)| matches!(action, SettingsAction::Weather(_))) {
         cells.iter().map(|&(label, on, ref action)| weather_choice_width(g, label, on, action)).sum::<f32>()
             + WEATHER_CHOICE_GAP * cells.len().saturating_sub(1) as f32
     } else {
@@ -6781,7 +6819,7 @@ fn toggle_row_hint(
     for(i,(line,_))in hints.iter().enumerate(){draw_text(g,x+inset,ty+labels.len() as f32*20.0+i as f32*18.0,line,11.0,theme::text_dim(),false);}
     g.rect(x+inset,*y+height-1.0,(w-inset*2.0).max(0.0),1.0,theme::with_alpha(theme::border(),45));
     let hover = contains(rect, s.cursor);
-    if s.cat == SettingsCat::Weather {
+    if matches!(&action, SettingsAction::Weather(_)) {
         let toggle = (x + w - inset - 44.0, *y + (height - 26.0) / 2.0, 44.0, 26.0);
         let fill = if on { theme::accent() } else { theme::lerp(theme::bg(), theme::text(), 0.18) };
         pill_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, fill);
@@ -6888,7 +6926,7 @@ fn segmented(
     if cells.is_empty() || w <= 4.0 {
         return;
     }
-    if s.cat == SettingsCat::Weather {
+    if cells.iter().any(|(_, _, action)| matches!(action, SettingsAction::Weather(_))) {
         weather_choices(g, s, hits, (x, y, w, CTL_H), cells);
         return;
     }
@@ -7112,7 +7150,7 @@ fn dropdown_row(
     };
     let open = s.dropdown == Some(id);
     let hover = contains(rect, s.cursor);
-    let is_weather = s.cat == SettingsCat::Weather;
+    let is_weather = matches!(id, DropdownId::WeatherPhase | DropdownId::WeatherCondition(_));
     if is_weather {
         let radius = rect.2.min(rect.3) * 0.5 * theme::roundness();
         pill_rect(g, rect.0, rect.1, rect.2, rect.3,
@@ -7267,7 +7305,7 @@ fn stepper_row(
     minus: SettingsAction,
     plus: SettingsAction,
 ) {
-    let weather = s.cat == SettingsCat::Weather;
+    let weather = matches!(&minus, SettingsAction::Weather(_));
     let bw = CTL_H;
     let vw = if weather { (g.measure_chrome_text(value, 13.0, false) + 22.0).max(48.0) } else { 48.0 };
     let gap = if weather { WEATHER_CHOICE_GAP } else { 0.0 };
@@ -7904,7 +7942,7 @@ mod tests {
     #[test]
     fn settings_categories_use_distinct_bundled_icons() {
         let pages = SettingsCat::NAV.into_iter()
-            .chain(SettingsCat::APPEARANCE_PAGES.into_iter().skip(1))
+            .chain(SettingsCat::APPEARANCE_SECTIONS)
             .chain([SettingsCat::Theme, SettingsCat::Shell]);
         let mut icons = std::collections::HashSet::new();
         for page in pages {

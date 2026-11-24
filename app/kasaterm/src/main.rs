@@ -4523,10 +4523,10 @@ impl SettingsCat {
         Self::Feedback,
     ];
 
-    pub(crate) const APPEARANCE_PAGES: [SettingsCat; 3] = [Self::Appearance, Self::Weather, Self::Statusbar];
+    pub(crate) const APPEARANCE_SECTIONS: [SettingsCat; 2] = [Self::Weather, Self::Statusbar];
 
     pub(crate) fn navigation_parent(self) -> Self {
-        if Self::APPEARANCE_PAGES.contains(&self) {
+        if Self::APPEARANCE_SECTIONS.contains(&self) {
             Self::Appearance
         } else if self == Self::Theme {
             Self::Students

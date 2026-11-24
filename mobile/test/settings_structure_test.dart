@@ -96,15 +96,16 @@ void main() {
     expect(find.text('둥글게 · 데스크톱 모양'), findsOneWidget);
 
     final preview = find.byKey(const Key('appearance-preview'));
-    final before = tester.element(preview);
-    await tester.tap(find.text('날씨'));
-    await tester.pumpAndSettle();
-    expect(find.text('날씨 켜기'), findsOneWidget);
+    final before = tester.getRect(preview);
+    final controls = find.descendant(
+      of: find.byKey(const PageStorageKey('appearance-controls')),
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(find.text('날씨 켜기'), 160, scrollable: controls);
+    expect(find.text('날씨 켜기').hitTestable(), findsOneWidget);
     expect(find.widgetWithText(AppBar, '외형'), findsOneWidget);
-    expect(tester.element(preview), same(before));
-    await tester.tap(find.text('색과 모양'));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('phone-brightness')), findsOneWidget);
+    expect(tester.getRect(preview), before);
+    expect(find.text('색과 모양'), findsNothing);
   });
 
   testWidgets('계정 없이 붙은 주소 연결은 계정·캐릭터·기기 이름·비밀 승인을 감춘다', (tester) async {
@@ -178,17 +179,17 @@ void main() {
 
     await tester.tap(find.byKey(const Key('settings-look')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('날씨'));
-    await tester.pumpAndSettle();
     final preview = find.byKey(const Key('appearance-preview'));
     expect(tester.getTopLeft(preview).dx, greaterThan(settingsNavWidth));
-    expect(find.text('날씨 켜기'), findsOneWidget);
+    final controls = find.descendant(
+      of: find.byKey(const PageStorageKey('appearance-controls')),
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(find.text('날씨 켜기'), 160, scrollable: controls);
+    expect(find.text('날씨 켜기').hitTestable(), findsOneWidget);
     expect(selected('settings-look'), isTrue);
     expect(find.byType(BottomSheet), findsNothing);
     expect(find.widgetWithText(AppBar, '일 권한'), findsNothing);
-    await tester.tap(find.text('색과 모양'));
-    await tester.pumpAndSettle();
-    expect(brightness, findsOneWidget);
   });
 
   testWidgets('좁은 스플릿 뷰는 폰 판 그대로 — 줄을 누르면 들어간다', (tester) async {

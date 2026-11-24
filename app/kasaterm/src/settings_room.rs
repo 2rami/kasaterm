@@ -25,6 +25,7 @@ pub(crate) struct SettingsSceneSnapshot {
 #[derive(Clone, Debug)]
 pub(crate) struct SettingsScene {
     category: SettingsCat,
+    pub(crate) appearance_jump: Option<SettingsCat>,
     pub(crate) weather_phase: crate::weather::indicator::Phase,
     return_pane: Option<String>,
     cache: crate::native_settings::SettingsCache,
@@ -65,6 +66,7 @@ impl Default for SettingsScene {
     fn default() -> Self {
         Self {
             category: SettingsCat::NAV[0],
+            appearance_jump: None,
             weather_phase: crate::weather::indicator::Phase::Working,
             return_pane: None,
             cache: crate::native_settings::SettingsCache::default(),
@@ -199,9 +201,13 @@ impl SettingsScene {
     }
 
     pub(crate) fn set_category(&mut self, category: SettingsCat) {
-        // 「터미널」 페이지는 「앱 일반」의 셸 묶음으로 합쳤다 — 옛 딥링크(`shell`)도 그리로 간다.
-        let category = if category == SettingsCat::Shell { SettingsCat::General } else { category };
-        if self.category != category {
+        self.appearance_jump = SettingsCat::APPEARANCE_SECTIONS.contains(&category).then_some(category);
+        let category = match category {
+            SettingsCat::Shell => SettingsCat::General,
+            SettingsCat::Weather | SettingsCat::Statusbar => SettingsCat::Appearance,
+            _ => category,
+        };
+        if self.category != category || category == SettingsCat::Appearance {
             self.category = category;
             self.scroll = 0.0;
             self.hits.clear();
@@ -264,6 +270,15 @@ impl SettingsScene {
         let changed = (next - self.scroll).abs() > f32::EPSILON;
         self.scroll = next;
         if changed { self.invalidate_hits(); }
+        changed
+    }
+
+    pub(crate) fn finish_appearance_jump(&mut self, scroll: f32) -> bool {
+        self.appearance_jump = None;
+        let next = scroll.clamp(0.0, self.scroll_max);
+        let changed = (next - self.scroll).abs() > f32::EPSILON;
+        // Keep hit areas matched to the frame already on screen until the destination is painted.
+        self.scroll = next;
         changed
     }
 
@@ -1054,6 +1069,19 @@ mod tests {
 
     fn keyboard_test_paint(scene: &mut SettingsScene, hits: Vec<crate::native_settings::Hit>) {
         scene.finish_paint(hits, 0.0, 500.0, 100.0, None, Vec::new(), false);
+    }
+
+    #[test]
+    fn appearance_links_open_sections_in_one_page() {
+        let mut scene = SettingsScene::default();
+        for section in SettingsCat::APPEARANCE_SECTIONS {
+            scene.set_category(section);
+            assert_eq!(scene.category(), SettingsCat::Appearance);
+            assert_eq!(scene.appearance_jump, Some(section));
+        }
+        scene.set_category(SettingsCat::Appearance);
+        assert_eq!(scene.appearance_jump, None);
+        assert_eq!(scene.scroll(), 0.0);
     }
 
     #[test]

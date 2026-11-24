@@ -1094,6 +1094,7 @@ pub(crate) fn paint(
         multiline_layouts: Vec::new(),
         motion_preview_visible: false,
         weather_preview: None,
+        appearance_scroll: None,
     }
 }
 
