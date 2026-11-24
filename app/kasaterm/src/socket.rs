@@ -2720,7 +2720,7 @@ impl Backend for PtyBackend {
     }
 
     fn character_face(&self, slug: &str, theme: Option<&str>) -> Option<Vec<u8>> {
-        if !safe_path_component(slug) {
+        if !safe_path_component(slug) || kasa_characters::character::retired_asset_slug(slug) {
             return None;
         }
         // 새 폴더 구조(`profile/<slug>.png`) 먼저, 옛 평면 이름이 폴백 — 상대 경로
@@ -2737,7 +2737,11 @@ impl Backend for PtyBackend {
                 return None;
             }
             let root = kasa_characters::character::themes_root()?;
-            let sprites = root.join(id).join("sprites");
+            let dir = root.join(id);
+            if kasa_characters::character::retired_theme_dir(&dir) {
+                return None;
+            }
+            let sprites = dir.join("sprites");
             return rels
                 .iter()
                 .find_map(|r| read_file_under(&root, &sprites.join(r)));
@@ -2793,7 +2797,7 @@ impl Backend for PtyBackend {
                 let user = user_sprite_layout(slug, m).is_some();
                 let bundled = match *m {
                     "profile" => crate::render::student_profile_png(slug).is_some(),
-                    "gif" => crate::render::student_idle_gif(slug).is_some(),
+                    "gif" => false,
                     _ => crate::render::student_sprite_png(slug, m).is_some(),
                 };
                 // `none` 은 오류가 아니다 — 번들에 gif 가 없는 캐릭터가 대부분이라,
@@ -6317,7 +6321,8 @@ fn sprite_dir_for_theme(theme: &str) -> Option<std::path::PathBuf> {
     if !safe_path_component(theme) {
         return None;
     }
-    Some(kasa_characters::character::themes_root()?.join(theme).join("sprites"))
+    let dir = kasa_characters::character::themes_root()?.join(theme);
+    (!kasa_characters::character::retired_theme_dir(&dir)).then(|| dir.join("sprites"))
 }
 
 fn validate_sprite_frames(slug: &str, motion: &str, frames: &[Vec<u8>]) -> anyhow::Result<()> {
@@ -6372,7 +6377,7 @@ fn palette_png(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
 mod face_png_tests {
     #[test]
     fn a_face_in_256_colours_keeps_its_shape_and_clear_edges() {
-        let (rgba, w, h) = crate::sprites::student_profile_rgba("izuna").expect("얼굴");
+        let (rgba, w, h) = crate::sprites::student_profile_rgba("kasa_tsuyu").expect("얼굴");
         let small = super::palette_png(&rgba, w, h).unwrap();
         assert_eq!(super::palette_png(&rgba, w, h).unwrap(), small, "같은 얼굴이면 같은 바이트 — 텍스처·거울 별칭 묶기가 기댄다");
         if let Ok(path) = std::env::var("KASATERM_FACE_PNG_DUMP") {
@@ -6445,7 +6450,7 @@ pub(crate) fn character_sprite_bytes(
     }
     match motion {
         "profile" => crate::render::student_profile_png(slug).map(<[u8]>::to_vec),
-        "gif" => crate::render::student_idle_gif(slug).map(<[u8]>::to_vec),
+        "gif" => None,
         _ => crate::render::student_sprite_png(slug, motion)
             .and_then(|frames| frames.get(frame).copied())
             .map(<[u8]>::to_vec),
@@ -6479,7 +6484,7 @@ pub(crate) fn character_sprite_bytes_in_theme(
     }
     match motion {
         "profile" => crate::render::student_profile_png(slug).map(<[u8]>::to_vec),
-        "gif" => crate::render::student_idle_gif(slug).map(<[u8]>::to_vec),
+        "gif" => None,
         _ => crate::render::student_sprite_png(slug, motion)
             .and_then(|frames| frames.get(frame).copied())
             .map(<[u8]>::to_vec),
@@ -6596,6 +6601,9 @@ fn sprite_rel_for(slug: &str, motion: &str, frame: usize, foldered: bool) -> Str
 /// 벌 단위로 판정하므로, 여기서 프레임별로 고르면 "폴더에 3장·평면에 6장" 같은
 /// 상태에서 미리보기가 화면에 실제로 뜨는 것과 다른 조합을 보여 준다.
 fn user_sprite_layout(slug: &str, motion: &str) -> Option<(std::path::PathBuf, bool)> {
+    if kasa_characters::character::retired_asset_slug(slug) {
+        return None;
+    }
     let dir = students_dir()?;
     let (n, _) = sprite_spec(motion)?;
     [true, false].into_iter().find_map(|foldered| {
@@ -9074,14 +9082,14 @@ mod mod_face_tests {
 
     #[test]
     fn the_mod_face_is_the_cropped_profile_written_once() {
-        let (path, generation) = write_mod_face("yuuka").expect("번들 학생은 얼굴이 있다");
+        let (path, generation) = write_mod_face("kasa_ame").expect("번들 학생은 얼굴이 있다");
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"\x89PNG"), "터미널이 디코딩할 PNG 여야 한다");
         let face = image::load_from_memory(&bytes).unwrap();
-        let (_, w, h) = crate::sprites::student_profile_rgba("yuuka").unwrap();
+        let (_, w, h) = crate::sprites::student_profile_rgba("kasa_ame").unwrap();
         assert_eq!((face.width(), face.height()), (w, h), "화면이 쓰는 자르기 그대로");
         let written = std::fs::metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(write_mod_face("yuuka").unwrap().1, generation, "같은 그림은 같은 세대");
+        assert_eq!(write_mod_face("kasa_ame").unwrap().1, generation, "같은 그림은 같은 세대");
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), written, "같은 그림은 다시 안 쓴다");
         assert!(write_mod_face("no-such-student").is_none());
     }

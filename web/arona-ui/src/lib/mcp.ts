@@ -373,7 +373,7 @@ export function characterPool(c: Characters | null): CharacterDef[] {
   return pool.filter((m) => m && m.name && !seen.has(m.name) && seen.add(m.name));
 }
 
-/** GET /characters — ~/.config 우선→번들, 없으면 404(null). */
+/** GET /characters — 현재 테마의 로스터. */
 export async function fetchCharacters(): Promise<Characters | null> {
   try {
     const r = await fetch(`${BASE}/characters`);
@@ -536,6 +536,12 @@ export function characterFaceUrl(slug: string, theme?: string): string {
   const q = new URLSearchParams({ slug });
   if (theme) q.set('theme', theme);
   return `${BASE}/character-face?${q}`;
+}
+
+export function characterStandingUrl(slug: string, theme?: string): string {
+  const q = new URLSearchParams({ slug, motion: 'idle', frame: '0' });
+  if (theme) q.set('theme', theme);
+  return `${BASE}/character-sprite?${q}`;
 }
 
 export interface RecentSession {
@@ -742,31 +748,6 @@ export async function sendToInbox(surfaceId: string, text: string): Promise<bool
   }
 }
 
-export interface SchaleState {
-  credits: number;
-  gold: number;
-  affinity_lv: number;
-  exp: number;
-}
-
-/** GET /schale-state — SCHALE OS 재화/Exp 영속 스냅샷. 파일 없으면 초기값 반환. */
-export async function fetchSchaleState(): Promise<SchaleState> {
-  const defaults: SchaleState = { credits: 0, gold: 0, affinity_lv: 1, exp: 0 };
-  try {
-    const r = await fetch(`${BASE}/schale-state`);
-    if (!r.ok) return defaults;
-    const d = (await r.json().catch(() => null)) as Partial<SchaleState> | null;
-    if (!d) return defaults;
-    return {
-      credits: d.credits ?? 0,
-      gold: d.gold ?? 0,
-      affinity_lv: d.affinity_lv ?? 1,
-      exp: d.exp ?? 0,
-    };
-  } catch {
-    return defaults;
-  }
-}
 
 export interface MessageEntry {
   id: string;

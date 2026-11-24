@@ -200,7 +200,7 @@ async function loadWho() {
   try {
     const r = await fetch('/persona-who');
     const j = await r.json();
-    state.name = j.name || '아로나';
+    state.name = j.name || '';
     state.slug = j.slug || '';
     $('name').textContent = state.name;
     loadArt(j.has_portrait);

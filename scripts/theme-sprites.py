@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """로스터의 desc 로 학생 스프라이트를 만들고 앱 자산 자리에 놓는다.
 
-파이프라인의 **생성 단계**다. 앞 단계(`theme-wiki.py`)가 만든 위키 수집물에서 사람이
+파이프라인의 **생성 단계**다. 캐릭터 원화를 보고 사람이
 `theme-src/<slug>/desc.txt` 한 줄을 쓰고, 여기서 그 한 줄을 `ppgen` 에 먹여 4상태
 스프라이트를 만든 뒤 `app/kasaterm/assets/students/` 로 옮긴다.
 
@@ -43,8 +43,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 작품(테마)마다 수집물·로스터·설치 자리가 다르다 — 블루아카 77명과 새 작품을 한
-# 폴더에 섞으면 슬러그가 겹치지 않아도 어느 그림이 어느 작품 것인지 사람이 못 가른다.
+# 테마별 소스와 설치 폴더를 가르면 동명 캐릭터의 그림이 섞이지 않는다.
 SRC = os.environ.get("THEME_SRC") or os.path.join(ROOT, "theme-src")
 DST = os.environ.get("THEME_DST") or os.path.join(ROOT, "app/kasaterm/assets/students")
 ROSTER = os.environ.get("THEME_ROSTER") or os.path.join(
@@ -341,7 +340,7 @@ def generate(slug, force=False, use_ref=False):
     if use_ref:
         ref = os.path.join(SRC, slug, "ref.png")
         if not os.path.exists(ref):
-            return slug, "no-ref", "theme-wiki.py 로 포트레이트를 먼저 받아라"
+            return slug, "no-ref", "같은 슬러그 폴더에 ref.png를 넣어라"
         # states_cmd 는 common 의 복사본이라 둘 다 따로 붙인다. -base 가 붙는 상태
         # 실행에서 -ref 는 무시되지만(베이스 생성 전용) 붙여 둬도 해가 없다.
         common += ["-ref", ref]
@@ -441,7 +440,7 @@ def gen_profile(slug, force=False):
         return slug, "no-desc", ""
     ref = os.path.join(SRC, slug, "ref.png")
     if not os.path.exists(ref):
-        return slug, "no-ref", "theme-wiki.py 로 포트레이트를 먼저 받아라"
+        return slug, "no-ref", "같은 슬러그 폴더에 ref.png를 넣어라"
     # 프사엔 무기를 넣는다(2026-08-20 사용자 지시) — 기존 12명 프사가 전부 공식
     # 무기를 든 구도라서다. 스프라이트 묘사의 「무기 금지」를 걷어내되, 무기의
     # 종류·색은 글로 추측하지 않고 원화(ref)에서 그대로 가져오게 한다(옛 교훈:

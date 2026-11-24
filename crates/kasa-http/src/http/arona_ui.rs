@@ -117,7 +117,6 @@ async fn mode_get_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
 }
 
 /// arona-ui 정적 번들 루트: env 오버라이드 → .app Resources → 레포 dev 빌드.
-/// (characters_candidate_paths 와 같은 3단 resolve 철학.)
 fn arona_ui_root() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("KASATERM_ARONA_UI_DIR") {
         let p = std::path::PathBuf::from(p);
@@ -206,26 +205,6 @@ async fn arona_ui_serve(rel: String) -> axum::response::Response {
     }
 }
 
-/// ~/.config/kasaterm/schale-state.json 경로.
-fn schale_state_path() -> Option<std::path::PathBuf> {
-    let home = kasa_socket::home_dir()?;
-    Some(home.join(".config/kasaterm/schale-state.json"))
-}
-
-/// schale-state.json 읽기. 파일 없으면 초기값 반환.
-fn read_schale_state() -> serde_json::Value {
-    let default = serde_json::json!({ "credits": 0, "gold": 0, "affinity_lv": 1, "exp": 0 });
-    let Some(path) = schale_state_path() else { return default };
-    let Ok(s) = std::fs::read_to_string(&path) else { return default };
-    serde_json::from_str::<serde_json::Value>(&s).unwrap_or(default)
-}
-
-/// `GET /schale-state` — SCHALE OS 재화/Exp 영속 스냅샷.
-async fn schale_state_handler() -> impl IntoResponse {
-    let s = read_schale_state();
-    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(s))
-}
-
 /// 이 모듈 창구의 라우트. `router` 가 한 표로 합친 뒤 공통 레이어(Origin·토큰 가드)를 두른다.
 pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let slash_backend = backend.clone();
@@ -289,7 +268,6 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
                 res
             }),
         )
-        .route("/schale-state", get(schale_state_handler))
         .route(
             "/slash-commands",
             get(move || slash_commands_handler(slash_backend.clone())),

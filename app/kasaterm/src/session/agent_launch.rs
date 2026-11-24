@@ -208,7 +208,7 @@ impl App {
                         let _ = kasa_characters::character::bind_session_character(sid, &true_char);
                     }
                     None => {
-                        if let Some(cur) = cur.filter(|c| !c.is_empty()) {
+                        if let Some(cur) = cur.filter(|c| !c.is_empty() && !kasa_characters::character::retired_character(c)) {
                             let _ = kasa_characters::character::bind_session_character(sid, &cur);
                         } else if let Some(chars) = kasa_characters::character::roster_in_use() {
                             // Windows에서는 `ps eww`로 스폰 시점의 환경변수를 복구할 수

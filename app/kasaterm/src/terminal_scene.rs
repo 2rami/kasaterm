@@ -198,7 +198,7 @@ impl TerminalComposition {
         };
         if self.agents_view && theme::character_appearance() {
             if let Some((bytes, _, _)) =
-                cache.image("schale-classroom", || png_asset(schale_classroom_rgba()?))
+                cache.image("workspace-background", || png_asset(workspace_background_rgba()?))
             {
                 if let Some(id) = cache.register(pane, 0, bytes) {
                     add(
@@ -315,9 +315,9 @@ impl TerminalComposition {
                 }
             }
         }
-        for rect in &self.schale_logo_slots {
+        for rect in &self.kasa_logo_slots {
             if let Some((bytes, _, _)) =
-                cache.image("schale-logo", || png_asset(schale_logo_rgba()?))
+                cache.image("kasa-logo", || png_asset(kasa_logo_rgba()?))
             {
                 if let Some(id) = cache.register(pane, 30_000, bytes) {
                     add(
@@ -381,7 +381,7 @@ impl TerminalComposition {
             + self.waiting_slots.len()
             + self.standing_slots.len()
             + self.profile_slots.len()
-            + self.schale_logo_slots.len()
+            + self.kasa_logo_slots.len()
             + self.status_model_icons.len()
             + self.title_outline_slots.len() * 4;
         // A failed asset registration must not ship cells whose original art was erased.
@@ -779,7 +779,7 @@ pub(crate) struct TerminalComposition {
     pub(crate) standing_slots: Vec<(&'static str, &'static str, (f32, f32, f32, f32))>,
     pub(crate) profile_slots: Vec<(&'static str, (f32, f32, f32, f32))>,
     pub(crate) inline_slots: Vec<InlineSlot>,
-    pub(crate) schale_logo_slots: Vec<(f32, f32, f32, f32)>,
+    pub(crate) kasa_logo_slots: Vec<(f32, f32, f32, f32)>,
     pub(crate) title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])>,
     pub(crate) status_model_icons: Vec<StatusModelIconSlot>,
     pub(crate) view_shifts: Vec<(String, crate::PaneViewShift)>,
@@ -816,7 +816,7 @@ impl TerminalComposition {
             standing_slots: self.standing_slots.clone(),
             profile_slots: self.profile_slots.clone(),
             inline_slots: self.inline_slots.clone(),
-            schale_logo_slots: self.schale_logo_slots.clone(),
+            kasa_logo_slots: self.kasa_logo_slots.clone(),
             title_outline_slots: self.title_outline_slots.clone(),
             status_model_icons: self.status_model_icons.clone(),
             view_shifts: self.view_shifts.clone(),
@@ -981,8 +981,8 @@ mod visual_scene_tests {
                 let mut slots = Vec::new();
                 compose_student_banners(
                     &mut rows,
-                    "아로나",
-                    "arona",
+                    "츠유",
+                    "kasa_tsuyu",
                     None,
                     0.0,
                     0.0,
@@ -1007,8 +1007,8 @@ mod visual_scene_tests {
         let mut slots = Vec::new();
         compose_student_banners(
             &mut rows,
-            "아로나",
-            "arona",
+            "츠유",
+            "kasa_tsuyu",
             None,
             0.0,
             0.0,
@@ -1044,7 +1044,7 @@ mod visual_scene_tests {
     #[test]
     fn visual_scene_does_not_publish_erased_cells_without_their_asset() {
         let scene = TerminalComposition {
-            profile_slots: vec![("arona", (0.0, 0.0, 18.0, 18.0))],
+            profile_slots: vec![("kasa_tsuyu", (0.0, 0.0, 18.0, 18.0))],
             ..Default::default()
         };
         assert!(scene
@@ -1072,7 +1072,7 @@ mod visual_scene_tests {
             let scene = TerminalComposition {
                 rows: Arc::new(rows.clone()),
                 standing_slots: vec![(
-                    "arona",
+                    "kasa_tsuyu",
                     "idle",
                     standing_slot_rect(5, left, 41, (0.0, 0.0), cell),
                 )],
@@ -1282,7 +1282,7 @@ impl App {
         let mut profile_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Default::default();
         let mut inline_slots: Vec<InlineSlot> =
             Default::default();
-        let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Default::default();
+        let mut kasa_logo_slots: Vec<(f32, f32, f32, f32)> = Default::default();
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Default::default();
         let mut status_model_icons: Vec<StatusModelIconSlot> = Default::default();
         let mut view_shifts: Vec<(String, crate::PaneViewShift)> = Default::default();
@@ -1579,7 +1579,7 @@ impl App {
                 find_agents_header_anchor(&composed, logo_cols)
             };
             if let Some((br, bc)) = anchor {
-                schale_logo_slots.push((
+                kasa_logo_slots.push((
                     body_left + bc as f32 * scw,
                     body_top + br as f32 * sch,
                     logo_cols as f32 * scw,
@@ -2439,7 +2439,7 @@ impl App {
         waiting_slots.retain(|(_, rect)| !foreground.overlaps(*rect, (body_left, body_top), cell));
         standing_slots.retain(|(_, _, rect)| !foreground.overlaps(*rect, (body_left, body_top), cell));
         profile_slots.retain(|(_, rect)| visible(*rect));
-        schale_logo_slots.retain(|rect| visible(*rect));
+        kasa_logo_slots.retain(|rect| visible(*rect));
         status_model_icons.retain(|slot| visible(slot.image_rect()));
         title_outline_slots.retain(|&(x, y, w, h, _)| !foreground.overlaps((x, y, w, h), (body_left, body_top), cell));
         foreground.restore(&mut composed);
@@ -2460,7 +2460,7 @@ impl App {
             standing_slots,
             profile_slots,
             inline_slots,
-            schale_logo_slots,
+            kasa_logo_slots,
             title_outline_slots,
             status_model_icons,
             view_shifts,

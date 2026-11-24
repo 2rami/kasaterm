@@ -930,7 +930,7 @@ impl App {
         // pane 밖까지 이어질 수 있고, 그리기는 클립 범위 안만.
         let mut banner_slots: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))> = Vec::new();
         // agents 뷰 SCHALE 로고 자리(Clawd 마스코트 위치 / 헤더 왼쪽 여백) — 위치만.
-        let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
+        let mut kasa_logo_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // agents 목록·resume 피커 화면의 교실 배경(셀 뒤 cover-fit). pane 본문 rect.
         let mut classroom_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
@@ -1270,7 +1270,7 @@ impl App {
                     }
                 }
                 inline_slots.extend(composition.inline_slots);
-                schale_logo_slots.extend(composition.schale_logo_slots);
+                kasa_logo_slots.extend(composition.kasa_logo_slots);
                 title_outline_slots.extend(composition.title_outline_slots);
                 status_model_icons.extend(composition.status_model_icons);
                 view_shifts.extend(composition.view_shifts);
@@ -2521,7 +2521,7 @@ impl App {
                 }
             }
             if !classroom_slots.is_empty() && !g.has_image("schale:classroom") {
-                if let Some((rgba, w, h)) = schale_classroom_rgba() {
+                if let Some((rgba, w, h)) = workspace_background_rgba() {
                     g.upload_image("schale:classroom", &rgba, w, h);
                 }
             }
@@ -2568,13 +2568,13 @@ impl App {
                     g.queue_image_cover("schale:classroom", *bx, *by, *bw, *bh);
                 }
             }
-            if !schale_logo_slots.is_empty() {
+            if !kasa_logo_slots.is_empty() {
                 if !g.has_image("schale:logo") {
-                    if let Some((rgba, w, h)) = schale_logo_rgba() {
+                    if let Some((rgba, w, h)) = kasa_logo_rgba() {
                         g.upload_image("schale:logo", &rgba, w, h);
                     }
                 }
-                for (bx, by, bw, bh) in &schale_logo_slots {
+                for (bx, by, bw, bh) in &kasa_logo_slots {
                     g.queue_image_above("schale:logo", *bx, *by, *bw, *bh);
                 }
             }

@@ -132,21 +132,6 @@ async fn term_grid_page(
     html_with_token_cookie(include_str!("../../assets/term/grid.html"), &q)
 }
 
-/// 프사가 있는 학생 슬러그. `term_avatar` 의 목록과 짝이므로 여기 없는 이름은
-/// 프사도 없다 — 둘 다 `assets/students/profile/*.png` 전체와 맞춘다. 12명만
-/// 있던 시절엔 로스터의 세나·이치카·하루나가 전부 탈락해 폰 목록이 무프사였다.
-const AVATAR_SLUGS: &[&str] = &[
-    "akane", "akari", "ako", "arisu", "arona", "aru", "asuna", "atsuko", "ayane", "azusa",
-    "chihiro", "chinatsu", "eimi", "fubuki", "fuuka", "hanako", "hare", "haruka", "haruna",
-    "hasumi", "hibiki", "hifumi", "himari", "hina", "hinata", "hiyori", "hoshino", "ichika",
-    "iori", "iroha", "izuna", "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei",
-    "kirino", "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
-    "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa", "neru",
-    "niya", "noa", "nonomi", "prana", "rio", "sakurako", "saori", "satsuki", "seia", "sena",
-    "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki", "tsukuyo", "tsurugi", "utaha",
-    "wakamo", "yukari", "yuuka", "yuzu",
-];
-
 /// agent 이름(`aru-p151-1uc`)의 앞 토막이 캐릭터 슬러그다.
 ///
 /// ⚠️ 이름→슬러그 표(`theme::character_slug`)를 여기 복제하지 않는다. 그건 인박스
@@ -160,7 +145,7 @@ pub(super) fn avatar_slug(agent_name: &str) -> Option<String> {
     // 이사 간 학생만 얼굴이 비었다. 아는 명부 전부에 물어본다 — 그림 실재는
     // `term_avatar` 가 따로 판정한다.
     kasa_characters::character::known_slug(head)
-        .or_else(|| AVATAR_SLUGS.iter().find(|s| **s == head).map(|s| s.to_string()))
+        .or_else(|| kasa_characters::bundled::portrait(head).map(|_| head.to_owned()))
 }
 
 /// `GET /term/avatar/<slug>.png` — pane 칩에 띄울 학생 프사.
@@ -206,35 +191,10 @@ fn avatar_lookup(slug: &str) -> Option<(Vec<u8>, bool)> {
     } else {
         kasa_characters::character::slug_for_any(raw).unwrap_or_default()
     };
-    macro_rules! avatars {
-        ($($s:literal),* $(,)?) => {
-            match slug.as_str() {
-                $($s => Some(
-                    include_bytes!(concat!(
-                        "../../../../app/kasaterm/assets/students/profile/", $s, ".png"
-                    )).as_slice()
-                ),)*
-                _ => None,
-            }
-        };
-    }
-    // 디스크가 먼저다 — 테마 학생의 얼굴은 번들에 없고, 사용자가 덮어쓴 그림도
-    // 여기 있다(GUI 의 찾기 순서와 같다).
     if let Some(disk) = kasa_characters::character::profile_png_on_disk(&slug) {
         return Some((disk, true));
     }
-    let bundled = avatars!(
-        "akane", "akari", "ako", "arisu", "arona", "aru", "asuna", "atsuko", "ayane", "azusa",
-        "chihiro", "chinatsu", "eimi", "fubuki", "fuuka", "hanako", "hare", "haruka", "haruna",
-        "hasumi", "hibiki", "hifumi", "himari", "hina", "hinata", "hiyori", "hoshino", "ichika",
-        "iori", "iroha", "izuna", "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei",
-        "kirino", "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
-        "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa", "neru",
-        "niya", "noa", "nonomi", "prana", "rio", "sakurako", "saori", "satsuki", "seia", "sena",
-        "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki", "tsukuyo", "tsurugi",
-        "utaha", "wakamo", "yukari", "yuuka", "yuzu",
-    );
-    bundled.map(|b| (b.to_vec(), false))
+    kasa_characters::bundled::portrait(&slug).map(|bytes| (bytes.to_vec(), false))
 }
 
 /// `GET /term/walk/<slug>.png` — 일하는 학생의 걷는 그림. 프레임을 가로로 이은 한 장이고

@@ -61,7 +61,8 @@ impl App {
         anyhow::ensure!(pid > 0, "missing harness process identity");
         if let Some(identity) = self.nested_launch_identity(pane, pid)? { return Ok(identity); }
         let pending = self.ws.lock().unwrap().pane_next_character.get(pane).cloned();
-        let requested = (!requested.is_empty()).then_some(requested).or(pending.as_deref());
+        let requested = (!requested.is_empty()).then_some(requested).or(pending.as_deref())
+            .filter(|name| !kasa_characters::character::retired_character(name));
         if let Some(name) = requested {
             anyhow::ensure!(crate::theme::character_slug_any(name).is_some(), "unknown character");
         }
@@ -199,23 +200,23 @@ impl App {
         if RAN.swap(true, std::sync::atomic::Ordering::Relaxed) { return; }
         let pane = self.target_surface().unwrap();
         let sid = kasa_characters::character::new_session_id();
-        kasa_characters::character::bind_session_character(&sid, "코하루").unwrap();
+        kasa_characters::character::bind_session_character(&sid, "키리").unwrap();
         assert!(!self.ws.lock().unwrap().pane_character.contains_key(&pane), "empty shell has no student");
         let resolved = self.prepare_agent_identity(&pane, &sid, "", std::process::id()).unwrap();
-        assert_eq!(resolved["character"], "코하루");
-        assert!(resolved["persona"].as_str().unwrap().contains("너는 코하루"));
+        assert_eq!(resolved["character"], "키리");
+        assert!(resolved["persona"].as_str().unwrap().contains("작업실의 키리"));
         // The exact historical failure: late saved mapping replaces only the
         // name while the harness has already loaded another student's voice.
-        kasa_characters::character::bind_session_character(&sid, "모모이").unwrap();
+        kasa_characters::character::bind_session_character(&sid, "아메").unwrap();
         self.apply_session_character(&pane, &sid);
-        assert_eq!(self.ws.lock().unwrap().pane_character[&pane], "코하루");
-        let resolved = self.prepare_agent_identity(&pane, &sid, "아로나", std::process::id()).unwrap();
-        assert_eq!(resolved["character"], "아로나");
-        assert!(resolved["persona"].as_str().unwrap().contains("너는 아로나"));
-        assert_eq!(self.ws.lock().unwrap().pane_character[&pane], "아로나");
+        assert_eq!(self.ws.lock().unwrap().pane_character[&pane], "키리");
+        let resolved = self.prepare_agent_identity(&pane, &sid, "츠유", std::process::id()).unwrap();
+        assert_eq!(resolved["character"], "츠유");
+        assert!(resolved["persona"].as_str().unwrap().contains("작업실의 츠유"));
+        assert_eq!(self.ws.lock().unwrap().pane_character[&pane], "츠유");
         let first = self.prepare_agent_identity(&pane, &kasa_characters::character::new_session_id(), "", std::process::id()).unwrap();
         let second = self.prepare_agent_identity(&pane, "", "", std::process::id()).unwrap();
-        assert_eq!(first["character"], "아로나");
+        assert_eq!(first["character"], "츠유");
         assert_ne!(first["character"], second["character"], "new harness in the same pane advances the roster");
         // 같은 자리 재시작: 직전 학생의 비석이 있고 그 학생이 비어 있으면 다시 앉는다.
         let prev = second["character"].as_str().unwrap().to_string();
@@ -241,7 +242,7 @@ impl App {
         child.wait().unwrap();
         self.release_finished_agent_identities();
         assert_eq!(self.ws.lock().unwrap().pane_character[&pane], seated, "the seated harness keeps its name");
-        // 칸 밖 터미널에서 떨어져 나가 뜬 실행(tmux 표본)도 빌릴 뿐이다 — 자손이 아니어도(%6 아로나).
+        // 칸 밖 터미널에서 떨어져 나가 뜬 실행(tmux 표본)도 빌릴 뿐이다 — 자손이 아니어도(%6 츠유).
         if cfg!(target_os = "macos") {
             let out = crate::proc::command("/bin/sh").args(["-c", "/bin/sleep 30 >/dev/null 2>&1 & echo $!"]).output().unwrap();
             let detached: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();

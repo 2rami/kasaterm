@@ -1,7 +1,7 @@
 /* Design tokens — mirrors tokens.ts. Update both together.
-   SCHALE OS 클린 블루 테마 (목업 기준 2026-06-11 전환). 호환 위해 토큰 *이름*은
+   KASA 대화 팔레트 (목업 기준 2026-06-11 전환). 호환 위해 토큰 *이름*은
    유지하고 값만 재매핑 — cream=밝은 표면(연하늘→화이트), ink=네이비 텍스트,
-   sky=SCHALE primary 블루. */
+   sky=KASA 기본 블루. */
 :root {
   /* Base — 밝은 표면 */
   --cth-cream-50:  #FFFFFF;
@@ -18,7 +18,7 @@
   --cth-ink-300: #4A638F;
   --cth-ink-100: #CBDCEF;
 
-  /* Accents — sky = SCHALE primary 블루 */
+  /* Accents — sky = KASA 기본 블루 */
   --cth-coral: #FF6B6B;       --cth-coral-light: #FFB4B4;
   --cth-coral-text-bg: #B42318;
   --cth-coral-text-surface: #B42318;
@@ -34,7 +34,7 @@
   --cth-mint:  #6BCF7F;       --cth-mint-light:  #B4E5BD;
   --cth-mint-text-bg: #167A35;
   --cth-mint-text-surface: #167A35;
-  --cth-sky:   #4A90E2;       --cth-sky-light:   #A9CBF0;
+  --cth-sky:   #377EAD;       --cth-sky-light:   #B1D6EB;
   --cth-lemon: #FFD93D;       --cth-lemon-light: #FFEC99;
   --cth-lilac: #B197FC;       --cth-lilac-light: #D6C5FF;
   --cth-peach: #FFA07A;       --cth-peach-light: #FFD0B5;
@@ -97,7 +97,7 @@
 
 /* 다크 모드 폴백. 런타임에는 터미널 팔레트가 같은 토큰을 덮는다: cream=어두운 네이비
    표면, ink=밝은 텍스트(반전), accent 는 유지하되 light 변형만 어두운 톤(hover 배경용).
-   SCHALE 의 클린 블루 정체성을 밤버전으로. */
+   KASA 팔레트을 밤버전으로. */
 :root[data-theme="dark"] {
   /* Base — 어두운 네이비 표면(밝을수록 위로) */
   --cth-cream-50:  #1B2541;

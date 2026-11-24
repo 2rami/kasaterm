@@ -453,8 +453,8 @@ void main() {
 
 void bannerTests() {
   const named = StudentStyle(
-    slug: 'arisu',
-    name: '아리스',
+    slug: 'kasa_tsuyu',
+    name: '츠유',
     accent: accent,
     bg: bg,
   );
@@ -482,9 +482,9 @@ void bannerTests() {
     // 그림 칸은 비고 제목·환영문이 바뀐다.
     expect(text(v.lines[2]).contains('▛'), isFalse);
     expect(text(v.lines[3]).contains('█'), isFalse);
-    expect(text(v.lines[2]), contains('아리스'));
+    expect(text(v.lines[2]), contains('츠유'));
     expect(text(v.lines[2]), contains('v2.1.0'));
-    expect(text(v.lines[1]), contains('kasa 선생님, 돌아왔구나!'));
+    expect(text(v.lines[1]), contains('kasa 선생님, 오셨네요.'));
     // 상자 선은 학생색.
     final corner = v.lines[0].first;
     expect(corner.fg, isA<RgbColor>());

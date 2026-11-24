@@ -941,7 +941,7 @@ impl App {
                 eprintln!("[restore] {c} 는 이미 다른 자리가 쓰는 중 — 새로 배정한다");
             }
         }
-        let restores_agent = was_agent.is_some() || (saved_char.is_some() && session_id.is_some());
+        let restores_agent = was_agent.is_some() || (stored_char.is_some() && session_id.is_some() && attach_target.is_none());
         let scrollback = restored_scrollback(rec, restores_agent);
         // 탭은 PTY 를 띄우기 **전에** 자리를 잡아야 한다 — 출력은 `pid_to_pane` 으로
         // 길을 찾으므로(apply_screen_update), 등록이 늦으면 첫 프레임이 바깥 pane 을

@@ -36,23 +36,25 @@ impl App {
         let original = self.target_surface().expect("initial verification pane");
         assert!(!self.ws.lock().unwrap().pane_character.contains_key(&original));
         self.prepare_agent_identity(&original, "", "", std::process::id()).unwrap();
-        assert_eq!(self.ws.lock().unwrap().pane_character[&original], "아로나");
+        assert_eq!(self.ws.lock().unwrap().pane_character[&original], "츠유");
         let one = self.spawn_new_tab(&original, false).expect("first ordered tab");
         assert!(!self.ws.lock().unwrap().pane_character.contains_key(&one));
         self.prepare_agent_identity(&one, "", "", std::process::id()).unwrap();
-        assert_eq!(self.ws.lock().unwrap().pane_character[&one], "미도리");
+        assert_eq!(self.ws.lock().unwrap().pane_character[&one], "아메");
         self.pane_cwd_cache.insert(one.clone(), std::path::PathBuf::from("/tmp/different-worktree"));
         let two = self.spawn_new_tab(&original, false).expect("second ordered tab");
         self.prepare_agent_identity(&two, "", "", std::process::id()).unwrap();
-        assert_eq!(self.ws.lock().unwrap().pane_character[&two], "모모이");
+        assert_eq!(self.ws.lock().unwrap().pane_character[&two], "시즈쿠");
         self.new_window();
         let next = self.target_surface().expect("new ordered room");
+        // This probe runs before the first PTY frame registers the new pane.
+        self.ws.lock().unwrap().panes.entry(next.clone()).or_default();
         self.prepare_agent_identity(&next, "", "", std::process::id()).unwrap();
         let ws = self.ws.lock().unwrap();
-        assert_eq!(ws.pane_character[&next], "히후미");
-        assert_eq!(ws.pane_character[&original], "아로나", "running identity must remain unchanged");
+        assert_eq!(ws.pane_character[&next], "키리");
+        assert_eq!(ws.pane_character[&original], "츠유", "running identity must remain unchanged");
         assert_eq!(self.pty.len(), 4);
-        eprintln!("[character-order] PASS: Arona first, distinct tabs/worktree/room, existing identities preserved, isolated registry={}", kasa_socket::collab_root().display());
+        eprintln!("[character-order] PASS: bundled leader first, distinct tabs/worktree/room, existing identities preserved, isolated registry={}", kasa_socket::collab_root().display());
     }
 
     /// 계정 동기화가 다른 기기의 학생 명단을 settings.json 에 써 넣은 뒤, 다음 배정이 그 명단과 순서를 따른다.
@@ -64,14 +66,14 @@ impl App {
         let original = self.target_surface().expect("initial verification pane");
         let roster = kasa_characters::character::roster_in_use().expect("bundled roster");
         assert!(kasa_characters::character::assignable_names(&roster).len() > 2, "no picks yet: everyone");
-        socket::write_setting("character_picks", serde_json::json!({"__base": ["세이아", "아즈사"]}));
+        socket::write_setting("character_picks", serde_json::json!({"__base": ["나기", "코사메"]}));
         self.reload_student_choices();
-        assert_eq!(kasa_characters::character::assignable_names(&roster), ["세이아", "아즈사"]);
+        assert_eq!(kasa_characters::character::assignable_names(&roster), ["나기", "코사메"]);
         let first = self.prepare_agent_identity(&original, "", "", std::process::id()).unwrap();
-        assert_eq!(first["character"], "세이아");
+        assert_eq!(first["character"], "나기");
         let tab = self.spawn_new_tab(&original, false).expect("second tab");
         let second = self.prepare_agent_identity(&tab, "", "", std::process::id()).unwrap();
-        assert_eq!(second["character"], "아즈사", "the synced order is the assignment order");
+        assert_eq!(second["character"], "코사메", "the synced order is the assignment order");
         eprintln!("[student-picks] PASS: synced picks replace the pool in order without a restart");
     }
 }

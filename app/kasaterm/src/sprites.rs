@@ -134,7 +134,7 @@ pub(crate) fn other_sprite_dirs_in(
     for e in rd.flatten() {
         // `theme.json` 이 테마라는 표식이다 — `_trash/`·낱장 파일은 여기서 걸린다.
         let dir = e.path();
-        if !dir.join("theme.json").is_file() {
+        if !dir.join("theme.json").is_file() || kasa_characters::character::retired_theme_dir(&dir) {
             continue;
         }
         let sprites = dir.join("sprites");
@@ -147,6 +147,9 @@ pub(crate) fn other_sprite_dirs_in(
 }
 
 pub(crate) fn has_student_profile(slug: &str) -> bool {
+    if kasa_characters::character::retired_asset_slug(slug) {
+        return false;
+    }
     if student_profile_png(slug).is_some() || crate::mirror_theme::asset(slug, "profile", 0).is_some() { return true; }
     selected_asset(picked_theme_sprite_dir(slug),
         |dir| [true, false].into_iter().any(|foldered| dir.join(profile_rel(slug, foldered)).is_file()).then_some(()),
@@ -244,72 +247,12 @@ pub(crate) fn sprite_key_prefix(motion: &str) -> &'static str {
     }
 }
 
-/// 캐릭터 슬러그 + 모션 → 컴파일타임 내장 도트 프레임(arona-ui 스프라이트의
-/// idle/wave/cheer 0..3 · walk-east 0..5). idle=대기, wave=승인 대기(한 팔
-/// 인사), cheer=턴 완료(양팔 만세), walk=working(제자리 걸음).
-pub(crate) fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8]]> {
-    // idle/wave/cheer 공통 4프레임 — 모션 폴더만 다르고 파일명은 전부 `<slug>-N`.
-    macro_rules! frames4 {
-        ($n:literal, $d:literal) => {{
-            const F: [&[u8]; STUDENT_IDLE_FRAMES] = [
-                include_bytes!(concat!("../assets/students/", $d, "/", $n, "-0.png")),
-                include_bytes!(concat!("../assets/students/", $d, "/", $n, "-1.png")),
-                include_bytes!(concat!("../assets/students/", $d, "/", $n, "-2.png")),
-                include_bytes!(concat!("../assets/students/", $d, "/", $n, "-3.png")),
-            ];
-            &F[..]
-        }};
+/// Keep a four-slot idle export for tools that consume the existing frame protocol.
+pub(crate) fn student_sprite_png(slug: &str, motion: &str) -> Option<[&'static [u8]; STUDENT_IDLE_FRAMES]> {
+    if motion != "idle" {
+        return None;
     }
-    macro_rules! walk {
-        ($n:literal) => {{
-            const F: [&[u8]; STUDENT_WALK_FRAMES] = [
-                include_bytes!(concat!("../assets/students/walk/", $n, "-0.png")),
-                include_bytes!(concat!("../assets/students/walk/", $n, "-1.png")),
-                include_bytes!(concat!("../assets/students/walk/", $n, "-2.png")),
-                include_bytes!(concat!("../assets/students/walk/", $n, "-3.png")),
-                include_bytes!(concat!("../assets/students/walk/", $n, "-4.png")),
-                include_bytes!(concat!("../assets/students/walk/", $n, "-5.png")),
-            ];
-            &F[..]
-        }};
-    }
-    macro_rules! student {
-        ($n:literal) => {
-            match motion {
-                "idle" => frames4!($n, "idle"),
-                "wave" => frames4!($n, "wave"),
-                "cheer" => frames4!($n, "cheer"),
-                "walk" => walk!($n),
-                _ => return None,
-            }
-        };
-    }
-    // 슬러그 하나가 18개 프레임(`include_bytes!`)으로 펼쳐지므로 arm 을 손으로 쓰면
-    // 로스터가 늘 때마다 79줄이 된다. 목록만 두고 arm 은 매크로가 만든다.
-    macro_rules! students {
-        ($($n:literal),* $(,)?) => {
-            match slug {
-                $($n => student!($n),)*
-                _ => return None,
-            }
-        };
-    }
-    // ⚠️`collab-hooks/characters.json` 로스터와 **같은 집합이어야 한다**. 빠진 슬러그는
-    // 오류가 아니라 「그림 없는 학생」이 되고, 그러면 배너·스피너 자리가 빈 구멍으로
-    // 남는다(`student_has_sprite` 주석 참고). 실제로 에셋을 67명분 만들어 놓고 이
-    // 목록에 안 넣어 앱에서는 12명만 보였다(2026-08-11).
-    Some(students![
-        "arona", "prana", "akane", "akari", "ako", "arisu", "aru", "asuna",
-        "atsuko", "ayane", "azusa", "chihiro", "chinatsu", "eimi", "fubuki", "fuuka",
-        "hanako", "hare", "haruka", "haruna", "hasumi", "hibiki", "hifumi", "himari",
-        "hina", "hinata", "hiyori", "hoshino", "ichika", "iori", "iroha", "izuna",
-        "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei", "kirino",
-        "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
-        "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa",
-        "neru", "niya", "noa", "nonomi", "rio", "sakurako", "saori", "satsuki",
-        "seia", "sena", "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki",
-        "tsukuyo", "tsurugi", "utaha", "wakamo", "yukari", "yuuka", "yuzu",
-    ])
+    Some([kasa_characters::bundled::standing(slug)?; STUDENT_IDLE_FRAMES])
 }
 
 /// 지금 쓰는 학생 그림을 전부 파일로 꺼낸다(테마 복제용). 쓴 파일 수를 돌려준다.
@@ -355,7 +298,7 @@ pub(crate) fn export_student_sprites(dir: &std::path::Path) -> std::io::Result<u
             for i in 0..motion_frame_count(motion) {
                 let rels =
                     [sprite_rel(slug, motion, i, true), sprite_rel(slug, motion, i, false)];
-                if copy(rels, frames.and_then(|f| f.get(i).copied()))? {
+                if copy(rels, frames.as_ref().and_then(|f| f.get(i).copied()))? {
                     n += 1;
                 }
             }
@@ -366,7 +309,7 @@ pub(crate) fn export_student_sprites(dir: &std::path::Path) -> std::io::Result<u
         }
     }
     let logo: &'static [u8] = include_bytes!("../../../assets/AppIcon.png");
-    if copy(["schale-logo.png".to_string(), "schale-logo.png".to_string()], Some(logo))? {
+    if copy(["kasa-logo.png".to_string(), "kasa-logo.png".to_string()], Some(logo))? {
         n += 1;
     }
     write_sprite_readme(dir)?;
@@ -474,6 +417,9 @@ pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
 /// 키 차이가 contain-fit 배율 차이로 증폭돼 캐릭터가 들썩인다.
 /// GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로 (캐릭터,모션)당 1회.
 pub(crate) fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, u32)>> {
+    if kasa_characters::character::retired_asset_slug(slug) {
+        return None;
+    }
     // 고른 테마 → 활성 override(students_dir) → 번들 내장 → 다른 설치 테마.
     let remote = (0..motion_frame_count(motion)).map(|i| {
         let bytes = crate::mirror_theme::asset(slug, motion, i)?;
@@ -517,34 +463,8 @@ pub(crate) fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec
     )
 }
 
-/// 캐릭터 슬러그 → statusline 프사 PNG(웹뷰 bust 를 96×96 contain-리사이즈한
-/// 정사각 상반신, 컴파일타임 내장).
-///
-/// ⚠️`student_sprite_png` 의 로스터와 **같은 집합이어야 한다**. 로스터가 12→79명이
-/// 될 때 여기만 12명 수동 목록으로 남아, 신규 학생은 SendMessage/tell 프사 자리가
-/// 조용히 비었다(2026-08-12 실측: 칸나 발신 메시지에 아바타 없음).
 pub(crate) fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
-    macro_rules! profiles {
-        ($($n:literal),* $(,)?) => {
-            match slug {
-                $($n => include_bytes!(concat!("../assets/students/profile/", $n, ".png"))
-                    as &'static [u8],)*
-                _ => return None,
-            }
-        };
-    }
-    Some(profiles![
-        "arona", "prana", "akane", "akari", "ako", "arisu", "aru", "asuna",
-        "atsuko", "ayane", "azusa", "chihiro", "chinatsu", "eimi", "fubuki", "fuuka",
-        "hanako", "hare", "haruka", "haruna", "hasumi", "hibiki", "hifumi", "himari",
-        "hina", "hinata", "hiyori", "hoshino", "ichika", "iori", "iroha", "izuna",
-        "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei", "kirino",
-        "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
-        "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa",
-        "neru", "niya", "noa", "nonomi", "rio", "sakurako", "saori", "satsuki",
-        "seia", "sena", "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki",
-        "tsukuyo", "tsurugi", "utaha", "wakamo", "yukari", "yuuka", "yuzu",
-    ])
+    kasa_characters::bundled::portrait(slug)
 }
 
 
@@ -587,11 +507,17 @@ fn crop_profile_face(rgba: Vec<u8>, w: u32, h: u32) -> Option<(Vec<u8>, u32, u32
 
 pub(crate) fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     let (rgba, w, h) = student_profile_rgba_full(slug)?;
+    if kasa_characters::bundled::portrait(slug).is_some() {
+        return Some((rgba, w, h));
+    }
     crop_profile_face(rgba, w, h)
 }
 
 /// 자르기 전 프사 원본 — 고른 테마 → 활성 → 번들 → 다른 설치 테마.
 fn student_profile_rgba_full(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
+    if kasa_characters::character::retired_asset_slug(slug) {
+        return None;
+    }
     if let Some(bytes) = crate::mirror_theme::asset(slug, "profile", 0) {
         let image = downscale_student(image::load_from_memory(&bytes).ok()?).to_rgba8();
         let (w, h) = image.dimensions();
@@ -848,28 +774,10 @@ pub(crate) fn student_idle_gif_bytes(slug: &str) -> Option<Vec<u8>> {
     selected_asset(
         picked_theme_sprite_dir(slug),
         |d| std::fs::read(d.join(gif_rel(slug))).ok(),
-        || student_idle_gif(slug).map(Vec::from),
+        || None,
         crate::socket::students_dir().as_deref(),
         other_theme_sprite_dirs(),
     )
-}
-
-pub(crate) fn student_idle_gif(slug: &str) -> Option<&'static [u8]> {
-    Some(match slug {
-        "arona" => include_bytes!("../assets/students/gif/arona.gif"),
-        "prana" => include_bytes!("../assets/students/gif/prana.gif"),
-        "midori" => include_bytes!("../assets/students/gif/midori.gif"),
-        "momoi" => include_bytes!("../assets/students/gif/momoi.gif"),
-        "yuzu" => include_bytes!("../assets/students/gif/yuzu.gif"),
-        "arisu" => include_bytes!("../assets/students/gif/arisu.gif"),
-        "yuuka" => include_bytes!("../assets/students/gif/yuuka.gif"),
-        "shiroko" => include_bytes!("../assets/students/gif/shiroko.gif"),
-        "hoshino" => include_bytes!("../assets/students/gif/hoshino.gif"),
-        "koharu" => include_bytes!("../assets/students/gif/koharu.gif"),
-        "himari" => include_bytes!("../assets/students/gif/himari.gif"),
-        "aru" => include_bytes!("../assets/students/gif/aru.gif"),
-        _ => return None,
-    })
 }
 
 /// 투명하지 않은 픽셀이 차지하는 사각 `(x, y, w, h)`. 빈 그림이면 전체.
@@ -1105,22 +1013,22 @@ pub(crate) fn app_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
 }
 
 // 기존 테마의 로고 파일명은 보존하되 제품 기본 로고는 앱 아이콘과 같아야 한다.
-pub(crate) fn schale_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
-    schale_logo_rgba_in(crate::socket::students_dir().as_deref())
+pub(crate) fn kasa_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    kasa_logo_rgba_in(crate::socket::students_dir().as_deref())
 }
 
-fn schale_logo_rgba_in(dir: Option<&std::path::Path>) -> Option<(Vec<u8>, u32, u32)> {
-    dir.and_then(|d| user_asset_rgba_in(d, "schale-logo.png")).or_else(app_logo_rgba)
+fn kasa_logo_rgba_in(dir: Option<&std::path::Path>) -> Option<(Vec<u8>, u32, u32)> {
+    dir.and_then(|d| user_asset_rgba_in(d, "kasa-logo.png")).or_else(app_logo_rgba)
 }
 
 // 사용자 배경은 유지하고, 자체 배경이 없는 기본 화면은 팔레트 표면을 쓴다.
-pub(crate) fn schale_classroom_rgba() -> Option<(Vec<u8>, u32, u32)> {
-    schale_classroom_rgba_in(crate::socket::students_dir().as_deref())
+pub(crate) fn workspace_background_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    workspace_background_rgba_in(crate::socket::students_dir().as_deref())
 }
 
-fn schale_classroom_rgba_in(dir: Option<&std::path::Path>) -> Option<(Vec<u8>, u32, u32)> {
+fn workspace_background_rgba_in(dir: Option<&std::path::Path>) -> Option<(Vec<u8>, u32, u32)> {
     const DIM: f32 = 0.40;
-    let (rgba, w, h) = user_asset_rgba_in(dir?, "schale-classroom.png")?;
+    let (rgba, w, h) = user_asset_rgba_in(dir?, "workspace-background.png")?;
     let mut img = image::RgbaImage::from_raw(w, h, rgba)?;
     for px in img.pixels_mut() {
         px[0] = (px[0] as f32 * DIM) as u8;
@@ -1300,9 +1208,9 @@ mod student_asset_tests {
 
     #[test]
     fn default_brand_uses_app_icon_without_classroom_background() {
-        let logo = schale_logo_rgba_in(None).expect("bundled app icon");
+        let logo = kasa_logo_rgba_in(None).expect("bundled app icon");
         assert_eq!(Some(logo), app_logo_rgba());
-        assert!(schale_classroom_rgba_in(None).is_none());
+        assert!(workspace_background_rgba_in(None).is_none());
     }
 
     #[test]
@@ -1312,10 +1220,10 @@ mod student_asset_tests {
         let dir = std::env::temp_dir().join(format!("kt-user-brand-{}-{stamp}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let art = image::RgbaImage::from_pixel(2, 2, image::Rgba([100, 150, 200, 255]));
-        art.save(dir.join("schale-logo.png")).unwrap();
-        art.save(dir.join("schale-classroom.png")).unwrap();
-        assert_eq!(schale_logo_rgba_in(Some(&dir)), Some((art.into_raw(), 2, 2)));
-        let (background, w, h) = schale_classroom_rgba_in(Some(&dir)).unwrap();
+        art.save(dir.join("kasa-logo.png")).unwrap();
+        art.save(dir.join("workspace-background.png")).unwrap();
+        assert_eq!(kasa_logo_rgba_in(Some(&dir)), Some((art.into_raw(), 2, 2)));
+        let (background, w, h) = workspace_background_rgba_in(Some(&dir)).unwrap();
         assert_eq!((w, h), (2, 2));
         assert_eq!(&background[..4], &[40, 60, 80, 255]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1327,98 +1235,30 @@ mod student_asset_tests {
     /// 안 풀리면 그 모션을 통째로 `None` 으로 돌려주고, 호출측은 업로드를 건너뛴
     /// 뒤 없는 키로 `queue_image_above` 를 부른다 — **아무것도 안 그려지고 에러도
     /// 없다**. 그래서 "프사(정적 로더)는 뜨는데 애니만 안 뜬다" 가 되면 원인을
-    /// 밖에서 가릴 수 없다(2026-08-05 사용자 신고 추적에 하루가 들었다).
     #[test]
-    fn bundled_sprite_frames_decode_for_every_student_and_motion() {
-        let mut checked = 0;
-        let mut with_art = 0;
-        // 여기는 활성 로스터가 아니라 코드젠 상수를 직접 쓴다 — 이건
-        // **번들** 자산이 번들 로스터 전원을 덮는지 보는 테스트다. 런타임 로스터로
-        // 바꾸면 테마를 깐 기계에서 그 테마를 검사하게 되고, 번들 구멍은 못 잡으면서
-        // 남의 테마 때문에 실패한다.
+    fn bundled_roster_has_portraits_and_standing_art() {
+        assert_eq!(crate::theme::CHARACTER_SLUGS.len(), 30);
         for (_, slug) in crate::theme::CHARACTER_SLUGS {
-            // 로스터(build.rs 가 characters.json 에서 굽는다)와 `student_sprite_png` 의
-            // 슬러그 목록은 **정본이 둘**이라 어긋나도 오류가 안 난다 — 빠진 학생은
-            // 그냥 그림 없는 학생이 되고 화면에서만 조용히 사라진다. 실제로 에셋을
-            // 67명분 만들어 놓고 목록에 안 넣어 앱에는 12명만 보였다(2026-08-11).
-            assert!(
-                student_sprite_png(slug, "idle").is_some(),
-                "{slug} 가 로스터엔 있는데 student_sprite_png 목록에 없다 — 앱에서 안 보인다"
-            );
-            with_art += 1;
-            for motion in ["idle", "wave", "cheer", "walk"] {
-                let frames = student_sprite_frames(slug, motion)
-                    .unwrap_or_else(|| panic!("{slug}/{motion}: 프레임이 None — 애니가 통째로 안 그려진다"));
-                let want = if motion == "walk" {
-                    STUDENT_WALK_FRAMES
-                } else {
-                    STUDENT_IDLE_FRAMES
-                };
-                assert_eq!(frames.len(), want, "{slug}/{motion}: 프레임 수");
-                for (i, (rgba, w, h)) in frames.iter().enumerate() {
-                    assert!(*w > 0 && *h > 0, "{slug}/{motion}[{i}]: 0 크기");
-                    assert_eq!(
-                        rgba.len(),
-                        (*w as usize) * (*h as usize) * 4,
-                        "{slug}/{motion}[{i}]: RGBA 길이가 w*h*4 와 안 맞는다"
-                    );
-                }
-                checked += 1;
-            }
+            let portrait = image::load_from_memory(student_profile_png(slug).unwrap()).unwrap();
+            assert_eq!((portrait.width(), portrait.height()), (160, 160), "{slug}");
+            let standing = student_sprite_frames(slug, "idle").unwrap();
+            assert_eq!(standing.len(), STUDENT_IDLE_FRAMES, "{slug}");
+            assert!(standing[0].1 > 0 && standing[0].2 > 0, "{slug}");
         }
-        assert!(checked >= 4, "모션을 하나도 못 셌다 — 로스터가 비었나");
-        // 로스터가 통째로 비면 위 루프는 조용히 0바퀴 돌고 전부 통과한다. 실측 79명을
-        // 하한으로 박아 그 침묵을 막는다.
-        assert!(with_art >= 79, "아트 있는 학생이 {with_art}명뿐 — 에셋이 빠졌나");
     }
 
-    /// 폰이 받는 걷기 시트는 사이드바가 올리는 프레임을 순서·크기 그대로 이어야 한다 — 폰은
-    /// 시트 폭을 프레임 수로 나눠 자르므로 한 칸만 어긋나도 이웃 프레임이 섞여 보인다.
     #[test]
     fn walk_sheet_lays_sidebar_frames_side_by_side() {
-        let frames = student_sprite_frames("mika", "walk").expect("번들 걷기");
-        let sheet = image::load_from_memory(&walk_sheet_png(&frames).expect("시트")).unwrap().to_rgba8();
-        let (_, w, h) = frames[0];
-        assert_eq!(sheet.dimensions(), (w * STUDENT_WALK_FRAMES as u32, h));
-        for (i, (rgba, fw, fh)) in frames.iter().enumerate() {
-            let frame = image::RgbaImage::from_raw(*fw, *fh, rgba.clone()).unwrap();
-            let cut = image::imageops::crop_imm(&sheet, i as u32 * w, 0, w, h).to_image();
-            assert!(cut == frame, "{i}번째 프레임이 시트 제자리에 없다");
-        }
+        let frames = vec![(vec![255, 0, 0, 255], 1, 1), (vec![0, 0, 255, 255], 1, 1)];
+        let sheet = image::load_from_memory(&walk_sheet_png(&frames).unwrap()).unwrap().to_rgba8();
+        assert_eq!(sheet.dimensions(), (2, 1));
+        assert_eq!(sheet.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(sheet.get_pixel(1, 0).0, [0, 0, 255, 255]);
     }
 
-    /// 프사도 같은 계약이다 — 스프라이트만 79명이고 프사가 12명 수동 목록으로
-    /// 남아, 신규 학생의 SendMessage/tell 아바타 자리가 조용히 비었다(2026-08-12).
-    #[test]
-    fn bundled_profile_decodes_for_every_student() {
-        let mut with_art = 0;
-        // 코드젠 상수 직접 사용 — 위 테스트와 같은 이유(번들끼리 대조).
-        for (_, slug) in crate::theme::CHARACTER_SLUGS {
-            let png = student_profile_png(slug).unwrap_or_else(|| {
-                panic!("{slug} 가 로스터엔 있는데 student_profile_png 목록에 없다")
-            });
-            let img = image::load_from_memory(png)
-                .unwrap_or_else(|e| panic!("profile/{slug}.png 디코드 실패: {e}"));
-            let (w, h) = (img.width(), img.height());
-            assert!(w > 0 && h > 0, "profile/{slug}.png 크기 0");
-            with_art += 1;
-        }
-        assert!(with_art >= 79, "프사 있는 학생이 {with_art}명뿐");
-    }
-
-    /// 그림 유무를 **슬롯 세우기 전에** 가르는 계약.
-    ///
-    /// 이게 무너지면 화면에 구멍이 난다: 호출부가 Clawd 배너·스피너 글리프를 먼저
-    /// blank 로 지우고 나서 슬롯을 세우므로, 그림이 없는데 세우면 원래 있던 것까지
-    /// 지워진 채 아무것도 안 그려진다. 로스터가 12→79명이 되며 실제로 그랬다.
-    ///
-    /// 로스터 79명은 이제 전원 그림이 있다(2026-08-11). 그래서 여기서 거르는 대상은
-    /// 로스터 **밖** 이름뿐이다 — 이름을 바꾼 세션이 그 경로로 들어온다.
     #[test]
     fn students_without_art_are_filtered_before_the_glyph_is_erased() {
-        for motion in ["idle", "wave", "cheer", "walk"] {
-            assert!(student_has_sprite("arisu", motion), "아리스/{motion}");
-        }
+        assert!(student_has_sprite("kasa_tsuyu", "idle"));
         assert!(!student_has_sprite("존재하지않는슬러그", "walk"));
         assert!(!student_has_sprite("모바일", "idle"));
     }
@@ -1461,9 +1301,9 @@ mod student_asset_tests {
         let dir = std::env::temp_dir().join(format!("kt-small-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         image::RgbaImage::from_pixel(96, 96, image::Rgba([1, 2, 3, 255]))
-            .save(dir.join("schale-logo.png"))
+            .save(dir.join("kasa-logo.png"))
             .unwrap();
-        let (_, w, h) = user_asset_rgba_in(&dir, "schale-logo.png").expect("override read");
+        let (_, w, h) = user_asset_rgba_in(&dir, "kasa-logo.png").expect("override read");
         assert_eq!((w, h), (96, 96));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1643,8 +1483,8 @@ mod sidebar_blink_tests {
 
     #[test]
     fn sender_accent_picks_the_student_before_the_tag_color() {
-        let himari = theme::character_accent("히마리").expect("로스터에 있어야 한다");
-        assert_eq!(teammate_sender_accent("himari-p2-1uc", None), himari);
+        let yoake = theme::character_accent("요아케").expect("로스터에 있어야 한다");
+        assert_eq!(teammate_sender_accent("kasa_yoake-p2-1uc", None), yoake);
         // 학생을 못 찾을 때만 태그 색으로 떨어진다.
         assert_eq!(
             teammate_sender_accent("모바일", Some("red")),

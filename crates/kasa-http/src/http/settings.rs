@@ -1,53 +1,11 @@
 //! 설정 화면 창구 — 캐릭터·테마 명부·디자인 토큰·온보딩·테마 생성·얼굴/스프라이트·설정 동작.
 
 use super::*;
-#[cfg(test)]
-use super::test_support::temp_dir;
-
-/// characters.json 후보 경로 — kasaterm-assign-character.py 와 같은 우선순위:
-/// ~/.config/kasaterm/characters.json → 번들 collab-hooks (env 오버라이드 →
-/// .app Resources → 레포 소스). 파싱 실패 파일은 건너뛰고 다음 후보로 (py 동일).
-fn characters_candidate_paths() -> Vec<std::path::PathBuf> {
-    let mut v = Vec::new();
-    if let Some(home) = kasa_socket::home_dir() {
-        v.push(home.join(".config/kasaterm/characters.json"));
-    }
-    if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
-        v.push(std::path::PathBuf::from(p).join("characters.json"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        // <bundle>/Contents/MacOS/kasaterm → <bundle>/Contents/Resources/collab-hooks
-        if let Some(res) = exe
-            .parent()
-            .and_then(|m| m.parent())
-            .map(|c| c.join("Resources/collab-hooks/characters.json"))
-        {
-            v.push(res);
-        }
-    }
-    // cargo run (dev): 이 crate 기준 레포 안 정본
-    v.push(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../app/kasaterm/collab-hooks/characters.json"),
-    );
-    v
-}
-
-/// 후보들 중 첫 번째로 읽히고 JSON 으로 파싱되는 파일의 내용.
-fn first_valid_json(paths: &[std::path::PathBuf]) -> Option<serde_json::Value> {
-    for p in paths {
-        let Ok(s) = std::fs::read_to_string(p) else { continue };
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-            return Some(v);
-        }
-    }
-    None
-}
 
 /// `GET /characters` — 캐릭터 테마 정의를 그대로 JSON 으로 반환. 없으면 404
 /// (테마 미설치 = 기능 전체 skip 이 규약이라, 프런트가 404 로 분기한다).
 async fn characters_handler() -> impl IntoResponse {
-    let (status, body) = match first_valid_json(&characters_candidate_paths()) {
+    let (status, body) = match kasa_characters::character::characters_json() {
         Some(v) => (axum::http::StatusCode::OK, v),
         None => (
             axum::http::StatusCode::NOT_FOUND,
@@ -781,21 +739,5 @@ mod tests {
         let response = login_action(desk.clone(), Some(true), "claude-phone-login-code", &"x".repeat(17 * 1024)).await;
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(desk.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn first_valid_json_skips_broken_files() {
-        let d = temp_dir("char-json");
-        let broken = d.join("broken.json");
-        let valid = d.join("valid.json");
-        let missing = d.join("missing.json");
-        std::fs::write(&broken, "{not json").unwrap();
-        std::fs::write(&valid, r#"{"leader":{"name":"아로나"}}"#).unwrap();
-        // 깨진 파일·없는 파일은 건너뛰고 첫 유효 JSON 을 집는다
-        let got = first_valid_json(&[missing.clone(), broken.clone(), valid.clone()]).unwrap();
-        assert_eq!(got["leader"]["name"], "아로나");
-        // 전부 무효 → None (핸들러는 404)
-        assert!(first_valid_json(&[missing, broken]).is_none());
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

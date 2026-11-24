@@ -23,9 +23,6 @@ function statusAnim(status: Agent['status']): string | undefined {
   return undefined;
 }
 
-// 방 추가 시 고를 첫 학생(사용자: 처음은 아로나 고정, 새 방은 선택). leaders 풀과 일치.
-const STARTERS = ['아로나', '프라나'];
-
 /** unix secs → "방금/N분 전/N시간 전/N일 전". */
 // 작업폴더 경로 축약 — 홈은 ~, 깊으면 마지막 2 세그먼트만(사용자: 최근 세션을 폴더로 구분).
 function shortPath(p?: string): string {
@@ -104,8 +101,7 @@ function RoomIcon({ active }: { active: boolean }) {
   );
 }
 
-// 좌측 방 네비 — 방 = kasaterm 윈도우(사용자). 목록 + "+ 방 추가"(첫 학생 선택). 첫 방은
-// 아로나 고정, 새 방은 아로나/프라나 중 골라 그 학생으로 스폰. × 로 방 닫기.
+// 새 방은 현재 로스터에서 고른 캐릭터를 첫 칸에 배정한다.
 export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStudent, onNewRoom, onCloseRoom, onOpenSession, onCollapse }: RoomMapProps) {
   const isPhone = useIsPhone();
   const n = sessions.count;
@@ -120,6 +116,17 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
     list.sort((x, y) => x.id.localeCompare(y.id));
   }
   const [adding, setAdding] = useState(false);
+  const [starters, setStarters] = useState<string[]>([]);
+  useEffect(() => {
+    if (!adding) return;
+    let alive = true;
+    void fetchCharacters().then((roster) => {
+      if (!alive) return;
+      const leads = roster?.leaders;
+      setStarters((leads?.length ? leads : characterPool(roster).slice(0, 2)).map((entry) => entry.name));
+    });
+    return () => { alive = false; };
+  }, [adding]);
   const [showRecent, setShowRecent] = useState(false);
   const [recent, setRecent] = useState<RecentSession[]>([]);
   // 기본은 이 방 폴더 것만. 켜면 폴더를 넘어 전체를 훑는다 — 어제 다른 레포에서
@@ -312,14 +319,14 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
         adding ? (
           <div style={{ marginTop: 4, padding: 7, borderRadius: 8, background: 'var(--cth-cream-100)', display: 'flex', flexDirection: 'column', gap: 4 }}>
             <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', padding: '0 2px 2px' }}>첫 캐릭터 선택</div>
-            {STARTERS.map((g) => (
+            {starters.map((g) => (
               <button key={g} onClick={() => { onNewRoom(g); setAdding(false); }} style={{
                 display: 'flex', alignItems: 'center', gap: 6, padding: '7px 9px', borderRadius: 7, border: 'none', cursor: 'pointer',
                 minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
                 background: 'var(--cth-cream-50)', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
                 boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
               }}>
-                <img src={`${import.meta.env.BASE_URL || '/'}assets/idle-front-${g === '아로나' ? 'arona' : 'prana'}.png`} alt="" style={{ width: 20, height: 20, objectFit: 'contain', imageRendering: 'pixelated' }} />
+                <SpritePortrait character={g} scale={1} bust />
                 {g}
               </button>
             ))}

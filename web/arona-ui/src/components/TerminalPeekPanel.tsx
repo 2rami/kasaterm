@@ -6,7 +6,7 @@ import { Markdown } from './Markdown';
 import { ToolUseCard } from './tool-use-card';
 import { ThinkingBlock } from './thinking-block';
 import { buildToolMap, type ToolMap } from '@/lib/build-tool-map';
-import { SLUG_TO_CHARACTER } from '@/lib/sprites';
+import { characterInText, characterNameForSlug } from '@/lib/sprites';
 import type { SessionEvent } from '@/lib/types';
 import { AnsiText } from './AnsiText';
 import { useStore, isAwaitingTeacher, type SubagentInfo } from '@/store';
@@ -41,16 +41,7 @@ const EFFORT_COLOR: Record<string, string> = {
 };
 const effortColor = (e?: string | null): string | undefined => (e ? EFFORT_COLOR[e.toLowerCase()] : undefined);
 
-// AskUserQuestion 옵션에 학생 이름이 박혀 있으면 그 도트를 곁들인다(사용자: 목업의 학생을 진짜
-// 도트로). SLUG 로스터와 동일 — label·description·preview 어디에 있든 첫 매치 반환.
-const AQ_STUDENTS = ['아로나', '프라나', '미도리', '모모이', '유즈', '아리스'];
-const detectStudent = (...texts: (string | undefined)[]): string | null => {
-  for (const t of texts) {
-    if (t) { const hit = AQ_STUDENTS.find((s) => t.includes(s)); if (hit) return hit; }
-  }
-  return null;
-};
-
+const detectStudent = characterInText;
 
 // /context 터미널 화면에서 의미있는 라인만 추출(사용자: GUI 새로 만들지 말고 터미널에 보이는
 // 거 잘 정리해서). 실측 포맷: "⛁ Custom agents: 602 tokens (0.1%)"·"⛶ Free space: 835.2k
@@ -1594,7 +1585,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       // 해야 agents(character=한글)와 매칭된다 — 직접 비교하면 항상 어긋나 색·이름이
       // raw agent-name 으로 샜다(사용자: 아리스에 시로코 칩). 못 찾으면 이름만, 색 없이.
       if (fromName) {
-        const ko = SLUG_TO_CHARACTER[fromName.split('-')[0]] ?? fromName;
+        const ko = characterNameForSlug(fromName.split('-')[0]) ?? fromName;
         const a = agents.find((x) => x.character === ko);
         return { pane: a?.id ?? '', name: a?.character ?? ko, accent: a?.accent, accentHex: a?.accentHex };
       }

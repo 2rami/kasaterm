@@ -1534,7 +1534,7 @@ impl crate::App {
             }
             Some(state::StatusbarHit::CopyAronaUrl) => {
                 if let Some(h) = self.statusbar.tunnel_host.clone() {
-                    self.copy_to_clipboard(tunnel_url(&h, "/arona-ui/"), "아로나 주소 복사됨");
+                    self.copy_to_clipboard(tunnel_url(&h, "/arona-ui/"), "대화 주소 복사됨");
                 }
                 return true;
             }

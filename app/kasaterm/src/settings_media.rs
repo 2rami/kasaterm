@@ -666,11 +666,7 @@ fn load_gif_motion(theme: &str, slug: &str) -> LoadResult {
             return Ok(Some((source, frames)));
         }
     }
-    let Some(bytes) = crate::sprites::student_idle_gif(slug) else {
-        return Ok(None);
-    };
-    let frames = decode_gif_bytes(bytes)?;
-    Ok(Some((MediaSource::Bundled, frames)))
+    Ok(None)
 }
 
 fn decode_static_path(

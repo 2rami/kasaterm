@@ -310,8 +310,7 @@ pub fn builtin_asset(name: &str) -> Option<(&'static [u8], &'static str)> {
         "terminal" => include_bytes!("../../../app/kasaterm/assets/icons/terminal.svg"),
         "server" => include_bytes!("../../../app/kasaterm/assets/icons/server.svg"),
         "laptop" => include_bytes!("../../../app/kasaterm/assets/icons/laptop.svg"),
-        "schale-logo" => return Some((include_bytes!("../../../app/kasaterm/assets/students/schale-logo.png"), "image/png")),
-        "schale-classroom" => return Some((include_bytes!("../../../app/kasaterm/assets/schale-classroom.png"), "image/png")),
+        "kasa-logo" | "schale-logo" => return Some((include_bytes!("../../../assets/AppIcon.png"), "image/png")),
         _ => return None,
     };
     Some((svg, "image/svg+xml"))

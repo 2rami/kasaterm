@@ -334,64 +334,34 @@ const TOKYO_NIGHT: Palette = Palette {
     ],
 };
 
-// Blue Archive "Schale" pair — hexes extracted from fan-repo canon (vitepress
-// vars.less / momotalk mixin.scss / BA-style-homepage index.css; 사용자 수집분,
-// [[reference_ba_styling_repos]]). green/red have no canon source and are
-// derived to fit — tune by eye. Light follows the game's white/sky UI; dark is
-// the same family re-rooted on the BA navy (#003153/#2a323e) since the game
-// itself has no dark mode.
-const SCHALE_LIGHT: Palette = Palette {
-    surfaces: None,
-    bg: [0xEA, 0xEF, 0xF5, 255],            // general background
-    fg: [0x2A, 0x32, 0x3E, 255],            // momotalk font-black
-    surface: [0xFF, 0xFF, 0xFF, 255],       // white cards
-    surface_hover: [0xE1, 0xE7, 0xEC, 255], // list-active
-    surface_active: [0xD3, 0xDD, 0xE8, 255],
-    border: [0xCD, 0xD3, 0xDC, 180],        // chatborder
-    text: [0x2A, 0x32, 0x3E, 255],
-    text_dim: [0x4C, 0x58, 0x66, 255],      // font-color-grey
-    text_mute: [0x87, 0x92, 0x9E, 255],     // momotalk font-grey
-    success: [0x2A, 0xA8, 0x76, 255],
-    danger: [0xE8, 0x50, 0x4F, 255],
-    syn_keyword: [0x12, 0x8A, 0xFA, 255],   // the BA blue
-    syn_string: [0x2A, 0xA8, 0x76, 255],
-    syn_number: [0xD2, 0x64, 0x9A, 255],    // momotalk pink, darkened for white bg
-    syn_comment: [0x87, 0x92, 0x9E, 255],
-    syn_function: [0x0E, 0x9C, 0xBE, 255],  // sky cyan family, darkened
-    syn_type: [0xB5, 0x8A, 0x00, 255],      // gold #ffe401, darkened for white bg
-    ansi: [
-        [0x2A, 0x32, 0x3E], [0xE8, 0x50, 0x4F], [0x2A, 0xA8, 0x76], [0xC9, 0x8A, 0x00],
-        [0x12, 0x8A, 0xFA], [0xEF, 0x62, 0x92], [0x0E, 0x9C, 0xBE], [0x68, 0x78, 0x8F],
-        [0x87, 0x92, 0x9E], [0xF0, 0x68, 0x60], [0x35, 0xC0, 0x8B], [0xE0, 0xA8, 0x00],
-        [0x34, 0x93, 0xF9], [0xF2, 0x72, 0xA0], [0x10, 0xB3, 0xD7], [0xCD, 0xD3, 0xDC],
-    ],
+const KASA_LIGHT: Palette = Palette {
+    bg: [238, 246, 250, 255],
+    fg: [34, 55, 68, 255],
+    surface: [250, 252, 253, 255],
+    surface_hover: [224, 238, 246, 255],
+    surface_active: [209, 228, 240, 255],
+    border: [172, 197, 214, 180],
+    text: [34, 55, 68, 255],
+    text_dim: [71, 97, 112, 255],
+    text_mute: [92, 115, 128, 255],
+    syn_function: [47, 106, 144, 255],
+    syn_type: [133, 91, 30, 255],
+    ..LIGHT
 };
 
-const SCHALE_DARK: Palette = Palette {
-    surfaces: None,
-    bg: [0x10, 0x17, 0x20, 255],
-    fg: [0xDC, 0xE6, 0xF2, 255],
-    surface: [0x18, 0x21, 0x2C, 255],
-    surface_hover: [0x1F, 0x2B, 0x39, 255],
-    surface_active: [0x26, 0x35, 0x47, 255],
-    border: [0x2E, 0x3D, 0x4F, 130],
-    text: [0xDC, 0xE6, 0xF2, 255],
-    text_dim: [0x9F, 0xB0, 0xC3, 255],
-    text_mute: [0x68, 0x78, 0x8F, 255],     // momotalk grey-active
-    success: [0x4C, 0xD3, 0x9A, 255],
-    danger: [0xFF, 0x6B, 0x6B, 255],
-    syn_keyword: [0xFC, 0x96, 0xAB, 255],   // momotalk pink
-    syn_string: [0x7C, 0xE8, 0xB8, 255],
-    syn_number: [0xFF, 0xB3, 0x42, 255],    // focus orange
-    syn_comment: [0x68, 0x78, 0x8F, 255],
-    syn_function: [0x4A, 0xA8, 0xFF, 255],  // BA blue, lifted for navy bg
-    syn_type: [0xFF, 0xE4, 0x01, 255],      // canon gold
-    ansi: [
-        [0x18, 0x21, 0x2C], [0xFF, 0x6B, 0x6B], [0x4C, 0xD3, 0x9A], [0xFF, 0xE4, 0x01],
-        [0x4A, 0xA8, 0xFF], [0xFC, 0x96, 0xAB], [0x6C, 0xE6, 0xFF], [0xDC, 0xE6, 0xF2],
-        [0x68, 0x78, 0x8F], [0xFF, 0x94, 0x94], [0x7C, 0xE8, 0xB8], [0xFF, 0xF0, 0x66],
-        [0x77, 0xDE, 0xFF], [0xFF, 0xB7, 0xC9], [0xA5, 0xF0, 0xFF], [0xFF, 0xFF, 0xFF],
-    ],
+const KASA_DARK: Palette = Palette {
+    bg: [19, 30, 40, 255],
+    fg: [228, 242, 247, 255],
+    surface: [30, 45, 57, 255],
+    surface_hover: [42, 60, 73, 255],
+    surface_active: [52, 75, 89, 255],
+    border: [81, 113, 130, 160],
+    text: [228, 242, 247, 255],
+    text_dim: [173, 199, 210, 255],
+    text_mute: [144, 169, 182, 255],
+    syn_function: [134, 191, 232, 255],
+    syn_type: [237, 190, 109, 255],
+    ..DARK
 };
 
 /// 호박색 인광 모니터. `shape: "pixel"` 과 짝이 되라고 만든 팔레트다 — 각진
@@ -543,11 +513,19 @@ pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
     ("catppuccin-latte", "Catppuccin Latte", &CATPPUCCIN_LATTE),
     ("gruvbox-dark", "Gruvbox Dark", &GRUVBOX_DARK),
     ("tokyo-night", "Tokyo Night", &TOKYO_NIGHT),
-    ("schale-light", "Sky Light", &SCHALE_LIGHT),
-    ("schale-dark", "Sky Dark", &SCHALE_DARK),
+    ("kasa-light", "KASA Light", &KASA_LIGHT),
+    ("kasa-dark", "KASA Dark", &KASA_DARK),
     ("amber-crt", "Amber CRT", &AMBER_CRT),
     ("nacho", "Nachoneko", &NACHO),
 ];
+
+fn palette_key(key: &str) -> &str {
+    match key {
+        "schale-light" => "kasa-light",
+        "schale-dark" => "kasa-dark",
+        _ => key,
+    }
+}
 
 /// 지금 store_palette 가 화면 밖 쓰기를 하지 않는 호출에서 불렸나. OS 색 패널의
 /// 미리보기와 독립 Viewer 시작은 원자 색 슬롯만 필요하고, Claude 설정 파일은
@@ -809,7 +787,7 @@ fn system_slot_theme_in(s: &serde_json::Value, light: bool) -> String {
             None => fallback.to_string(),
         };
     }
-    raw.to_string()
+    palette_key(raw).to_string()
 }
 
 /// system 모드가 지금 이 순간 실제로 입힐 팔레트를 굳힌다 — OS 밝기가 가리키는
@@ -843,6 +821,7 @@ fn apply_system_palette() {
 /// Switch to a preset theme by key; unknown keys fall back to dark.
 /// `custom:<slug>`(및 옛 `custom`)은 설정 파일의 팔레트를 다시 읽는다.
 pub fn set_theme(mode: &str) {
+    let mode = palette_key(mode);
     if let Some(slug) = custom_key(mode) {
         apply_custom_theme(&crate::socket::read_settings(), slug);
         return;
@@ -946,7 +925,7 @@ pub fn custom_palette(e: &serde_json::Value) -> Palette {
     let base_key = e.get("base").and_then(|x| x.as_str()).unwrap_or("dark");
     let (_, _, base) = THEME_PRESETS
         .iter()
-        .find(|(k, _, _)| *k == base_key)
+        .find(|(k, _, _)| *k == palette_key(base_key))
         .unwrap_or(&THEME_PRESETS[0]);
     let mut p: Palette = **base;
     let Some(o) = e.as_object() else { return p };
@@ -1110,7 +1089,7 @@ pub fn palette_slot_label(index: usize) -> String {
 pub fn custom_theme_seed(base_key: &str, slug: &str, label: &str) -> serde_json::Value {
     let (key, _, p) = THEME_PRESETS
         .iter()
-        .find(|(k, _, _)| *k == base_key)
+        .find(|(k, _, _)| *k == palette_key(base_key))
         .unwrap_or(&THEME_PRESETS[0]);
     let mut o = serde_json::Map::new();
     o.insert("slug".to_string(), serde_json::Value::String(slug.to_string()));
@@ -1646,12 +1625,9 @@ pub fn character_accent(name: &str) -> Option<[u8; 4]> {
     if let Some(color) = crate::mirror_theme::character_color(name) {
         return Some(color);
     }
-    // 학생 아님 — claude agents(에이전트 목록 뷰)의 SCHALE 조직 정체성 색.
-    // render 가 argv(is_claude_agents)+프사 슬롯 부재로 목록 뷰를 판정해
-    // 타이틀바 이름·테두리에만 쓴다(pane_character 엔 저장 안 함, 세션 진입
-    // 시 배정 학생을 가리지 않게). 로스터엔 없어 랜덤 배정 후보 아님.
-    if name == "샬레" {
-        return Some(unpack(0x3a6eb4_ff));
+    // The agent overview uses the workspace accent without occupying a roster slot.
+    if name == "KASA" {
+        return Some(unpack(0x377ead_ff));
     }
     roster().accents.iter().find(|(n, _)| *n == name).map(|(_, rgb)| unpack((rgb << 8) | 0xff))
 }
@@ -1848,10 +1824,9 @@ fn build_other_rosters() -> &'static [Roster] {
         return &[];
     }
     let Some(root) = kasa_characters::character::themes_root() else { return &[] };
-    let Ok(rd) = std::fs::read_dir(root) else { return &[] };
     let mut out: Vec<Roster> = Vec::new();
-    for e in rd.flatten() {
-        let Ok(raw) = std::fs::read_to_string(e.path().join("theme.json")) else { continue };
+    for path in kasa_characters::character::theme_roster_paths(&root) {
+        let Ok(raw) = std::fs::read_to_string(path) else { continue };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
         // 파싱은 활성 로스터와 **같은 갈래**를 탄다 — 파서가 둘이 되면 같은
         // theme.json 을 두 벌로 해석하고, 어긋나도 오류가 안 난다.
@@ -1973,6 +1948,7 @@ pub fn character_slug(name: &str) -> Option<&'static str> {
 pub fn agent_slug(name: &str) -> String {
     // Mirrored image keys are viewer-local GPU identities, never inbox names.
     character_slug(name).or_else(|| slug_beyond_active(name, other_rosters()))
+        .or_else(|| kasa_characters::character::retired_slug(name))
         .map(String::from)
         .unwrap_or_else(|| kasa_students::team::ascii_ident(name))
 }
@@ -2000,34 +1976,17 @@ fn name_beyond_active(slug: &str, extra: &[Roster]) -> Option<&'static str> {
     })
 }
 
-/// claude 시작 배너의 "Welcome back <user>!" 를 대체할 배정 학생 인사말 —
-/// 각 캐릭터 페르소나 말투로. `user` 는 원 배너에서 추출한 사용자 이름(하드코딩
-/// 금지, characters.json 의 user_title="선생님" 을 뒤에 붙인다).
-///
-/// ⚠️ 개별 페르소나가 없는 학생도 **범용 존대 한 줄로 반드시 커버한다** —
-/// 12명만 알고 나머지를 None 으로 돌려보내던 동안, 그 학생 pane 은 인사말이
-/// 안 바뀌는 것에서 끝나지 않고 **배너 테두리 학생색까지 통째로 빠졌다**
-/// (호출부가 None 에서 조기 반환, 2026-08-20 사용자 스샷·히나 pane 실측).
-/// 아바타 12명 목록과 같은 병이다: 로스터 부분집합 하드코딩은 조용히 샌다.
+/// The banner fits a brief greeting and uses the roster's configured title.
 pub fn character_welcome(name: &str, user: &str) -> Option<String> {
-    // 인사말은 원 배너("Welcome back <user>!") 폭에 맞춘 한 문장 — 2컬럼 배너의
-    // 왼쪽 컬럼을 넘기면 호출부가 "…"로 자른다(사용자 실사고: 긴 인사말 잘림).
-    let g = match name {
-        "아로나" => format!("어서 오세요 {user} 선생님!"),
-        "프라나" => format!("{user} 선생님, 오셨군요."),
-        "미도리" => format!("{user} 선생님, 오셨어요."),
-        "모모이" => format!("{user} 선생님, 어서 오세요!"),
-        "유즈" => format!("{user} 선생님… 오셨네요."),
-        "아리스" => format!("{user} 선생님, 돌아왔구나!"),
-        "유우카" => format!("{user} 선생님, 오셨네요."),
-        "시로코" => format!("{user} 선생님, 오셨어요."),
-        "호시노" => format!("{user} 선생님~ 왔구나~"),
-        "코하루" => format!("어, 어서오세요 {user} 선생님…!"),
-        "히마리" => format!("{user} 선생님, 어서 오세요."),
-        "아루" => format!("훗, 왔군 {user} 선생님!"),
-        _ => format!("{user} 선생님, 어서 오세요."),
-    };
-    Some(g)
+    let title = kasa_characters::character::characters_json()
+        .and_then(|roster| roster.get("user_title").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| "선생님".into());
+    let addressee = format!("{user} {title}").trim().to_owned();
+    Some(match name {
+        "츠유" => format!("{addressee}, 오셨네요."),
+        "아메" => format!("{addressee}, 어서 오세요!"),
+        _ => format!("{addressee}, 어서 오세요."),
+    })
 }
 
 /// `[r,g,b,a]` → CSS hex. 알파가 불투명하면 6자리로 — 대부분이 그렇고, 8자리를
@@ -2076,10 +2035,8 @@ fn character_accents_json() -> serde_json::Value {
             m.insert((*name).to_string(), serde_json::Value::String(css_hex(c)));
         }
     }
-    // 샬레는 학생이 아니라 조직 색이라 로스터에 이름이 없다 — 에이전트 목록
-    // 뷰가 이 색을 쓰므로 따로 넣는다.
-    if let Some(c) = character_accent("샬레") {
-        m.insert("샬레".to_string(), serde_json::Value::String(css_hex(c)));
+    if let Some(c) = character_accent("KASA") {
+        m.insert("KASA".to_string(), serde_json::Value::String(css_hex(c)));
     }
     serde_json::Value::Object(m)
 }
@@ -2296,10 +2253,10 @@ mod roster_tests {
     fn accent_beyond_active_covers_both_directions() {
         // 활성 밖 + 번들 안. 색까지 번들 표와 같아야 한다 — 되는대로 아무 색이나
         // 칠하면 「색이 곧 학생」이 깨진다.
-        let midori = CHARACTER_ACCENTS.iter().find(|(n, _)| *n == "미도리").map(|(_, c)| *c);
+        let tsuyu = CHARACTER_ACCENTS.iter().find(|(n, _)| *n == "츠유").map(|(_, c)| *c);
         assert_eq!(
-            accent_beyond_active("미도리", &[]),
-            midori.map(|rgb| unpack((rgb << 8) | 0xff)),
+            accent_beyond_active("츠유", &[]),
+            tsuyu.map(|rgb| unpack((rgb << 8) | 0xff)),
             "테마를 켠 화면의 옛 이름이 안 닫힌다"
         );
 
@@ -2313,7 +2270,7 @@ mod roster_tests {
         // 역방향도 같은 범위여야 한다 — agent 이름(`hachiware-p2-1uc`)의 로마자
         // 머리로 학생을 되짚는 자리가 이걸 쓴다.
         assert_eq!(name_beyond_active("hachiware", &extra), Some("하치와레"));
-        assert_eq!(name_beyond_active("midori", &[]), Some("미도리"));
+        assert_eq!(name_beyond_active("kasa_tsuyu", &[]), Some("츠유"));
 
         // 어느 명부에도 없으면 None — **이 None 이 가짜 마커 문지기다.** 사람이
         // 본문에 친 `⟦메모⟧` 까지 걷어내면 화면 내용을 조용히 바꾸는 셈이 된다.
@@ -2348,7 +2305,7 @@ mod roster_tests {
             Some(accent_variant([0x4a, 0x90, 0xd9, 255], 1))
         );
         // 활성 안 이름은 그대로 — 넓힌 조회가 기존 색을 바꾸면 안 된다.
-        assert_eq!(accent_n_with("미도리", 0, &extra), character_accent("미도리"));
+        assert_eq!(accent_n_with("츠유", 0, &extra), character_accent("츠유"));
         // 어느 명부에도 없으면 None. 이 None 이 「색이 곧 학생」의 문지기다.
         assert!(accent_n_with("없는캐릭", 0, &extra).is_none());
     }
@@ -2357,11 +2314,11 @@ mod roster_tests {
     /// 화면은 지금 고른 테마의 색을 보여야 한다. 그리고 로스터 밖 특례(샬레)가
     /// 합집합 경로에서도 살아 있어야 한다(에이전트 목록 뷰의 조직색).
     #[test]
-    fn accent_any_prefers_active_and_keeps_schale() {
-        let active = character_accent("미도리").expect("번들 활성");
-        assert_eq!(character_accent_any("미도리"), Some(active));
-        assert_eq!(character_accent_any("샬레"), character_accent("샬레"));
-        assert!(character_accent_any("샬레").is_some());
+    fn accent_any_prefers_active_and_keeps_workspace_color() {
+        let active = character_accent("츠유").expect("번들 활성");
+        assert_eq!(character_accent_any("츠유"), Some(active));
+        assert_eq!(character_accent_any("KASA"), character_accent("KASA"));
+        assert!(character_accent_any("KASA").is_some());
     }
 
     /// 캐시를 비우고 다시 부르면 새로 굽는다.
@@ -2523,7 +2480,7 @@ mod custom_theme_tests {
         assert_eq!(system_slot_theme_in(&gone, false), "dark");
         // 프리셋과 미설정은 그대로.
         let preset = json!({ "theme_system_light": "schale-light" });
-        assert_eq!(system_slot_theme_in(&preset, true), "schale-light");
+        assert_eq!(system_slot_theme_in(&preset, true), "kasa-light");
         assert_eq!(system_slot_theme_in(&json!({}), true), "light");
     }
 
@@ -2562,12 +2519,7 @@ mod accent_tests {
 
     #[test]
     fn variant_distinguishes_duplicates_including_light_bases() {
-        // 어떤 로스터 색이든 0·1·2번째가 서로 달라야 중복 pane 이 구분된다 —
-        // 특히 프라나(흰 계열)는 밝히는 변주가 안 보이므로 사다리 방향 검증.
-        for name in [
-            "아로나", "프라나", "미도리", "모모이", "유즈", "아리스", "유우카", "시로코",
-            "호시노", "코하루", "히마리", "아루",
-        ] {
+        for (name, _) in CHARACTER_SLUGS {
             let base = character_accent(name).unwrap();
             let v1 = accent_variant(base, 1);
             let v2 = accent_variant(base, 2);
@@ -2591,10 +2543,10 @@ mod accent_tests {
         }
         // 수동 시절 교정값이 로스터와 같았음을 대표 표본으로 재확인 — 코드젠 이관이
         // 색을 바꾸지 않았다는 보증.
-        assert_eq!(character_accent("미도리"), Some([0x6b, 0xcf, 0x7f, 255]));
-        assert_eq!(character_accent("아리스"), Some([0x4c, 0x6e, 0xf5, 255]));
+        assert_eq!(character_accent("츠유"), Some([0x85, 0xbd, 0xeb, 255]));
+        assert_eq!(character_accent("아메"), Some([0xe6, 0xb8, 0x5c, 255]));
         // 로스터 밖 특례.
-        assert!(character_accent("샬레").is_some());
+        assert!(character_accent("KASA").is_some());
         assert!(character_accent("없는학생").is_none());
     }
 }

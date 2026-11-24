@@ -316,7 +316,7 @@ pub(crate) fn fixture_on() -> bool {
 const FIXTURE_ROWS: [(&str, &str, RowTurn, Option<u64>); 6] = [
     ("케이", "계정 설정·하단바·우측패널", RowTurn::Working, Some(12 * 60)),
     ("유우카", "미러링 방식 변경", RowTurn::Yours, None),
-    ("아로나", "MC 되돌리기 dev 반영", RowTurn::Resting, None),
+    ("츠유", "패치 검토", RowTurn::Resting, None),
     ("코유키", "카사넷 iroh P2P 직통", RowTurn::Yours, None),
     ("모모이", "작업현황 판 웹 목업", RowTurn::Working, Some(47 * 60)),
     ("호시노", "슬랙 요청 채널 접수대 — 스레드 원글까지 붙이는 긴 제목", RowTurn::Resting, None),

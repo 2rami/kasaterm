@@ -40,7 +40,7 @@
 두 축으로 읽으면 된다:
 
 - **아래 — 터미널 엔진.** wgpu 셀 렌더러, 두벌식 한글 IME, 크로스플랫폼 PTY를 각각 **독립 crate**로 깎았다. 터미널을 만들려는 사람이 부품만 가져다 쓸 수 있게 설계했다.
-- **위 — AI 오케스트레이션.** 그 엔진 위에서, pane마다 도는 Claude의 작업이 BA GUI(아로나 모드)로 실시간으로 보인다. 로그를 읽는 게 아니라 작업을 *지켜본다.*
+- **위 — AI 오케스트레이션.** 그 엔진 위에서, pane마다 도는 Claude의 작업이 KASA 작업 공간로 실시간으로 보인다. 로그를 읽는 게 아니라 작업을 *지켜본다.*
 - **밖 — 기계를 가로지른다.** pane이 이 컴퓨터에 묶여 있지 않다. 도는 세션을 다른 기계로 [이사](#기계를-가로지른다)시키고, 그 화면을 원래 창에 거울로 두고, 폰 브라우저로 같은 pane을 이어서 본다.
 
 ---
@@ -90,13 +90,9 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 
 ## 그 위 — 여러 Claude를 거느린다
 
-엔진이 안정될수록 그 위에 쌓는 게 본 게임이다. pane마다 Claude Code를 띄우고, 각 학생(pane)이 무슨 작업을 하는지 BA GUI로 한눈에 본다.
+엔진이 안정될수록 그 위에 쌓는 게 본 게임이다. pane마다 Claude Code를 띄우고, 각 학생(pane)이 무슨 작업을 하는지 KASA 작업 공간로 한눈에 본다.
 
-<div align="center">
-  <img src="assets/shot-arona.png" width="780" alt="kasaterm BA GUI — 여러 Claude의 작업이 학생별 채팅·작업 트리로 실시간 표시" />
-  <br/>
-  <sub>왼쪽 교실에 학생(pane)들이, 가운데 각 학생의 대화·작업이, 오른쪽 Command Center에 현재 작업이 실시간으로.</sub>
-</div>
+
 
 다른 터미널과 다른 점:
 
@@ -106,25 +102,18 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 - **계정을 갈아끼운다** — 상태줄에 claude·codex 계정 슬롯이 모여 있고, 전환하면 도는 pane도 새 계정으로 되띄운다. 5시간·7일 한도와 무엇이 그걸 잡아먹는지가 하단바에 상시 표시된다.
 - **확장을 한 화면에서** — MCP·플러그인·에이전트·커맨드·훅을 하네스별·스코프별로 보고 거기서 바로 켜고 끈다.
 
-### claude를 켜면 화면에 학생이 산다
+### KASA 캐릭터가 작업 칸을 구분한다
 
-pane에서 `claude`를 실행하면 그 pane에 블루 아카이브 학생 한 명이 배정된다 — 이름·테두리색·프로필이 전부 그 학생으로 맞춰지고, 창 전체에서 겹치지 않게 자동으로 고른다. `/rename 미도리`처럼 이름을 바꾸면 원하는 학생으로 갈아끼운다. (기본 로스터 12명: 아로나·프라나·미도리·모모이·유즈·아리스·유우카·시로코·호시노·코하루·히마리·아루.)
+기본 로스터는 날씨에서 영감을 받은 츠유·아메와 28명의 KASA 캐릭터로 구성된다. 에이전트가 실행되는 칸에 이름·색·초상화를 붙이고, 열려 있는 칸의 배정을 살펴 빈 캐릭터부터 고른다. 명부와 프로필의 슬러그로 대화와 그림을 연결한다.
 
-**로스터는 갈아끼울 수 있다.** 테마 팩 하나가 캐릭터 세트 하나다 — 폴더에 명부(`characters.json`)·그림·색 프리셋을 넣어 두면 그게 통째로 로스터가 된다. 설정 창에 zip을 떨어뜨려 가져오고, 여러 팩을 가로질러 좋아하는 캐릭터만 골라 쓰는 풀도 만든다. 캐릭터마다 모델·성격·이름을 따로 지정할 수 있고, 대화를 끊지 않고 도중에 바꿔도 말투까지 따라온다.
-
-그리고 kasaterm은 **Claude Code가 그리는 터미널 화면 자체**를 렌더 단계에서 읽어, 그 위에 배정된 학생을 그린다. 로그를 파싱하거나 별도로 통합한 게 아니라 — 화면만 보고 동작한다:
-
-- **시작 배너** → Claude Code의 Clawd 블록아트를 감지해 학생 도트 idle 애니메이션으로 교체
-- **statusline** → 모델·컨텍스트 옆에 학생 프로필(bust)을 2행으로
-- **입력창 위** → 대기 중엔 학생이 전신으로 서서 숨쉬고(idle 애니), effort 칩이 뜨면 옆으로 비켜선다
-- **작업 중** → 스피너 자리에서 학생이 걸어다닌다(walk)
-
-로그를 읽는 게 아니라 학생이 옆에서 같이 일하는 것처럼 보인다.
+테마 팩에는 명부·그림·색 프리셋을 담을 수 있다. 설정에서 가져오거나 캐릭터를 골라 배정 대상을 좁힐 수 있다. 시작 배너와 입력창에는 캐릭터 전신이, 상태줄과 대화에는 초상화가 표시된다.
 
 <div align="center">
-  <img src="assets/shot-sprite.png" width="820" alt="claude 로 대화하는 중 — 배정된 아루가 시작 배너·작업 스피너 옆·statusline 에 도트로 나타난다" />
-  <br/>
-  <sub><code>claude</code> 로 대화하는 중 — 배정된 <b>아루</b>가 <b>시작 배너</b>(좌상) · <b>작업 스피너 옆 전신</b>(좌하) · <b>statusline 프로필</b>(최하단)에 동시에 나타난다. 작업 중일 땐 effort 칩을 피해 옆으로 비켜선다.</sub>
+  <img src="app/kasaterm/assets/students/profile/kasa_tsuyu.png" width="96" alt="츠유" />
+  <img src="app/kasaterm/assets/students/profile/kasa_ame.png" width="96" alt="아메" />
+  <img src="app/kasaterm/assets/students/profile/kasa_shizuku.png" width="96" alt="시즈쿠" />
+  <img src="app/kasaterm/assets/students/profile/kasa_kiri.png" width="96" alt="키리" />
+  <img src="app/kasaterm/assets/students/profile/kasa_nagi.png" width="96" alt="나기" />
 </div>
 
 한 모노레포에 세 층이 쌓여 있고, 아래층이 위층을 떠받친다:
@@ -133,7 +122,7 @@ pane에서 `claude`를 실행하면 그 pane에 블루 아카이브 학생 한 �
 |---|---|---|---|
 | ① 엔진 | **kasaterm** | 터미널 — wgpu 셀 렌더 · PTY · 한글 IME · multipane | 거의 안정 |
 | ② 작업환경 | **kasaspace** | 파일트리 · git 관리 · pane 간 에이전트 연결 | 진행 중 |
-| ③ 오케스트레이션 | **blueclaudearchive** | 여러 Claude를 학생처럼 거느리는 하네스 GUI (아로나 모드) | 무게중심 |
+| ③ 오케스트레이션 | **KASA 작업 공간** | 여러 에이전트의 대화와 작업을 보는 하네스 GUI (대화 보기) | 무게중심 |
 
 ---
 
@@ -179,7 +168,7 @@ cargo run -p kasaterm
 cargo run --release -p kasaterm
 ```
 
-macOS `.app`은 `scripts/build-app.sh`, Windows `.msi`와 portable ZIP은 `scripts/windows/package.ps1`로 빌드한다. Windows 패키징은 완성된 MSI를 다시 추출해 앱·CLI·아로나 UI·학생 로스터·협업 훅의 누락까지 검사한다. 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)를 바로 쓸 수 있다.
+macOS `.app`은 `scripts/build-app.sh`, Windows `.msi`와 portable ZIP은 `scripts/windows/package.ps1`로 빌드한다. Windows 패키징은 완성된 MSI를 다시 추출해 앱·CLI·대화 UI·학생 로스터·협업 훅의 누락까지 검사한다. 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)를 바로 쓸 수 있다.
 
 <details>
 <summary><b>예전 <code>tmuxify</code> 폴더를 쓰고 있다면 (펼치기)</b></summary>
@@ -305,8 +294,8 @@ pane 목록·이름·분할·전송 같은 **조작은 전부 `kasaterm-cli`**�
 | ② 작업환경 | pane 간 에이전트 연결 | 안정 |
 | ② 작업환경 | 기계 간 세션 이사 · 거울 pane | 진행 중 |
 | ② 작업환경 | 폰 웹터미널 (관문 주소) | 진행 중 |
-| ③ 오케스트레이션 | BA GUI — 작업 실시간 시각화 | 진행 중 |
-| ③ 오케스트레이션 | 여러 Claude 협업 (아로나 모드) | 안정 |
+| ③ 오케스트레이션 | KASA 작업 공간 — 작업 실시간 시각화 | 진행 중 |
+| ③ 오케스트레이션 | 여러 Claude 협업 (대화 보기) | 안정 |
 | ③ 오케스트레이션 | 테마 팩 — 캐릭터 세트 교체 | 안정 |
 | ③ 오케스트레이션 | claude · codex 계정 슬롯 전환 | 진행 중 |
 

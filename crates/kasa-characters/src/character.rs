@@ -47,6 +47,70 @@ fn read_json(path: &Path) -> Option<Arc<Value>> {
     value
 }
 
+const RETIRED_THEME: &str = "blue-archive";
+
+fn retired_theme(value: &Value) -> bool {
+    value.get("theme").and_then(Value::as_str) == Some(RETIRED_THEME)
+}
+
+fn read_roster(path: &Path) -> Option<Arc<Value>> {
+    read_json(path).filter(|value| !retired_theme(value))
+}
+
+fn retired_names() -> &'static std::collections::BTreeMap<String, String> {
+    static NAMES: std::sync::LazyLock<std::collections::BTreeMap<String, String>> =
+        std::sync::LazyLock::new(|| serde_json::from_str(include_str!("retired-character-ids.json"))
+            .expect("retired roster identifiers"));
+    &NAMES
+}
+
+/// Old mailbox filenames still belong to conversations that were already running.
+pub fn retired_slug(name: &str) -> Option<&'static str> {
+    retired_names().get(name).map(String::as_str)
+}
+
+pub fn retired_slug_head(slug: &str) -> Option<&'static str> {
+    retired_names().values().find(|old| old.as_str() == slug).map(String::as_str)
+}
+
+pub fn retired_asset_slug(slug: &str) -> bool {
+    retired_slug_head(slug).is_some() && known_slug(slug).is_none()
+}
+
+pub fn retired_character(name: &str) -> bool {
+    retired_slug(name).is_some() && slug_for_any(name).is_none()
+}
+
+pub fn retired_theme_dir(dir: &Path) -> bool {
+    dir.file_name().and_then(|name| name.to_str()) == Some(RETIRED_THEME)
+        || read_json(&dir.join("theme.json")).is_some_and(|value| retired_theme(&value))
+}
+
+#[cfg(test)]
+mod retired_roster_tests {
+    use super::*;
+
+    #[test]
+    fn retired_override_cannot_hide_the_kasa_roster() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-retired-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let old = dir.join("theme.json");
+        std::fs::write(&old, br#"{"theme":"blue-archive","members":[]}"#).unwrap();
+        assert!(read_roster(&old).is_none());
+        assert!(retired_theme_dir(&dir));
+        let custom = dir.join("characters.json");
+        std::fs::write(&custom, br#"{"theme":"custom","members":[]}"#).unwrap();
+        let broken = dir.join("broken.json");
+        std::fs::write(&broken, "{invalid").unwrap();
+        assert_eq!(first_roster(&[old.clone(), broken.clone(), custom.clone()]).unwrap()["theme"], "custom");
+        assert!(first_roster(&[dir.join("missing.json"), old.clone(), broken.clone()]).is_none());
+        std::fs::remove_file(broken).unwrap();
+        std::fs::remove_file(old).unwrap();
+        std::fs::remove_file(custom).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+}
+
 /// Windows GUI 프로세스엔 HOME 이 없다 — USERPROFILE 이 그 자리.
 fn home() -> Option<PathBuf> {
     std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()).map(PathBuf::from)
@@ -91,7 +155,9 @@ pub fn themes_root() -> Option<PathBuf> {
 /// 뒤지고 있으니, 그 순서만 여기로 옮겨 온다(코드는 못 공유한다 — kasa-http → app 은
 /// 없는 의존 방향이다).
 pub fn profile_png_on_disk(slug: &str) -> Option<Vec<u8>> {
-    if slug.is_empty() || slug.contains('/') || slug.contains("..") {
+    if slug.is_empty() || slug.contains('/') || slug.contains("..")
+        || retired_asset_slug(slug)
+    {
         return None;
     }
     let picked = picked_theme_of_slug().into_iter().find(|(s, _)| s == slug);
@@ -119,7 +185,7 @@ pub fn profile_png_on_disk(slug: &str) -> Option<Vec<u8>> {
             .flatten()
             .flatten()
             .map(|e| e.path())
-            .filter(|d| d.join("theme.json").is_file())
+            .filter(|d| d.join("theme.json").is_file() && !retired_theme_dir(d))
             .map(|d| d.join("sprites"))
             .collect();
         // read_dir 순서는 파일시스템이 정한다 — 같은 슬러그를 가진 테마가 둘이면
@@ -187,18 +253,14 @@ fn active_theme_dir_in(root: &Path, id: &str) -> Option<PathBuf> {
         return None;
     }
     let d = root.join(id);
-    d.join("theme.json").is_file().then_some(d)
+    (d.join("theme.json").is_file() && !retired_theme_dir(&d)).then_some(d)
 }
 
 /// 지금 고른 테마 id — 빈 문자열이면 번들. **`active_theme_dir` 과 같은 손잡이를
 /// 본다**(env 우선, 그다음 설정). 화면이 「고른 것」을 표시할 때 이걸 써야 실제로
 /// 도는 테마와 어긋나지 않는다.
 pub fn active_theme_id() -> String {
-    std::env::var("KASATERM_CHARACTER_THEME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| read_setting_str("character_theme"))
-        .unwrap_or_default()
+    active_theme_dir().and_then(|dir| dir.file_name()?.to_str().map(str::to_owned)).unwrap_or_default()
 }
 
 /// 설치된 테마 `(id, label)` 목록 — 설정 화면의 선택지. 번들은 폴더가 없으니 여기
@@ -214,8 +276,9 @@ fn list_themes_in(root: &Path) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = rd
         .flatten()
         .filter_map(|e| {
-            let f = e.path().join("theme.json");
-            if !f.is_file() {
+            let dir = e.path();
+            let f = dir.join("theme.json");
+            if !f.is_file() || retired_theme_dir(&dir) {
                 return None;
             }
             let id = e.file_name().to_str()?.to_string();
@@ -236,7 +299,7 @@ fn list_themes_in(root: &Path) -> Vec<(String, String)> {
     out
 }
 
-/// characters.json 후보 경로 — kasaterm-assign-character.py 와 동일 우선순위:
+/// characters.json 후보 경로:
 /// 활성 테마 → ~/.config → env override → .app Resources(mac)/exe 옆(win MSI) → 레포 소스.
 fn candidate_paths() -> Vec<PathBuf> {
     let mut v = Vec::new();
@@ -270,7 +333,11 @@ fn candidate_paths() -> Vec<PathBuf> {
 
 /// 후보 중 첫 번째로 파싱되는 characters.json. 없으면 None(테마 미설치 = 배정 skip).
 pub fn characters_json() -> Option<Value> {
-    candidate_paths().iter().find_map(|p| read_json(p)).map(|v| Value::clone(&v))
+    first_roster(&candidate_paths())
+}
+
+fn first_roster(paths: &[PathBuf]) -> Option<Value> {
+    paths.iter().find_map(|p| read_roster(p)).map(|v| Value::clone(&v))
 }
 
 /// **실제로 쓰는 명부** — 활성 명부에 고른 캐릭터를 그 사람이 고른 테마의 것으로 얹는다.
@@ -423,7 +490,7 @@ pub fn all_rosters() -> Vec<Arc<Value>> {
         if !seen.insert(p.clone()) {
             return;
         }
-        if let Some(v) = read_json(&p) {
+        if let Some(v) = read_roster(&p) {
             out.push(v);
         }
     };
@@ -464,7 +531,7 @@ pub fn persona_prefixes() -> Vec<(String, String)> {
 pub fn theme_roster_paths(root: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(root) else { return Vec::new() };
     let mut v: Vec<PathBuf> =
-        rd.flatten().map(|e| e.path()).filter(|d| d.is_dir()).map(|d| d.join("theme.json")).collect();
+        rd.flatten().map(|e| e.path()).filter(|d| d.is_dir()).filter(|d| !retired_theme_dir(d)).map(|d| d.join("theme.json")).collect();
     v.sort();
     v
 }
@@ -478,7 +545,7 @@ pub fn base_characters_json() -> Option<Value> {
         if skip.as_deref() == Some(p.as_path()) {
             continue;
         }
-        if let Some(v) = read_json(&p) {
+        if let Some(v) = read_roster(&p) {
             return Some(Value::clone(&v));
         }
     }
@@ -490,7 +557,11 @@ pub fn theme_characters_json(id: &str) -> Option<Value> {
     if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
         return None;
     }
-    read_json(&themes_root()?.join(id).join("theme.json")).map(|v| Value::clone(&v))
+    let dir = themes_root()?.join(id);
+    if retired_theme_dir(&dir) {
+        return None;
+    }
+    read_roster(&dir.join("theme.json")).map(|v| Value::clone(&v))
 }
 
 /// persona 합집합 조회 — 활성 → 기본(번들) → 설치 테마 전부. 진행 중 pane 이
@@ -556,7 +627,9 @@ pub fn persona_for_any(name: &str) -> Option<String> {
     }
     let root = themes_root()?;
     for e in std::fs::read_dir(root).ok()?.flatten() {
-        let Some(v) = read_json(&e.path().join("theme.json")) else { continue };
+        let dir = e.path();
+        if retired_theme_dir(&dir) { continue; }
+        let Some(v) = read_roster(&dir.join("theme.json")) else { continue };
         if let Some(p) = persona_for(&v, name) {
             return Some(p);
         }
@@ -1703,7 +1776,7 @@ pub fn session_character(sid: &str) -> Option<String> {
     session_character_in(&path, sid).or_else(|| {
         let current = session_char_path();
         (current != path).then(|| session_character_in(&current, sid)).flatten()
-    })
+    }).filter(|name| !retired_character(name))
 }
 
 fn session_character_in(path: &Path, sid: &str) -> Option<String> {
@@ -2611,7 +2684,7 @@ fn write_manual_picks(path: &Path, list: &[String]) -> std::io::Result<()> {
 /// 필터가 걸리는 자리(복원의 저장된 학생, shim 의 정체성 교정)는 전부 sid 를 들고
 /// 있으므로, 명단만 보는 `is_assignable` 대신 이걸 부른다.
 pub fn is_assignable_for(sid: &str, name: &str) -> bool {
-    is_assignable(name) || is_manual_pick(sid)
+    !retired_character(name) && (is_assignable(name) || is_manual_pick(sid))
 }
 
 /// 손으로 고른 자리는 **명단을 바꿔도 지킨다** — 2026-08-26 지시.

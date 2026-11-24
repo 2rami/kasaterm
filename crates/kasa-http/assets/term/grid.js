@@ -40,7 +40,7 @@
   const validKey = value => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
   const validRect = rect => rect && ['x', 'y', 'width', 'height'].every(key =>
     Number.isFinite(rect[key]) && Math.abs(rect[key]) <= 10000) && rect.width > 0 && rect.height > 0;
-  const builtins = new Set(['claude', 'codex', 'terminal', 'server', 'laptop', 'schale-logo', 'schale-classroom']);
+  const builtins = new Set(['claude', 'codex', 'terminal', 'server', 'laptop', 'kasa-logo', 'schale-logo']);
 
   function validRun(run, cols) {
     if (!Array.isArray(run) || typeof run[0] !== 'string') return false;

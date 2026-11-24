@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """호요버스 위키(원신·스타레일·젠레스)용 캐릭터 조사기.
 
-`theme-wiki.py` 와 하는 일은 같지만 **위키 구조가 달라 그대로는 못 쓴다**:
+호요버스 위키에서 한글 이름과 외형 자료를 찾을 때 쓰는 규칙:
 
 - 한글 이름이 `name_kr` 이 아니라 `{{Other Languages}}` 의 `|ko` 에 있고,
   `{{tt|호두|胡桃}}` 처럼 템플릿에 싸여 있는 경우가 있다.
@@ -12,10 +12,6 @@
 
     THEME_WIKI_API=... THEME_ROSTER=... THEME_SRC=... theme-wiki-hoyo.py index
     THEME_WIKI_API=... THEME_ROSTER=... THEME_SRC=... theme-wiki-hoyo.py collect
-
-**언제 지우면 되나**: 위 세 꼴을 `theme-wiki.py` 본체가 흡수하고, 그 본체로 호요 위키
-한 명을 실제로 수집해 본 뒤다. 통합 자체는 어렵지 않지만 **미검증 통합보다 돌아간
-변종을 남기는 쪽이 싸다** — 이 파일은 원신·스타레일 42명의 실데이터를 만든 코드다.
 """
 import json, os, re, sys, time, urllib.parse, urllib.request
 

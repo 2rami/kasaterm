@@ -1,21 +1,8 @@
 # 테마 만들기 — 캐릭터 세트를 통째로 갈아끼우는 절차
 
-「명조 테마 만들어」 한 마디에서 학생 67명의 페르소나·스프라이트·색까지 나오게 하는
-파이프라인이다. 블루아카이브 로스터 77명을 이 절차로 만들었고, 그때 실제로 밟은
-지뢰를 각 단계에 붙여 뒀다.
-
-로스터의 **필드 규칙과 페르소나 6부 구조**는 [theme-roster.md](theme-roster.md) 에 있다.
-여기서는 그것을 **어떤 순서로 어떻게 채우는가**만 다룬다.
-
-```
-① 조사        어떤 IP인가 · 캐릭터가 몇 명인가
-② 선정        몇 명을 넣을지 · 누구를 넣을지 (사용자에게 묻는다)
-③ 캐릭터 조사  scripts/theme-wiki.py     → theme-src/<slug>/wiki.json
-④ 페르소나     characters.json 작성       (에이전트 여럿에 나눠 준다)
-⑤ 묘사        theme-src/<slug>/desc.txt  (에이전트 여럿에 나눠 준다)
-⑥ 스프라이트   scripts/theme-sprites.py gen
-⑦ 설치        scripts/theme-sprites.py install
-```
+캐릭터 명부·초상화·모션을 하나의 테마 팩으로 묶는 절차다. 명부 필드는
+[캐릭터 로스터](theme-roster.md)에서 확인할 수 있다. KASA 기본 그림은
+번들 명부와 학생 에셋 폴더에 담는다.
 
 ---
 
@@ -27,54 +14,11 @@
 확정되고, 그건 어떤 배정 알고리즘으로도 못 막는다. 12명이던 시절 pane 15개에서 같은
 학생이 겹쳤던 게 그 이유다. **최소 40명, 넉넉히 70명 이상**을 권한다.
 
-## ③ 캐릭터 조사 — `theme-wiki.py`
+## ③ 캐릭터 자료 · ④ 페르소나 · ⑤ 외형 묘사
 
-```bash
-python3 scripts/theme-wiki.py index     # 한글 이름 → 위키 문서 제목 (한 번만)
-python3 scripts/theme-wiki.py collect   # 로스터 전원 수집
-```
-
-`index` 가 따로 있는 이유는 **이름 매칭이 어려워서**다. 로스터엔 「케이」인데 문서
-제목은 `Tendou Kei` 이고, 로마자 변환으로는 못 맞춘다 — 아리스는 `Alice` 다. 위키
-인포박스의 `name_kr` 필드로 표를 한 번 만들어 두면 이 문제가 통째로 사라진다(BA 77명
-전원 매칭됐다). 다른 IP 로 갈 때는 `THEME_WIKI_API` 로 위키를 바꾸고, 그 위키에
-현지화 이름 필드가 없으면 `theme-src/_index.json` 을 손으로 채운다.
-
-> ⚠️ **WebFetch 로 fandom 을 못 읽는다**(402). MediaWiki API 를 직접 쳐야 한다 —
-> 스크립트가 그렇게 한다.
-
-> ⚠️ **`roster.json` 의 `leader` 는 `members` 배열 밖에 있다.** `members` 만 순회하는
-> 검증 스크립트는 조용히 한 명을 빠뜨리는데, `status` 는 leader 를 합쳐 세므로 총원이
-> 하나 어긋난 채 「다 됐다」로 읽힌다(2026-08-24 엔드필드에서 20 vs 21 로 드러났다).
-> 순회는 `[r["leader"]] + r["members"]` 로 해라.
-
-> ⚠️ **ref 가 전신 그림이 아니면 desc 가 조용히 어긋난다.** desc 는 그대로 프롬프트로
-> 들어가니, 얼굴 아이콘·제품 박스샷·부분컷을 보고 쓴 묘사는 옷 절반이 빠진 채 굽힌다
-> (2026-08-24 엔드필드에서 9명이 어긋났다 — 짐승귀·꼬리가 통째로 빠지고 눈 색이
-> 틀렸다. fandom 이 신규 캐릭터에 249px Token 만 갖고 있던 탓이다). 굽기 전에 ref
-> 해상도를 훑어 아이콘이면 전신 아트로 바꾸고 그 캐릭터 desc 를 다시 대조해라.
-> 엔드필드는 `endfield.wiki.gg` 의 `File:<이름>_Splash_Art.png` 가 2048×2048 전신이다.
-
-## ④ 페르소나 · ⑤ 묘사 — 에이전트에 나눠 준다
-
-둘 다 「손이 많고 판단이 적은」 일이라 학생 pane 여럿에 나눠 준다. 오케스트레이터가
-직접 하면 문서 67개가 컨텍스트로 들어와 말라 죽는다.
-
-`desc.txt` 는 스프라이트 생성기에 그대로 들어가는 **영문 한 줄**이다. 이 한 줄의
-품질이 결과를 정한다 — 「분홍 머리 소녀」면 아무나 나오고, 아래처럼 쓰면 그 캐릭터가
-나온다(케이로 실측):
-
-```
-Kei (Tendou Kei) from Blue Archive, chibi Millennium game-dev-club student: very long
-straight white hair with center bangs parted to the right, sharp pink tsurime eyes, pale
-skin, glowing pink halo, dark gray blazer under a jacket with fluorescent pink inner
-lining, short skirt, black thigh-high stockings. No weapon.
-```
-
-- **`No weapon.` 으로 끝낸다.** 안 쓰면 총이 딸려 나온다
-- **헤일로(모양·색)를 반드시 넣는다.** BA 캐릭터의 최대 식별자다
-- 근거는 `wiki.json` 의 `appearance`/`halo`/`uniform` **만**. 기억으로 쓰면 틀린다
-- 한 줄, 400자 이내, 외형만(성격·스토리 금지)
+캐릭터별 참조 원화를 작업 소스 폴더의 슬러그 디렉터리에 ref.png로 둔다.
+로스터에는 이름·색·말투를 기록하고, 같은 디렉터리의 desc.txt에 스프라이트에
+반영할 외형을 영문 한 줄로 적는다.
 
 ## ⑥ 스프라이트 — `theme-sprites.py gen`
 
@@ -161,7 +105,7 @@ PPGEN=/tmp/ppgen THEME_SRC=theme-src-<id> THEME_ROSTER=theme-src-<id>/roster.jso
 python3 scripts/theme-sprites.py gen kei --ref --force
 ```
 
-`③ 캐릭터 조사` 가 받아 둔 공식 포트레이트(`theme-src/<slug>/ref.png`)를 정체성 참조로
+`③ 캐릭터 조사` 가 받아 둔 참조 원화(`theme-src/<slug>/ref.png`)를 정체성 참조로
 넘긴다. 실측에서 흰 머리·분홍 눈·안감까지 공식 원본과 일치했다. 다만 **4배 느리다**
 (base+idle 기준 204초 vs 45초). 그래서 기본값이 아니다 — **묘사로 전부 만든 뒤 프로필을
 한 장에 모아 눈으로 보고, 어긋난 애만 이걸로 다시 굽는 것**이 가장 싸다. 정체성은
@@ -184,7 +128,7 @@ python3 scripts/theme-sprites.py status   # 어디까지 됐는지
 같아 리사이즈는 없다.
 
 ⚠️ **기본 목적지는 번들(`app/kasaterm/assets/students/`)이다 — 런타임 테마 자리가
-아니다.** 번들은 빌드에 박혀 나가는 기본 세트(블루 아카이브)고, 새로 구운 작품은
+아니다.** 번들은 빌드에 박혀 나가는 기본 세트(KASA)고, 새로 구운 작품은
 거기가 아니라 사용자 설정 폴더로 가야 한다. 그냥 `install` 을 돌리면 기본 세트를
 덮어쓴다. 목적지는 `THEME_DST` 로 지정한다:
 

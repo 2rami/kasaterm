@@ -1231,7 +1231,11 @@ pub(crate) fn tell_marker_line(row: &[GridCell]) -> Option<(usize, usize, String
         .collect();
     // 다른 기기 학생은 `⟦이름@기기⟧` — 색·얼굴은 이름으로 찾는다.
     let name = kasa_socket::tell::split_sender(&name).0.to_string();
-    theme::character_accent_any(&name)?;
+    if theme::character_accent_any(&name).is_none()
+        && kasa_characters::character::retired_slug(&name).is_none()
+    {
+        return None;
+    }
     Some((first, first + 1 + close_rel + 1, name))
 }
 
@@ -1724,10 +1728,11 @@ pub(crate) fn native_sender_accent(
 /// 사람인데 모르는 사람 취급을 받아 엉뚱한 폴백을 탄다. 프사 자리에서는 결과에
 /// `face_ready` 를 따로 건다.
 pub(crate) fn teammate_sender_slug(name: &str) -> Option<&'static str> {
-    if let Some(s) = theme::character_slug_any(name) {
-        return Some(s);
-    }
-    theme::slug_character_any(sender_roman_head(name)).and_then(theme::character_slug_any)
+    let head = sender_roman_head(name);
+    theme::character_slug_any(name)
+        .or_else(|| theme::slug_character_any(head).and_then(theme::character_slug_any))
+        .or_else(|| kasa_characters::character::retired_slug(name))
+        .or_else(|| kasa_characters::character::retired_slug_head(head))
 }
 
 /// agent 이름에서 로스터가 아는 로마자 부분만. **첫 토막**이다.
@@ -1899,7 +1904,8 @@ pub(crate) fn label_is_roster_agent(label: &str) -> bool {
     let Some((head, rest)) = label.split_once('-') else {
         return false;
     };
-    theme::slug_character_any(head).is_some()
+    (theme::slug_character_any(head).is_some()
+        || kasa_characters::character::retired_slug_head(head).is_some())
         && rest.split('-').next().is_some_and(|p| {
             p.len() > 1 && p.starts_with('p') && p[1..].chars().all(|c| c.is_ascii_digit())
         })
@@ -4510,20 +4516,20 @@ mod picker_tag_tests {
         out
     }
 
-    // 실측 /resume 피커 설명줄: "    14 minutes ago · main · 23KB · #프라나"
+    // 실측 /resume 피커 설명줄: "    14 minutes ago · main · 23KB · #코사메"
     #[test]
     fn picker_row_detected_plain_and_wide() {
         for row in [
-            row_from("    14 minutes ago · main · 23KB · #프라나"),
-            row_wide("    14 minutes ago · main · 23KB · #프라나", ' '),
-            row_wide("    14 minutes ago · main · 23KB · #프라나", '\0'),
+            row_from("    14 minutes ago · main · 23KB · #코사메"),
+            row_wide("    14 minutes ago · main · 23KB · #코사메", ' '),
+            row_wide("    14 minutes ago · main · 23KB · #코사메", '\0'),
         ] {
             let (c0, end, slug) = picker_student_tag(&row).expect("tag");
-            assert_eq!(slug, "prana");
+            assert_eq!(slug, "kasa_kosame");
             assert_eq!(row[c0].ch, '#');
             assert!(end > c0 && end < row.len());
             // 이름 마지막 셀까지 범위에 포함(블랭크 처리 범위).
-            assert!(row[c0..=end].iter().any(|c| c.ch == '나'));
+            assert!(row[c0..=end].iter().any(|c| c.ch == '메'));
         }
     }
 
@@ -4631,16 +4637,16 @@ mod picker_tag_tests {
     // PR 번호(`repo#12`)의 '#' 는 이름 검증에서 떨어지고, 뒤의 진짜 태그가 잡힌다.
     #[test]
     fn pr_number_hash_skipped() {
-        let row = row_from("    2 days ago · main · 1MB · repo#12 · #시로코");
+        let row = row_from("    2 days ago · main · 1MB · repo#12 · #미즈베");
         let (_, _, slug) = picker_student_tag(&row).expect("tag");
-        assert_eq!(slug, "shiroko");
+        assert_eq!(slug, "kasa_mizube");
     }
 
     // 오탐 방어: '·' 1개뿐(태그 구분자만) / 구분자 없는 해시태그 / 로스터 밖 이름.
     #[test]
     fn non_picker_rows_ignored() {
-        assert!(picker_student_tag(&row_from(" · #시로코")).is_none());
-        assert!(picker_student_tag(&row_from("echo #시로코 · done")).is_none());
+        assert!(picker_student_tag(&row_from(" · #미즈베")).is_none());
+        assert!(picker_student_tag(&row_from("echo #미즈베 · done")).is_none());
         assert!(picker_student_tag(&row_from("  1 day ago · main · 2KB · #낯선이")).is_none());
         assert!(picker_student_tag(&row_from("plain text without tags")).is_none());
     }
@@ -4983,29 +4989,6 @@ mod clawd_banner_tests {
         );
     }
 
-    const ALL_SLUGS: [&str; 12] = [
-        "arona", "prana", "midori", "momoi", "yuzu", "arisu", "yuuka", "shiroko", "hoshino",
-        "koharu", "himari", "aru",
-    ];
-
-    // 상태 모션 3종(idle/wave/cheer)이 12명 전원에 배선돼 있고 프레임 수가 맞다.
-    // (include_bytes 라 파일 부재면 컴파일 실패 — 여긴 arm 매칭 오타를 잡는다.)
-    #[test]
-    fn every_student_has_state_motions() {
-        for slug in ALL_SLUGS {
-            for motion in ["idle", "wave", "cheer"] {
-                let f = student_sprite_png(slug, motion)
-                    .unwrap_or_else(|| panic!("{slug} {motion} 프레임 미배선"));
-                assert_eq!(f.len(), STUDENT_IDLE_FRAMES, "{slug} {motion} 프레임 수");
-            }
-            assert_eq!(
-                student_sprite_png(slug, "walk").map(|f| f.len()),
-                Some(STUDENT_WALK_FRAMES),
-                "{slug} walk 프레임 수",
-            );
-        }
-    }
-
     // 로스터 밖 슬러그·미지원 모션은 None.
     #[test]
     fn unknown_slug_or_motion_is_none() {
@@ -5068,9 +5051,9 @@ mod clawd_banner_tests {
             row_from("  ▝▜█████▛▘"),
             row_from("    ▘▘ ▝▝"),
         ];
-        replace_welcome_greeting(&mut rows, 1, "코하루", Some([200, 50, 50, 255]));
+        replace_welcome_greeting(&mut rows, 1, "아메", Some([200, 50, 50, 255]));
         let line = row_text(&rows[0]);
-        assert!(line.contains("어서오세요"), "인사말 치환됨: {line}");
+        assert!(line.contains("어서 오세요"), "인사말 치환됨: {line}");
         assert!(line.contains("한글"), "이름 추출·삽입: {line}");
         assert!(!line.contains("Welcome back"), "원문 제거: {line}");
         let first = rows[0].iter().find(|c| !matches!(c.ch, ' ' | '\0')).unwrap();
@@ -5807,20 +5790,20 @@ mod teammate_msg_tests {
     // 오탐(`⟦…⟧` 이지만 캐릭터 아님)은 무시 = 무색.
     #[test]
     fn tell_marker_parsed_and_guarded() {
-        let row = row_from("⟦미도리⟧ 안녕하세요", 80);
+        let row = row_from("⟦시즈쿠⟧ 안녕하세요", 80);
         let (start, _, name) = tell_marker_line(&row).expect("유효 캐릭터 마커");
-        assert_eq!((start, name.as_str()), (0, "미도리"));
+        assert_eq!((start, name.as_str()), (0, "시즈쿠"));
         // claude TUI 실화면: 제출된 user 턴은 `❯ ` 프롬프트 마커 뒤에 온다.
-        let prompted = row_from("❯ ⟦프라나⟧ 검증 메시지", 80);
+        let prompted = row_from("❯ ⟦코사메⟧ 검증 메시지", 80);
         let (start, _, name) = tell_marker_line(&prompted).expect("❯ 뒤 마커도 인정");
-        assert_eq!((start, name.as_str()), (2, "프라나"), "마커 시작 = ❯ + 공백 뒤");
+        assert_eq!((start, name.as_str()), (2, "코사메"), "마커 시작 = ❯ + 공백 뒤");
         // codex TUI 는 제출된 user 턴을 `› ` 로 그린다 — 같은 자리의 마커를 인정한다.
-        let codex = row_from("› ⟦아로나⟧ codex 에게", 80);
+        let codex = row_from("› ⟦미나모⟧ codex 에게", 80);
         let (start, _, name) = tell_marker_line(&codex).expect("› 뒤 마커도 인정");
-        assert_eq!((start, name.as_str()), (2, "아로나"));
+        assert_eq!((start, name.as_str()), (2, "미나모"));
         assert!(tell_marker_line(&row_from("그냥 내 입력", 80)).is_none());
-        let remote = row_from("❯ ⟦미도리@맥미니⟧ 다른 기기에서", 80);
-        assert_eq!(tell_marker_line(&remote).map(|(_, _, name)| name).as_deref(), Some("미도리"), "다른 기기 학생도 그 학생 색");
+        let remote = row_from("❯ ⟦시즈쿠@맥미니⟧ 다른 기기에서", 80);
+        assert_eq!(tell_marker_line(&remote).map(|(_, _, name)| name).as_deref(), Some("시즈쿠"), "다른 기기 학생도 그 학생 색");
         assert!(tell_marker_line(&row_from("❯ 마커 없는 제출", 80)).is_none());
         assert!(tell_marker_line(&row_from("› 마커 없는 제출", 80)).is_none());
         assert!(tell_marker_line(&row_from("⟦없는캐릭⟧ x", 80)).is_none());
@@ -5835,16 +5818,16 @@ mod teammate_msg_tests {
             row_from("  본문 마지막 문단", 80),
             row_from("", 80),
             row_from("  본문 첫 문단", 80),
-            row_from("⟦미도리⟧ 브리프 간다", 80),
+            row_from("⟦시즈쿠⟧ 브리프 간다", 80),
             row_from("⏺ 이전 어시스턴트 출력", 80),
         ];
         match carried_message_header(&above) {
-            Some(CarriedHeader::Tell(name)) => assert_eq!(name, "미도리"),
+            Some(CarriedHeader::Tell(name)) => assert_eq!(name, "시즈쿠"),
             _ => panic!("tell 마커 헤더를 찾아야 한다"),
         }
-        let native = vec![row_from("  들여쓴 본문", 80), row_from("@ midori-p4-v32❯", 80)];
+        let native = vec![row_from("  들여쓴 본문", 80), row_from("@ kasa_shizuku-p4-v32❯", 80)];
         match carried_message_header(&native) {
-            Some(CarriedHeader::Native(label)) => assert_eq!(label, "midori-p4-v32"),
+            Some(CarriedHeader::Native(label)) => assert_eq!(label, "kasa_shizuku-p4-v32"),
             _ => panic!("펼친 `@ 라벨❯` 헤더를 찾아야 한다"),
         }
         // 연속 행을 다 건너 만난 것이 헤더가 아니면 — 그냥 들여쓴 일반 출력.
@@ -5853,7 +5836,7 @@ mod teammate_msg_tests {
         // 접힌 줄은 본문이 화면에 없다는 뜻 — 아래 연속 행은 그 메시지가 아니다.
         let collapsed = vec![
             row_from("  남의 본문", 80),
-            row_from("› Message from @midori-p4-v32", 80),
+            row_from("› Message from @kasa_shizuku-p4-v32", 80),
         ];
         assert!(carried_message_header(&collapsed).is_none());
         // 위가 전부 연속/빈 행이면(240행 캡 안에 헤더가 안 들어옴) 못 찾은 것.
@@ -5866,9 +5849,9 @@ mod teammate_msg_tests {
     /// `이름 ›` 갈래로, 피커·agents 뷰는 태그를 그대로 둔다).
     #[test]
     fn student_face_slug_needs_a_real_picture() {
-        assert_eq!(student_face_slug("미도리"), Some("midori"));
+        assert_eq!(student_face_slug("시즈쿠"), Some("kasa_shizuku"));
         assert!(student_face_slug("없는캐릭").is_none());
-        assert!(face_ready("midori"), "내장 프사는 사용할 수 있어야 한다");
+        assert!(face_ready("kasa_shizuku"), "내장 프사는 사용할 수 있어야 한다");
         // 어느 쪽으로도 그림을 못 찾으면 막는다.
         assert!(!face_ready("존재하지않는슬러그"));
     }
@@ -5890,6 +5873,7 @@ mod teammate_msg_tests {
     /// 화면에 새는 것이 이번 수리의 본체다.
     #[test]
     fn marker_is_always_consumed_even_without_a_face() {
+        assert!(student_face_slug("미도리").is_none());
         let mut row = row_from("⟦미도리⟧ 본문", 80);
         let (s0, e0, name) = tell_marker_line(&row).expect("마커");
         restyle_tell_line(&mut row, s0, e0, &name, [107, 207, 127, 255]);
@@ -5899,7 +5883,7 @@ mod teammate_msg_tests {
 
     #[test]
     fn restyle_tell_keeps_body_at_original_columns() {
-        let mut row = row_from("❯ ⟦미도리⟧ 본문", 80);
+        let mut row = row_from("❯ ⟦시즈쿠⟧ 본문", 80);
         let (marker_start, marker_end, name) = tell_marker_line(&row).unwrap();
         let original_body = row[marker_end..].to_vec();
         let face_col =
@@ -5914,9 +5898,9 @@ mod teammate_msg_tests {
     #[test]
     fn tell_name_and_face_stay_inside_original_marker() {
         // wide 셀 재현: 한글 뒤에 스페이서 한 칸(composed 경로와 동일).
-        let mut row = row_from("❯ ⟦호 시 노 ⟧ 본문", 80);
+        let mut row = row_from("❯ ⟦미 조 레 ⟧ 본문", 80);
         let (marker_start, marker_end, name) = tell_marker_line(&row).expect("마커 인식");
-        assert_eq!(name, "호시노");
+        assert_eq!(name, "미조레");
         let original_body = row[marker_end..].iter().map(|c| c.ch).collect::<Vec<_>>();
         let face_col = restyle_tell_line(&mut row, marker_start, marker_end, &name, [107, 207, 127, 255])
             .expect("프사");
@@ -5960,7 +5944,7 @@ mod teammate_msg_tests {
         use kasa_bridge::screen::Color;
         let mut rows = vec![
             row_from("                    ╭──────────────────╮", 60),
-            row_from("❯ ⟦유우카⟧ hello", 60),
+            row_from("❯ ⟦코오리⟧ hello", 60),
             row_from("  wrapped body", 60),
             row_from("                    ╰──────────────────╯", 60),
             row_from("  › Plan mode", 60),
@@ -5980,7 +5964,7 @@ mod teammate_msg_tests {
         assert_eq!(foreground.prefix_end(1, 60), 20);
         let faces = restyle_tell_messages(&mut rows, &foreground);
         foreground.restore(&mut rows);
-        assert_eq!(faces, vec![(1, 0, "yuuka")]);
+        assert_eq!(faces, vec![(1, 0, "kasa_koori")]);
         for r in 0..4 {
             assert_eq!(rows[r][20..40], original[r][20..40]);
         }
@@ -5997,7 +5981,7 @@ mod teammate_msg_tests {
     #[test]
     fn tell_keeps_paragraphs_and_stops_before_the_next_message() {
         use kasa_bridge::screen::Color;
-        let mut rows = vec!["› ⟦유즈⟧ first", "  wrapped", "", "  second paragraph", "", "",
+        let mut rows = vec!["› ⟦나기⟧ first", "  wrapped", "", "  second paragraph", "", "",
             "  | table content |", "", "› ordinary prompt", "  ordinary body"]
             .into_iter().map(|s| {
                 let mut row = row_from(s, 60);
@@ -6026,7 +6010,7 @@ mod teammate_msg_tests {
     fn tell_background_tracks_sender_and_stops_at_original_band_boundary() {
         use kasa_bridge::screen::Color;
         let mut rows = vec![
-            row_from("❯ ⟦미도리⟧ first", 60),
+            row_from("❯ ⟦시즈쿠⟧ first", 60),
             row_from("  second", 60),
             row_from("  unrelated output", 60),
         ];
@@ -6058,7 +6042,7 @@ mod teammate_msg_tests {
             row_from("• previous answer", 60),
             row_from("", 60),
             banded(""),
-            banded("› ⟦미도리⟧ first line of a long note"),
+            banded("› ⟦시즈쿠⟧ first line of a long note"),
             banded("  second line"),
             banded(""),
             row_from("", 60),
@@ -6186,9 +6170,9 @@ mod teammate_msg_tests {
     // 이름 텍스트는 프사가 대신하고 원문 "› Message from @…" 잔재는 지워진다.
     #[test]
     fn restyle_writes_inline_body_with_face_for_student() {
-        let mut rows = vec![row_from("› Message from @aru-9c88", 60)];
+        let mut rows = vec![row_from("› Message from @kasa_ame-9c88", 60)];
         let face =
-            expand_teammate_message(&mut rows, 0, 0, "aru-9c88", Some("아루다 확인"), [255, 128, 0, 255]);
+            expand_teammate_message(&mut rows, 0, 0, "kasa_ame-9c88", Some("아메다 확인"), [255, 128, 0, 255]);
         assert_eq!(face, Some(0), "프사 col 반환");
         assert_eq!(rows[0][0].ch, ' ', "첫 두 칸은 프사 자리");
         assert_eq!(rows[0][2].ch, '아', "본문은 이어 쓰는 줄과 같은 col 2");
@@ -6198,8 +6182,8 @@ mod teammate_msg_tests {
             "학생 accent 로 도색"
         );
         let text = row_text(&rows[0]);
-        assert!(text.contains("아 루 다"), "본문 와이드 스페이서 유지: {text}");
-        assert!(!text.contains("aru-9c88"), "이름은 프사가 대신: {text}");
+        assert!(text.contains("아 메 다"), "본문 와이드 스페이서 유지: {text}");
+        assert!(!text.contains("kasa_ame-9c88"), "이름은 프사가 대신: {text}");
     }
 
     // 학생이 아닌 발신자(team-lead 등)는 프사가 없어 기존 `@이름❯` 헤더 유지.
@@ -6313,10 +6297,10 @@ mod teammate_msg_tests {
     // agent 이름 로마자 → 로스터 역매핑, 로스터 밖은 태그 color 폴백.
     #[test]
     fn sender_accent_roster_and_fallback() {
-        assert_eq!(theme::slug_character("aru"), Some("아루"));
+        assert_eq!(theme::slug_character("kasa_ame"), Some("아메"));
         assert_eq!(
-            teammate_sender_accent("aru-9c88", None),
-            theme::character_accent("아루").unwrap()
+            teammate_sender_accent("kasa_ame-9c88", None),
+            theme::character_accent("아메").unwrap()
         );
         assert_eq!(
             teammate_sender_accent("team-lead", Some("orange")),

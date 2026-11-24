@@ -315,9 +315,7 @@ async fn term_character_theme_post(
     // 빈 테마 id = 번들 — 팩 검사 없이 통과. 지정 테마는 팩이 실재해야 적용된다
     // (없는 테마 id 를 설정에 앉히면 로스터가 통째로 비어 배정이 멈춘다).
     if !theme.is_empty() {
-        let has_pack = kasa_characters::character::themes_root()
-            .map(|r| r.join(theme).join("theme.json").is_file())
-            .unwrap_or(false);
+        let has_pack = kasa_characters::character::theme_characters_json(theme).is_some();
         if !has_pack {
             return err(format!(
                 "테마 팩 '{theme}' 이 이 기계에 없다 — ~/.config/kasaterm/themes/ 에 폴더째 복사해 와야 한다"

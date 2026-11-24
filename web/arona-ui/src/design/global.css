@@ -193,3 +193,13 @@ canvas { image-rendering: pixelated; }
   /* 대화를 끝까지 스크롤한 뒤 더 밀면 페이지 전체가 튀거나 당겨서 새로고침된다. */
   html, body { overscroll-behavior: none; }
 }
+
+
+@media (prefers-reduced-motion: no-preference) {
+  .kasa-standing-walk { animation: kasa-standing-step .55s ease-in-out infinite alternate; }
+}
+
+@keyframes kasa-standing-step {
+  from { translate: 0 0; }
+  to { translate: 0 -2px; }
+}
