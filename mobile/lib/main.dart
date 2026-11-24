@@ -23,6 +23,7 @@ import 'screens/connect.dart';
 import 'screens/dev_server.dart';
 import 'screens/conversation_view.dart';
 import 'screens/hub.dart';
+import 'documents/documents_tab.dart';
 import 'screens/offline_hub.dart';
 import 'screens/terminal.dart';
 import 'screens/saved_conversations.dart';
@@ -762,25 +763,37 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       final archive = _connection.archiveServer;
       // 본 적이 하나도 없을 때만 대기 화면이다. 한 번이라도 본 허브는 연결 전·끊김에도 그대로 띄운다.
       if (seen == null || seen.isEmpty || archive == null) {
-        return AccountWaitingScreen(connection: _connection, shared: _shared);
+        return MobileTabs(
+          key: ValueKey(scope),
+          server: null,
+          students: AccountWaitingScreen(connection: _connection, shared: _shared),
+        );
       }
-      return HubScreen(
-        key: ObjectKey(archive),
-        server: archive,
-        offline: true,
-        connection: _connection,
-        onChangeAddress: _connection.logout,
-        shared: _shared,
-        prefs: _hubPrefs(archive.account),
+      return MobileTabs(
+        key: ValueKey(scope),
+        server: null,
+        students: HubScreen(
+          key: ObjectKey(archive),
+          server: archive,
+          offline: true,
+          connection: _connection,
+          onChangeAddress: _connection.logout,
+          shared: _shared,
+          prefs: _hubPrefs(archive.account),
+        ),
       );
     }
-    return HubScreen(
-      key: ObjectKey(server),
+    return MobileTabs(
+      key: ValueKey(_hubScope),
       server: server,
-      connection: server.account == null ? null : _connection,
-      onChangeAddress: _connection.logout,
-      shared: _shared,
-      prefs: _hubPrefs(server.account),
+      students: HubScreen(
+        key: ObjectKey(server),
+        server: server,
+        connection: server.account == null ? null : _connection,
+        onChangeAddress: _connection.logout,
+        shared: _shared,
+        prefs: _hubPrefs(server.account),
+      ),
     );
   }
 }

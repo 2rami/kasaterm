@@ -148,6 +148,8 @@ where
 
 // ── 받는 쪽: /net/tcp ─────────────────────────────────────────────────────────
 
+pub const VAULT_LOOPBACK_PORT: u16 = 6341;
+
 fn port_param(query: Option<&str>) -> Option<u16> {
     query?
         .split('&')
@@ -181,6 +183,14 @@ pub async fn tcp_ws_handler(req: axum::extract::Request) -> Response {
     let Some(port) = port_param(req.uri().query()) else {
         return (axum::http::StatusCode::BAD_REQUEST, "port=1..65535 required").into_response();
     };
+    // The generic phone route also accepts gateway traffic. The vault uses its
+    // dedicated phone route and keeps the existing trusted desktop loopback path.
+    if port == VAULT_LOOPBACK_PORT
+        && (req.extensions().get::<kasa_device::access::MobileAuth>().is_some()
+            || kasa_device::access::is_remote_peer(&req))
+    {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
     use axum::extract::FromRequestParts as _;
     let (mut parts, _body) = req.into_parts();
     let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
@@ -715,6 +725,9 @@ mod tests {
         assert_eq!(status_of(e), 403);
         let base = app(Some(owner)).await;
         assert!(tokio_tungstenite::connect_async(format!("{base}/net/tcp?port={echo}")).await.is_ok());
+        let e = tokio_tungstenite::connect_async(format!("{base}/net/tcp?port={VAULT_LOOPBACK_PORT}"))
+            .await.unwrap_err();
+        assert_eq!(status_of(e), 404);
     }
 
     fn target(app: &str, port: u16) -> Target {

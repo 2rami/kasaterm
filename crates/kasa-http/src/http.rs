@@ -29,6 +29,7 @@ use kasa_students::http::{schedule, tasks};
 
 mod router;
 mod phone_browser;
+mod vault;
 mod machine_proxy;
 mod screen;
 mod app_control;

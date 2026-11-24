@@ -1339,6 +1339,77 @@ class Server {
     }
   }
 
+  Future<List<({String route, String label, bool preferred})>> vaultMachines() async {
+    final live = await _accountMachines();
+    final machines = live is Map ? live['machines'] : null;
+    if (machines is! List) return const [];
+    return [
+      for (final m in machines.whereType<Map>())
+        if (m['id'] is String && (m['id'] as String).isNotEmpty)
+          (
+            route: '~${m['id']}',
+            label: m['machine'] as String? ?? m['id'] as String,
+            preferred: [
+              m['machine'],
+              if (m['aliases'] case final List aliases) ...aliases,
+            ].whereType<String>().any(
+              (name) => name.toLowerCase().replaceAll('-', '') == 'nachoneko',
+            ),
+          ),
+    ];
+  }
+
+  Future<http.Response> vaultRequest(
+    String machine,
+    String method,
+    String path, {
+    Map<String, String>? query,
+    String? body,
+    required Duration timeout,
+  }) async {
+    if (_closed || _kasanet == null) {
+      throw const ServerException('카사넷을 사용할 수 없어요.');
+    }
+    final changed = Completer<Uri>();
+    final router = _kasanet!;
+    void connected() {
+      final base = router.base(machine);
+      if (base != null && !changed.isCompleted) changed.complete(base);
+    }
+
+    void onClose() {
+      if (!changed.isCompleted) {
+        changed.completeError(const ServerException('카사넷 연결이 종료됐어요.'));
+      }
+    }
+
+    router.addListener(connected);
+    addCloseListener(onClose);
+    Uri base;
+    try {
+      connected();
+      base = await changed.future.timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => throw const ServerException('볼트 기기의 카사넷 연결을 확인해 주세요.'),
+      );
+    } finally {
+      router.removeListener(connected);
+      removeCloseListener(onClose);
+    }
+    final uri = base.resolve('vault/$path').replace(queryParameters: query);
+    final stop = Completer<void>();
+    final request = http.AbortableRequest(method, uri, abortTrigger: stop.future);
+    if (body != null) {
+      request.headers['content-type'] = 'application/json; charset=utf-8';
+      request.bodyBytes = utf8.encode(body);
+    }
+    try {
+      return await _client.sendDirect(request).then(http.Response.fromStream).timeout(timeout);
+    } finally {
+      stop.complete();
+    }
+  }
+
   /// 데스크톱을 바꾸는 요청 한 번의 상한. 데스크톱은 받은 일을 바로 하고 답한다(관문 왕복 1초 안팎) — 첫 시도가
   /// 이보다 늦으면 길이 죽은 것으로 보고 관문으로 다시 보낸다.
   @visibleForTesting

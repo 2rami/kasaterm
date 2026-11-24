@@ -480,6 +480,13 @@ class OriginClient extends http.BaseClient {
     }
   }
 
+  Future<http.StreamedResponse> sendDirect(http.BaseRequest request) {
+    if (direct?.call(request.url) != true) {
+      throw const AccountException('카사넷 연결을 확인해 주세요.');
+    }
+    return _send(request, true);
+  }
+
   Future<http.StreamedResponse> _gateway(http.BaseRequest request) async {
     try {
       return await _send(request, false);
