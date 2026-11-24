@@ -171,6 +171,17 @@ fn without_opt_in(changes: &mut local::Delta) -> bool {
     changes.settings.len() != before
 }
 
+fn same_revision_view(previous: &Snapshot, remote: &Snapshot) -> bool {
+    // An upgrade may request a previously hidden opt-in key at the same server revision.
+    previous.machines == remote.machines
+        && previous.settings.iter()
+            .filter(|(key, _)| schema::known_setting(key))
+            .all(|(key, value)| remote.settings.get(key) == Some(value))
+        && remote.settings.keys().all(|key| {
+            previous.settings.contains_key(key) || schema::OPT_IN_KEYS.contains(&key.as_str())
+        })
+}
+
 pub async fn synchronize(
     client: &reqwest::Client, credential: &DeviceCred, stamp: Stamp, paths: Paths,
     authorize: &(dyn Fn() -> Result<(), String> + Sync),
@@ -190,7 +201,7 @@ pub async fn synchronize(
     let previous = bindings.accounts.get(&account);
     let mut remote = get_remote(client, credential).await?;
     if previous.is_some_and(|binding| remote.revision < binding.remote.revision
-        || (remote.revision == binding.remote.revision && remote != binding.remote)) {
+        || (remote.revision == binding.remote.revision && !same_revision_view(&binding.remote, &remote))) {
         return Err(SyncError::Failed);
     }
     authorize().map_err(|_| SyncError::Changed)?;
@@ -583,6 +594,67 @@ mod tests {
         local::write_private(&a.settings, &json!({"theme":"ink","claude_account":"acct-5"})).unwrap();
         local::write_private(&b.settings, &json!({"claude_account":"acct-6"})).unwrap();
         (root, a, b)
+    }
+
+    #[tokio::test]
+    async fn a_newly_visible_account_order_does_not_block_a_pending_choice() {
+        let (credential, state, server) = fixture().await;
+        let me = owner(&credential);
+        let (root, a, b) = rig("opt-in-view");
+        let client = reqwest::Client::new();
+        let allow = || Ok(());
+        let apply = |request| apply_files(&request);
+        let sync = |paths| synchronize(&client, &credential, Stamp::fixture(), paths, &allow, &apply);
+        sync(a.clone()).await.unwrap();
+        let before = state.store.get("alice").unwrap();
+        let account_order = order::value(&[(TEAM.into(), ORG.into()), (GMAIL.into(), ORG.into())]);
+        let published = state.store.patch("alice", &schema::Patch {
+            expected_revision: before.revision,
+            settings: [(order::KEY.into(), account_order.clone())].into(),
+            ..Default::default()
+        }).unwrap();
+        sync(a.clone()).await.unwrap();
+
+        // Reproduce a binding written by an older client that omitted this key from its GET.
+        let mut bindings = local::load_bindings(&a.binding).unwrap();
+        let binding = bindings.accounts.get_mut(&me).unwrap();
+        binding.remote.settings.remove(order::KEY);
+        binding.observed.settings.remove(order::KEY);
+        local::write_private(&a.binding, &serde_json::to_value(bindings).unwrap()).unwrap();
+        local::edit_json(&a.settings, json!({}), |settings| {
+            settings.as_object_mut().unwrap().remove(order::KEY);
+            Ok(())
+        }).unwrap();
+        assert_eq!(seen(&a), published.revision);
+        let selected = choose_at(&a, &me, GMAIL);
+        sync(a.clone()).await.unwrap();
+        sync(b.clone()).await.unwrap();
+
+        let after = state.store.get("alice").unwrap();
+        assert_eq!(after.revision, published.revision + 1);
+        assert_eq!(after.settings[order::KEY], account_order);
+        assert_eq!(intent_of(remote_choice(&state).as_ref()), intent_of(Some(&selected)));
+        assert_eq!(local_choice(&b), remote_choice(&state));
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_opt_in_key_already_visible_cannot_change_at_the_same_revision() {
+        let key = order::KEY.to_string();
+        let mut saved = Snapshot {
+            revision: 108,
+            settings: [(key.clone(), order::value(&[(TEAM.into(), ORG.into())]))].into(),
+            ..Default::default()
+        };
+        let mut remote = saved.clone();
+        remote.settings.insert(key.clone(), order::value(&[(GMAIL.into(), ORG.into())]));
+        assert!(!same_revision_view(&saved, &remote));
+        remote.settings.remove(&key);
+        assert!(!same_revision_view(&saved, &remote));
+        saved.settings.remove(&key);
+        remote.settings.insert("theme".to_string(), json!("ink"));
+        assert!(!same_revision_view(&saved, &remote));
     }
 
     #[tokio::test]
