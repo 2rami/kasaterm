@@ -2827,86 +2827,7 @@ impl App {
             eprintln!("[autoinfo] Info 탭 열림 (col_visible={})", self.git.col_visible);
             return;
         }
-        // Display-only fixture: never connect to or change a real source pane.
-        // Reapply while active so process polling cannot replace the capture.
         let preview = std::env::var("KASATERM_AUTOINFO").unwrap_or_default();
-        if crate::verification_run() && matches!(preview.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown" | "execution-skills" | "execution-waiting") {
-            use crate::context_info::ContextEvidence;
-            use crate::info::{ContextLines, InfoSnap, PaneGroup};
-            let evidence = if preview == "execution-unknown" { ContextEvidence::default() } else {
-                ContextEvidence {
-                    available: true, partial: true, observed_records: 18,
-                    last_input_tokens: Some(12000), observed_input_tokens: 24000,
-                    observed_output_tokens: 600,
-                    // 「execution-skills」는 실제 세션처럼 앞머리가 같은 스킬이 수십 개 섞인 목록 — 묶음 알약 확인용.
-                    skills_available: Some(if preview == "execution-skills" {
-                        let mut v: Vec<String> = ["run", "loop", "simplify", "code-review", "learn", "learn-mcp", "learn-agent-skills", "claude-api", "jev"].iter().map(|s| s.to_string()).collect();
-                        v.extend(["admin-reports", "calendar-agenda", "calendar-insert", "chat", "chat-send", "docs-write", "drive-upload", "gmail-read", "gmail-send", "gmail-triage", "keep", "meet", "sheets", "sheets-read", "slides", "tasks", "workflow"].iter().map(|s| format!("gws-{s}")));
-                        v.extend(["backup-sheet-as-csv", "block-focus-time", "create-task-list", "find-free-time", "label-and-archive-emails", "plan-weekly-schedule", "post-mortem-setup", "share-doc-and-notify"].iter().map(|s| format!("recipe-{s}")));
-                        v.extend(["ai-sdk", "nextjs", "deploy", "env", "shadcn", "vercel-cli"].iter().map(|s| format!("vercel:{s}")));
-                        v.extend(["agent", "map", "scrape", "search"].iter().map(|s| format!("firecrawl-{s}")));
-                        v
-                    } else {
-                        vec!["화면 구성과 버튼 배치를 점검하는 긴 이름의 스킬".into(), "문서 작성".into(), "코드 검토".into()]
-                    }),
-                    skills_read: vec!["문서 작성".into()],
-                    mcp_configured: Some(vec!["문서 검색".into(), "브라우저".into()]),
-                    mcp_called: vec!["문서 검색".into()],
-                    image_read_calls: 3, attachment_records: 2,
-                    image_payload_blocks: 1, image_reference_blocks: 1,
-                    stored_image_payload_bytes: 8192, max_image_payload_bytes: 8192,
-                    request_size_error: true,
-                    ..Default::default()
-                }
-            };
-            self.git.col_w_logical = 280.0;
-            self.info.selected_pane = Some("%info-fixture".into());
-            self.info.selected_pid = if preview == "execution-stale" { "%new-fixture" } else { "%info-fixture" }.into();
-            self.info.selected_session_id = "fixture-session".into();
-            self.info.selected_harness = "claude".into();
-            // 매 틱 다시 깔리므로 누른 스킬 묶음(`pills:`)만은 남겨 둔다 — 펼침을 눌러 확인할 수 있게.
-            self.info.pane_expanded.retain(|key| key.starts_with("pills:"));
-            self.info.pane_expanded.insert(crate::info::ROOMS_FOLD.into());
-            if matches!(preview.as_str(), "execution-details" | "execution-scroll" | "execution-skills") {
-                self.info.pane_expanded.insert("runtime:local:%info-fixture".into());
-            }
-            self.info.scroll = if preview == "execution-scroll" { 960.0 } else {
-                std::env::var("KASATERM_AUTOINFO_SCROLL").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0)
-            };
-            self.info.view = InfoSnap {
-                panes: vec![
-                    PaneGroup { pane: "%info-fixture".into(), label: "문서 담당".into(),
-                        session: "문서 편집 동작 확인".into(), harness: "claude".into(),
-                        status: "대기".into(), window: 0, window_label: "앱 개발".into(),
-                        ..Default::default() },
-                    PaneGroup { pane: "%second-fixture".into(), label: "검토 담당".into(),
-                        session: "다른 방의 실행 정보".into(), harness: "codex".into(),
-                        status: "연결끊김".into(), machine: Some("검증용 기기".into()),
-                        window: 1, window_label: "화면 검토".into(), ..Default::default() },
-                ],
-                contexts: std::collections::HashMap::from([("%info-fixture".into(), ContextLines {
-                    pane_id: "%info-fixture".into(), session_id: "fixture-session".into(),
-                    harness: "claude".into(), note: evidence.detail_note(), scope: evidence.detail_scope(), details: evidence.detail_sections(),
-                })]),
-                // 보드가 주는 「지금 하는 일」과, 상태 칸과 같은 말이라 안 서야 하는 작업 한 줄.
-                now: std::collections::HashMap::from([("%info-fixture".into(), crate::info::NowLine {
-                    character: Some("아로나".into()),
-                    request: "문서 편집기에서 한글 줄바꿈이 어절 가운데서 끊기지 않는지 확인해 주세요".into(),
-                    reply: "입력창 폭을 세 가지로 바꿔 가며 확인했고, 긴 경로만 글자 단위로 넘어가요.".into(),
-                })]),
-                // `execution-waiting` 은 턴이 끝났어도 배경 일이 남은 칸 — 상태 칸이 「대기」여도 그 줄이 선다.
-                tasks: std::collections::HashMap::from([("%info-fixture".into(), crate::info::TaskLine { label: if preview == "execution-waiting" {
-                    crate::info::status_label(&kasa_socket::backend::PaneActivity {
-                        status: "idle".into(), idle_secs: Some(1500), background: vec!["배포 피드 기다림".into(), "Windows 굽기".into()], ..Default::default()
-                    })
-                } else { "대기 중".into() }, ..Default::default() })]),
-                ..Default::default()
-            };
-            if !ACTED.swap(true, Ordering::Relaxed) {
-                eprintln!("[autoinfo] display-only fixture: {preview}");
-            }
-            return;
-        }
         if crate::verification_run() && matches!(preview.as_str(), "mirrors" | "rooms") {
             self.info.view = crate::info::InfoSnap {
                 panes: vec![
@@ -2920,7 +2841,6 @@ impl App {
                         machine: Some("맥북".into()), ..Default::default() },
                 ], ..Default::default()
             };
-            self.info.procs_collapsed = false;
             self.info.machines_col.machines.clear();
             if preview == "rooms" {
                 use crate::info::{PaneGroup, ProcKind, ProcRow};
@@ -2940,8 +2860,6 @@ impl App {
                         rows: vec![ProcRow { pid: 131, name: "claude".into(),
                             kind: ProcKind::Claude, ..Default::default() }], ..Default::default() },
                 ];
-                self.info.group_collapsed.clear();
-                self.info.machine_collapsed.clear();
                 self.info.machines_col.machines = vec![crate::state::MachinesColMachine {
                     label: "맥북".into(), online: true, ago_secs: Some(0), outdated: false,
                     closed: 0, web_shells: Vec::new(), link: Default::default(),
@@ -2992,115 +2910,8 @@ impl App {
             }
             return;
         }
-        let act = match std::env::var("KASATERM_AUTOINFO").ok() {
-            Some(v)
-                if v == "hover"
-                    || v == "menu"
-                    || v == "panemenu"
-                    || v == "panethemes"
-                    || v == "machinemenu"
-                    || v == "migratestages"
-                    || v.starts_with("panechars") =>
-            {
-                v
-            }
-            _ => return,
-        };
-        if ACTED.load(Ordering::Relaxed)
-            || Instant::now() < *due + std::time::Duration::from_millis(1500)
-        {
-            return;
-        }
-        ACTED.store(true, Ordering::Relaxed);
-        // 학생 줄 우클릭 메뉴 — 프로세스 행과 다른 목록(`group_rects`)을 쓰고,
-        // 캐릭터 목록은 **한 번 더 눌러야** 나오므로 정적 캡처로는 존재 자체를
-        // 확인할 수 없다. `panemenu` 는 테마 목록까지, `panechars` 는 첫 테마를
-        // 골라 캐릭터 목록까지 편 상태로 세운다.
-        // 「다른 기계」 줄의 메뉴. 명부 폴링이 몇십 초 걸릴 수 있어 줄이 아직 없으면
-        // 다음 프레임에 다시 본다 — 한 번 놓치고 끝내면 빈 화면을 「확인했다」고 찍는다.
-        // 이사 체크리스트 — 실제 이사 없이 단계 상태만 심어 그리기를 본다(진짜 이사는
-        // 저쪽 기계에 학생을 만드는 부작용이 있다). 기계 줄이 아직 없으면 다음 프레임에.
-        if act == "migratestages" {
-            let Some(m) = self.info.machines_col.machines.first().cloned() else {
-                ACTED.store(false, Ordering::Relaxed);
-                return;
-            };
-            use crate::state::MigrateStageState as S;
-            let mut p = crate::state::MigrateProgress::new("%1", &m.label, "코하루", None);
-            p.stages[0] = (S::Done, "있음".to_string());
-            p.stages[1] = (S::Done, String::new());
-            p.stages[2] = (S::Running, "12.4MB".to_string());
-            self.info.machines_col.progress = Some(p);
-            eprintln!("[autoinfo] act=migratestages machine={}", m.label);
-            return;
-        }
-        if act == "machinemenu" {
-            let Some((label, r)) = self.info.machine_rects.first().cloned() else {
-                ACTED.store(false, Ordering::Relaxed);
-                return;
-            };
-            let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
-            self.cursor_px = (cx, cy);
-            self.info.machine_menu = Some((cx, cy, label.clone()));
-            self.info.machines_col.last_refresh = None;
-            eprintln!("[autoinfo] act=machinemenu machine={label} at ({cx:.0},{cy:.0})");
-            return;
-        }
-        if act == "panemenu" || act == "panethemes" || act.starts_with("panechars") {
-            let Some((pane, r)) = self
-                .info
-                .group_rects
-                .iter()
-                .find(|(k, _)| k.starts_with('%'))
-                .cloned()
-            else {
-                eprintln!("[autoinfo] 학생 줄 없음 — group_rects 에 pane 머리가 안 잡혔다");
-                return;
-            };
-            let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
-            // `panechars:<테마 id>` 로 볼 단을 고른다. 기본(첫 테마)만으로는 **번들
-            // 로스터를 못 연다** — `list_themes` 에 번들이 없어서다. 그런데 켠 학생
-            // 대부분이 거기 있으니, 거르기를 시험할 자리가 바로 그 단이다.
-            // `panemenu` 는 첫 단(이사·가기·닫기), `panethemes` 는 테마 단.
-            use crate::state::PaneMenuPage as P;
-            let opened = if let Some(id) = act.strip_prefix("panechars:") {
-                P::Theme(id.to_string())
-            } else if act == "panechars" {
-                let first = kasa_characters::character::list_themes().into_iter().next();
-                if first.is_none() {
-                    eprintln!("[autoinfo] 테마가 하나도 없다 — 캐릭터 목록을 못 편다");
-                }
-                first.map(|(id, _)| P::Theme(id)).unwrap_or(P::Themes)
-            } else if act == "panethemes" {
-                P::Themes
-            } else {
-                P::Root
-            };
-            let opened_s = match &opened {
-                P::Root => "root".to_string(),
-                P::Themes => "themes".to_string(),
-                P::Theme(id) => format!("theme:{id}"),
-            };
-            self.cursor_px = (cx, cy);
-            self.info.pane_menu = Some((cx, cy, pane.clone(), opened));
-            eprintln!(
-                "[autoinfo] act={act} pane={pane} at ({cx:.0},{cy:.0}) opened={opened_s}"
-            );
-            return;
-        }
-        let Some((pid, r)) = self.info.proc_rects.first().copied() else {
-            eprintln!("[autoinfo] 프로세스 행 없음 — 좌표가 아직 안 생겼다");
-            return;
-        };
-        let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
-        if act == "menu" {
-            self.info.ctx_menu = Some((cx, cy, pid));
-        }
-        // hover 든 menu 든 커서는 행 위에 둔다 — menu 도 그 행이 하이라이트된
-        // 상태로 찍혀야 어느 프로세스를 겨눈 메뉴인지 보인다.
-        self.cursor_px = (cx, cy);
-        eprintln!("[autoinfo] act={act} pid={pid} at ({cx:.0},{cy:.0})");
     }
+
     /// 스크롤을 **경계에 걸친 자리**에 세워 두는 구멍. 잘라내기(시저) 작업은
     /// "위로 반쯤 나간 행이 헤더를 덮나"를 봐야 하는데, 그 상태는 목록을 조금
     /// 밀어야만 나온다 — 스크롤이 0 이면 첫 행이 마침 경계에 딱 붙어 있어 클리핑이
@@ -3236,9 +3047,8 @@ impl App {
         // 「휠이 안 먹었다」와 구분이 안 된다. 행 수는 요청과 실제가 갈렸을 때
         // 「clamp 이 먹었다」와 「목록이 아직 안 찼다」를 가르는 단서다.
         eprintln!(
-            "[autocolscroll] 요청={px} 실제={} 행={} 내용={:.0}",
+            "[autocolscroll] 요청={px} 실제={} 내용={:.0}",
             self.info.scroll,
-            self.info.proc_rects.len(),
             self.info.content_h
         );
     }
@@ -8897,77 +8707,6 @@ impl App {
         let ws = self.ws.lock().ok()?;
         let id = ws.active_pane.as_ref()?;
         ws.panes.get(id)?.markdown().map(|m| m.scroll)
-    }
-}
-
-impl App {
-    /// Info 패널 그룹 머리 **더블클릭 → 그 학생으로 포커스** 헤드리스 검증.
-    /// `KASATERM_AUTOINFODBL_MS` 뒤에, 지금 활성이 아닌 첫 pane 그룹을 두 번
-    /// 눌러 `active_pane` 이 실제로 옮겨갔는지 로그로 남긴다. 사람 손 없이
-    /// 확인할 수 있는 유일한 경로다 — 포커스는 그려지는 값이 아니라 상태다.
-    pub(crate) fn run_pending_autoinfodbl(&mut self, event_loop: &ActiveEventLoop) {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::OnceLock;
-        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
-        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
-        static DONE: AtomicBool = AtomicBool::new(false);
-        let due = DUE.get_or_init(|| {
-            std::env::var("KASATERM_AUTOINFODBL_MS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
-        });
-        let Some(due) = due else { return };
-        if Instant::now() < *due || DONE.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
-        let before = self.ws.lock().ok().and_then(|w| w.active_pane.clone()).unwrap_or_default();
-        // `KASATERM_AUTOINFODBL=win` 이면 방 머리를, 아니면 지금 활성이 아닌
-        // pane 머리를 겨눈다 — 두 경로가 서로 다른 동작(방 전환 / pane 포커스)이라
-        // 따로 재야 한다.
-        let want_win = std::env::var("KASATERM_AUTOINFODBL").is_ok_and(|v| v == "win");
-        let target = self
-            .info
-            .group_rects
-            .iter()
-            .find(|(k, _)| {
-                if want_win {
-                    k.strip_prefix("win:").is_some_and(|n| n != self.active_window.to_string())
-                } else {
-                    !k.starts_with("win:") && *k != before
-                }
-            })
-            .map(|(k, r)| (k.clone(), *r));
-        let Some((key, r)) = target else {
-            eprintln!("[autoinfodbl] 비활성 pane 그룹이 없다(그룹 {})", self.info.group_rects.len());
-            return;
-        };
-        let (x, y) = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
-        for _ in 0..2 {
-            self.cursor_px = (x, y);
-            for state in [ElementState::Pressed, ElementState::Released] {
-                self.window_event(
-                    event_loop,
-                    wid,
-                    WindowEvent::MouseInput {
-                        device_id: DeviceId::dummy(),
-                        state,
-                        button: MouseButton::Left,
-                    },
-                );
-            }
-        }
-        let after = self.ws.lock().ok().and_then(|w| w.active_pane.clone()).unwrap_or_default();
-        eprintln!(
-            "[autoinfodbl] {key} 더블클릭 → active_pane {before} → {after} (win={}) 접힘={}",
-            self.active_window,
-            if key.starts_with("win:") {
-                self.info.group_collapsed.contains(&key)
-            } else {
-                !self.info.pane_expanded.contains(&key)
-            }
-        );
     }
 }
 

@@ -1,4 +1,4 @@
-//! Info 열의 위아래 나눔 — 위는 「지금 보는 칸」 카드와 「내 프롬프트」, 아래는 「결과물」·「모든 방」. 사이 경계를
+//! Info 열의 위아래 나눔 — 위는 「지금 보는 칸」 카드와 「내 프롬프트」, 아래는 「결과물」·Git. 사이 경계를
 //! 끌어 두 영역의 높이 비율을 정하고, 영역마다 따로 굴린다.
 //!
 //! 비율은 경계를 뺀 칼럼 높이에서 위 영역이 차지하는 몫이다. 설정 파일 옆 `info-layout.json` 에 남는다 — 검증
@@ -122,7 +122,7 @@ impl crate::state::InfoState {
 
 impl crate::App {
     fn info_split_live(&self) -> bool {
-        self.git.col_visible && self.info.ctx_menu.is_none() && self.info.pane_menu.is_none()
+        self.git.col_visible && !self.git.panel_menu_open() && self.info.pane_menu.is_none()
     }
 
     /// 커서가 경계 위인가 — 끌 수 있다는 커서를 띄운다.
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn a_short_side_lends_its_spare_room_and_the_drag_stays_inside_the_contents() {
         let room = 600.0 - GRIP_H;
-        // 방을 접어 아래가 짧으면 아래는 제 내용만큼만, 나머지는 프롬프트가 쓴다.
+        // 아래가 짧으면 아래는 제 내용만큼만, 나머지는 프롬프트가 쓴다.
         let (h, (lo, hi)) = place(600.0, 2000.0, 100.0, Some(0.3)).unwrap();
         assert_eq!((h, lo, hi), (room - 100.0, room - 100.0, room - MIN_LOWER));
         // 아래 내용이 최소 높이보다 짧으면 그 내용만큼만 — 내줄 자리가 없어 경계는 못 움직인다.

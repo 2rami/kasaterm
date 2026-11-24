@@ -98,12 +98,12 @@ mod weather;
 /// 다른 모듈이라 루트에서 재수출한다(`use super::*` 하나로 닿게).
 pub(crate) use chrome::Density;
 mod gitdiff;
+mod git_panel;
 mod info;
 mod info_focus;
 mod info_outputs;
 mod info_prompts;
 mod info_split;
-mod context_info;
 mod internal_room;
 mod shared_rooms;
 mod links;
@@ -665,6 +665,15 @@ const FILE_TREE_W_MAX: f32 = 480.0;
 /// Right column (Info), mirroring the file-tree column on the left:
 /// `effective_right_chrome_w()` folds its width in so the cell grid reflows
 /// and panes never overlap it.
+const GIT_DENSE_COMPACT: f32 = 248.0;
+/// 칼럼 발치 「최근 커밋」 구역이 손대기 전에 보여 주는 줄 수. 사용자가 그 구역의
+/// 경계선을 끌면 높이가 잡히고, 그때부터는 높이에 들어가는 만큼 가져온다.
+const GIT_RECENT_COMMITS_DEFAULT: usize = 5;
+/// 그 구역의 최소·최대 높이(LOGICAL px). 최소는 머리 24px + 한 줄 20px 이라 끝까지
+/// 줄여도 커밋 하나는 남는다 — 0 까지 줄면 경계선도 함께 사라져 되돌릴 손잡이가
+/// 없어진다. 최대는 창 크기에 따라 다시 좁혀지므로(`commits_cap`) 여기선 헐겁게.
+const GIT_COMMITS_H_MIN: f32 = 44.0;
+const GIT_COMMITS_H_MAX: f32 = 4000.0;
 const GIT_COL_W: f32 = 420.0;
 const GIT_COL_W_MIN: f32 = 220.0;
 const GIT_COL_W_MAX: f32 = 720.0;
@@ -3731,6 +3740,7 @@ mod settings_action_privacy_tests {
 /// without the ~0.5s blink-cadence lag.
 #[derive(Debug, Clone)]
 enum UserEvent {
+    GitOpDone(Result<(), String>),
     SharedRooms(shared_rooms::Event),
     SharedLocal(shared_rooms::service::Event),
     AccountSyncApply(kasa_device::account_sync::PendingApply, std::sync::mpsc::Sender<Result<(), String>>),
@@ -4373,6 +4383,92 @@ fn resets_in_label_at(resets_at: Option<u64>, now: u64) -> Option<String> {
     Some(remaining_duration_label(left))
 }
 
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct GitColView {
+    #[serde(skip)]
+    generation: u64,
+    #[serde(skip)]
+    loading: bool,
+    #[serde(skip)]
+    issue: Option<String>,
+    /// 보이는 것이 마지막으로 잘 읽은 열이고 새로 읽는 중이거나 방금 읽기가 실패했다.
+    #[serde(skip)]
+    stale: bool,
+    #[serde(default)]
+    repo_root: Option<std::path::PathBuf>,
+    #[serde(default)]
+    branch_list: Vec<kasa_git::git::GitBranch>,
+    #[serde(default)]
+    detached: bool,
+    #[serde(default)]
+    unborn: bool,
+    #[serde(default)]
+    head_oid: Option<String>,
+    #[serde(default)]
+    remote: Option<(String, String)>,
+    /// cwd this snapshot was computed for — so a stale repo's rows aren't
+    /// shown after a pane switch until the poller catches the new cwd.
+    cwd: Option<std::path::PathBuf>,
+    /// `git_status` found no repo here (home / arbitrary dir): render a soft
+    /// notice instead of a branch + file list.
+    no_repo: bool,
+    branch: String,
+    ahead: u32,
+    behind: u32,
+    insertions: u32,
+    deletions: u32,
+    clean: bool,
+    /// Index (staged) changes — VSCode's "Staged Changes". `(marker, path)`
+    /// where marker is `A`/`M`/`D`. Each row's - button unstages it.
+    staged: Vec<(char, String)>,
+    /// Worktree changes not yet staged — VSCode's "Changes". `(marker, path)`
+    /// where marker is `M` modified · `?` untracked. Each row's + button
+    /// stages it. A partially-staged file appears in BOTH lists.
+    unstaged: Vec<(char, String)>,
+    /// Local branch names for the switcher dropdown (current one is `branch`).
+    branches: Vec<String>,
+    /// Per-file `(insertions, deletions)` for the row's `+N -M` count, keyed by
+    /// path. Filled from `git diff --numstat` (+ `--cached`).
+    numstat: HashMap<String, (u32, u32)>,
+    /// Most recent commits `(short_hash, subject)` for the panel's preview list.
+    recent_commits: Vec<(String, String)>,
+    #[serde(default)]
+    commit_graph: Vec<kasa_git::git::GitGraphCommit>,
+    #[serde(default)]
+    graph_supported: bool,
+    #[serde(default)]
+    graph_truncated: bool,
+    /// 칸 폴더가 여러 저장소를 담은 부모일 때 그 아래 저장소들(최근에 만진 순). 보이는 것은 `repo_root`.
+    #[serde(default)]
+    repos: Vec<std::path::PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitColBtn {
+    Pull,
+    Push,
+}
+
+/// Items in the Commit-button split dropdown (cursor-style): plain commit,
+/// commit + push, or open a PR. Wired to `git_commit_menu_rects`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitCommitAction {
+    Commit,
+    Push,
+    Pull,
+    CreatePr,
+}
+
+/// Clickable targets inside the Commit modal (screenshot #5).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitModalBtn {
+    Close,
+    IncludeUnstaged,
+    Commit,
+    CommitAndPush,
+    Cancel,
+}
+
 /// 파일트리 우클릭 컨텍스트 메뉴 항목. `NewFile`/`NewFolder`/`Rename` 은 인라인
 /// 입력행을 열고, `CopyPath` 는 절대경로를 클립보드로, `Reveal` 은 OS 파일매니저
 /// (Finder/탐색기)에서 보여주고, `Delete` 는 선택 전체를 휴지통으로 보낸다.
@@ -4429,6 +4525,7 @@ enum SidebarMenuAction {
 /// 문맥으로 새어 나간다. 그 주인을 이 값으로 들고 다니며 바뀌는 순간 정리한다.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum ImeFocus {
+    GitCommit,
     /// 터미널 surface(PTY id). 바깥 pane id 로 두면 같은 pane 안의 탭을
     /// 바꿨을 때 조합 중인 마지막 음절이 새 탭으로 넘어간다.
     Pane(String),
@@ -6273,6 +6370,7 @@ impl App {
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or_else(|_| ui.git_col_visible.unwrap_or(false)),
                 col_w_logical: ui.git_col_w.unwrap_or(GIT_COL_W),
+                commit_modal_include_unstaged: true,
                 ..Default::default()
             },
             info: state::InfoState {

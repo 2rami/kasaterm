@@ -365,7 +365,7 @@ impl App {
         self.shared_room_active() && !self.main_confirmation_modal() && !self.account_menu
             && self.statusbar.popover.is_none() && self.handle_menu.is_none()
             && self.sidebar_menu.is_none() && self.info.navigation.room_menu.is_none()
-            && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
+            && self.info.pane_menu.is_none()
             && self.info.machine_menu.is_none() && self.file_tree.ctx_menu.is_none()
     }
 }

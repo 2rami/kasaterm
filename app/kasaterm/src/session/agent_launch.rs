@@ -258,9 +258,8 @@ impl App {
     /// 「말투」 토글이 꺼져 있으면 **빈 파일**을 쓴다 — 파일이 아예 없으면 shim 이
     /// spawn 때의 env 로 되돌아가 옛 말투가 되살아난다. 빈 내용은 「말투 없음」이라는
     /// 명시적 뜻이다.
-
     pub(crate) fn repersona_pane(&mut self, pane: &str, character: &str) {
-        if !self.ws.lock().unwrap().panes.contains_key(pane) {
+        if self.ws.lock().unwrap().outer_for_pty(pane).is_none() {
             return;
         }
         // 로스터 밖 이름 가드 — 엔드포인트로 들어오는 자유 문자열이 헤더/마커를

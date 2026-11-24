@@ -1962,6 +1962,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::GitOpDone(result) => {
+                self.git.op = None;
+                if let Err(message) = result { self.set_toast(message.clone()); }
+                self.invalidate_git_diffs();
+                self.refresh_git_panel();
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::NlCommand { pane, seq, result } => {
                 self.nl_command_done(pane.clone(), *seq, result.clone());
                 self.render_frame();
@@ -2533,6 +2542,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        let git_wake = self.git.col_wake.clone();
+        kasa_git::git_watch::set_listener(move || git_wake.kick());
+        crate::git_panel::spawn_poller(
+            self.proxy.clone(),
+            self.git.col_context.clone(),
+            self.git.col_data.clone(),
+            self.git.col_commit_want.clone(),
+            self.git.col_wake.clone(),
+        );
+        crate::git_panel::spawn_remote_watcher(self.git.col_context.clone(), self.git.col_wake.clone());
         // 디스크 지키기 — 뒤 스레드가 남은 공간을 재고 빌드 산출물을 치운다(docs/disk-guard.md). 리그도 남은 공간은
         // 재지만(경고 카드를 그려 본다) 정리는 `KASATERM_DISK_ROOTS` 없이는 하지 않는다.
         if !self.lite {
@@ -3321,16 +3340,16 @@ impl ApplicationHandler<UserEvent> for App {
                     (left, TITLE_HEIGHT, (size.width as f32 / scale - left).max(0.0),
                         (size.height as f32 / scale - TITLE_HEIGHT - self.status_h()).max(0.0))
                 });
-                if blocks_obscured_button(*button, self.main_confirmation_modal(), workspace, self.cursor_px) {
+                if blocks_obscured_button(*button, self.main_pointer_modal(), workspace, self.cursor_px) {
                     return;
                 }
             }
         }
         if main_window {
-            let allow_image = !self.main_confirmation_modal() && !self.internal_room_active_any()
+            let allow_image = !self.main_pointer_modal() && !self.internal_room_active_any()
                 && self.handle_menu.is_none() && self.statusbar.popover.is_none() && !self.account_menu
                 && self.file_tree.ctx_menu.is_none() && self.sidebar_menu.is_none()
-                && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
+                && self.info.pane_menu.is_none()
                 && self.info.machine_menu.is_none() && !self.shell_picker.is_open();
             let media_was_open = self.media_preview.owns(id);
             match self.media_preview.event(id, self.cursor_px, self.modifiers, &event, &self.proxy, allow_image && !self.image_preview.owns(id)) {
@@ -3477,11 +3496,24 @@ impl ApplicationHandler<UserEvent> for App {
             if used { window.request_redraw(); return; }
         }
         if matches!(event, WindowEvent::MouseInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. })
-            && !self.main_confirmation_modal()
+            && !self.main_pointer_modal()
             && self.screen_pointer_event(&event)
         {
             window.request_redraw();
             return;
+        }
+        if self.git.commit_modal_open && !self.main_confirmation_modal() {
+            match &event {
+                WindowEvent::MouseInput { button, state, .. } => {
+                    if *button == MouseButton::Left && state.is_pressed() {
+                        self.git_commit_modal_press();
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } => return,
+                _ => {}
+            }
         }
         match event {
             WindowEvent::CloseRequested => self.close_main_window(event_loop),
@@ -3678,7 +3710,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_pinch(delta);
             }
             WindowEvent::CursorMoved { .. } => {
-                let main_modal = self.main_confirmation_modal();
+                let main_modal = self.main_pointer_modal();
                 if !main_modal && self.room_rename_pointer_drag(self.cursor_px.0) {
                     window.set_cursor(CursorIcon::Text);
                     window.request_redraw();
@@ -3706,8 +3738,15 @@ impl ApplicationHandler<UserEvent> for App {
                                 pending.surface == crate::session::ConfirmSurface::Main
                             })
                             .is_some_and(|pending| pending.rects.iter().any(|(_, r)| inside(r)));
-                    self.text_cursor_shown = false;
-                    window.set_cursor(if pointer {
+                    let commit_text = self.git.commit_modal_open
+                        && !self.main_confirmation_modal()
+                        && self.git.commit_input_rect.as_ref().is_some_and(inside);
+                    let pointer = pointer || self.git.commit_modal_open
+                        && self.git.commit_modal_rects.iter().any(|(_, r)| inside(r));
+                    self.text_cursor_shown = commit_text;
+                    window.set_cursor(if commit_text {
+                        CursorIcon::Text
+                    } else if pointer {
                         CursorIcon::Pointer
                     } else {
                         CursorIcon::Default
@@ -3962,6 +4001,10 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 // Info 위아래 영역 경계 드래그(`info_split`) — 아래로 끌수록 프롬프트 쪽이 커진다.
+                if let Some(moved) = self.commits_grip_drag(self.cursor_px.1) {
+                    if moved { window.request_redraw(); }
+                    return;
+                }
                 if let Some(moved) = self.info_split_drag(self.cursor_px.1) {
                     if moved {
                         window.set_cursor(CursorIcon::RowResize);
@@ -4351,7 +4394,8 @@ impl ApplicationHandler<UserEvent> for App {
                         && cy > TITLE_HEIGHT
                         && cy < bar_top
                         && (cx - self.git_col_x()).abs() <= 3.0;
-                    let icon = if self.on_info_split(cx, cy) {
+                    let icon = if self.on_info_split(cx, cy) || self.git.col_commits_resize.is_some()
+                        || (!self.git.panel_menu_open() && self.git.col_commits_grip.as_ref().is_some_and(|r| info::hit((cx, cy), r))) {
                         CursorIcon::RowResize
                     } else if on_sidebar_edge || on_tree_edge || on_git_edge {
                         CursorIcon::ColResize
@@ -4523,71 +4567,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Info 프로세스·포트 행 → 종료·복사 메뉴.
-                if self.git.col_visible
-                    && cy > TITLE_HEIGHT
-                    && cx >= self.git_col_x()
-                {
-                    let inside = |r: &(f32, f32, f32, f32)| {
-                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                    };
-                    let target = self
-                        .info
-                        .proc_rects
-                        .iter()
-                        .find(|(_, r)| inside(r))
-                        .map(|(p, _)| *p);
-                    if let Some(target) = target {
-                        self.info.ctx_menu = Some((cx, cy, target));
-                        self.chrome_dirty = true;
-                        window.request_redraw();
-                        return;
-                    }
-                    // 프로세스 행이 아니면 **학생 줄**을 본다 — 거기서 그 pane 의
-                    // 학생을 바꾼다(2026-08-25 사용자: 인포에서 우클릭하게 한 거
-                    // 아니냐). `group_rects` 는 방 머리와 학생 머리를 한 벌로 담으므로
-                    // pane id(`%N`)로 시작하는 것만 고른다.
-                    let pane = self
-                        .info
-                        .group_rects
-                        .iter()
-                        .find(|(k, r)| k.starts_with('%') && inside(r))
-                        .map(|(k, _)| k.clone());
-                    if let Some(pane) = pane {
-                        self.info.pane_menu_chat = {
-                            let ws = self.ws.lock().unwrap();
-                            self.pane_view_toggle(&ws, &pane)
-                        };
-                        self.info.pane_menu = Some((cx, cy, pane, state::PaneMenuPage::Root));
-                        self.chrome_dirty = true;
-                        window.request_redraw();
-                        return;
-                    }
-                    // 「다른 기계」 밑 pane 줄 우클릭 — 그 기계의 메뉴(펼치기·거울이 거기).
-                    if let Some(label) = self
-                        .info
-                        .machine_pane_rects
-                        .iter()
-                        .find(|(_, _, _, r)| inside(r))
-                        .map(|(l, _, _, _)| l.clone())
-                    {
-                        self.info.machine_menu = Some((cx, cy, label));
-                        self.info.machines_col.last_refresh = None;
-                        self.chrome_dirty = true;
-                        window.request_redraw();
-                        return;
-                    }
-                    // 「다른 기계」 줄 — 왼쪽 클릭과 같은 메뉴다.
-                    if let Some(label) = self
-                        .info
-                        .machine_rects
-                        .iter()
-                        .find(|(_, r)| inside(r))
-                        .map(|(l, _)| l.clone())
-                    {
-                        self.info.machine_menu = Some((cx, cy, label));
-                        self.info.machines_col.last_refresh = None;
-                        self.chrome_dirty = true;
+                if self.git.col_visible && cy > TITLE_HEIGHT && cx >= self.git_col_x() {
+                    if self.info.focus_card_rect.as_ref().is_some_and(|r| info::hit((cx, cy), r))
+                        && self.open_info_pane_menu((cx, cy)) {
                         window.request_redraw();
                     }
                     return;
@@ -4687,9 +4669,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // (cursor left the row) released over a pane types that path
                 // into the shell; otherwise it just disarms — the row's
                 // expand/preview click already fired on press.
-                if matches!(state, ElementState::Pressed) && !self.main_confirmation_modal()
+                if matches!(state, ElementState::Pressed) && !self.main_pointer_modal()
                     && self.sidebar_menu.is_none() && self.info.navigation.room_menu.is_none()
-                    && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
+                    && self.info.pane_menu.is_none()
                     && self.info.machine_menu.is_none() && self.file_tree.ctx_menu.is_none()
                     && self.room_rename_pointer_press(self.cursor_px)
                 {
@@ -4833,12 +4815,19 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                if matches!(state, ElementState::Pressed) && self.git.panel_menu_open()
+                    && !self.info.panel_rect.as_ref().is_some_and(|r| info::hit(self.cursor_px, r))
+                {
+                    self.git.close_panel_menus();
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
                 // 인포·사이드바의 우클릭 메뉴가 떠 있으면 **어디를 눌러도** 항목이 아닌
                 // 한 닫힌다. 전엔 그 칼럼 안의 클릭만 닫아서, pane 을 눌러도 메뉴가
                 // 남아 오른쪽 빈 곳을 눌러야 했다(2026-09-09 지적). 닫는 클릭은 삼킨다.
                 if matches!(state, ElementState::Pressed)
                     && (self.info.pane_menu.is_some()
-                        || self.info.ctx_menu.is_some()
                         || self.info.machine_menu.is_some()
                         || self.sidebar_menu.is_some())
                 {
@@ -4847,12 +4836,10 @@ impl ApplicationHandler<UserEvent> for App {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
                     let on_item = self.info.pane_menu_rects.iter().any(|(_, r)| inside(r))
-                        || self.info.ctx_menu_rects.iter().any(|(_, r)| inside(r))
                         || self.info.machines_col.btn_rects.iter().any(|(_, r)| inside(r))
                         || self.sidebar_menu_rects.iter().any(|(_, r)| inside(r));
                     if !on_item {
                         self.info.pane_menu = None;
-                        self.info.ctx_menu = None;
                         self.info.machine_menu = None;
                         self.sidebar_menu = None;
                         self.chrome_dirty = true;
@@ -5191,6 +5178,11 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     // Info 위아래 영역 경계 — 바로 위아래가 프롬프트·결과물 줄이라 칼럼 클릭보다 앞이다.
+                    if !self.git.panel_menu_open() && self.info.pane_menu.is_none()
+                        && self.commits_grip_press(cx, cy) {
+                        window.request_redraw();
+                        return;
+                    }
                     if self.info_split_press(cx, cy) {
                         window.set_cursor(CursorIcon::RowResize);
                         return;
@@ -5479,197 +5471,22 @@ impl ApplicationHandler<UserEvent> for App {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
-                        // 학생 줄 우클릭 메뉴. 테마를 고른 것은 **메뉴를 닫지 않고**
-                        // 같은 자리에서 목록만 바꾼다 — 한 번 더 눌러 학생을 고르는
-                        // 것이 이 메뉴의 본래 목적이라, 여기서 닫으면 매번 우클릭을
-                        // 다시 해야 한다.
-                        if let Some((mx, my, pane, _)) = self.info.pane_menu.clone() {
-                            use state::PaneMenuItem as M;
-                            let picked = self
-                                .info
-                                .pane_menu_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(m, _)| m.clone());
-                            use state::PaneMenuPage as P;
-                            match picked {
-                                Some(M::Themes) | Some(M::Back) => {
-                                    self.info.pane_menu = Some((mx, my, pane, P::Themes));
-                                }
-                                Some(M::Theme(id)) => {
-                                    self.info.pane_menu = Some((mx, my, pane, P::Theme(id)));
-                                }
-                                Some(M::Root) => {
-                                    self.info.pane_menu = Some((mx, my, pane, P::Root));
-                                }
-                                Some(M::Character(name)) => {
-                                    self.info.pane_menu = None;
-                                    // 말투가 켜져 있으면 「다시 띄울까」를 먼저 묻는다.
-                                    // 토스트는 그 갈래마다 다르므로 여기서 안 띄운다.
-                                    self.ask_or_repersona(&pane, &name);
-                                }
-                                Some(M::Send(label)) => {
-                                    self.info.pane_menu = None;
-                                    self.machines_col_act(state::MachinesColBtn::Send { pane, label });
-                                }
-                                Some(M::Bring) => {
-                                    self.info.pane_menu = None;
-                                    self.machines_col_act(state::MachinesColBtn::Bring { pane });
-                                }
-                                Some(M::Focus) => {
-                                    self.info.pane_menu = None;
-                                    self.focus_pane(&pane);
-                                }
-                                Some(M::Zoom) => {
-                                    self.info.pane_menu = None;
-                                    self.toggle_pane_zoom(&pane);
-                                }
-                                Some(M::ChatView) => {
-                                    self.info.pane_menu = None;
-                                    self.toggle_pane_view(&pane);
-                                }
-                                Some(M::Close) => {
-                                    self.info.pane_menu = None;
-                                    self.confirm_or_close_pane(&pane);
-                                }
-                                None => self.info.pane_menu = None,
-                            }
-                            self.chrome_dirty = true;
+                        if self.info_pane_menu_press((cx, cy)) {
                             window.request_redraw();
                             return;
                         }
-                        // 프로세스·포트 우클릭 메뉴가 떠 있으면 그게 최상단이다.
-                        // 밖을 눌렀으면 닫기만 하고 클릭을 삼킨다 — 메뉴를 닫는
-                        // 클릭이 밑의 행까지 누르면 놀란다.
-                        if let Some((_, _, target)) = self.info.ctx_menu {
-                            let picked = self
-                                .info
-                                .ctx_menu_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(a, _)| *a);
-                            self.info.ctx_menu = None;
-                            if let Some(action) = picked {
-                                self.run_info_menu_action(action, target);
-                            }
+                        if self.info.focus_menu_rect.as_ref().is_some_and(inside)
+                            && self.open_info_pane_menu((cx, cy)) {
+                            window.request_redraw();
+                            return;
+                        }
+                        if self.git_panel_press((cx, cy)) {
                             window.request_redraw();
                             return;
                         }
                         if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
                             self.info.last_refresh = None;
-                            window.request_redraw();
-                            return;
-                        }
-                        // 「다른 기계」 밑 pane 줄 — 이쪽에 거울이 있으면 그리로, 없으면 연다.
-                        if let Some((_, act, local, _)) = self
-                            .info
-                            .machine_pane_rects
-                            .iter()
-                            .find(|(_, _, _, r)| inside(r))
-                            .cloned()
-                        {
-                            // 동작(거울 열기·닫기)이 실려 있으면 그것이 먼저 — 거울 행의
-                            // × 도 여기로 온다. 동작 없는 거울 행만 그 pane 으로 간다.
-                            match (local, act) {
-                                // 거울 열기는 **두 번** 눌러야 한다 — 목록을 훑다 스친
-                                // 한 번에 탭이 생기면 닫는 일이 는다(2026-09-09 지시).
-                                // 한 번은 이미 있는 거울로만 간다.
-                                (_, Some(state::MachinesColBtn::Mirror { label, remote_id, name, cwd })) => {
-                                    let now = Instant::now();
-                                    let key = format!("{label}/{remote_id}");
-                                    let is_double = matches!(
-                                        self.info.machine_click.as_ref(),
-                                        Some((t, k)) if *k == key && now.duration_since(*t).as_millis() < 400
-                                    );
-                                    if is_double {
-                                        self.info.machine_click = None;
-                                        self.machines_col_act(state::MachinesColBtn::Mirror {
-                                            label,
-                                            remote_id,
-                                            name,
-                                            cwd,
-                                        });
-                                    } else {
-                                        self.info.machine_click = Some((now, key));
-                                        let existing = kasa_device::machines::find(&label).and_then(|m| {
-                                            kasa_pty::live_sessions().into_iter().find(|id| {
-                                                kasa_remote::remote::remote_info(id).is_some_and(|i| {
-                                                    i.base == m.base && i.remote_id == remote_id
-                                                })
-                                            })
-                                        });
-                                        if let Some(p) = existing {
-                                            self.reveal_pane_tab(&p);
-                                        }
-                                    }
-                                }
-                                (_, Some(btn)) => {
-                                    self.machines_col_act(btn);
-                                }
-                                (Some(p), None) => {
-                                    self.reveal_pane_tab(&p);
-                                }
-                                (None, None) => {}
-                            }
-                            self.chrome_dirty = true;
-                            window.request_redraw();
-                            return;
-                        }
-                        // Device headings collapse; right-click opens the device menu.
-                        if let Some(label) = self
-                            .info
-                            .machine_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(l, _)| l.clone())
-                        {
-                            if !self.info.machine_collapsed.remove(&label) {
-                                self.info.machine_collapsed.insert(label);
-                            }
-                            self.chrome_dirty = true;
-                            window.request_redraw();
-                            return;
-                        }
-                        if let Some(sec) = self
-                            .info
-                            .sec_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(s, _)| *s)
-                        {
-                            let flag = match sec {
-                                state::InfoSection::Dir => &mut self.info.dir_collapsed,
-                                state::InfoSection::Procs => &mut self.info.procs_collapsed,
-                            };
-                            *flag = !*flag;
-                            window.request_redraw();
-                            return;
-                        }
-                        if let Some(btn) = self
-                            .info
-                            .dir_btn_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(b, _)| *b)
-                        {
-                            if let Some(path) = self.info.root.clone() {
-                                match btn {
-                                    state::InfoDirBtn::Reveal => {
-                                        self.reveal_in_file_manager(&path)
-                                    }
-                                    state::InfoDirBtn::Editor => {
-                                        if let Some((_, target)) =
-                                            crate::proc::open_with_apps().first()
-                                        {
-                                            crate::proc::open_path_with(target, &path);
-                                        }
-                                    }
-                                    state::InfoDirBtn::CopyPath => {
-                                        let s = path.to_string_lossy().into_owned();
-                                        self.copy_to_clipboard(s, "경로 복사됨");
-                                    }
-                                }
-                            }
+                            self.refresh_git_panel();
                             window.request_redraw();
                             return;
                         }
@@ -5685,71 +5502,6 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                         if self.info_prompt_press(cx, cy) || self.info_output_press(cx, cy) {
-                            window.request_redraw();
-                            return;
-                        }
-                        // pane 그룹 머리 → 그 그룹만 접기.
-                        if let Some(pane) = self
-                            .info
-                            .group_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(p, _)| p.clone())
-                        {
-                            if pane.starts_with("runtime:") || pane.starts_with("pills:") || pane.starts_with("fold:") {
-                                if !self.info.pane_expanded.remove(&pane) {
-                                    self.info.pane_expanded.insert(pane);
-                                }
-                                self.info.last_group_click = None;
-                                self.chrome_dirty = true;
-                                window.request_redraw();
-                                return;
-                            }
-                            // 한 번 = 접기/펴기, 두 번 = 그 학생으로 포커스.
-                            // 더블클릭이면 접기 토글이 두 번 걸려 제자리로
-                            // 돌아오므로, 여기선 포커스만 얹으면 된다.
-                            let now = Instant::now();
-                            let is_double = matches!(
-                                self.info.last_group_click.as_ref(),
-                                Some((t, k))
-                                    if *k == pane
-                                        && now.duration_since(*t).as_millis() < 400
-                            );
-                            // 방은 「접어둔 것」을, 학생은 「펴 둔 것」을 기억한다
-                            // — 기본값이 서로 반대(방=열림, 학생=닫힘)라 한 집합
-                            // 으로는 표현할 수 없다.
-                            if pane.starts_with("win:") {
-                                if !self.info.group_collapsed.remove(&pane) {
-                                    self.info.group_collapsed.insert(pane.clone());
-                                }
-                            } else if !self.info.pane_expanded.remove(&pane) {
-                                self.info.pane_expanded.insert(pane.clone());
-                            }
-                            if is_double {
-                                self.info.last_group_click = None;
-                                // 방 머리는 그 방으로, pane 머리는 그 pane 으로.
-                                match pane.strip_prefix("win:").and_then(|n| n.parse().ok()) {
-                                    Some(wi) => self.switch_window(wi),
-                                    None => {
-                                        self.focus_pane(&pane);
-                                    }
-                                }
-                            } else {
-                                self.info.last_group_click = Some((now, pane));
-                            }
-                            self.chrome_dirty = true;
-                            window.request_redraw();
-                            return;
-                        }
-                        // 종료(×)는 행보다 먼저 — 행 안에 겹쳐 있다.
-                        if let Some(pid) = self
-                            .info
-                            .kill_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(p, _)| *p)
-                        {
-                            self.kill_process(pid, false);
                             window.request_redraw();
                             return;
                         }
@@ -6823,6 +6575,10 @@ impl ApplicationHandler<UserEvent> for App {
                             self.save_ui_state();
                             return;
                         }
+                        if self.commits_grip_release() {
+                            window.request_redraw();
+                            return;
+                        }
                         if self.info_split_release() {
                             window.set_cursor(CursorIcon::Default);
                             window.request_redraw();
@@ -6928,6 +6684,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.main_confirmation_modal() || self.shell_picker.is_open() {
                     self.discard_modal_ime(&ime);
+                    window.request_redraw();
+                    return;
+                }
+                if self.git_commit_modal_ime(&ime) {
                     window.request_redraw();
                     return;
                 }
@@ -7150,6 +6910,10 @@ impl ApplicationHandler<UserEvent> for App {
                         self.modifiers.shift_key(),
                         self.modifiers.alt_key(),
                     );
+                }
+                if self.git_commit_modal_key(&event) {
+                    window.request_redraw();
+                    return;
                 }
                 // Cmd+Q (macOS) / Ctrl+Shift+Q (Win/Linux): quit, but raise the
                 // confirm modal first when a job is running. macOS hands Cmd+Q
@@ -7784,7 +7548,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoclicks(event_loop);
         #[cfg(target_os = "macos")]
         self.run_pending_autokeys();
-        self.run_pending_autoinfodbl(event_loop);
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoweather();
         self.run_character_pick_probe(event_loop);
@@ -8046,6 +7809,10 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    pub(crate) fn main_pointer_modal(&self) -> bool {
+        self.main_confirmation_modal() || self.git.commit_modal_open
+    }
+
     pub(crate) fn main_confirmation_modal(&self) -> bool {
         self.confirm_close.is_some() || self.restore_prompt.is_some()
             || self.character_swap_confirm.is_some()

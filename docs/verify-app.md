@@ -122,8 +122,7 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
    원리상 못 잡는다** — 그건 캡처에서 글자 위치를 재서 `x,y` 로 눌러 확인한다. 그리고 **사람이 누르는 배치를 그대로 세워라**:
    좁은 리그에선 Claude Code 옆 창이 아래에 붙어 단추가 pane 위쪽에 안 오니, pane 위 34px 를 헤더로 잡아먹던 판정(2026-10-06)이
    통과로 보였다 — 칸 폭 115 이상이면 오른쪽에 붙는다(`KASATERM_WINDOW_SIZE=2300,900` 두 칸). 팝오버·묶음 알약을
-   연 채로 `kasaterm-cli capture --window` 로 찍는다. 좌표는 창의 논리 크기(물리 폭 ÷ 로그의 `scale=`) 기준이다 — 캡처 PNG 는 줄여 저장되니 비율로 옮긴다. 표시용 픽스처(`KASATERM_AUTOINFO=execution…`)는
-   검증 실행(`KASATERM_WINDOW_SIZE="w,h"`)에서만 선다.
+   연 채로 `kasaterm-cli capture --window` 로 찍는다. 좌표는 창의 논리 크기(물리 폭 ÷ 로그의 `scale=`) 기준이다 — 캡처 PNG 는 줄여 저장되니 비율로 옮긴다.
 3. **스크린샷** — `KASATERM_AUTOCAPTURE_MS=8000` 로 N초 후 자동 캡처. 기본 경로 `$TMPDIR/kasaterm.png` (`KASATERM_AUTOCAPTURE_PATH` 로 변경). **판정은 `Read` 로 직접 본다** — 먼저 `sips -s format jpeg -s formatOptions 60 -Z 1200 <png> --out <jpg>` 로 줄여서 연다. 이미지는 대화에 박혀 매 요청마다 다시 전송되고 빼는 수단이 없다(2026-09-05: 한 세션에 47장 8.5MB 가 쌓여 32MB 벽에 걸렸다) — 볼 것을 정한 뒤 한 장씩. macOS `screencapture` 는 권한 막혀 안 됨 — 무조건 자체 캡처.
 4. **자동 입력** — `KASATERM_AUTOSEND="claude" KASATERM_AUTOSEND_MS=6000`. send_bytes 직접 주입이라 **IME 조합 경로는 재현 못 함** — 한글 조합 버그는 사용자가 직접 타이핑해야 함 (`KASATERM_IME_DEBUG=1` 로 키 코드포인트 로깅).
 5. **체감(스크롤·입력 지연)은 반드시 release** — `cargo run --release -p kasaterm`. 디버그 빌드는 원래 버벅임(debug=느림, release/.app=빠름). 디버그로 "느리다" 판단 금지.

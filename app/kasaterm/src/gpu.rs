@@ -2,6 +2,8 @@
 //! 본판만의 것 — 크롬 글자·아이콘·마크다운·코드 편집기·날씨 — 을 같은 인스턴스 목록으로 얹는다.
 //! `GpuRenderer` 는 엔진을 `grid` 로 품고 `Deref` 로 그 메서드를 그대로 내보인다.
 
+mod curves;
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -3451,6 +3453,7 @@ impl GpuRenderer {
             "panel-bottom-dashed" => include_str!("../assets/icons/panel-bottom-dashed.svg"),
             "panel-top" => include_str!("../assets/icons/panel-top.svg"),
             "panel-top-dashed" => include_str!("../assets/icons/panel-top-dashed.svg"),
+            "git-commit-horizontal" => include_str!("../assets/icons/git-commit-horizontal.svg"),
             "ellipsis-vertical" => include_str!("../assets/icons/ellipsis-vertical.svg"),
             "ellipsis-horizontal" => include_str!("../assets/icons/ellipsis-horizontal.svg"),
             "arrow-up" => include_str!("../assets/icons/arrow-up.svg"),
@@ -3576,6 +3579,7 @@ impl GpuRenderer {
             "folder-plus" => include_str!("../assets/icons/pixel/folder-plus.svg"),
             "folder-tree" => include_str!("../assets/icons/pixel/folder-tree.svg"),
             "git-branch" => include_str!("../assets/icons/pixel/git-branch.svg"),
+            "git-commit-horizontal" => include_str!("../assets/icons/pixel/git-commit-horizontal.svg"),
             "image" => include_str!("../assets/icons/pixel/image.svg"),
             "info" => include_str!("../assets/icons/pixel/info.svg"),
             "layout-grid" => include_str!("../assets/icons/pixel/layout-grid.svg"),

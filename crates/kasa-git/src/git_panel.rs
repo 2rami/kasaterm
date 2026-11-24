@@ -236,9 +236,60 @@ pub fn panel_view(cwd: &Path, choice: Option<&Path>, busy: &[(PathBuf, SystemTim
     Ok(view)
 }
 
+pub fn validate_response(value: &Value, expected: &Source) -> Result<Value, &'static str> {
+    if value.get("schema").and_then(Value::as_str) != Some(SCHEMA) { return Err("update_needed"); }
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(match value.get("error").and_then(Value::as_str) {
+            Some("update_needed") => "update_needed",
+            Some("source_changed" | "source_missing" | "mirror_source") => "source_changed",
+            Some("cwd_unavailable") => "cwd_unavailable",
+            _ => "git_unavailable",
+        });
+    }
+    let source: Source = serde_json::from_value(value.get("source").cloned().unwrap_or(Value::Null))
+        .map_err(|_| "invalid_response")?;
+    if source.machine_id != expected.machine_id || source.pane != expected.pane
+        || source.surface_key != expected.surface_key || !absolute_path(&source.cwd)
+        || (!expected.cwd.is_empty() && source.cwd != expected.cwd) { return Err("source_changed"); }
+    let view = value.get("view").filter(|v| v.is_object()).ok_or("invalid_response")?;
+    if view.get("cwd").and_then(Value::as_str) != Some(source.cwd.as_str())
+        || view.get("branch_list").and_then(Value::as_array).is_none()
+        || view.get("no_repo").and_then(Value::as_bool).is_none() { return Err("invalid_response"); }
+    Ok(view.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source() -> Source {
+        Source { machine_id: "machine-a".into(), pane: "%4".into(), surface_key: "stable-a".into(), cwd: "/repo".into() }
+    }
+
+    fn response(source: &Source) -> Value {
+        json!({"schema": SCHEMA, "ok": true, "source": source,
+            "view": {"cwd": source.cwd, "branch_list": [], "no_repo": false}})
+    }
+
+    #[test]
+    fn old_server_never_becomes_a_non_repository_snapshot() {
+        assert_eq!(validate_response(&json!({"ok": false, "error": "path required"}), &source()), Err("update_needed"));
+        assert_eq!(validate_response(&json!({"ok": true, "view": {"cwd": "/repo"}}), &source()), Err("update_needed"));
+    }
+
+    #[test]
+    fn response_must_match_device_surface_and_directory() {
+        let expected = source();
+        assert!(validate_response(&response(&expected), &expected).is_ok());
+        for field in ["machine_id", "pane", "surface_key", "cwd"] {
+            let mut value = response(&expected);
+            value["source"][field] = json!("wrong");
+            assert_eq!(validate_response(&value, &expected), Err("source_changed"));
+        }
+        let mut value = response(&expected);
+        value["view"]["cwd"] = json!("/other-repo");
+        assert_eq!(validate_response(&value, &expected), Err("invalid_response"));
+    }
 
     fn git(dir: &Path, args: &[&str]) {
         let ok = std::process::Command::new("git").arg("-C").arg(dir).args(args)

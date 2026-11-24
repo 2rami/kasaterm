@@ -748,6 +748,7 @@ impl App {
             self.refresh_file_tree();
         }
         // Info 탭이 열려 있으면 프로세스·포트 스냅샷을 갱신(스로틀은 내부에서).
+        self.publish_git_col_cwd();
         self.pump_info();
         self.pump_info_prompts();
         self.pump_info_outputs();
@@ -880,6 +881,29 @@ impl App {
         } else {
             0.0
         };
+        // 폴러가 내용을 바꿨을 때만 사본을 뜬다 — 커밋 그래프 200개와 파일 목록을 장마다 복사·해제했다(2026-11-18 표본).
+        let git_view = match self.git.col_data.try_lock() {
+            Ok(data) => match self.git.col_frame.as_ref().filter(|seen| ***seen == *data) {
+                Some(seen) => seen.clone(),
+                None => {
+                    let fresh = std::sync::Arc::new(data.clone());
+                    self.git.col_frame = Some(fresh.clone());
+                    fresh
+                }
+            },
+            Err(_) => self.git.col_frame.clone().unwrap_or_default(),
+        };
+        let git_repo_choice = self.git_active_pane().and_then(|id| self.git.col_repo_choice.get(&id).cloned());
+        // Remote paths must never become local repository picker targets.
+        let git_repo_list: Vec<std::path::PathBuf> = if self.git.path_menu_open {
+            let mut set: std::collections::BTreeSet<std::path::PathBuf> = self.pane_cwd_cache.iter()
+                .filter(|(id, _)| !kasa_remote::remote::is_remote_pane(id))
+                .map(|(_, cwd)| cwd.clone()).collect();
+            if let Some(cur) = git_view.cwd.clone().filter(|_| git_view.remote.is_none()) {
+                set.insert(cur);
+            }
+            set.into_iter().collect()
+        } else { Vec::new() };
         let pad_px = (WINDOW_PADDING + sidebar_w) * scale;
         let title_px = TITLE_HEIGHT * scale;
         // Per-pane font multipliers (keyed by pty/leaf id), so each pane's
@@ -4623,7 +4647,13 @@ impl App {
                         bg: git_col_bg,
                         viewport: (win_px.0 / scale, win_px.1 / scale),
                         status_h,
-                        cursor: self.cursor_px,
+                        git: git_panel::paint::Frame {
+                            cursor: self.cursor_px,
+                            time_secs,
+                            git_view: &git_view,
+                            repo_list: &git_repo_list,
+                            repo_choice: git_repo_choice.as_ref(),
+                        },
                     },
                 );
             }
@@ -4778,6 +4808,10 @@ impl App {
                     claude_observations: &claude_observations,
                     codex_rollout: codex_rollout.as_ref(),
                 },
+            );
+            git_panel::paint::modal(
+                g, &mut self.git, &git_view, (win_px.0 / scale, win_px.1 / scale),
+                self.cursor_px, &self.preedit, commit_caret_on,
             );
             if let Some(dlg) = &close_confirmation {
                 confirm_btn_hits = crate::mirror_close::paint_confirmation(

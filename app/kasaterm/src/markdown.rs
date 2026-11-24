@@ -3391,6 +3391,23 @@ impl App {
         }
     }
 
+    /// 열려 있는 모든 편집기의 HEAD 원본 캐시를 버린다. 커밋·스테이지·discard 로
+    /// **HEAD 가 움직인 뒤**에 부른다 — 안 버리면 이미 커밋한 변경이 거터에
+    /// 그대로 남아, 고치지도 않은 줄이 파랗게 보인다.
+    pub(crate) fn invalidate_editor_diffs(&mut self) {
+        if let Ok(mut ws) = self.ws.lock() {
+            for pane in ws.panes.values_mut() {
+                for tab in pane.tabs.iter_mut() {
+                    if let Some(m) = tab.markdown_mut() {
+                        m.diff_head = None;
+                        m.diff = None;
+                        m.diff_peek = None;
+                    }
+                }
+            }
+        }
+    }
+
     /// 이 화면 좌표를 품은 편집기 pane.
     fn md_pane_at_px(&self, px: f32, py: f32) -> Option<String> {
         self.md_body_rects

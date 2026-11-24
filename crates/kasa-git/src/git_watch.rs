@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 pub fn supported() -> bool {
@@ -40,6 +40,14 @@ struct Store {
 
 static STORE: LazyLock<Mutex<Store>> = LazyLock::new(Default::default);
 static WAKE: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
+type Listener = Arc<dyn Fn() + Send + Sync>;
+static LISTENER: OnceLock<Listener> = OnceLock::new();
+
+/// 변경이 쌓이면 부를 자리 — 앱이 Git 열 일꾼을 깨우려고 한 번 건다.
+pub fn set_listener(listener: impl Fn() + Send + Sync + 'static) {
+    let _ = LISTENER.set(Arc::new(listener));
+}
+
 /// 작업 트리 밖의 git 속(`.git/`)은 HEAD·ref 만 — 커밋·체크아웃·브랜치·fetch. 인덱스는 누가 `git status` 만 해도 다시
 /// 쓰이므로 빼고(인덱스는 Git 열의 지문이 따로 본다), 객체·잠금 파일은 늘 뒤따르는 것이다.
 fn noise(path: &Path) -> bool {
@@ -95,6 +103,9 @@ fn record(paths: impl IntoIterator<Item = PathBuf>) {
     }
     if any {
         WAKE.notify_waiters();
+        if let Some(listener) = LISTENER.get() {
+            listener();
+        }
     }
 }
 

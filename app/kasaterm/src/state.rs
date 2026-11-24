@@ -209,15 +209,89 @@ pub(crate) enum StatusbarHit {
     ScheduleDelete(String),
 }
 
-/// 오른쪽 열(Info)의 여닫기·폭·확대 단추. 이름은 이 열이 Git 열이던 때의 것이다 — 저장 값
-/// (`git_col_visible`·`git_col_w`)과 맞물려 그대로 둔다.
+/// 오른쪽 Info 열의 기하와 그 안의 Git 묶음 상태. 폭·표시 설정 키는 기존 판과 공유한다.
 #[derive(Default)]
 pub(crate) struct GitState {
+    pub(crate) col_displayed_target: Option<(std::path::PathBuf, Option<(String, String)>, u64)>,
+    pub(crate) col_context: std::sync::Arc<std::sync::Mutex<crate::git_panel::Context>>,
+    pub(crate) col_wake: std::sync::Arc<crate::git_panel::Wake>,
     pub(crate) col_visible: bool,
     pub(crate) col_w_logical: f32,
     pub(crate) col_resize: Option<(f32, f32)>,
+    pub(crate) col_scroll: f32,
+    /// 직전 프레임의 변경 목록 기하 — `(보이는 높이, 내용 높이)`, LOGICAL px.
+    /// 휠이 스크롤 상한을 여기서 읽는다.
+    ///
+    /// 그리기 쪽이 써 주는 이유: 휠은 이 값을 자기 힘으로 알 수 없다. 목록 높이는
+    /// 파일 수만이 아니라 섹션 머리 두 개와 **펼친 diff 줄 수**로 정해지는데, 그건
+    /// 캐시를 뒤져야 나온다. 예전엔 휠이 `파일 수 × 22` 로 어림했고 그래서 diff 를
+    /// 펼치면 끝까지 스크롤이 안 됐다 — 목록은 화면 몇 배로 길어졌는데 상한은
+    /// 파일 몇 개 몫 그대로였다. 보이는 높이도 `헤더 68px · 버튼 44px` 로 박혀 있어
+    /// 최근 커밋 미리보기가 자리를 얼마나 먹는지를 아예 못 봤다.
+    pub(crate) list_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) col_list_extent: (f32, f32),
+    pub(crate) col_file_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
+    pub(crate) col_expanded: std::collections::HashSet<(bool, String)>,
+    pub(crate) col_diff_cache: HashMap<(bool, String), Vec<kasa_git::git::DiffLine>>,
+    /// 최근 커밋 더블클릭 인라인 펼침(GitLens 그래프식): 펼친 커밋 hash(하나만),
+    /// 그 변경 파일 목록 캐시, 다시 펼친 파일 diff 집합/캐시, 행 hit, 더블클릭 감지.
+    pub(crate) col_commit_expanded: Option<String>,
+    pub(crate) col_commit_files_cache: HashMap<String, Vec<(String, u32, u32)>>,
+    pub(crate) col_commit_file_expanded: std::collections::HashSet<(String, String)>,
+    pub(crate) col_commit_diff_cache: HashMap<(String, String), Vec<kasa_git::git::DiffLine>>,
+    pub(crate) col_commit_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) graph_scroll: f32,
+    pub(crate) graph_extent: (f32, f32),
+    pub(crate) graph_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) col_commit_file_rects: Vec<(String, String, (f32, f32, f32, f32))>,
+    pub(crate) last_commit_click: Option<(std::time::Instant, String)>,
+    /// 「최근 커밋」 구역에 사용자가 잡아 준 높이(LOGICAL px). `None` 이면 가져온
+    /// 커밋 수에 맞춘 자동. 구역 머리의 가로선을 위아래로 끌면 잡힌다.
+    pub(crate) col_commits_h: Option<f32>,
+    /// 그 가로선 드래그 중 — `(드래그 시작 커서 y, 시작 높이)`. 시작 높이를 함께
+    /// 쥐는 건 폭 드래그(`col_resize`)와 같은 이유다: 매 이동마다 델타를 누적하면
+    /// clamp 에 걸린 뒤 커서를 되돌려도 값이 안 따라온다.
+    pub(crate) col_commits_resize: Option<(f32, f32)>,
+    /// 그 가로선의 hit rect(직전 프레임). 렌더가 써 주고 마우스가 읽는다 — 자리가
+    /// 변경 목록 길이·펼침 상태에 따라 매 프레임 달라져 handler 가 자기 힘으로는
+    /// 못 구한다.
+    pub(crate) col_commits_grip: Option<(f32, f32, f32, f32)>,
+    /// 폴러에게 건네는 「커밋 몇 개까지 가져와라」. 렌더가 구역 높이에서 계산해
+    /// 쓰고 폴러 스레드가 읽는다. 0 은 「아직 안 정해짐」이라 폴러가 기본값을 쓴다.
+    pub(crate) col_commit_want: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) col_expand_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) commit_btn_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) commit_caret_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) commit_menu_open: bool,
+    pub(crate) commit_menu_rects: Vec<(GitCommitAction, (f32, f32, f32, f32))>,
+    pub(crate) commit_modal_open: bool,
+    pub(crate) commit_modal_include_unstaged: bool,
+    pub(crate) commit_modal_rects: Vec<(GitModalBtn, (f32, f32, f32, f32))>,
+    pub(crate) col_stage_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
+    pub(crate) col_discard_rects: Vec<(String, bool, (f32, f32, f32, f32))>,
+    pub(crate) col_open_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) commit_msg: String,
+    pub(crate) commit_cursor: usize,
+    pub(crate) commit_focused: bool,
+    pub(crate) commit_input_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) col_data: std::sync::Arc<std::sync::Mutex<GitColView>>,
+    /// 그리기가 보는 `col_data` 사본. 폴러가 내용을 바꿨을 때만 새로 뜬다.
+    pub(crate) col_frame: Option<std::sync::Arc<GitColView>>,
+    pub(crate) op: Option<&'static str>,
+    pub(crate) col_pinned_cwd: Option<std::path::PathBuf>,
+    /// 부모 폴더 칸마다 사람이 고른 하위 레포(칸 id → 레포). 없으면 최근에 만진 레포를 따라간다.
+    pub(crate) col_repo_choice: HashMap<String, std::path::PathBuf>,
+    /// 머리 메뉴의 하위 레포 줄 — 누르면 그 칸의 레포로 고른다.
+    pub(crate) path_menu_repo_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
+    pub(crate) path_menu_open: bool,
+    pub(crate) branch_menu_open: bool,
+    pub(crate) branch_page: usize,
+    pub(crate) branch_page_rects: Vec<(bool, (f32, f32, f32, f32))>,
+    pub(crate) path_hdr_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) branch_hdr_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) path_menu_rects: Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
 }
+
 
 /// Info 탭 「다른 기계」 절의 재료 — 조립은 `refresh_machines_col`. 절에는 기계마다
 /// 요약 한 줄만 서고, 학생 목록·거울·펼치기·화면 보기는 그 줄을 누르면 뜨는 메뉴
@@ -451,25 +525,7 @@ pub(crate) enum MachinesColBtn {
     },
 }
 
-/// Info 패널의 접히는 섹션. 접힘 상태는 pane 을 옮겨도 유지된다 — 포트만 보려고
-/// 프로세스를 접어둔 사람이 탭을 옮길 때마다 다시 접을 이유가 없다.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InfoSection {
-    Dir,
-    Procs,
-}
-
-/// 프로젝트 디렉터리 섹션의 액션 버튼.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InfoDirBtn {
-    /// Finder(macOS) · 탐색기 · 파일 관리자.
-    Reveal,
-    /// 설치된 에디터 중 첫 번째(`proc::open_with_apps`).
-    Editor,
-    CopyPath,
-}
-
-/// 학생 줄 우클릭 메뉴 항목.
+/// 지금 보는 칸 메뉴 항목.
 ///
 /// 테마를 고르면 **같은 자리에서 목록만** 그 테마의 캐릭터로 바뀐다. 2단 팝업을
 /// 옆으로 겹치지 않는 이유는 인포 칼럼이 좁아서다 — 겹치면 두 번째 단이 화면 밖으로
@@ -509,21 +565,22 @@ pub(crate) enum PaneMenuPage {
     Theme(String),
 }
 
-/// 프로세스·포트 행 우클릭 메뉴 항목.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InfoMenuAction {
-    Terminate,
-    ForceKill,
-    CopyPid,
-    CopyCmd,
+#[derive(Default)]
+pub(crate) struct PaneMenuScroll {
+    pub(crate) first: usize,
+    pub(crate) max: usize,
 }
 
-/// Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. `snap` 은 워커 스레드가
-/// 채우는 스냅샷이고 `busy`/`last_refresh` 가 그 워커를 스로틀한다(수집이 `ps` +
-/// `lsof` fork 라 렌더 스레드에서 돌릴 수 없다 — info.rs 참고). `shell_pid` 는
-/// 현재 목록이 어느 pane 것인지로, pane 을 옮기면 즉시 갱신을 트리거한다.
-/// `root`/`root_is_repo` 는 파일트리가 앵커한 디렉터리로, 그게 git 레포라서
-/// 골라진 것인지를 패널이 정직하게 밝히는 데 쓴다.
+pub(crate) struct PaneMenu {
+    pub(crate) anchor: (f32, f32),
+    pub(crate) pane: String,
+    pub(crate) surface: Option<String>,
+    pub(crate) remote: Option<String>,
+    pub(crate) chat: Option<bool>,
+    pub(crate) page: PaneMenuPage,
+    pub(crate) scroll: PaneMenuScroll,
+}
+
 pub(crate) struct InfoState {
     /// 맨 위 「지금 보는 칸」 카드 — 감시 스레드와 함께 쥐는 자리, 렌더가 읽는 사본, 그 판 번호, 누르는 줄.
     pub(crate) focus: std::sync::Arc<crate::info_focus::FocusShared>,
@@ -533,9 +590,6 @@ pub(crate) struct InfoState {
     /// 그 칸이 전체 화면(alt screen)인가 — 칸 종류를 「전체 화면 · vim」 으로 적는다.
     pub(crate) focus_alt: bool,
     pub(crate) selected_pane: Option<String>,
-    pub(crate) selected_pid: String,
-    pub(crate) selected_session_id: String,
-    pub(crate) selected_harness: String,
     pub(crate) navigation: crate::sidebar_navigation::NavigationState,
     /// 이사 탭 본문 상태. App 필드가 아니라 여기 있는 건 병렬 작업 규칙 때문이다
     /// (struct App 정의는 충돌 핫스팟 — 탭 상태는 탭 선택과 같은 집에 있어도
@@ -557,14 +611,6 @@ pub(crate) struct InfoState {
     /// 즉시 재수집을 트리거한다.
     pub(crate) key: String,
     pub(crate) scroll: f32,
-    pub(crate) root: Option<std::path::PathBuf>,
-    pub(crate) root_is_repo: bool,
-    pub(crate) dir_collapsed: bool,
-    pub(crate) procs_collapsed: bool,
-    /// 우클릭 메뉴 — `(화면 좌표, 대상)`.
-    /// 열렸으면 (좌상단 x, y, 겨눈 프로세스 pid). pid 를 들고 다니는 건 메뉴가
-    /// 열린 뒤 목록이 갱신돼도 겨눈 대상이 흔들리지 않게 하려는 것이다.
-    pub(crate) ctx_menu: Option<(f32, f32, u32)>,
     /// 직전 프레임에 이 패널이 차지한 영역 `(x, y, w, h)`. 커서가 여기 있는 동안은
     /// 새 스냅샷을 렌더 사본으로 옮기지 않는다 — 항목이 생기거나 사라지면 아래
     /// 행들이 밀려 **누르려던 것이 손가락 밑에서 달아나기** 때문이다. 한 프레임
@@ -578,49 +624,14 @@ pub(crate) struct InfoState {
     /// 이 값으로 붙잡아 둔다 — 항목이 빠지면 높이가 줄고 그만큼 목록이 위로 딸려
     /// 올라와, 다음 × 가 손가락 밑에서 달아난다.
     pub(crate) content_h: f32,
-    /// 「카드·내 프롬프트」 와 「결과물·모든 방」 사이 경계 — 높이 비율·끌기·아래 영역 스크롤.
+    /// 「카드·내 프롬프트」 와 「결과물·Git」 사이 경계 — 높이 비율·끌기·아래 영역 스크롤.
     pub(crate) split: crate::info_split::Split,
-    /// 접어둔 **방**(`win:N`). 방은 펴진 게 기본이라 여기 담긴 것만 접힌다.
-    pub(crate) group_collapsed: std::collections::HashSet<String>,
-    /// 펴 둔 **학생 그룹**(surface id). 학생은 접힌 게 기본이라 여기 담긴 것만
-    /// 펴진다 — 방과 기본값이 반대여서 한 집합으로는 표현할 수 없다.
-    ///
-    /// 기본을 접힘으로 둔 건 목록 길이 때문이다. pane 마다 프로세스 나무를 다 펴면
-    /// 방 몇 개만 돼도 화면을 넘겨야 "누가 무슨 포트를 쥐었나"에 닿는다. 접힌 학생도
-    /// 포트를 쥔 줄은 남으므로(그리기 참조) 접는다고 서버를 놓치지는 않는다.
-    /// 펼친 스킬 묶음 알약(`pills:<목록>:<앞머리>`)도 여기 담는다 — 같은 「접힌 게 기본」이다.
-    pub(crate) pane_expanded: std::collections::HashSet<String>,
-    /// 그룹 머리 직전 클릭 `(시각, 열쇠)` — 더블클릭(=그 학생으로 포커스) 판정용.
-    /// 한 번 클릭은 접기라, 두 번째 클릭이 접기를 되돌리고 포커스까지 옮긴다.
-    pub(crate) last_group_click: Option<(std::time::Instant, String)>,
-    /// 매 paint 재생성되는 hit target. 포트 행(→ 브라우저로 열기) /
-    /// 프로세스 행(우클릭 대상) / 종료 버튼 / 섹션 머리 / 디렉터리 버튼.
-    /// `(포트, 소유 pid, rect)` — 종료가 붙으면서 pid 없이는 행을 다룰 수 없다.
-    /// pane 그룹 머리 — 클릭하면 그 그룹만 접힌다.
-    pub(crate) group_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// 올리면 뜨는 말 — 「—」 값의 까닭·이름표 설명. 렌더가 칼럼을 그린 뒤 커서 아래 것을 띄운다.
     pub(crate) tip_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) proc_rects: Vec<(u32, (f32, f32, f32, f32))>,
-    pub(crate) kill_rects: Vec<(u32, (f32, f32, f32, f32))>,
-    pub(crate) sec_rects: Vec<(InfoSection, (f32, f32, f32, f32))>,
-    pub(crate) dir_btn_rects: Vec<(InfoDirBtn, (f32, f32, f32, f32))>,
-    pub(crate) ctx_menu_rects: Vec<(InfoMenuAction, (f32, f32, f32, f32))>,
-    /// 학생 줄 우클릭 메뉴 — `(x, y, pane id, 단)`.
-    pub(crate) pane_menu: Option<(f32, f32, String, PaneMenuPage)>,
+    pub(crate) focus_card_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) focus_menu_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) pane_menu: Option<PaneMenu>,
     pub(crate) pane_menu_rects: Vec<(PaneMenuItem, (f32, f32, f32, f32))>,
-    /// 메뉴를 연 pane 의 대화 보기 전환 `Some(켜졌나)` — 학생 칸만. 셸 칸이면 None.
-    /// 그리는 쪽이 App 을 못 보므로 여는 자리에서 적어 둔다.
-    pub(crate) pane_menu_chat: Option<bool>,
-    /// Device heading hit rect: click collapses, right-click opens its menu.
-    pub(crate) machine_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) machine_collapsed: std::collections::HashSet<String>,
-    /// 「다른 기계」 밑에 펼친 그 기계 pane 줄 hit rect — `(라벨, 누르면 할 일, 이쪽에
-    /// 이미 있는 거울 pane, rect)`. 거울이 있으면 그리로 가고, 없으면 거울을 연다.
-    pub(crate) machine_pane_rects:
-        Vec<(String, Option<MachinesColBtn>, Option<String>, (f32, f32, f32, f32))>,
-    /// 「다른 기계」 pane 줄의 마지막 클릭 `(시각, 라벨/원격 id)` — 거울은 **두 번**
-    /// 눌러야 연다(2026-09-09 지시). 한 번은 이미 있는 거울로 가는 것까지만.
-    pub(crate) machine_click: Option<(std::time::Instant, String)>,
     /// 기계 메뉴 — `(x, y, 명부 라벨)`. 항목 rect 는 `machines_col.btn_rects`.
     pub(crate) machine_menu: Option<(f32, f32, String)>,
     pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
@@ -635,9 +646,6 @@ impl Default for InfoState {
             focus_rects: Vec::new(),
             focus_alt: false,
             selected_pane: None,
-            selected_pid: String::new(),
-            selected_session_id: String::new(),
-            selected_harness: String::new(),
             navigation: crate::sidebar_navigation::NavigationState::default(),
             machines_col: MachinesColState::default(),
             snap: std::sync::Arc::new(std::sync::Mutex::new(crate::info::InfoSnap::default())),
@@ -653,28 +661,11 @@ impl Default for InfoState {
             split: Default::default(),
             key: String::new(),
             scroll: 0.0,
-            root: None,
-            root_is_repo: false,
-            dir_collapsed: false,
-            procs_collapsed: false,
-            ctx_menu: None,
-            group_collapsed: std::collections::HashSet::new(),
-            pane_expanded: std::collections::HashSet::new(),
-            last_group_click: None,
-            group_rects: Vec::new(),
             tip_rects: Vec::new(),
-            proc_rects: Vec::new(),
-            kill_rects: Vec::new(),
-            sec_rects: Vec::new(),
-            dir_btn_rects: Vec::new(),
-            ctx_menu_rects: Vec::new(),
+            focus_card_rect: None,
+            focus_menu_rect: None,
             pane_menu: None,
             pane_menu_rects: Vec::new(),
-            pane_menu_chat: None,
-            machine_rects: Vec::new(),
-            machine_collapsed: std::collections::HashSet::new(),
-            machine_pane_rects: Vec::new(),
-            machine_click: None,
             machine_menu: None,
             refresh_rect: None,
         }

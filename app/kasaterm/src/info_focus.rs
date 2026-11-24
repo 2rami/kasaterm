@@ -556,7 +556,7 @@ fn tool_line(tool: &kasa_students::claude_mod::FocusTool, elapsed: String) -> St
 }
 
 /// 카드의 줄들 — 맨 위 머리, 그 아래 「이름 · 값」 표. 그리기·잘림·말풍선은 Info 표와 같은 길을 탄다.
-pub(crate) fn card_lines<'a>(seen: &Seen, alt_screen: bool) -> Vec<info::ExecutionLine<'a>> {
+pub(crate) fn card_lines(seen: &Seen, alt_screen: bool) -> Vec<info::ExecutionLine> {
     use info::ExecutionLine as L;
     let kv = |name: &str, value: String, tip: String, warn: bool| L::Kv { name: name.into(), value: (!value.is_empty()).then_some(value), tip, warn };
     let device = seen.remote.as_deref().map(crate::render::pane_identity::device_name);
@@ -670,7 +670,7 @@ mod tests {
     use super::*;
     use kasa_students::claude_mod::{FocusAsk, FocusContext, FocusTask, FocusTool};
 
-    fn rows<'a>(lines: &[info::ExecutionLine<'a>]) -> Vec<(String, String)> {
+    fn rows(lines: &[info::ExecutionLine]) -> Vec<(String, String)> {
         lines
             .iter()
             .filter_map(|line| match line {
@@ -681,7 +681,7 @@ mod tests {
             .collect()
     }
 
-    fn head(lines: &[info::ExecutionLine<'_>]) -> (String, String) {
+    fn head(lines: &[info::ExecutionLine]) -> (String, String) {
         match &lines[0] {
             info::ExecutionLine::Head { title, note } => (title.clone(), note.clone()),
             _ => panic!("카드는 머리로 시작한다"),
