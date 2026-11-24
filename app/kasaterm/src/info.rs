@@ -4042,7 +4042,7 @@ fn draw_machine_hole_row(
 }
 
 /// 「다른 기계」 줄을 누르면 뜨는 메뉴 — 방 펼치기·화면 보기, 그 기계 학생마다
-/// 거울 열기, 이사 간 학생마다 데려오기. 옛 「원격」 탭이 본문에 펼쳐 두던 것을
+/// 거울 열기. 옛 「원격」 탭이 본문에 펼쳐 두던 것을
 /// 줄 하나 뒤로 접은 것이다(2026-09-07 지시). 항목 rect 는 `machines_col.btn_rects`
 /// 에 실어 클릭이 옛 탭과 같은 길(`machines_col_click`)을 탄다.
 pub(crate) fn draw_machine_menu(
@@ -4108,26 +4108,8 @@ pub(crate) fn draw_machine_menu(
             items.push((act, if i == 0 && last_room.is_empty() { row.sep() } else { row }));
         }
     }
-    for (i, r) in m.mirrored.iter().filter(|r| !r.closed).enumerate() {
-        let row = MenuRow::new(format!("{} 데려오기", r.name)).face(&r.name);
-        items.push((Some(B::Bring { pane: r.pane.clone() }), if i == 0 { row.sep() } else { row }));
-    }
-    // 저쪽 태생 학생도 이 기계로 — 거울을 열고 그 자리에서 역이사(2026-09-07 지적
-    // 「맥미니에서 여기로 옮기는 것도 없어」).
-    if m.online {
-        for (i, r) in m.remote.iter().filter(|r| !r.remote_id.is_empty()).enumerate() {
-            let row = MenuRow::new(format!("{} 여기로 데려오기", r.name)).face(&r.name);
-            items.push((
-                Some(B::Fetch {
-                    label: m.label.clone(),
-                    remote_id: r.remote_id.clone(),
-                    name: r.name.clone(),
-                    cwd: r.remote_cwd.clone(),
-                }),
-                if i == 0 { row.sep() } else { row },
-            ));
-        }
-    }
+    // 데려오기는 메뉴에 두지 않는다 — 사이드바에서 칸을 이 기기로 끌어 놓는 것이 같은
+    // 이사이고, 학생마다 줄이 두 벌 붙어 메뉴만 길어졌다(2026-11-24 지시).
     if m.online && m.remote.is_empty() && m.mirrored.is_empty() {
         items.push((None, MenuRow::new("캐릭터 없음").sep().muted()));
     }

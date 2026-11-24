@@ -4089,7 +4089,7 @@ fn status_feed_inbox_pop() -> Option<(String, String, String)> {
 ///
 /// 한글이 아니면 받침이 없는 것으로 친다. 로마자 이름(Mao·huohuo)은 우리말로 읽을 때
 /// 받침이 붙는 경우가 드물고, 틀려도 「마오는」이 「마오은」보다 낫다.
-fn josa(word: &str, with_final: &'static str, without: &'static str) -> &'static str {
+pub(crate) fn josa(word: &str, with_final: &'static str, without: &'static str) -> &'static str {
     let Some(c) = word.chars().last() else {
         return without;
     };

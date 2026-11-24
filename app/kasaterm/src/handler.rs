@@ -4559,7 +4559,7 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    // 「다른 기계」 밑 pane 줄 우클릭 — 그 기계의 메뉴(펼치기·데려오기가 거기).
+                    // 「다른 기계」 밑 pane 줄 우클릭 — 그 기계의 메뉴(펼치기·거울이 거기).
                     if let Some(label) = self
                         .info
                         .machine_pane_rects

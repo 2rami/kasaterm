@@ -449,13 +449,6 @@ pub(crate) enum MachinesColBtn {
         name: String,
         cwd: String,
     },
-    /// 저쪽 태생 학생을 이 기계로 — 거울을 열고 그 자리에서 역이사(데려오기).
-    Fetch {
-        label: String,
-        remote_id: String,
-        name: String,
-        cwd: String,
-    },
 }
 
 /// Info 패널의 접히는 섹션. 접힘 상태는 pane 을 옮겨도 유지된다 — 포트만 보려고
