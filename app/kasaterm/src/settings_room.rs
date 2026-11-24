@@ -25,6 +25,7 @@ pub(crate) struct SettingsSceneSnapshot {
 #[derive(Clone, Debug)]
 pub(crate) struct SettingsScene {
     category: SettingsCat,
+    pub(crate) weather_phase: crate::weather::indicator::Phase,
     return_pane: Option<String>,
     cache: crate::native_settings::SettingsCache,
     scroll: f32,
@@ -64,6 +65,7 @@ impl Default for SettingsScene {
     fn default() -> Self {
         Self {
             category: SettingsCat::Students,
+            weather_phase: crate::weather::indicator::Phase::Working,
             return_pane: None,
             cache: crate::native_settings::SettingsCache::default(),
             scroll: 0.0,

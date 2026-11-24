@@ -148,12 +148,13 @@ class _WorkWeatherState extends State<WorkWeather> implements WorkWeatherPlace {
 /// 흐르고 아래 테두리에 고인다. 김은 비를 맞기 시작한 뒤 「젖는 시간」에 걸쳐 낀다. 만지면 이 카드가
 /// 초점이 된다. 길게 누르면 「이 카드 날씨」.
 class WeatherCard extends StatefulWidget {
-  const WeatherCard({super.key, required this.id, this.mood, required this.child});
+  const WeatherCard({super.key, required this.id, this.mood, this.preview = false, required this.child});
 
   final String id;
 
   /// 학생 상태 날씨가 켜져 있을 때 비 양을 고르는 기분. 모르면 null(전역 비 양).
   final Mood? mood;
+  final bool preview;
   final Widget child;
 
   @override
@@ -239,8 +240,11 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
     if (!mounted) return;
     final v = weatherVerdictOf(context);
     final s = weather.settings.value;
+    final picked = widget.preview && s.target == WeatherTarget.pickedOnly;
+    final override = widget.preview ? (picked ? CardWeather.picked : CardWeather.follow) : weather.cardOf(widget.id);
+    final focused = widget.preview ? s.target != WeatherTarget.unfocusedOnly : weather.focused.value == widget.id;
     final amount = v.active
-        ? cardAmount(s, weather.cardOf(widget.id), focused: weather.focused.value == widget.id, mood: widget.mood)
+        ? cardAmount(s, override, focused: focused, mood: widget.mood)
         : RainAmount.none;
     final liquid = s.style == RainStyle.liquid;
     final changed = liquid != _liquid || v.active != _v.active || amount != _amount || v.moving != _v.moving;
@@ -367,7 +371,7 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
 
   void _onDown(PointerDownEvent e) {
     if (!_v.active || !_liquid) return;
-    weather.focus(widget.id);
+    if (!widget.preview) weather.focus(widget.id);
     if (_liquid && weather.settings.value.has(Effect.ripples)) _sim.ripple(e.localPosition);
     _sync();
   }

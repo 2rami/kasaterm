@@ -346,6 +346,7 @@ fn edge_light(p: vec2f, size: vec2f, mask: f32, time: f32, moving: f32) -> f32 {
 fn fs_showers(in: VOut) -> @location(0) vec4f {
     let px = in.uv * g.res.xy;
     let base = textureSampleLevel(frame, samp, in.uv, 0.0).rgb;
+    if (g.rip.z > 0.0 && inside(px, g.rip)) { return vec4f(base, 1.0); }
     let luminance = dot(base, vec3f(0.21, 0.72, 0.07));
     let ink = mix(vec3f(0.77, 0.87, 0.96), vec3f(0.35, 0.48, 0.60), smoothstep(0.38, 0.85, luminance));
     let owner = region_any(px);

@@ -601,6 +601,7 @@ pub(crate) enum HitCursor {
 /// 펼쳐지는 선택 상자. 한 번에 하나만 열린다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DropdownId {
+    WeatherPhase,
     WeatherCondition(crate::weather::indicator::Phase),
     UiFont,
     /// 시스템 따라가기에서 밝은(true)·어두운(false) 화면에 입힐 팔레트.
@@ -614,6 +615,7 @@ pub(crate) enum Target {
     FinishInput,
     CancelInput,
     Category(SettingsCat),
+    WeatherPhase(crate::weather::indicator::Phase),
     NavigationScroll(u32),
     Disclosure(&'static str),
     /// 선택 상자 머리 — 누르면 펼치고, 다시 누르면 닫는다.
@@ -701,6 +703,7 @@ pub(crate) struct PaintOutput {
     pub(crate) caret_rect: Option<Rect>,
     pub(crate) multiline_layouts: Vec<MultilineLayout>,
     pub(crate) motion_preview_visible: bool,
+    pub(crate) weather_preview: Option<crate::weather::SettingsPreview>,
 }
 
 #[derive(Clone, Debug)]
@@ -724,6 +727,7 @@ pub(crate) struct MultilineLayout {
 struct PaintFeedback {
     multiline_layouts: Vec<MultilineLayout>,
     motion_preview_visible: bool,
+    weather_preview: Option<crate::weather::SettingsPreview>,
     /// 이번 프레임에 그린 「펼쳐진」 선택 상자의 머리 자리. 팝업은 본문을 다 그린 뒤
     /// 이 자리에 붙여 맨 위에 올린다.
     dropdown_anchor: Option<(DropdownId, Rect)>,
@@ -759,6 +763,7 @@ pub(crate) struct Snapshot {
     pub(crate) disk: crate::disk_warning::SettingsView,
     pub(crate) weather: crate::weather::model::WeatherSettings,
     pub(crate) weather_os: crate::weather::model::OsMotion,
+    pub(crate) weather_phase: crate::weather::indicator::Phase,
     pub(crate) device_account: device_account::View,
     pub(crate) preferred_agent: String,
     pub(crate) disclosures: std::collections::HashSet<&'static str>,
@@ -1010,6 +1015,7 @@ impl App {
             disk: crate::disk_warning::settings_view(),
             weather: self.weather.settings.clone(),
             weather_os: self.weather.os(),
+            weather_phase: scene.weather_phase,
             device_account: self.device_account.view(),
             preferred_agent: cache.preferred_agent.clone(),
             disclosures: scene.disclosures().clone(),
@@ -1211,6 +1217,7 @@ impl App {
                 self.native_settings_blur();
                 self.settings_scene.toggle_dropdown(id);
             }
+            Some(Target::WeatherPhase(phase)) => self.settings_scene.weather_phase = phase,
             Some(Target::DropdownDismiss) => {}
             Some(Target::NavigationScroll(_)) => {}
             Some(Target::Category(cat)) => {
@@ -2662,7 +2669,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let mut hits = Vec::new();
     let mut caret_rect = None;
 
-    let (nav_fill, body_fill) = (theme::settings_nav(), theme::settings_body());
+    let nav_fill = theme::settings_nav();
+    let body_fill = if snapshot.cat == SettingsCat::Weather {
+        theme::lerp(theme::settings_body(), theme::accent(), 0.035)
+    } else {
+        theme::settings_body()
+    };
     g.rect(outer_x, outer_y, outer_w, outer_h, theme::settings_canvas());
     if !compact {
         g.rect(ax, ay, nav_w, ah, nav_fill);
@@ -2929,11 +2941,15 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         snapshot.scroll,
     );
 
-    let feedback = take_paint_feedback();
+    let mut feedback = take_paint_feedback();
     let mut dropdown_scroll_max = 0.0;
     if let (Some(open), Some((id, anchor))) = (snapshot.dropdown, feedback.dropdown_anchor) {
         if open == id {
-            dropdown_scroll_max = paint_dropdown_popup(g, snapshot, &mut hits, id, anchor);
+            let (scroll, panel) = paint_dropdown_popup(g, snapshot, &mut hits, id, anchor);
+            dropdown_scroll_max = scroll;
+            if let (Some(preview), Some(rect)) = (&mut feedback.weather_preview, panel) {
+                preview.popup = Some([rect.0, rect.1, rect.2, rect.3]);
+            }
         }
     }
     paint_keyboard_focus(g, snapshot, &hits);
@@ -2945,6 +2961,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         caret_rect,
         multiline_layouts: feedback.multiline_layouts,
         motion_preview_visible: feedback.motion_preview_visible,
+        weather_preview: feedback.weather_preview,
     }
 }
 
@@ -4639,6 +4656,48 @@ fn machines_view() -> Vec<MachineRow> {
     rows
 }
 
+fn paint_weather_sample(g: &mut gpu::GpuRenderer, s: &Snapshot, rect: Rect) {
+    let (x, y, w, h) = rect;
+    if w < 80.0 { return; }
+    let tint = theme::lerp(theme::settings_body(), theme::accent(), 0.16);
+    let sky = theme::lerp(theme::settings_body(), theme::accent(), 0.07);
+    round_rect(g, x, y, w, h, ctrl_radius(), tint);
+    stroke_round(g, rect, ctrl_radius(), theme::edge_on(tint));
+    g.queue_icon("umbrella", x + 13.0, y + 10.0, 16.0, theme::text());
+    draw_text(g, x + 36.0, y + 12.0, "미리보기", 12.0, theme::text(), true);
+
+    let pane = (x + 9.0, y + 36.0, w - 18.0, h - 45.0);
+    g.rect(pane.0, pane.1, pane.2, pane.3, sky);
+    let icon = if s.weather.style == crate::weather::model::RainStyle::Showers {
+        s.weather.indicator(s.weather_phase).weather.map_or("monitor", weather_icon)
+    } else { "umbrella" };
+    let icon_size = (pane.3 * 0.79).min(pane.2 * 0.52);
+    g.queue_icon(icon, pane.0 + (pane.2 - icon_size) * 0.5,
+        pane.1 + (pane.3 - icon_size) * 0.5, icon_size, theme::enforce_contrast_at(theme::accent(), sky, 3.0));
+    g.queue_icon("terminal", pane.0 + 11.0, pane.1 + 11.0, 14.0, theme::text_dim());
+    let phase = if s.weather.style == crate::weather::model::RainStyle::Showers { s.weather_phase.label() } else { "작업실" };
+    let label = fit(g, phase, pane.2 - 45.0, 12.0, true);
+    draw_text(g, pane.0 + 31.0, pane.1 + 12.0, &label, 12.0, theme::text(), true);
+    if let Some((px, py, pw, ph)) = g.clip_hit(pane).filter(|r| r.3 >= 32.0) {
+        PAINT_FEEDBACK.with(|f| f.borrow_mut().weather_preview = Some(crate::weather::SettingsPreview {
+            rect: [px, py, pw, ph], phase: s.weather_phase, popup: None,
+        }));
+    }
+}
+
+fn weather_icon(c: crate::weather::condition::WeatherCondition) -> &'static str {
+    let (material, variant) = c.material();
+    match material as u8 {
+        0 => "umbrella",
+        1 if (5.0..=7.0).contains(&variant) => "moon",
+        1 if variant >= 2.0 && variant <= 4.0 => "weather-cloud",
+        1 | 6 => "weather-sun",
+        2 | 3 | 7 => "weather-wind",
+        4 => "weather-snow",
+        _ => "weather-storm",
+    }
+}
+
 /// 날씨 — docs/weather.md 표의 모든 항목. 켜고 끄는 줄이 맨 위, 나머지는 켜기 전에도
 /// 미리 골라 둘 수 있게 늘 선다.
 fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
@@ -4663,26 +4722,34 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         });
     }
 
-    *y += 8.0;
-    section_title(g, x, *y, "효과", "");
-    *y += 54.0;
     use wm::RainStyle;
     seg_row(g, s, hits, x, y, w, "날씨 표현", &[
         ("리퀴드 비", ws.style == RainStyle::Liquid, act(Change::Style(RainStyle::Liquid))),
         ("작업 날씨", ws.style == RainStyle::Showers, act(Change::Style(RainStyle::Showers))),
     ]);
-    if ws.style == RainStyle::Showers {
-        use crate::weather::indicator::Phase;
-        toggle_row(g, s, hits, x, y, w, "표면에 물방울 맺힘", ws.beads, act(Change::Beads(!ws.beads)));
-        plain_hint(g, x, y, w, "완료는 6초 후 쉬는 중으로 바뀝니다");
-        for phase in Phase::ALL {
-            let rule = ws.indicator(phase);
-            let label = rule.weather.map_or("날씨 없음", |c| c.label());
-            dropdown_row(g, s, hits, x, y, w, phase.label(), &crate::native_strings::text(label), DropdownId::WeatherCondition(phase));
-            let cells: Vec<_> = [("위", 1), ("아래", 4), ("왼쪽", 8), ("오른쪽", 2)].into_iter()
-                .map(|(label, side)| (label, rule.edges & side != 0, act(Change::StateEdge(phase, side)))).collect();
-            seg_row(g, s, hits, x, y, w, "프로세스바 위치", &cells);
-        }
+
+    *y += 16.0;
+    let phase = s.weather_phase;
+    let work = ws.style == RainStyle::Showers;
+    let rule = ws.indicator(phase);
+    let wide = work && w >= 608.0;
+    let preview_w = if wide { w * 0.45 } else { w };
+    let preview_x = x + w - preview_w;
+    let top = *y;
+    paint_weather_sample(g, s, (preview_x, top, preview_w, if wide { 200.0 } else { 156.0 }));
+    if !wide { *y += 168.0; }
+
+    if work {
+        let controls_w = if wide { w - preview_w - 20.0 } else { w };
+        dropdown_row(g, s, hits, x, y, controls_w, "상태", &crate::native_strings::text(phase.label()), DropdownId::WeatherPhase);
+        let label = rule.weather.map_or("날씨 없음", |c| c.label());
+        dropdown_row(g, s, hits, x, y, controls_w, "날씨 효과", &crate::native_strings::text(label), DropdownId::WeatherCondition(phase));
+        let cells: Vec<_> = [("위", 1), ("아래", 4), ("왼쪽", 8), ("오른쪽", 2)].into_iter()
+            .map(|(label, side)| (label, rule.edges & side != 0, act(Change::StateEdge(phase, side)))).collect();
+        seg_row(g, s, hits, x, y, controls_w, "프로세스바 위치", &cells);
+        toggle_row(g, s, hits, x, y, controls_w, "표면에 물방울 맺힘", ws.beads, act(Change::Beads(!ws.beads)));
+        if wide { *y = (*y).max(top + 200.0); }
+        *y += 12.0;
         let levels = ["없음", "약하게", "보통", "강하게"];
         let cells: Vec<_> = RainAmount::ALL.iter().map(|&a| (levels[a.index()], a == ws.amount, act(Change::Amount(a)))).collect();
         seg_row(g, s, hits, x, y, w, "효과 강도", &cells);
@@ -6630,7 +6697,7 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         ),
         SettingsCat::Weather => (
             "날씨",
-            "sparkles",
+            "umbrella",
             "창과 카드에 표시할 날씨 효과를 고릅니다",
         ),
         SettingsCat::Claude => (
@@ -6884,8 +6951,15 @@ fn ui_font_label(value: &str) -> String {
 }
 
 /// 선택 상자에 들어갈 항목들: (보이는 이름, 지금 골라진 것인지, 고르면 할 일).
-fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAction)> {
-    match id {
+fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, Target)> {
+    if id == DropdownId::WeatherPhase {
+        return crate::weather::indicator::Phase::ALL.into_iter().map(|phase| (
+            crate::native_strings::text(phase.label()).into_owned(),
+            phase == s.weather_phase, Target::WeatherPhase(phase),
+        )).collect();
+    }
+    let items: Vec<_> = match id {
+        DropdownId::WeatherPhase => unreachable!(),
         DropdownId::WeatherCondition(phase) => {
             let current = s.weather.indicator(phase).weather;
             std::iter::once(None).chain(crate::weather::condition::WeatherCondition::ALL.iter().copied().map(Some))
@@ -6938,7 +7012,8 @@ fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAc
                 .map(|font| (font.to_string(), Some(font) == current, SettingsAction::TerminalFont(font.to_string())))
                 .collect()
         }
-    }
+    };
+    items.into_iter().map(|(label, selected, action)| (label, selected, Target::Setting(action))).collect()
 }
 
 /// 글꼴 목록에서 굵기·기울임 얼굴을 걷는다. 설치 폴더를 그대로 훑어 한 가족이 스무 줄로
@@ -7021,10 +7096,10 @@ fn paint_dropdown_popup(
     hits: &mut Vec<Hit>,
     id: DropdownId,
     anchor: Rect,
-) -> f32 {
+) -> (f32, Option<Rect>) {
     let items = dropdown_items(s, id);
     if items.is_empty() {
-        return 0.0;
+        return (0.0, None);
     }
     register(hits, Target::DropdownDismiss, s.area, HitCursor::Arrow);
     let pad = 6.0;
@@ -7059,7 +7134,7 @@ fn paint_dropdown_popup(
 
     g.push_clip(panel.0 + 1.0, panel.1 + 1.0, panel.2 - 2.0, panel.3 - 2.0);
     let mut iy = panel.1 + pad - scroll;
-    for (label, selected, action) in items {
+    for (label, selected, target) in items {
         let rect = (panel.0 + pad, iy, panel.2 - pad * 2.0, DROPDOWN_ITEM_H);
         iy += DROPDOWN_ITEM_H;
         if rect.1 + rect.3 < panel.1 || rect.1 > panel.1 + panel.3 {
@@ -7100,7 +7175,7 @@ fn paint_dropdown_popup(
                 theme::accent(),
             );
         }
-        register_clipped(g, hits, Target::Setting(action), rect, HitCursor::Pointer);
+        register_clipped(g, hits, target, rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
     }
     g.pop_clip();
@@ -7118,7 +7193,7 @@ fn paint_dropdown_popup(
             theme::with_alpha(theme::text_dim(), 120),
         );
     }
-    scroll_max
+    (scroll_max, Some(panel))
 }
 
 fn stepper_row(

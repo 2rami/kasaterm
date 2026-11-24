@@ -373,7 +373,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _Page.weather,
           key: 'settings-weather',
           tone: tone,
-          icon: Icons.umbrella_outlined,
+          icon: Icons.water_drop_outlined,
           title: '날씨',
           subtitle: w.enabled ? (w.style == RainStyle.showers ? '상태별 날씨와 프로세스바' : '${w.amount.label} · ${w.target.label}') : '꺼짐',
         );

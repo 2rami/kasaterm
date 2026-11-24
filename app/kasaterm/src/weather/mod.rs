@@ -43,8 +43,16 @@ pub(crate) struct WeatherState {
     ripple_tail: f32,
     /// 설정 화면처럼 창 자리를 다른 것이 덮을 때: 창 유리는 그리지 않는다(물은 그대로 남는다).
     dry: bool,
+    settings_preview: Option<SettingsPreview>,
     scale: f32,
     win: [f32; 2],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SettingsPreview {
+    pub(crate) rect: [f32; 4],
+    pub(crate) phase: Phase,
+    pub(crate) popup: Option<[f32; 4]>,
 }
 
 struct ShowerFade {
@@ -275,7 +283,9 @@ impl App {
         remote: &[indicator::RemoteIndicator],
         active: Option<&str>,
         guard: Option<[f32; 4]>,
+        preview: Option<SettingsPreview>,
     ) -> Option<gpu::Frame> {
+        self.weather.settings_preview = preview;
         let v = self.weather.verdict();
         self.weather.indicators.clear();
         self.weather.next_indicator_change = None;
@@ -289,6 +299,36 @@ impl App {
         // The settings page stands where the panes are; keep it dry and readable.
         let settings_open = self.settings_room_active();
         let mut places = Vec::new();
+        if let Some(preview) = preview {
+            use model::WeatherTarget;
+            let key = key_of("settings-weather-preview");
+            let mut kind = PlaceKind::Pane;
+            let amount = if showers {
+                let rule = s.indicator(preview.phase);
+                self.weather.indicators.insert(key, rule);
+                if rule.weather.is_some() { s.amount } else { RainAmount::None }
+            } else if s.target == WeatherTarget::BackgroundOnly {
+                kind = PlaceKind::Panel;
+                s.amount
+            } else {
+                let over = if s.target == WeatherTarget::PickedOnly { PaneWeather::Picked } else { PaneWeather::Follow };
+                model::pane_amount(&s, over, s.target != WeatherTarget::UnfocusedOnly, PaneMood::Busy)
+            };
+            places.push(Place { key, kind, rect: preview.rect, amount, focused: true, guard: preview.popup });
+            // The sample is the only wet region on this settings page.
+            self.weather.showers.retain(|k, _| *k == key);
+            self.weather.places = places;
+            self.weather.scale = scale;
+            self.weather.win = win;
+            self.weather.dry = false;
+            let frame = self.weather_step(v);
+            return Some(frame);
+        }
+        if settings_open && self.settings_scene.category() == crate::SettingsCat::Weather {
+            self.weather.showers.clear();
+            self.weather.places.clear();
+            return None;
+        }
         let now_ms = kasa_socket::board::now_ms();
         let surfaces = panes.iter().map(|p| (p, false)).chain(sidebar.iter().map(|p| (p, true)));
         for ((id, x, y, w, h), small) in surfaces {
@@ -433,7 +473,7 @@ impl App {
                     res: [w, h, 1.0 / w, 1.0 / h],
                     t: [st.shower_time, dt, scale, 0.0],
                     rain: [if s.beads { 1.0 } else { 0.0 }, s.wind() * 0.68, 0.0, if v.moving { 1.0 } else { 0.0 }],
-                    ..Default::default()
+                    rip: st.settings_preview.and_then(|p| p.popup).map_or([0.0; 4], physical),
                 },
                 places: regions, buttons: gpu::ButtonsU::zeroed(), canvas: win,
                 showers: true, rain: false, glass: false, ripple: false,
@@ -441,8 +481,9 @@ impl App {
                 boxes: Vec::new(), ripples: Vec::new(), inst: Vec::new(),
             };
         }
+        let background = if st.settings_preview.is_some() { RainAmount::None } else { model::background_amount(&s) };
         let amount_at = |p: [f32; 2], places: &[Place]| {
-            places.iter().find(|pl| sim::inside(p, pl.rect)).map_or(model::background_amount(&s), |pl| pl.amount)
+            places.iter().find(|pl| sim::inside(p, pl.rect)).map_or(background, |pl| pl.amount)
         };
         let spots: Vec<ButtonSpot> = if s.effects.buttons {
             st.spots
@@ -466,7 +507,7 @@ impl App {
         let ripple_dim = [(win[0] / RIPPLE_TEXEL).ceil().max(8.0) as u32, (win[1] / RIPPLE_TEXEL).ceil().max(8.0) as u32];
         let mut speed = 0.7f32;
         let mut pu = gpu::PlacesU::zeroed();
-        let bgl = sim::LEVEL[model::background_amount(&s).index()];
+        let bgl = sim::LEVEL[background.index()];
         pu.n = [places.len() as f32, if s.effects.streaks { bgl[0] } else { 0.0 }, bgl[1], 0.0];
         let mut any_streak = s.effects.streaks && bgl[0] > 0.01;
         let mut any_panel = false;

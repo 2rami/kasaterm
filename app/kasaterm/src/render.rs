@@ -5026,6 +5026,7 @@ impl App {
                 &remote,
                 weather_focus.as_deref(),
                 weather_guard,
+                settings_paint.as_ref().and_then(|out| out.weather_preview),
             );
             let g = self.gpu.as_mut().unwrap();
             if weather_frame.is_none() {
