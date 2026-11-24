@@ -14,6 +14,7 @@ import '../weather/model.dart';
 import '../weather/sheet.dart';
 import '../weather/store.dart';
 import 'controls.dart';
+import 'accent_picker.dart';
 import 'hub.dart' show parseHexColor;
 
 /// 폰 밝기의 고르기 칸 — 짧은 이름은 칸 말풍선과 최상위 「외형」 줄이 같이 쓴다.
@@ -48,6 +49,8 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
   String? _pending;
   IndicatorPhase _phase = IndicatorPhase.working;
   final _previewKey = GlobalKey();
+  final _controls = ScrollController();
+  HSVColor? _accentDraft;
   final _command = TextEditingController();
   TermSession? _shell;
   bool _openingShell = false;
@@ -66,6 +69,7 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
       shell.dispose();
       unawaited(_discardShell(server, shell.pane));
     }
+    _controls.dispose();
     _command.dispose();
     super.dispose();
   }
@@ -133,45 +137,39 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
     }
   }
 
-  Future<void> _customAccent() async {
-    final current = _appearance?['accent'];
-    var value = current is String && current.startsWith('#')
-        ? current
-        : '#${(Theme.of(context).colorScheme.primary.toARGB32() & 0xffffff).toRadixString(16).padLeft(6, '0')}';
-    final form = GlobalKey<FormState>();
-    final choice = await showDialog<String>(
-      context: context,
-      builder: (dialog) => AlertDialog(
-        title: const Text('강조색 직접 입력'),
-        content: Form(
-          key: form,
-          child: TextFormField(
-            autofocus: true,
-            initialValue: value,
-            decoration: const InputDecoration(labelText: 'HEX', hintText: '#5B9BF5'),
-            autocorrect: false,
-            onChanged: (next) => value = next,
-            validator: (text) => RegExp(r'^#?[0-9a-fA-F]{6}$').hasMatch(text?.trim() ?? '')
-                ? null : '6자리 색상 코드를 입력하세요',
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(dialog), child: const Text('취소')),
-          FilledButton(
-            onPressed: () {
-              if (form.currentState?.validate() != true) return;
-              final hex = value.trim().toLowerCase();
-              Navigator.pop(dialog, hex.startsWith('#') ? hex : '#$hex');
-            },
-            child: const Text('적용'),
-          ),
-        ],
-      ),
-    );
-    if (choice != null && mounted) await _apply('accent', choice);
+  Color _accentColor(Map<String, Object?> a, Color fallback) {
+    final id = a['accent'];
+    return parseHexColor(id is String ? id : null)
+        ?? _entries(a, 'accents')
+            .where((entry) => entry['name'] == id)
+            .map((entry) => parseHexColor(entry['hex'] as String?))
+            .firstOrNull
+        ?? fallback;
   }
 
-  Widget _shellGrid(TermSession shell) => ListenableBuilder(
+  void _chooseAccent(Color color) {
+    if (_accentDraft == null && _controls.hasClients) _controls.jumpTo(0);
+    setState(() => _accentDraft = HSVColor.fromColor(color));
+  }
+
+  Future<void> _commitAccent() async {
+    final draft = _accentDraft;
+    if (draft == null || _pending != null) return;
+    final argb = draft.toColor().toARGB32();
+    final preset = _entries(_appearance ?? const {}, 'accents')
+        .where((entry) => parseHexColor(entry['hex'] as String?)?.toARGB32() == argb)
+        .firstOrNull?['name'];
+    if (await _apply('accent', preset as String? ?? AccentPicker.hex(draft.toColor())) && mounted) {
+      _closeAccent();
+    }
+  }
+
+  void _closeAccent() {
+    if (_controls.hasClients) _controls.jumpTo(0);
+    setState(() => _accentDraft = null);
+  }
+
+  Widget _shellGrid(TermSession shell, Color accent) => ListenableBuilder(
     listenable: shell,
     builder: (context, _) {
       if (!shell.canSend && shell.grid.version == 0) {
@@ -181,7 +179,7 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
         grid: shell.grid,
         version: shell.grid.version + shell.historyVersion,
         palette: TerminalPalette.forViewer(
-          context, mode: phoneThemeMode.value, source: designTokens.value ?? shell.tokens,
+          context, mode: phoneThemeMode.value, source: designTokens.value ?? shell.tokens, cursorOverride: accent,
         ),
         history: shell.history,
         historyVersion: shell.historyVersion,
@@ -228,17 +226,21 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
   }
 
   /// 데스크톱에 액션을 보내고, 바뀐 색을 되받아 폰도 같은 얼굴로.
-  Future<void> _apply(String action, String id) async {
+  Future<bool> _apply(String action, String id) async {
     setState(() => _pending = '$action:$id');
     try {
       await server.settingsAction(action, id: id);
       final t = await server.designTokens();
       if (t != null && mounted && !server.isClosed) designTokens.value = t;
+      return true;
     } on ServerException catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      return false;
     } finally {
-      if (mounted) setState(() => _pending = null);
-      await _reload();
+      if (mounted) {
+        await _reload();
+        if (mounted) setState(() => _pending = null);
+      }
     }
   }
 
@@ -256,14 +258,11 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
       appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('외형')),
       body: LayoutBuilder(builder: (context, constraints) {
         final theme = Theme.of(context);
-        final current = _appearance?['accent'];
-        final previewAccent = parseHexColor(current is String ? current : null)
-            ?? _entries(_appearance ?? const {}, 'accents')
-                .where((entry) => entry['name'] == current)
-                .map((entry) => parseHexColor(entry['hex'] as String?))
-                .firstOrNull;
+        final savedAccent = _accentColor(_appearance ?? const {}, theme.colorScheme.primary);
+        final draft = _accentDraft;
+        final previewAccent = draft?.toColor() ?? savedAccent;
         final shell = _shell;
-        final pinned = constraints.maxHeight >= 430;
+        final pinned = constraints.maxHeight >= (draft == null ? 430 : 300);
         final preview = Padding(
           key: _previewKey,
           padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 10),
@@ -272,20 +271,23 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
               ValueListenableBuilder<WeatherSettings>(
                 valueListenable: weather.settings,
                 builder: (context, value, _) => Theme(
-                  data: previewAccent == null ? theme : theme.copyWith(
+                  data: theme.copyWith(
                     colorScheme: theme.colorScheme.copyWith(primary: previewAccent),
                   ),
                   child: WeatherPreview(
                     key: const Key('appearance-preview'),
                     settings: value,
                     phase: _phase,
-                    height: (constraints.maxHeight * .27).clamp(62.0, 245.0),
+                    height: draft == null
+                        ? (constraints.maxHeight * .27).clamp(62.0, 245.0)
+                        : (constraints.maxHeight * .20).clamp(48.0, 180.0),
                     cornerRadius: switch (_appearance?['shape']) {
                       'sharp' => 3,
                       'pixel' => 0,
                       _ => Look.radius,
                     },
-                    terminal: shell == null ? null : _shellGrid(shell),
+                    terminal: shell == null ? null : _shellGrid(shell, previewAccent),
+                    accentOutline: draft != null,
                     action: TextButton(
                       onPressed: _openingShell ? null : _toggleShell,
                       child: Text(shell != null ? '셸 닫기' : _openingShell ? '연결 중' : '셸 열기'),
@@ -303,8 +305,13 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
             Expanded(
               child: CustomScrollView(
                 key: const PageStorageKey('appearance-controls'),
+                controller: _controls,
                 slivers: [
                   if (!pinned) SliverToBoxAdapter(child: preview),
+                  if (_appearance case final appearance?)
+                    SliverToBoxAdapter(
+                      child: _accentControls(appearance, savedAccent, draft, constraints.maxHeight < 640),
+                    ),
                   _lookControls(),
                   WeatherSettingsControls(
                     phase: _phase,
@@ -319,6 +326,50 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
       }),
     ),
   );
+
+  Widget _accentControls(Map<String, Object?> appearance, Color saved, HSVColor? draft, bool compact) {
+    final selected = draft?.toColor() ?? saved;
+    final busy = _pending != null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Look.pagePad, 2, Look.pagePad, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('강조색', style: Theme.of(context).textTheme.titleSmall),
+          Wrap(
+            spacing: 3,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              for (final entry in _entries(appearance, 'accents'))
+                if (parseHexColor(entry['hex'] as String?) case final color?)
+                  _AccentDot(
+                    name: entry['name'] as String? ?? '',
+                    color: color,
+                    selected: color.toARGB32() == selected.toARGB32(),
+                    onTap: busy ? null : () => _chooseAccent(color),
+                  ),
+              TextButton.icon(
+                key: const Key('appearance-custom-accent'),
+                onPressed: busy || draft != null ? null : () => _chooseAccent(saved),
+                icon: Icon(Icons.circle, color: selected, size: 17),
+                label: const Text('색 고르기'),
+              ),
+            ],
+          ),
+          if (draft != null)
+            AccentPicker(
+              original: saved,
+              color: draft,
+              busy: busy,
+              compact: compact,
+              onChanged: (next) => setState(() => _accentDraft = next),
+              onApply: _commitAccent,
+              onCancel: _closeAccent,
+            ),
+        ],
+      ),
+    );
+  }
 
   Widget _lookControls() => SliverPadding(
     padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
@@ -364,30 +415,6 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
       ];
     }
     return [
-      SettingsRow(
-        tone: tone,
-        icon: Icons.palette_outlined,
-        title: '강조색',
-        subtitle: a['accent'] is String && (a['accent'] as String).startsWith('#') ? a['accent'] as String : null,
-        below: Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          children: [
-            for (final c in _entries(a, 'accents'))
-              _AccentDot(
-                name: c['name'] as String? ?? '',
-                color: parseHexColor(c['hex'] as String?) ?? Theme.of(context).colorScheme.primary,
-                selected: c['name'] == a['accent'],
-                onTap: busy || c['name'] is! String ? null : () => _apply('accent', c['name'] as String),
-              ),
-            TextButton(
-              key: const Key('appearance-custom-accent'),
-              onPressed: busy ? null : _customAccent,
-              child: const Text('직접 입력'),
-            ),
-          ],
-        ),
-      ),
       SettingsRow(
         tone: tone,
         icon: Icons.rounded_corner_rounded,

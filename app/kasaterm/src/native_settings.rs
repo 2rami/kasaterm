@@ -623,6 +623,8 @@ pub(crate) enum Target {
     Category(SettingsCat),
     PreviewShell,
     ClosePreviewShell,
+    OpenAccentPicker,
+    AccentPreset(&'static str),
     WeatherPhase(crate::weather::indicator::Phase),
     NavigationScroll(u32),
     Disclosure(&'static str),
@@ -785,6 +787,7 @@ pub(crate) struct Snapshot {
     pub(crate) cat: SettingsCat,
     pub(crate) appearance_jump: Option<SettingsCat>,
     pub(crate) appearance_shell: appearance_shell::View,
+    pub(crate) accent_before: Option<[u8; 4]>,
     pub(crate) keyboard_focus: Option<Target>,
     pub(crate) keyboard_anchor: Option<Rect>,
     pub(crate) cursor: (f32, f32),
@@ -1047,6 +1050,9 @@ impl App {
             cat: scene.category(),
             appearance_jump: self.settings_scene.appearance_jump,
             appearance_shell: self.settings_scene.appearance_shell.view(),
+            accent_before: scene.field_backup()
+                .filter(|backup| backup.field == SettingsInput::AccentHex)
+                .map(|backup| theme::accent_color(&backup.value)),
             keyboard_focus: scene.keyboard_focus().cloned(),
             keyboard_anchor: scene.keyboard_anchor(),
             cursor: self.cursor_px,
@@ -1235,10 +1241,14 @@ impl App {
         if target != Some(Target::PreviewShell) { self.settings_scene.appearance_shell.blur(); }
         match target {
             Some(Target::PreviewShell) => {
-                self.native_settings_blur();
+                if self.settings_input != Some(SettingsInput::AccentHex) {
+                    self.native_settings_blur();
+                }
                 self.settings_scene.appearance_shell.open(&self.set_shell);
             }
             Some(Target::ClosePreviewShell) => self.settings_scene.appearance_shell.close(),
+            Some(Target::OpenAccentPicker) => self.native_settings_open_accent(None),
+            Some(Target::AccentPreset(name)) => self.native_settings_open_accent(Some(name)),
             Some(Target::ClearSearch) => {
                 if self.settings_input == Some(SettingsInput::Search) { self.native_settings_cancel_field(); }
                 self.settings_scene.query.clear();
@@ -1251,6 +1261,14 @@ impl App {
                     self.native_settings_blur();
                 }
                 self.settings_scene.toggle_disclosure(id);
+                if id == "color-values-accent" && self.settings_input == Some(SettingsInput::AccentHex)
+                    && !self.settings_scene.disclosures().contains(id)
+                    && theme::parse_hex(&self.set_palette_edit).is_none()
+                {
+                    let [r, g, b, _] = theme::accent();
+                    self.set_palette_edit = theme::hex_str([r, g, b]);
+                    self.settings_caret = self.set_palette_edit.len();
+                }
             }
             Some(Target::Dropdown(id)) => {
                 self.native_settings_blur();
@@ -1284,12 +1302,6 @@ impl App {
                     return true;
                 }
                 self.native_settings_blur();
-                if action == SettingsAction::FocusColor(SettingsInput::AccentHex) {
-                    if !self.settings_scene.disclosures().contains("color-values-accent") {
-                        self.settings_scene.toggle_disclosure("color-values-accent");
-                    }
-                    self.settings_scene.appearance_jump = Some(SettingsCat::Appearance);
-                }
                 self.native_settings_apply(action);
                 if let Some(field) = self.settings_input {
                     self.native_settings_arm_backup(field);
@@ -1327,6 +1339,23 @@ impl App {
         true
     }
 
+    fn native_settings_open_accent(&mut self, preset: Option<&str>) {
+        if self.settings_input != Some(SettingsInput::AccentHex) {
+            self.native_settings_focus(SettingsInput::AccentHex);
+            if self.settings_scene.disclosures().contains("color-values-accent") {
+                self.settings_scene.toggle_disclosure("color-values-accent");
+            }
+            self.settings_scene.reset_scroll();
+        }
+        if let Some(name) = preset {
+            let [r, g, b, _] = theme::accent_color(name);
+            self.set_palette_edit = theme::hex_str([r, g, b]);
+            self.settings_caret = self.set_palette_edit.len();
+            self.settings_scene.mark_field_dirty();
+            self.update_color_edit(SettingsInput::AccentHex);
+        }
+    }
+
     pub(crate) fn native_settings_drag_move(&mut self, x: f32, y: f32) -> bool {
         let Some((action, rect)) = self.settings_scene.picker_drag() else { return false };
         self.settings_scene.mark_field_dirty();
@@ -1342,7 +1371,7 @@ impl App {
         let ended = self.settings_scene.end_picker_drag();
         if ended {
             match self.settings_input {
-                Some(field) if field.is_color() => self.apply_color_edit(field),
+                Some(field) if field.is_color() && field != SettingsInput::AccentHex => self.apply_color_edit(field),
                 _ => {}
             }
         }
@@ -1622,7 +1651,7 @@ impl App {
             }
             field @ (SettingsInput::PaletteHex(_) | SettingsInput::AccentHex | SettingsInput::StatusbarHex(_)) => {
                 crate::lineedit::insert(&mut self.set_palette_edit, &mut self.settings_caret, text);
-                self.apply_color_edit(field);
+                self.update_color_edit(field);
             }
         }
         if matches!(
@@ -1643,10 +1672,20 @@ impl App {
     }
 
     fn native_settings_finish_input(&mut self) {
+        let accent = self.settings_input == Some(SettingsInput::AccentHex);
+        if accent {
+            if let Some(text) = self.hangul.flush() {
+                self.native_settings_insert_into(SettingsInput::AccentHex, &text);
+            }
+        }
         if self.settings_input.is_some_and(SettingsInput::is_color)
             && theme::parse_hex(&self.set_palette_edit).is_none() {
             self.set_toast("색상은 #RRGGBB 형식으로 입력해 주세요".to_string());
             return;
+        }
+        if accent {
+            self.apply_color_edit(SettingsInput::AccentHex);
+            self.settings_scene.take_field_backup();
         }
         self.native_settings_blur();
     }
@@ -1659,7 +1698,7 @@ impl App {
             }
         }
         let (backup, dirty) = self.settings_scene.take_field_backup();
-        if !dirty || (self.settings_input.is_some_and(SettingsInput::is_color)
+        if self.settings_input == Some(SettingsInput::AccentHex) || !dirty || (self.settings_input.is_some_and(SettingsInput::is_color)
             && theme::parse_hex(&self.set_palette_edit).is_none()) {
             if let Some(backup) = backup {
                 self.native_settings_restore_backup(backup);
@@ -1759,7 +1798,11 @@ impl App {
                 self.apply_palette_edit(slot);
             }
             SettingsInput::AccentHex => {
-                self.settings_apply(SettingsAction::Accent(backup.value));
+                let settings = socket::read_settings();
+                let saved = settings.get("accent").and_then(|value| value.as_str()).unwrap_or(&backup.value);
+                let [r, g, b, _] = theme::accent_color(saved);
+                theme::preview_accent([r, g, b]);
+                self.repaint_all();
             }
             SettingsInput::StatusbarHex(id) => {
                 self.settings_apply(SettingsAction::SetStatusbarColor(id.to_string(), backup.value));
@@ -1839,7 +1882,9 @@ impl App {
                     }
                 }
                 let next = self.settings_scene.advance_keyboard_focus(reverse);
-                self.native_settings_blur();
+                if self.settings_input != Some(SettingsInput::AccentHex) {
+                    self.native_settings_blur();
+                }
                 if let Some(hit) = next {
                     if let Target::Focus(field) = hit.target { self.native_settings_focus(field); }
                     self.settings_scene.set_keyboard_focus(Some(hit.target));
@@ -1849,6 +1894,15 @@ impl App {
                 self.native_settings_blur();
                 self.settings_scene.set_keyboard_focus(None);
                 self.settings_scene.scroll_page(key == NamedKey::PageDown);
+            }
+            NamedKey::Enter | NamedKey::Space
+                if self.settings_input == Some(SettingsInput::AccentHex)
+                    && self.settings_scene.keyboard_hit().is_some_and(|hit| !matches!(hit.target, Target::Focus(_))) =>
+            {
+                if !repeat {
+                    self.settings_scene.arm_activation_key(key);
+                    self.native_settings_activate_focus();
+                }
             }
             NamedKey::Enter | NamedKey::Space if self.settings_input.is_none() => {
                 if !repeat && self.settings_scene.keyboard_hit().is_some() {
@@ -1950,6 +2004,14 @@ impl App {
                 if modified { return false; }
                 if self.native_settings_control_key(key, self.modifiers.shift_key(), event.repeat) { return true; }
             }
+        }
+        if self.settings_input == Some(SettingsInput::AccentHex)
+            && !self.settings_scene.disclosures().contains("color-values-accent")
+        {
+            if !modified && !event.repeat && event.logical_key == Key::Named(NamedKey::Enter) {
+                self.native_settings_finish_input();
+            }
+            return true;
         }
         if self.settings_scene.dropdown().is_some() && matches!(event.logical_key, Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)) {
             self.settings_scene.advance_keyboard_focus(matches!(event.logical_key, Key::Named(NamedKey::ArrowUp)));
@@ -2187,7 +2249,7 @@ impl App {
                 self.settings_save();
             }
             match field {
-                field if field.is_color() => self.apply_color_edit(field),
+                field if field.is_color() => self.update_color_edit(field),
                 _ => {}
             }
         }
@@ -2902,21 +2964,25 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
 
     let mut body_top = if compact { title_y + 32.0 } else { ay + HEADER_H + 14.0 };
     let input_footer = snapshot.input.is_some_and(|field| !matches!(field,
-        SettingsInput::Search | SettingsInput::MachineLabel | SettingsInput::MachineAddress | SettingsInput::LoginCode)
+        SettingsInput::Search | SettingsInput::MachineLabel | SettingsInput::MachineAddress | SettingsInput::LoginCode | SettingsInput::AccentHex)
         && !device_account::owns(field));
     let body_bottom = ay + ah - 12.0 - if input_footer { ROW_H } else { 0.0 };
-    let preview_height = appearance_preview::preview_height(ay + ah - 12.0 - body_top);
-    let fixed_preview = appearance && body_bottom - body_top >= preview_height + 252.0;
+    let accent_open = snapshot.input == Some(SettingsInput::AccentHex);
+    let stacked_accent = accent_open && appearance_preview::accent_column(content_w).is_none();
+    let mut preview_height = appearance_preview::preview_height(ay + ah - 12.0 - body_top);
+    if stacked_accent { preview_height = preview_height.min(146.0); }
+    let picker_gap = if stacked_accent { 245.0 } else { 0.0 };
+    let fixed_preview = appearance && body_bottom - body_top >= preview_height + 252.0 + picker_gap;
     if fixed_preview {
         g.push_clip(content_x, body_top, content_w, body_bottom - body_top);
-        body_top += appearance_preview::paint(g, snapshot, &mut hits, content_x, body_top, content_w, preview_height) + 16.0;
+        body_top += appearance_preview::paint(g, snapshot, &mut hits, &mut caret_rect, content_x, body_top, content_w, preview_height) + 16.0;
         g.pop_clip();
     }
     let view_h = (body_bottom - body_top).max(0.0);
     g.push_clip(content_x, body_top, content_w, view_h);
     let mut y = body_top - snapshot.scroll;
     if appearance && !fixed_preview {
-        y += appearance_preview::paint(g, snapshot, &mut hits, content_x, y, content_w, preview_height) + 16.0;
+        y += appearance_preview::paint(g, snapshot, &mut hits, &mut caret_rect, content_x, y, content_w, preview_height) + 16.0;
     }
 
     let mut appearance_scroll = None;
@@ -2938,7 +3004,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             }
             paint_appearance(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
             if disclosure(g, snapshot, &mut hits, x, &mut y, w, "appearance-palette", "팔레트·세부 색") {
-                paint_appearance_palette(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
+                paint_appearance_palette(g, snapshot, &mut hits, x, &mut y, w);
             }
             if !crate::lite_mode() {
                 let weather_top = y;
@@ -3366,14 +3432,6 @@ fn paint_appearance(
     paint_palette_editor(g, s, hits, caret, x, y, w);
     row_label(g, x, y, "강조색");
     *y += appearance_preview::paint_accents(g, s, hits, x, *y, w);
-    if s.input == Some(SettingsInput::AccentHex) {
-        let color = theme::accent();
-        let accent_hex = theme::hex_str([color[0], color[1], color[2]]);
-        *y += paint_color_picker(g, s, hits, caret, x, *y, w, SettingsInput::AccentHex,
-            "강조색", if s.input == Some(SettingsInput::AccentHex) { &s.palette_edit } else { &accent_hex },
-            s.eyedropper.then_some(SettingsAction::ColorEyedropper(SettingsInput::AccentHex)));
-        *y += 12.0;
-    }
     if !crate::lite_mode() {
         let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
             (preset_label(label), s.shape == *key, SettingsAction::Shape(key))).collect();
@@ -3385,7 +3443,6 @@ fn paint_appearance_palette(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
-    caret: &mut Option<Rect>,
     x: f32,
     y: &mut f32,
     w: f32,
@@ -3957,13 +4014,31 @@ fn paint_color_picker(
     let (hue, sat, val) = if s.input == Some(field) { s.picker_hsv } else {
         crate::settings::rgb_to_hsv(theme::parse_hex(value).unwrap_or([0, 0, 0]))
     };
-    let layout = color_picker_layout(x, y, w);
+    let accent = field == SettingsInput::AccentHex;
+    let layout = if accent {
+        ColorPickerLayout {
+            sv: (x, y, w, 110.0),
+            hue: (x, y + 122.0, w, 18.0),
+            preview: (x, y + 151.0, 20.0, 20.0),
+            eyedropper: (x, y + 182.0, w.min(152.0), CTL_H),
+            height: if eyedropper.is_some() { 222.0 } else { 179.0 },
+        }
+    } else {
+        color_picker_layout(x, y, w)
+    };
     let sv = layout.sv;
     g.color_picker(sv, hue, false);
     stroke_rect(g, sv, theme::border());
     let marker_x = sv.0 + sat * sv.2;
     let marker_y = sv.1 + (1.0 - val) * sv.3;
-    stroke_rect(g, (marker_x - 4.0, marker_y - 4.0, 8.0, 8.0), [255, 255, 255, 255]);
+    if accent && sv.2 >= 12.0 {
+        let marker = (marker_x.clamp(sv.0 + 6.0, sv.0 + sv.2 - 6.0) - 6.0, marker_y.clamp(sv.1 + 6.0, sv.1 + sv.3 - 6.0) - 6.0, 12.0, 12.0);
+        stroke_round(g, marker, 6.0, [255, 255, 255, 255]);
+        let inner = (marker.0 + 1.0, marker.1 + 1.0, 10.0, 10.0);
+        stroke_round(g, inner, 5.0, [22, 22, 22, 255]);
+    } else {
+        stroke_rect(g, (marker_x - 4.0, marker_y - 4.0, 8.0, 8.0), [255, 255, 255, 255]);
+    }
     register_clipped(
         g,
         hits,
@@ -3992,15 +4067,27 @@ fn paint_color_picker(
     let rgb = hsv_rgb(hue, sat, val);
     let color = [rgb[0], rgb[1], rgb[2], 255];
     let preview = layout.preview;
-    round_rect(g, preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), color);
-    g.round_rect_stroke(preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), 1.0, theme::border());
-    if preview.2 > 100.0 {
-        let label = fit(g, slot_label, preview.2 - 16.0, 12.0, true);
-        g.centered_chrome_text(preview, &label, gpu::DrawOpts {
-            font_size: 12.0, color: theme::foreground_on(color), bold: true, italic: false,
-        });
+    if accent {
+        for (index, (sample, label)) in [
+            (s.accent_before.unwrap_or_else(theme::accent), "현재"),
+            (color, "미리보기"),
+        ].into_iter().enumerate() {
+            let at = x + index as f32 * w.min(240.0) * 0.5;
+            round_rect(g, at, preview.1, 20.0, 20.0, 5.0, sample);
+            stroke_round(g, (at, preview.1, 20.0, 20.0), 5.0, theme::border());
+            draw_text(g, at + 27.0, preview.1 + 4.0, label, 11.0, theme::text_dim(), false);
+        }
     } else {
-        draw_text(g, layout.eyedropper.0, preview.1 - 3.0, "선택한 색", 11.0, theme::text_dim(), false);
+        round_rect(g, preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), color);
+        g.round_rect_stroke(preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), 1.0, theme::border());
+        if preview.2 > 100.0 {
+            let label = fit(g, slot_label, preview.2 - 16.0, 12.0, true);
+            g.centered_chrome_text(preview, &label, gpu::DrawOpts {
+                font_size: 12.0, color: theme::foreground_on(color), bold: true, italic: false,
+            });
+        } else {
+            draw_text(g, layout.eyedropper.0, preview.1 - 3.0, "선택한 색", 11.0, theme::text_dim(), false);
+        }
     }
     if let Some(action) = eyedropper {
         button(g, s, hits, layout.eyedropper, "화면에서 색 집기", Target::Setting(action), false);
@@ -4013,8 +4100,12 @@ fn paint_color_picker(
             plain_hint(g, x, &mut bottom, w, "#RRGGBB 형식으로 입력해 주세요. 예: #3a7bd5");
         }
     }
+    if accent {
+        bottom += button_row(g, s, hits, (x, bottom, w, 0.0),
+            &[("취소", Target::CancelInput, false), ("적용", Target::FinishInput, true)],
+            crate::native_layout::Align::End);
+    }
     bottom - y
-
 }
 
 fn paint_device_icons(
@@ -8569,6 +8660,8 @@ impl App {
         assert_ne!(theme::accent(), theme::accent_color("blue"));
         assert_eq!(socket::read_settings()["accent"], "blue");
         self.settings_scene.begin_picker_drag(SettingsAction::PickerHue(SettingsInput::AccentHex), (0.0, 0.0, 300.0, 30.0));
+        self.native_settings_end_drag();
+        assert_eq!(socket::read_settings()["accent"], "blue");
         self.native_settings_cancel_field();
         assert!(self.settings_scene.picker_drag().is_none());
         assert_eq!(theme::accent(), theme::accent_color("blue"));
@@ -8583,6 +8676,7 @@ impl App {
         self.native_settings_focus(SettingsInput::AccentHex);
         self.settings_scene.select_all_field();
         self.native_settings_insert_into(SettingsInput::AccentHex, "#36B4A7");
+        assert_eq!(socket::read_settings()["accent"], "blue");
         self.native_settings_finish_input();
         assert_eq!(socket::read_settings()["accent"], "#36b4a7");
         assert_eq!(theme::theme_name(), original_theme);

@@ -385,11 +385,13 @@ class WeatherPreview extends StatelessWidget {
     required this.height,
     this.cornerRadius = Look.radius,
     this.terminal,
+    this.accentOutline = false,
     this.action,
   });
 
   final double height, cornerRadius;
   final Widget? terminal, action;
+  final bool accentOutline;
 
   final WeatherSettings settings;
   final IndicatorPhase phase;
@@ -430,7 +432,7 @@ class WeatherPreview extends StatelessWidget {
       decoration: BoxDecoration(
         color: Color.alphaBlend(scheme.primary.withValues(alpha: 0.15), theme.scaffoldBackgroundColor),
         borderRadius: corners,
-        border: Border.all(color: scheme.outlineVariant),
+        border: Border.all(color: accentOutline ? scheme.primary : scheme.outlineVariant),
       ),
       child: Padding(
         padding: const EdgeInsets.all(9),

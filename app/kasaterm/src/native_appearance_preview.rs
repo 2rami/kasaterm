@@ -79,13 +79,43 @@ pub(super) fn paint_accents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut V
         let label = preset_label(name);
         let width = g.measure_chrome_text(label, 10.5, false);
         draw_text(g, rect.0 + (cell_w - width) * 0.5, rect.1 + 44.0, label, 10.5, theme::text_dim(), false);
-        register_clipped(g, hits, Target::Setting(SettingsAction::Accent(name.to_string())), rect, HitCursor::Pointer);
+        register_clipped(g, hits, Target::AccentPreset(name), rect, HitCursor::Pointer);
         g.hover_pointer |= hot;
     }
     theme::ACCENT_PRESETS.len().div_ceil(columns) as f32 * 64.0
 }
 
+pub(super) fn accent_column(width: f32) -> Option<f32> {
+    (width >= 850.0).then(|| (width * 0.35).clamp(285.0, 360.0))
+}
+
 pub(super) fn paint(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: f32,
+    w: f32,
+    height: f32,
+) -> f32 {
+    let accent = s.input == Some(SettingsInput::AccentHex);
+    let side = if accent { accent_column(w) } else { None };
+    let pane_width = side.map_or(w, |column| w - column - 16.0);
+    let pane_height = paint_shell(g, s, hits, x, y, pane_width, height);
+    if !accent { return pane_height; }
+    let (panel_x, panel_y, panel_w) = side.map_or((x, y + pane_height + 10.0, w),
+        |column| (x + pane_width + 16.0, y, column));
+    draw_text(g, panel_x, panel_y + 8.0, "강조색", 12.0, theme::text(), true);
+    let picker_end = panel_y + CTL_H + 8.0 + paint_color_picker(
+        g, s, hits, caret, panel_x, panel_y + CTL_H + 8.0, panel_w,
+        SettingsInput::AccentHex, "강조색", &s.palette_edit,
+        s.eyedropper.then_some(SettingsAction::ColorEyedropper(SettingsInput::AccentHex)),
+    );
+    pane_height.max(picker_end - y)
+}
+
+fn paint_shell(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
@@ -106,7 +136,9 @@ pub(super) fn paint(
     let app_layer = theme::without_settings_layer();
     crate::native_controls::panel(g, pane, theme::pane_bg());
     let ink = theme::enforce_min_contrast(theme::fg(), theme::pane_bg());
-    if shell.focused { stroke_round(g, pane, theme::radius_md(), theme::accent()); }
+    if shell.focused || s.input == Some(SettingsInput::AccentHex) {
+        stroke_round(g, pane, theme::radius_md(), theme::accent());
+    }
     let body = (x + 12.0, top + 9.0, (w - 24.0).max(0.0), height - 18.0);
     register_clipped(g, hits, Target::PreviewShell, pane, HitCursor::Text);
 
@@ -155,7 +187,7 @@ pub(super) fn paint(
     let controls = [
         ("터미널 바탕", Target::Setting(SettingsAction::FocusPaletteHex(27)), s.input == Some(SettingsInput::PaletteHex(27))),
         ("터미널 글자", Target::Setting(SettingsAction::FocusPaletteHex(1)), s.input == Some(SettingsInput::PaletteHex(1))),
-        ("강조색 직접 입력", Target::Setting(SettingsAction::FocusColor(SettingsInput::AccentHex)), s.input == Some(SettingsInput::AccentHex)),
+        ("색 고르기", Target::OpenAccentPicker, s.input == Some(SettingsInput::AccentHex)),
     ];
     let buttons = button_row(g, s, hits, (x, top + height + 10.0, w, 0.0), &controls, crate::native_layout::Align::Start);
     CTL_H + 8.0 + height + 10.0 + buttons
@@ -179,6 +211,16 @@ mod tests {
                     assert!(overlap_w <= 0.0 || overlap_h <= 0.0);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn accent_picker_uses_the_side_only_when_the_pane_can_stay_wide() {
+        assert!(accent_column(800.0).is_none());
+        for width in [850.0, 960.0, 1120.0] {
+            let picker = accent_column(width).unwrap();
+            assert!(picker >= 285.0);
+            assert!(width - picker - 16.0 >= 500.0);
         }
     }
 

@@ -57,16 +57,17 @@ class TerminalPalette {
     BuildContext context, {
     required ThemeMode mode,
     DesignTokens? source,
+    Color? cursorOverride,
   }) {
     if (source != null) {
-      if (mode == ThemeMode.system) return TerminalPalette.fromTokens(source);
+      if (mode == ThemeMode.system && cursorOverride == null) return TerminalPalette.fromTokens(source);
       // 앱 테마와 같은 뒤집힌 팔레트 — 터미널 바탕만 폰 기본색이면 상단 바와 칸 사이에 이음매가 보인다.
-      final t = source.inBrightness(dark: mode == ThemeMode.dark);
+      final t = mode == ThemeMode.system ? source : source.inBrightness(dark: mode == ThemeMode.dark);
       return TerminalPalette(
         dark: t.dark,
         fg: Color(t.fg),
         bg: Color(t.bg),
-        cursor: Color(t.accent),
+        cursor: cursorOverride ?? Color(t.accent),
         ansi: t.ansi,
         minContrast: source.minContrast,
         sourceFg: Color(source.fg),

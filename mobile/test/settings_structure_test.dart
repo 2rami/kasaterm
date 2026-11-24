@@ -4,6 +4,7 @@ import 'package:kasaterm_mobile/screens/settings.dart';
 import 'package:kasaterm_mobile/screens/settings_look.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/wide_layout.dart';
+import 'package:kasaterm_mobile/weather/sheet.dart';
 
 import 'fixtures/settings.dart';
 
@@ -109,7 +110,7 @@ void main() {
     expect(find.text('색과 모양'), findsNothing);
   });
 
-  testWidgets('작은 창에서도 사용자 지정 강조색을 입력하고 외형을 스크롤한다', (tester) async {
+  testWidgets('색판은 pane만 미리 바꾸고 적용할 때 데스크톱에 저장한다', (tester) async {
     tester.view.physicalSize = const Size(320, 420);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -118,21 +119,54 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: LookSettingsScreen(server: fx.server)));
     await tester.pumpAndSettle();
 
-    final hex = find.byKey(const Key('appearance-custom-accent'));
-    await tester.scrollUntilVisible(hex.hitTestable(), 115);
-    await tester.tap(hex);
+    final openPicker = find.byKey(const Key('appearance-custom-accent'));
+    final preview = find.byKey(const Key('appearance-preview'));
+    final plane = find.byKey(const Key('appearance-accent-plane'));
+    final scroll = find.descendant(
+      of: find.byKey(const PageStorageKey('appearance-controls')),
+      matching: find.byWidgetPredicate((w) => w is Scrollable && w.axisDirection == AxisDirection.down),
+    );
+    final original = Theme.of(tester.element(preview)).colorScheme.primary;
+    await tester.scrollUntilVisible(openPicker.hitTestable(), 110, scrollable: scroll);
+    await tester.tap(openPicker);
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextFormField), 'nope');
-    await tester.tap(find.text('적용'));
+    expect(tester.widget<WeatherPreview>(preview).accentOutline, isTrue);
+    expect(find.byKey(const Key('appearance-accent-hex')), findsNothing);
+
+    await tester.scrollUntilVisible(plane.hitTestable(), 85, scrollable: scroll);
+    final area = tester.getRect(plane);
+    await tester.dragFrom(area.center, const Offset(42, -20));
+    await tester.pumpAndSettle();
+    expect(Theme.of(tester.element(preview)).colorScheme.primary, isNot(original));
+    expect(fx.accent, 'Blue');
+    expect(fx.paths.where((p) => p.endsWith('settings/action')), isEmpty);
+
+    await tester.scrollUntilVisible(find.text('취소').hitTestable(), 130, scrollable: scroll);
+    await tester.tap(find.text('취소'));
+    await tester.pumpAndSettle();
+    expect(Theme.of(tester.element(preview)).colorScheme.primary, original);
+    expect(fx.accent, 'Blue');
+
+    await tester.scrollUntilVisible(openPicker.hitTestable(), 85, scrollable: scroll);
+    await tester.tap(openPicker);
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('HEX').hitTestable(), 130, scrollable: scroll);
+    await tester.tap(find.text('HEX'));
+    await tester.pumpAndSettle();
+    final hex = find.byKey(const Key('appearance-accent-hex'));
+    await tester.ensureVisible(hex);
+    await tester.enterText(hex, 'nope');
     await tester.pumpAndSettle();
     expect(find.text('6자리 색상 코드를 입력하세요'), findsOneWidget);
-    await tester.enterText(find.byType(TextFormField), '#12a4c8');
+    await tester.enterText(hex, '#12a4c8');
+    await tester.pumpAndSettle();
+    expect(Theme.of(tester.element(preview)).colorScheme.primary, const Color(0xff12a4c8));
+    expect(fx.accent, 'Blue');
+    await tester.scrollUntilVisible(find.text('적용').hitTestable(), 100, scrollable: scroll);
     await tester.tap(find.text('적용'));
     await tester.pumpAndSettle();
     expect(fx.accent, '#12a4c8');
-    expect(find.text('#12a4c8'), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('날씨 켜기'), 115);
-    expect(find.text('날씨 켜기').hitTestable(), findsOneWidget);
+    expect(plane, findsNothing);
     expect(tester.takeException(), isNull);
   });
 
