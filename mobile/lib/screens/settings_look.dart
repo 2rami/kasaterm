@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../look.dart';
@@ -7,11 +5,13 @@ import '../main.dart' show designTokens;
 import '../server.dart';
 import '../theme_prefs.dart';
 import '../twins_loading.dart';
+import '../weather/controls.dart';
 import '../weather/model.dart';
 import '../weather/sheet.dart';
 import '../weather/store.dart';
 import 'controls.dart';
 import 'hub.dart' show parseHexColor;
+import 'settings_glyph.dart';
 
 /// 폰 밝기의 고르기 칸 — 짧은 이름은 칸 말풍선과 최상위 「외형」 줄이 같이 쓴다.
 const phoneModes = [
@@ -28,10 +28,9 @@ String _modeLabel(ThemeMode mode) => switch (mode) {
 
 /// 설정 「외형」 — 이 폰의 밝기, 날씨, 데스크톱 강조색과 모서리.
 class LookSettingsScreen extends StatefulWidget {
-  const LookSettingsScreen({super.key, required this.server, this.embedded = false});
+  const LookSettingsScreen({super.key, required this.server});
 
   final Server server;
-  final bool embedded;
 
   @override
   State<LookSettingsScreen> createState() => _LookSettingsScreenState();
@@ -44,6 +43,8 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
   Map<String, Object?>? _appearance;
   bool _loading = true;
   String? _pending;
+  bool _weatherTab = false;
+  IndicatorPhase _phase = IndicatorPhase.working;
 
   @override
   void initState() {
@@ -87,61 +88,87 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
     if (problem != null) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(problem)));
   }
 
-  void _openWeather() {
-    if (widget.embedded) {
-      unawaited(Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const WeatherSettingsScreen())));
-    } else {
-      unawaited(showWeatherSheet(context));
-    }
-  }
-
   @override
   Widget build(BuildContext context) => TwinBackdrop(
     child: Scaffold(
       backgroundColor: Colors.transparent,
       appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('외형')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap * 2),
-        children: [
-          SettingsGroup(
-            title: '이 폰',
-            children: [
-              SettingsRow(
-                key: const Key('phone-brightness'),
-                icon: Icons.brightness_6_outlined,
-                title: '밝기',
-                subtitle: _modeLabel(phoneThemeMode.value),
-                trailing: IconChoice<ThemeMode>(
-                  options: phoneModes,
-                  selected: phoneThemeMode.value,
-                  onSelect: _setMode,
-                ),
-              ),
-            ],
-          ),
-          SettingsGroup(
-            children: [
-              ValueListenableBuilder<WeatherSettings>(
+      body: LayoutBuilder(builder: (context, constraints) {
+        final theme = Theme.of(context);
+        final previewAccent = _entries(_appearance ?? const {}, 'accents')
+            .where((entry) => entry['name'] == _appearance?['accent'])
+            .map((entry) => parseHexColor(entry['hex'] as String?))
+            .firstOrNull;
+        return Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 10),
+              child: ValueListenableBuilder<WeatherSettings>(
                 valueListenable: weather.settings,
-                builder: (context, value, _) => SettingsRow(
-                  key: const Key('settings-weather'),
-                  icon: Icons.umbrella_outlined,
-                  title: '날씨',
-                  subtitle: !value.enabled
-                      ? '꺼짐'
-                      : value.style == RainStyle.showers
-                          ? '상태별 날씨와 프로세스바'
-                          : '${value.amount.label} · ${value.target.label}',
-                  chevron: true,
-                  onTap: _openWeather,
+                builder: (context, value, _) => Theme(
+                  data: previewAccent == null ? theme : theme.copyWith(
+                    colorScheme: theme.colorScheme.copyWith(primary: previewAccent),
+                  ),
+                  child: WeatherPreview(
+                    key: const Key('appearance-preview'),
+                    settings: value,
+                    phase: _phase,
+                    height: (constraints.maxHeight * .27).clamp(56.0, 208.0),
+                    cornerRadius: switch (_appearance?['shape']) {
+                      'sharp' => 3,
+                      'pixel' => 0,
+                      _ => Look.radius,
+                    },
+                  ),
                 ),
               ),
-            ],
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
+              child: WeatherChoices(
+                options: const [(false, '색과 모양'), (true, '날씨')],
+                selected: {_weatherTab},
+                symbol: (weather, ink) => SettingsMark(
+                  weather ? SettingsGlyph.weather : SettingsGlyph.appearance,
+                  size: 17,
+                  color: ink,
+                ),
+                onPressed: (value) => setState(() => _weatherTab = value),
+              ),
+            ),
+            Expanded(
+              child: _weatherTab
+                  ? WeatherSettingsList(phase: _phase, onPhaseChanged: (phase) => setState(() => _phase = phase))
+                  : _lookControls(),
+            ),
+          ],
+        );
+      }),
+    ),
+  );
+
+  Widget _lookControls() => ListView(
+    key: const PageStorageKey('appearance-look-controls'),
+    padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap * 2),
+    children: [
+      SettingsGroup(
+        title: '이 폰',
+        children: [
+          SettingsRow(
+            key: const Key('phone-brightness'),
+            icon: Icons.brightness_6_outlined,
+            title: '밝기',
+            subtitle: _modeLabel(phoneThemeMode.value),
+            trailing: IconChoice<ThemeMode>(
+              options: phoneModes,
+              selected: phoneThemeMode.value,
+              onSelect: _setMode,
+            ),
           ),
-          SettingsGroup(title: '데스크톱', children: _desktopRows(1)),
         ],
       ),
-    ),
+      SettingsGroup(title: '데스크톱', children: _desktopRows(1)),
+    ],
   );
 
   /// 데스크톱 「외형」 값을 폰에서 바꾸는 줄 — 강조색·모서리는 누르면 데스크톱이 바뀐다.

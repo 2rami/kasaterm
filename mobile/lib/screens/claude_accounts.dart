@@ -11,6 +11,7 @@ import '../machine_look.dart';
 import '../server.dart';
 import '../twins_loading.dart';
 import 'controls.dart';
+import 'settings_glyph.dart';
 
 class _Device {
   const _Device(this.id, this.label, this.route, this.online);
@@ -775,6 +776,12 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
         Look.groupGap,
       ),
       children: [
+        if (!_locked)
+          SettingsOverview(
+            art: const SettingsMark(SettingsGlyph.agents, size: 36),
+            title: "${_name(device)} · Claude",
+            detail: _accounts.where((account) => account.id == _summaries[device.id]?.activeId).firstOrNull?.title,
+          ),
         SettingsGroup(
           title: _locked ? '기기 · 로그인 중에는 고정돼요' : '기기',
           // 로그인 중에는 그 기기 줄만 — 다른 기기 줄이 승인 단계를 화면 아래로 밀어내지 않게.

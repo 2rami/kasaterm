@@ -2,25 +2,12 @@ import 'package:flutter/material.dart';
 
 import '../look.dart';
 import '../screens/controls.dart';
+import '../screens/settings_glyph.dart';
 import 'card.dart';
 import 'controls.dart';
 import 'model.dart';
 import 'scene.dart';
 import 'store.dart';
-
-Color _weatherSurface(BuildContext context) {
-  final colors = Theme.of(context).colorScheme;
-  return Color.alphaBlend(colors.primary.withValues(alpha: 0.04), colors.surface);
-}
-
-/// 설정 「날씨」 — docs/weather.md 의 표 전부와 「날씨는 기기마다」.
-Future<void> showWeatherSheet(BuildContext context) => showModalBottomSheet<void>(
-  context: context,
-  showDragHandle: true,
-  backgroundColor: _weatherSurface(context),
-  isScrollControlled: true,
-  builder: (_) => const ModalLook(child: _WeatherSheet()),
-);
 
 /// 카드 길게 누르기 「이 카드 날씨」 — 이 폰에만 남는다.
 Future<void> showCardWeatherSheet(BuildContext context, String id) {
@@ -74,7 +61,7 @@ class CardWeatherRow extends StatelessWidget {
       final settings = weather.settings.value;
       if (!settings.enabled || settings.style != RainStyle.liquid || id == null) return const SizedBox.shrink();
       return ListTile(
-        leading: const _OpenUmbrella(size: 24),
+        leading: const SettingsMark(SettingsGlyph.weather, size: 24),
         title: const Text('이 카드 날씨'),
         subtitle: Text(weather.cardOf(id).label),
         trailing: const Icon(Icons.chevron_right),
@@ -88,42 +75,12 @@ class CardWeatherRow extends StatelessWidget {
   );
 }
 
-class _WeatherSheet extends StatelessWidget {
-  const _WeatherSheet();
+class WeatherSettingsList extends StatelessWidget {
+  const WeatherSettingsList({super.key, required this.phase, required this.onPhaseChanged});
 
-  @override
-  Widget build(BuildContext context) => DraggableScrollableSheet(
-    expand: false,
-    initialChildSize: 0.85,
-    maxChildSize: 0.95,
-    builder: (context, scroll) => WeatherSettingsList(controller: scroll),
-  );
-}
+  final IndicatorPhase phase;
+  final ValueChanged<IndicatorPhase> onPhaseChanged;
 
-/// 넓은 설정의 오른쪽 칸 「날씨」 — 폰 판의 시트와 같은 줄을 페이지로.
-class WeatherSettingsScreen extends StatelessWidget {
-  const WeatherSettingsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    backgroundColor: _weatherSurface(context),
-    appBar: AppBar(backgroundColor: _weatherSurface(context), title: const Text('날씨')),
-    body: const WeatherSettingsList(),
-  );
-}
-
-/// 날씨 설정 줄 전부 — 시트와 페이지가 같이 쓴다.
-class WeatherSettingsList extends StatefulWidget {
-  const WeatherSettingsList({super.key, this.controller});
-
-  final ScrollController? controller;
-
-  @override
-  State<WeatherSettingsList> createState() => _WeatherSettingsListState();
-}
-
-class _WeatherSettingsListState extends State<WeatherSettingsList> {
-  IndicatorPhase _phase = IndicatorPhase.working;
   static const _rewet = [30, 60, 120, 180, 300, 600];
 
   @override
@@ -142,12 +99,12 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
       final motion = weather.reduceMotion.value || MediaQuery.disableAnimationsOf(context);
       final glassOff = weather.reduceTransparency.value;
       return ListView(
-        controller: widget.controller,
+        key: const PageStorageKey('appearance-weather-controls'),
         padding: const EdgeInsets.fromLTRB(0, 0, 0, Look.groupGap),
         children: [
           WeatherToggle(
             title: const Text('날씨 켜기'),
-            secondary: const _OpenUmbrella(size: 22),
+            secondary: const SettingsMark(SettingsGlyph.weather, size: 22),
             value: s.enabled,
             onChanged: (v) => set(s.copyWith(enabled: v)),
           ),
@@ -156,21 +113,17 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
             selected: {s.style},
             onPressed: (style) => set(s.copyWith(style: style)),
           )),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(Look.pagePad, 12, Look.pagePad, 0),
-            child: _WeatherPreview(settings: s, phase: _phase),
-          ),
           if (s.style == RainStyle.showers) ...[
             _Title('상태'),
             _Pad(WeatherPick(
-              value: _phase,
+              value: phase,
               items: [
                 for (final phase in IndicatorPhase.values) DropdownMenuItem(value: phase, child: Text(phase.label)),
               ],
-              onChanged: (phase) { if (phase != null) setState(() => _phase = phase); },
+              onChanged: (next) { if (next != null) onPhaseChanged(next); },
             )),
-            _IndicatorControls(rule: s.indicator(_phase), onChanged: (rule) {
-              set(s.copyWith(indicators: {...s.indicators, _phase: rule}));
+            _IndicatorControls(rule: s.indicator(phase), onChanged: (rule) {
+              set(s.copyWith(indicators: {...s.indicators, phase: rule}));
             }),
             WeatherToggle(
               title: const Text('표면에 물방울 맺힘'), value: s.beads,
@@ -425,8 +378,10 @@ class _UmbrellaOutline extends CustomPainter {
   bool shouldRepaint(_UmbrellaOutline oldDelegate) => oldDelegate.color != color;
 }
 
-class _WeatherPreview extends StatelessWidget {
-  const _WeatherPreview({required this.settings, required this.phase});
+class WeatherPreview extends StatelessWidget {
+  const WeatherPreview({super.key, required this.settings, required this.phase, required this.height, this.cornerRadius = Look.radius});
+
+  final double height, cornerRadius;
 
   final WeatherSettings settings;
   final IndicatorPhase phase;
@@ -437,15 +392,18 @@ class _WeatherPreview extends StatelessWidget {
     final scheme = theme.colorScheme;
     final work = settings.style == RainStyle.showers;
     final sky = Color.alphaBlend(scheme.primary.withValues(alpha: 0.09), theme.scaffoldBackgroundColor);
-    final label = work ? phase.label : '작업실';
+    final label = settings.enabled && work ? phase.label : '작업실';
+    final corners = BorderRadius.circular(cornerRadius);
+    final paneCorners = BorderRadius.circular(cornerRadius * 2 / 3);
+    final symbolSize = (height * .56).clamp(38.0, 104.0);
     final sample = ColoredBox(
       color: sky,
       child: Stack(
         fit: StackFit.expand,
         children: [
           Center(child: work
-              ? _conditionSymbol(settings.indicator(phase).weather, 82, scheme.primary)
-              : _OpenUmbrella(size: 82, color: scheme.primary)),
+              ? _conditionSymbol(settings.indicator(phase).weather, symbolSize, scheme.primary)
+              : _OpenUmbrella(size: symbolSize, color: scheme.primary)),
           Positioned(top: 10, left: 12, right: 12, child: Row(children: [
             Icon(Icons.terminal_outlined, size: 15, color: scheme.onSurfaceVariant),
             const SizedBox(width: 7),
@@ -456,17 +414,17 @@ class _WeatherPreview extends StatelessWidget {
     );
     final pane = work
         ? WorkWeather(id: 'settings-weather-sample', phase: phase, doneUntilMs: 0,
-            radius: Look.smallCorners, builder: (_) => sample)
+            radius: paneCorners, builder: (_) => sample)
         : settings.target == WeatherTarget.backgroundOnly
             ? Stack(fit: StackFit.expand, children: [
-                Center(child: _OpenUmbrella(size: 82, color: scheme.primary)),
+                Center(child: _OpenUmbrella(size: symbolSize, color: scheme.primary)),
                 Positioned(top: 10, left: 12, child: Text(label, style: theme.textTheme.labelMedium)),
               ])
             : WeatherCard(id: 'settings-liquid-sample', mood: Mood.busy, preview: true, child: sample);
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Color.alphaBlend(scheme.primary.withValues(alpha: 0.15), theme.scaffoldBackgroundColor),
-        borderRadius: Look.corners,
+        borderRadius: corners,
         border: Border.all(color: scheme.outlineVariant),
       ),
       child: Padding(
@@ -475,16 +433,16 @@ class _WeatherPreview extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(3, 2, 3, 8),
             child: Row(children: [
-              _OpenUmbrella(size: 16, color: scheme.primary),
+              SettingsMark(SettingsGlyph.weather, size: 16, color: scheme.primary),
               const SizedBox(width: 7),
               Text('미리보기', style: theme.textTheme.labelLarge),
             ]),
           ),
           ClipRRect(
-            borderRadius: Look.smallCorners,
+            borderRadius: paneCorners,
             child: ColoredBox(
               color: sky,
-              child: SizedBox(height: 118, child: IgnorePointer(child: WeatherScene(child: pane))),
+              child: SizedBox(height: height, child: IgnorePointer(child: WeatherScene(child: pane))),
             ),
           ),
         ]),

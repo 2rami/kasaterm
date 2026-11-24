@@ -47,7 +47,7 @@ void main() {
     expect(find.text('Google·아이디 로그인 · 일 권한'), findsOneWidget, reason: '계정 줄은 이어진 로그인 방법을 요약');
 
     // 페이지 안의 줄은 첫 화면에 없다.
-    for (final key in ['change-login', 'work-permissions', 'approval-key', 'device-names', 'phone-brightness', 'settings-weather']) {
+    for (final key in ['change-login', 'work-permissions', 'approval-key', 'device-names', 'phone-brightness']) {
       expect(find.byKey(Key(key)), findsNothing, reason: key);
     }
   });
@@ -95,14 +95,16 @@ void main() {
     expect(find.text('강조색'), findsOneWidget);
     expect(find.text('둥글게 · 데스크톱 모양'), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('settings-weather')));
+    final preview = find.byKey(const Key('appearance-preview'));
+    final before = tester.element(preview);
+    await tester.tap(find.text('날씨'));
     await tester.pumpAndSettle();
-    expect(find.byType(BottomSheet), findsOneWidget);
     expect(find.text('날씨 켜기'), findsOneWidget);
-    await tester.tapAt(const Offset(195, 24));
-    await tester.pumpAndSettle();
     expect(find.widgetWithText(AppBar, '외형'), findsOneWidget);
-    expect(find.byType(BottomSheet), findsNothing);
+    expect(tester.element(preview), same(before));
+    await tester.tap(find.text('색과 모양'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('phone-brightness')), findsOneWidget);
   });
 
   testWidgets('계정 없이 붙은 주소 연결은 계정·캐릭터·기기 이름·비밀 승인을 감춘다', (tester) async {
@@ -176,16 +178,17 @@ void main() {
 
     await tester.tap(find.byKey(const Key('settings-look')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('settings-weather')));
+    await tester.tap(find.text('날씨'));
     await tester.pumpAndSettle();
-    expect(find.widgetWithText(AppBar, '날씨'), findsOneWidget, reason: '두 칸이면 날씨도 시트 대신 페이지');
+    final preview = find.byKey(const Key('appearance-preview'));
+    expect(tester.getTopLeft(preview).dx, greaterThan(settingsNavWidth));
+    expect(find.text('날씨 켜기'), findsOneWidget);
     expect(selected('settings-look'), isTrue);
-    expect(tester.getTopLeft(find.widgetWithText(AppBar, '날씨')).dx, greaterThan(settingsNavWidth));
     expect(find.byType(BottomSheet), findsNothing);
     expect(find.widgetWithText(AppBar, '일 권한'), findsNothing);
-    await tester.tap(find.byType(BackButton));
+    await tester.tap(find.text('색과 모양'));
     await tester.pumpAndSettle();
-    expect(brightness, findsOneWidget, reason: '날씨에서 뒤로 가면 외형으로 돌아온다');
+    expect(brightness, findsOneWidget);
   });
 
   testWidgets('좁은 스플릿 뷰는 폰 판 그대로 — 줄을 누르면 들어간다', (tester) async {

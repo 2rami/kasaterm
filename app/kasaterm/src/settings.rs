@@ -1182,6 +1182,9 @@ impl App {
                 self.settings_input = Some(SettingsInput::CustomThemeLabel);
             }
             SettingsAction::FocusPaletteHex(i) => {
+                if self.settings_scene.category() == SettingsCat::Appearance {
+                    self.settings_scene.reset_scroll();
+                }
                 if theme::active_custom_slug().is_none() {
                     self.settings_apply(SettingsAction::StartCustomTheme);
                 }

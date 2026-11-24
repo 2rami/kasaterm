@@ -569,6 +569,7 @@ fn english(value: &str) -> Option<&'static str> {
         "처음 설정" => "First setup",
         "테마, 터미널 설정, Agent 로그인을 한 번만 살펴봅니다." => "Review theme, terminal settings, and Agent sign-ins once",
         "외형" => "Appearance",
+        "색과 모양" => "Colors & shape",
         "건너뛰고 터미널 열기" => "Skip and open terminal",
         "익숙한 터미널 모습으로 시작하세요" => "Start with a familiar terminal",
         "기존 설정을 가져오거나 색과 글꼴을 직접 고릅니다" => "Import existing settings or choose colors and fonts",

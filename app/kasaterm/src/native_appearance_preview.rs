@@ -87,13 +87,13 @@ fn regions(x:f32,y:f32,w:f32)->[(usize,Rect);5] {
     let inset=6.0;let gap=5.0;let header=32.0;
     let inside=(w-inset*2.0).max(0.0);
     let side=(inside*0.22).floor();let panel=(inside*0.24).floor();let center=inside-side-panel-gap*2.0;
-    let top=y+inset+header+gap;let body_h=PREVIEW_H-inset*2.0-header-gap;
+    let top=y+inset+header+gap;let body_h=PREVIEW_H-inset*2.0-header-gap-30.0;
     let middle=x+inset+side+gap;
     [(30,(middle,y+inset,center,header)),
-     (29,(x+inset,y+inset,side,PREVIEW_H-inset*2.0)),
+     (29,(x+inset,y+inset,side,PREVIEW_H-inset*2.0-30.0)),
      (28,(middle,top,center,28.0)),
      (27,(middle,top+33.0,center,body_h-33.0)),
-     (31,(middle+center+gap,y+inset,panel,PREVIEW_H-inset*2.0))]
+     (31,(middle+center+gap,y+inset,panel,PREVIEW_H-inset*2.0-30.0))]
 }
 
 fn text(g: &mut gpu::GpuRenderer, rect: Rect, value: &str, ink: [u8; 4], bold: bool) {
@@ -113,6 +113,11 @@ pub(super) fn paint(
         Some(SettingsInput::PaletteHex(index)) => Some(index),
         _ => None,
     };
+    let can_edit = s.cat == SettingsCat::Appearance;
+    g.queue_icon("terminal", x + 2.0, y + 1.0, 15.0, theme::text_dim());
+    draw_text(g, x + 23.0, y + 2.0, "미리보기", 12.0, theme::text(), true);
+    let header_h = 24.0;
+    let y = y + header_h;
     let areas = regions(x, y, w);
     // Only the miniature workspace uses the application's palette; its editor buttons belong to the settings panel.
     let app_layer = theme::without_settings_layer();
@@ -126,14 +131,10 @@ pub(super) fn paint(
             _ => theme::side_panel_bg(),
         };
         g.round_rect_fill(rect.0,rect.1,rect.2,rect.3,theme::radius_sm().min(8.0),fill);
-        register_clipped(
-            g,
-            hits,
-            Target::Setting(SettingsAction::FocusPaletteHex(slot)),
-            rect,
-            HitCursor::Pointer,
-        );
-        let hover = contains(rect, s.cursor);
+        if can_edit {
+            register_clipped(g, hits, Target::Setting(SettingsAction::FocusPaletteHex(slot)), rect, HitCursor::Pointer);
+        }
+        let hover = can_edit && contains(rect, s.cursor);
         g.hover_pointer |= hover;
         if selected == Some(slot) || hover {
             stroke_rect(
@@ -167,7 +168,9 @@ pub(super) fn paint(
             line == 0,
         );
     }
-    text(g, areas[2].1, "터미널 · main", header_ink, true);
+    let tab = areas[2].1;
+    g.rect(tab.0 + 5.0, tab.1 + tab.3 - 2.0, (tab.2 * 0.36).max(0.0), 2.0, theme::accent());
+    text(g, tab, "터미널 · main", header_ink, true);
     let body = areas[3].1;
     text(g, body, "$ git status", pane_ink, false);
     text(
@@ -177,15 +180,22 @@ pub(super) fn paint(
         pane_ink,
         false,
     );
-    let split_y = body.1 + body.3 * 0.58;
-    g.rect(body.0, split_y, body.2, 1.0, theme::border());
-    text(
-        g,
-        (body.0, split_y + 8.0, body.2, 26.0),
-        "$ 새 터미널",
-        pane_ink,
-        false,
-    );
+    if !crate::lite_mode() && s.weather.enabled {
+        let work = s.weather.style == crate::weather::model::RainStyle::Showers;
+        let condition = if work {
+            s.weather.indicator(s.weather_phase).weather.map_or("monitor", weather_icon)
+        } else {
+            "umbrella"
+        };
+        let size = (body.2 * 0.38).min(body.3 * 0.65).clamp(12.0, 92.0);
+        g.queue_icon(condition, body.0 + (body.2 - size) * 0.5, body.1 + body.3 - size - 6.0, size,
+            theme::enforce_contrast_at(theme::accent(), theme::pane_bg(), 3.0));
+    }
+    if let Some((px, py, pw, ph)) = g.clip_hit(body).filter(|r| r.2 >= 32.0 && r.3 >= 32.0) {
+        PAINT_FEEDBACK.with(|f| f.borrow_mut().weather_preview = Some(crate::weather::SettingsPreview {
+            rect: [px, py, pw, ph], phase: s.weather_phase, popup: None,
+        }));
+    }
     let right = areas[4].1;
     for (line, label) in ["Git · Info", "변경 파일", "src/main.rs"]
         .iter()
@@ -200,7 +210,11 @@ pub(super) fn paint(
         );
     }
 
+    statusbar_preview(g, s, (x + 6.0, y + PREVIEW_H - 30.0, (w - 12.0).max(0.0), 24.0));
     drop(app_layer);
+    if !can_edit {
+        return header_h + PREVIEW_H;
+    }
     let options = [
         (0, "창 바탕"),
         (1, "터미널 글자"),
@@ -215,7 +229,7 @@ pub(super) fn paint(
         let r=crate::native_controls::text_button(g,r,s.cursor,&label,crate::native_controls::Style{active:selected==Some(slot),..Default::default()});
         register_clipped(g,hits,Target::Setting(SettingsAction::FocusPaletteHex(slot)),r,HitCursor::Pointer);
     }
-    PREVIEW_H+12.0+height
+    header_h + PREVIEW_H + 12.0 + height
 
 }
 

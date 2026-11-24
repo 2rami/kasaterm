@@ -16,6 +16,7 @@ import 'claude_accounts.dart';
 import 'controls.dart';
 import 'settings_account.dart';
 import 'settings_devices.dart';
+import 'settings_glyph.dart';
 import 'settings_look.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -127,7 +128,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _pageOf(_Page page) => switch (page) {
-    _Page.look => LookSettingsScreen(server: server, embedded: _split),
+    _Page.look => LookSettingsScreen(server: server),
     _Page.account => AccountSettingsScreen(
       api: _api!,
       providers: _providers,
@@ -155,13 +156,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _Page page, {
     required String key,
     required int tone,
-    required IconData icon,
+    required SettingsGlyph mark,
     required String title,
     required String subtitle,
   }) => SettingsRow(
     key: Key(key),
     tone: tone,
-    icon: icon,
+    mark: mark,
     title: title,
     subtitle: subtitle,
     chevron: !_split,
@@ -352,7 +353,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _Page.look,
       key: 'settings-look',
       tone: 0,
-      icon: Icons.palette_outlined,
+      mark: SettingsGlyph.appearance,
       title: '외형',
       subtitle: '${phoneModes.firstWhere((m) => m.$1 == mode).$3} · 색 · 날씨',
     ),
@@ -365,7 +366,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _Page.agents,
         key: 'claude-accounts',
         tone: tone,
-        icon: Icons.smart_toy_outlined,
+        mark: SettingsGlyph.agents,
         title: '코딩 에이전트',
         subtitle: 'Claude 계정 · 폰에서 다시 로그인',
       ),
@@ -374,7 +375,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _Page.characters,
           key: 'character-picks',
           tone: tone,
-          icon: Icons.groups_2_outlined,
+          mark: SettingsGlyph.characters,
           title: '캐릭터',
           subtitle: '학생 테마와 새 창에 나올 학생 · 모든 기기 같이',
         ),
@@ -399,7 +400,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _Page.account,
         key: 'settings-account',
         tone: tone,
-        icon: Icons.manage_accounts_outlined,
+        mark: SettingsGlyph.account,
         title: '계정',
         subtitle: _accountLine(),
       ),
@@ -407,7 +408,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _Page.devices,
       key: 'settings-devices',
       tone: tone,
-      icon: Icons.devices_outlined,
+      mark: SettingsGlyph.devices,
       title: '연결 기기',
       subtitle: _api != null ? '기기 이름 · PC 기능 · 비밀 승인 · 브라우저' : 'PC 기능 · 브라우저 · 개발 서버',
     ),
@@ -422,7 +423,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return SettingsRow(
           key: const Key('app-release'),
           tone: tone,
-          icon: fresh ? Icons.system_update_outlined : Icons.info_outline_rounded,
+          mark: SettingsGlyph.release,
           title: '앱 판',
           subtitle: fresh
               ? '새 판 ${r.version} (${r.build}) · 눌러서 설치'

@@ -324,7 +324,7 @@ impl App {
             let frame = self.weather_step(v);
             return Some(frame);
         }
-        if settings_open && self.settings_scene.category() == crate::SettingsCat::Weather {
+        if settings_open && self.settings_scene.category().navigation_parent() == crate::SettingsCat::Appearance {
             self.weather.showers.clear();
             self.weather.places.clear();
             return None;

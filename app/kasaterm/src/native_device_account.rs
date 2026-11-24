@@ -539,27 +539,17 @@ pub(super) fn paint(
     w: f32,
 ) {
     let v = &s.device_account;
-    // 같은 「계정」 페이지의 Claude·Codex 머리와 같은 급 — 아이콘 17, 이름 14.5 굵게.
-    g.queue_icon("users", x, *y - 1.0, 17.0, theme::text());
-    draw_text(g, x + 24.0, *y, "KASA 계정", 14.5, theme::text(), true);
-    *y += 26.0;
     let (status, error) = status_label(&v.status);
-    for line in wrap_words(g, &crate::native_strings::text(status), w, 12.0) {
-        draw_text(
-            g,
-            x,
-            *y,
-            &line,
-            12.0,
-            if error {
-                theme::danger()
-            } else {
-                theme::text()
-            },
-            false,
-        );
-        *y += 18.0;
+    let status_lines = wrap_words(g, &crate::native_strings::text(status), (w - 66.0).max(0.0), 12.0);
+    let overview_h = 46.0 + status_lines.len() as f32 * 18.0;
+    crate::native_controls::panel(g, (x, *y, w, overview_h), theme::surface());
+    g.queue_icon("settings-account", x + 15.0, *y + 17.0, 23.0, theme::accent());
+    draw_text(g, x + 51.0, *y + 17.0, "KASA 계정", 14.5, theme::text(), true);
+    for (i, line) in status_lines.iter().enumerate() {
+        draw_text(g, x + 51.0, *y + 36.0 + i as f32 * 18.0, line, 12.0,
+            if error { theme::danger() } else { theme::text_dim() }, false);
     }
+    *y += overview_h + 10.0;
     // OAuth 로 만든 계정 이름(oauth_<hex>)은 사람이 못 알아본다 — 관문이 준 이메일·아이디를 쓴다.
     // 로그인해 있으면 아래 얼굴 줄이 닉네임·아이디를 보인다.
     let signed_in = v.status["credential_saved"].as_bool() == Some(true);

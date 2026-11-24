@@ -45,7 +45,7 @@ pub(crate) fn create(proxy: &winit::event_loop::EventLoopProxy<UserEvent>) -> Op
 
 /// 우산 표(하단바·설치 화면과 같은 Lucide 우산). 맥은 검정 본뜨기, Windows 는 강조색 판 위 흰 우산(앱 표와 같은 결).
 fn tray_icon_image() -> Option<Icon> {
-    const UMBRELLA: &str = include_str!("../assets/icons/umbrella.svg");
+    const UMBRELLA: &str = include_str!("../../../mobile/assets/icons/settings/appearance.svg");
     let (svg, px) = if cfg!(target_os = "macos") {
         (UMBRELLA.replace("currentColor", "#000000").replace("stroke-width=\"2\"", "stroke-width=\"2.2\""), 36)
     } else {

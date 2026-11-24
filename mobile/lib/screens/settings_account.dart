@@ -11,9 +11,10 @@ import '../twins_loading.dart';
 import 'account_profile.dart';
 import 'controls.dart';
 import 'oauth_sheet.dart';
+import 'settings_glyph.dart';
 import 'work_permissions.dart';
 
-/// 설정 「에이전트」 → 「계정」 — 데스크톱 설정 「계정」과 같이 KASA 계정의 로그인 방법만 두고, 일 권한을 그 아래에.
+/// 설정 「계정·기기」 → 「계정」 — 데스크톱 설정 「계정」과 같이 KASA 계정의 로그인 방법만 두고, 일 권한을 그 아래에.
 /// 일 권한이 여기인 까닭: 그 권한은 이 화면의 GitHub 연결 한 번으로 붙고, 일 연결 끊기와 폰의 PR 승인이 이 길뿐이다.
 class AccountSettingsScreen extends StatefulWidget {
   const AccountSettingsScreen({
@@ -124,6 +125,17 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         builder: (context, snap) => ListView(
           padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap * 2),
           children: [
+            if (_profile?.name case final name?)
+              SettingsOverview(
+                art: AccountFace(
+                  avatar: _profile?.avatar,
+                  api: widget.api,
+                  size: 48,
+                  fallback: const SettingsMark(SettingsGlyph.account, size: 44),
+                ),
+                title: name,
+                detail: _profile?.login,
+              ),
             SettingsGroup(title: '로그인 방법', children: _loginRows(snap.data?.enabled ?? const [])),
             SettingsGroup(
               title: '일 권한',

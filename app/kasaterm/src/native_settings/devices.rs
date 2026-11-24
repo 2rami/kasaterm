@@ -56,23 +56,6 @@ pub(super) fn paint(
     w: f32,
 ) {
     section_title(g, x, *y, "이 기기", "");
-    *y += 54.0;
-    if let Some(local) = s.device_names.iter().find(|row| row.local) {
-        device_row(g, s, hits, caret, x, y, w, Some(local), None);
-    } else {
-        let name = crate::info::cached_local_machine_name().unwrap_or("이 기기");
-        flat_row(g, x, *y, w, name, "현재 설정을 바꾸는 기기", w);
-        *y += ROW_H;
-    }
-    plain_hint(
-        g,
-        x,
-        y,
-        w,
-        "표시 이름은 같은 KASA 계정의 PC·폰에서 함께 사용합니다. 연결 주소는 바뀌지 않습니다.",
-    );
-    *y += 8.0;
-    section_title(g, x, *y, "다른 기기", "");
     button(
         g,
         s,
@@ -86,6 +69,26 @@ pub(super) fn paint(
     if let Some(editor) = s.machine_edit.as_ref() {
         paint_editor(g, s, hits, caret, x, y, w, editor);
     }
+    crate::native_controls::panel(g, (x, *y, w, 76.0), theme::surface());
+    let mut row_y = *y + 8.0;
+    if let Some(local) = s.device_names.iter().find(|row| row.local) {
+        device_row(g, s, hits, caret, x + 10.0, &mut row_y, w - 20.0, Some(local), None);
+    } else {
+        let name = crate::info::cached_local_machine_name().unwrap_or("이 기기");
+        g.queue_icon("settings-devices", x + 14.0, row_y + 13.0, 22.0, theme::accent());
+        flat_row(g, x + 34.0, row_y, w - 46.0, name, "현재 설정을 바꾸는 기기", w - 46.0);
+    }
+    *y += 86.0;
+    plain_hint(
+        g,
+        x,
+        y,
+        w,
+        "표시 이름은 같은 KASA 계정의 PC·폰에서 함께 사용합니다. 연결 주소는 바뀌지 않습니다.",
+    );
+    *y += 8.0;
+    section_title(g, x, *y, "다른 기기", "");
+    *y += 54.0;
     let mut count = 0;
     for (index, machine) in s.machines.iter().enumerate() {
         let name = s.device_names.iter().find(|row| matches_name(row, machine));

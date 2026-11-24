@@ -238,14 +238,17 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Bob'), findsWidgets);
+    final preview = find.byKey(const Key('character-preview'));
+    expect(find.descendant(of: preview, matching: find.text('Bob')), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('1번째'), 160, scrollable: find.byType(Scrollable).first);
     expect(find.text('1번째'), findsOneWidget);
     final alice = find.byKey(const Key('pick-cell-__base-Alice'));
-    await tester.ensureVisible(alice);
+    await tester.scrollUntilVisible(alice, -160, scrollable: find.byType(Scrollable).first);
     await tester.tap(alice);
     await tester.pumpAndSettle();
     expect(fake.patches.single['settings'], {'character_picks': {'b': ['Bob'], '__base': ['Alice']}});
     expect(find.text('2번째'), findsOneWidget);
+    expect(find.descendant(of: preview, matching: find.text('Alice')), findsOneWidget);
     await tester.scrollUntilVisible(find.text('Bob → Alice'), -200);
     expect(find.text('Bob → Alice'), findsOneWidget);
   });

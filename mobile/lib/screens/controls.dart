@@ -4,6 +4,7 @@ import '../claude_style.dart' show claudeBrand;
 import '../contrast.dart';
 import '../look.dart';
 import '../shell_blocks.dart' show tildePath;
+import 'settings_glyph.dart';
 
 /// 입력칸 오른쪽 보내기 44×44 — 글이 있으면 강조 채움·화살표, 없으면 톤 채움·흐린 화살표.
 /// 대화(`round`)는 A 이전 모습이라 늘 강조색으로 채운 원이다.
@@ -173,6 +174,53 @@ class LabeledField extends StatelessWidget {
   );
 }
 
+class SettingsOverview extends StatelessWidget {
+  const SettingsOverview({
+    super.key,
+    required this.art,
+    required this.title,
+    this.detail,
+    this.centered = false,
+  });
+
+  final Widget art;
+  final String title;
+  final String? detail;
+  final bool centered;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final summary = Column(
+      crossAxisAlignment: centered ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(title, style: theme.textTheme.titleMedium, textAlign: centered ? TextAlign.center : null),
+        if (detail case final text?) ...[
+          const SizedBox(height: 4),
+          Text(
+            text,
+            style: theme.textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+            textAlign: centered ? TextAlign.center : null,
+          ),
+        ],
+      ],
+    );
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Color.alphaBlend(colors.primary.withValues(alpha: 0.08), colors.surface),
+        borderRadius: Look.cardCorners,
+        border: Border.all(color: colors.outlineVariant),
+      ),
+      child: centered
+          ? Column(children: [art, const SizedBox(height: 12), summary])
+          : Row(children: [art, const SizedBox(width: 14), Expanded(child: summary)]),
+    );
+  }
+}
+
 /// 설정 묶음 — 흐린 제목 하나와 둥근 판, 안의 줄 사이는 글자 시작점부터 선(design.md 「설정」).
 class SettingsGroup extends StatelessWidget {
   const SettingsGroup({super.key, this.title, required this.children, this.inset});
@@ -229,7 +277,8 @@ class SettingsGroup extends StatelessWidget {
 class SettingsRow extends StatelessWidget {
   const SettingsRow({
     super.key,
-    required this.icon,
+    this.icon,
+    this.mark,
     required this.title,
     this.subtitle,
     this.trailing,
@@ -242,7 +291,8 @@ class SettingsRow extends StatelessWidget {
     this.logo,
   });
 
-  final IconData icon;
+  final IconData? icon;
+  final SettingsGlyph? mark;
 
   /// 타일 안에 아이콘 대신 그릴 그림(공급자 로고). 크기는 아이콘과 같다.
   final Widget? logo;
@@ -276,7 +326,9 @@ class SettingsRow extends StatelessWidget {
               height: Look.tile,
               decoration: BoxDecoration(color: tileFill, borderRadius: Look.smallCorners),
               alignment: Alignment.center,
-              child: logo ?? Icon(icon, size: Look.iconSize, color: tileInk),
+              child: logo ?? (mark == null
+                  ? Icon(icon, size: Look.iconSize, color: tileInk)
+                  : SettingsMark(mark!, size: Look.iconSize, color: tileInk)),
             ),
             const SizedBox(width: 12),
             Expanded(
