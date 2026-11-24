@@ -100,10 +100,22 @@ class WeatherSettingsControls extends StatelessWidget {
       final glassOff = weather.reduceTransparency.value;
       return SliverList.list(
         children: [
-          const _Title('날씨'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Look.pagePad, 6, Look.pagePad, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Divider(height: 22),
+                Row(children: [
+                  const SettingsMark(SettingsGlyph.weather, size: 19),
+                  const SizedBox(width: 8),
+                  Text('날씨', style: Theme.of(context).textTheme.titleSmall),
+                ]),
+              ],
+            ),
+          ),
           WeatherToggle(
             title: const Text('날씨 켜기'),
-            secondary: const SettingsMark(SettingsGlyph.weather, size: 22),
             value: s.enabled,
             onChanged: (v) => set(s.copyWith(enabled: v)),
           ),
@@ -163,6 +175,7 @@ class WeatherSettingsControls extends StatelessWidget {
             _Title('어디에'),
             for (final t in WeatherTarget.values)
               ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
                 title: Text(t.label),
                 subtitle: t == WeatherTarget.focusedOnly
                     ? const Text('방금 만지거나 스크롤한 카드')
@@ -401,60 +414,106 @@ class WeatherPreview extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final work = settings.style == RainStyle.showers;
-    final sky = Color.alphaBlend(scheme.primary.withValues(alpha: 0.09), theme.scaffoldBackgroundColor);
-    final label = settings.enabled && work ? phase.label : '작업실';
-    final corners = BorderRadius.circular(cornerRadius);
-    final paneCorners = BorderRadius.circular(cornerRadius * 2 / 3);
-    final symbolSize = (height * .56).clamp(38.0, 104.0);
-    final sample = terminal ?? ColoredBox(
-      color: sky,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          Center(child: work
-              ? _conditionSymbol(settings.indicator(phase).weather, symbolSize, scheme.primary)
-              : _OpenUmbrella(size: symbolSize, color: scheme.primary)),
-          Positioned(top: 10, left: 12, right: 12, child: Row(children: [
-            Icon(Icons.terminal_outlined, size: 15, color: scheme.onSurfaceVariant),
-            const SizedBox(width: 7),
-            Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelMedium)),
-          ])),
-        ],
-      ),
+    final sky = Color.alphaBlend(
+      scheme.primary.withValues(alpha: 0.09),
+      theme.scaffoldBackgroundColor,
     );
-    final pane = work
-        ? WorkWeather(id: 'settings-weather-sample', phase: phase, doneUntilMs: 0,
-            radius: paneCorners, builder: (_) => sample)
-        : settings.target == WeatherTarget.backgroundOnly
-            ? (terminal ?? sample)
-            : WeatherCard(id: 'settings-liquid-sample', mood: Mood.busy, preview: true, child: sample);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Color.alphaBlend(scheme.primary.withValues(alpha: 0.15), theme.scaffoldBackgroundColor),
-        borderRadius: corners,
-        border: Border.all(color: accentOutline ? scheme.primary : scheme.outlineVariant),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(9),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(3, 2, 3, 8),
-            child: Row(children: [
-              SettingsMark(SettingsGlyph.weather, size: 16, color: scheme.primary),
-              const SizedBox(width: 7),
-              Expanded(child: Text('미리보기', style: theme.textTheme.labelLarge)),
-              ?action,
-            ]),
+    final label = settings.enabled && work ? phase.label : '작업실';
+    final paneCorners = BorderRadius.circular(cornerRadius);
+    final symbolSize = (height * .56).clamp(38.0, 104.0);
+    final sample =
+        terminal ??
+        ColoredBox(
+          color: sky,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Center(
+                child: work
+                    ? _conditionSymbol(
+                        settings.indicator(phase).weather,
+                        symbolSize,
+                        scheme.primary,
+                      )
+                    : _OpenUmbrella(size: symbolSize, color: scheme.primary),
+              ),
+              Positioned(
+                top: 10,
+                left: 12,
+                right: 12,
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.terminal_outlined,
+                      size: 15,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 7),
+                    Flexible(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelMedium,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-          ClipRRect(
-            borderRadius: paneCorners,
+        );
+    final pane = work
+        ? WorkWeather(
+            id: 'settings-weather-sample',
+            phase: phase,
+            doneUntilMs: 0,
+            radius: paneCorners,
+            builder: (_) => sample,
+          )
+        : settings.target == WeatherTarget.backgroundOnly
+        ? (terminal ?? sample)
+        : WeatherCard(
+            id: 'settings-liquid-sample',
+            mood: Mood.busy,
+            preview: true,
+            child: sample,
+          );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            SettingsMark(
+              SettingsGlyph.weather,
+              size: 16,
+              color: scheme.primary,
+            ),
+            const SizedBox(width: 7),
+            Expanded(child: Text('미리보기', style: theme.textTheme.labelLarge)),
+            ?action,
+          ],
+        ),
+        ClipRRect(
+          borderRadius: paneCorners,
+          child: DecoratedBox(
+            position: DecorationPosition.foreground,
+            decoration: BoxDecoration(
+              borderRadius: paneCorners,
+              border: Border.all(
+                color: accentOutline ? scheme.primary : scheme.outlineVariant,
+              ),
+            ),
             child: ColoredBox(
               color: sky,
-              child: SizedBox(height: height, child: WeatherScene(child: pane)),
+              child: SizedBox(
+                height: height,
+                child: WeatherScene(child: pane),
+              ),
             ),
           ),
-        ]),
-      ),
+        ),
+      ],
     );
   }
 }

@@ -1643,6 +1643,10 @@ pub(crate) fn settings_layer(base: [u8; 4]) -> SettingsLayer {
     SettingsLayer(SETTINGS_LAYER.with(|layer| layer.replace(Some(colors))))
 }
 
+pub(crate) fn in_settings_layer() -> bool {
+    SETTINGS_LAYER.with(|layer| layer.get().is_some())
+}
+
 pub(crate) fn without_settings_layer() -> SettingsLayer {
     SettingsLayer(SETTINGS_LAYER.with(|layer| layer.replace(None)))
 }

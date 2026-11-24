@@ -42,12 +42,12 @@ and show the same two characters:
 twin tails, a wink and a white dress. It is not an identity reference for new
 artwork.
 
-The app icon (`assets/AppIcon.icon`, see `docs/design.md` 「앱 아이콘」) is the
-outfit A Sky from the browser background, close up, with her clear umbrella, the
-raindrop pupil and a forceful wink: the eye on the viewer's left squeezed shut so
-its lid lines meet at the inner corner as a `>`, the wink-side corner of the mouth
-raised. It was generated from the browser background crop alone. Mixing in other
-references drifted the face away from the canon.
+The desktop app icon (`assets/AppIcon.icon`, see `docs/design.md` 「앱 아이콘」)
+shows Sky in outfit B, based on the personal site artwork. She holds a shallow
+sky-blue umbrella with a pale yellow underside and a teardrop charm. The
+terminal `>_` expression pairs a closed left eye and straight mouth with the
+reference-based open right eye. The crop frames the umbrella, face, hands and
+charm. The layer is transparent so the system can supply the tile background.
 
 ### Writing a prompt
 

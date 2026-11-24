@@ -15,11 +15,10 @@ class WeatherToggle extends StatelessWidget {
     required this.value,
     required this.onChanged,
     this.subtitle,
-    this.secondary,
   });
 
   final Widget title;
-  final Widget? subtitle, secondary;
+  final Widget? subtitle;
   final bool value;
   final ValueChanged<bool> onChanged;
 
@@ -30,10 +29,10 @@ class WeatherToggle extends StatelessWidget {
     return SwitchListTile(
       title: title,
       subtitle: subtitle,
-      secondary: secondary,
       value: value,
       onChanged: onChanged,
       minTileHeight: 48,
+      contentPadding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
       activeTrackColor: colors.primary,
       inactiveTrackColor: idle,
       activeThumbColor: Colors.white,

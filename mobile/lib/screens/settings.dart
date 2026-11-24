@@ -127,27 +127,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _loadProfile();
   }
 
-  Widget _pageOf(_Page page) => switch (page) {
-    _Page.look => LookSettingsScreen(server: server),
-    _Page.account => AccountSettingsScreen(
-      api: _api!,
-      providers: _providers,
-      profile: _profile,
-      installId: widget.installId,
-      onProfile: (p) {
-        if (mounted) setState(() => _profile = p);
-      },
-    ),
-    _Page.agents => ClaudeAccountsScreen(server: server),
-    _Page.characters => CharacterPicksScreen(server: server, api: _api!),
-    _Page.devices => DeviceSettingsScreen(server: server, api: _api),
-  };
+  Widget _pageOf(BuildContext context, _Page page) => Theme(
+    data: settingsControlsTheme(Theme.of(context)),
+    child: switch (page) {
+      _Page.look => LookSettingsScreen(server: server),
+      _Page.account => AccountSettingsScreen(
+        api: _api!,
+        providers: _providers,
+        profile: _profile,
+        installId: widget.installId,
+        onProfile: (p) {
+          if (mounted) setState(() => _profile = p);
+        },
+      ),
+      _Page.agents => ClaudeAccountsScreen(server: server),
+      _Page.characters => CharacterPicksScreen(server: server, api: _api!),
+      _Page.devices => DeviceSettingsScreen(server: server, api: _api),
+    },
+  );
 
   void _go(_Page page) {
     if (_split) {
       setState(() => _selected = page);
     } else {
-      unawaited(Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => _pageOf(page))));
+      unawaited(Navigator.of(context).push(MaterialPageRoute<void>(builder: (context) => _pageOf(context, page))));
     }
   }
 
@@ -167,6 +170,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     subtitle: subtitle,
     chevron: !_split,
     selected: _split && _selected == page,
+    flat: true,
     onTap: () => _go(page),
   );
 
@@ -303,7 +307,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             constraints: const BoxConstraints(maxWidth: settingsPageMaxWidth + 2 * Look.pagePad),
             child: Navigator(
               key: ValueKey(_selected),
-              onGenerateRoute: (_) => MaterialPageRoute<void>(builder: (_) => _pageOf(_selected)),
+              onGenerateRoute: (_) => MaterialPageRoute<void>(builder: (context) => _pageOf(context, _selected)),
             ),
           ),
         ),
@@ -312,6 +316,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   );
 
   Widget _list() {
+    return Theme(
+      data: settingsControlsTheme(Theme.of(context)),
+      child: _settingsList(),
+    );
+  }
+
+  Widget _settingsList() {
     final account = server.account;
     return TwinBackdrop(
       child: Scaffold(
@@ -326,13 +337,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               api: _api,
               onTap: _api != null && _profile != null ? () => unawaited(_editProfile()) : null,
             ),
-            SettingsGroup(key: const Key('group-screen'), title: '화면', children: [_lookRow()]),
-            SettingsGroup(key: const Key('group-agent'), title: '에이전트', children: _agentRows(1)),
-            SettingsGroup(key: const Key('group-connection'), title: '계정·기기', children: _connectionRows(0)),
-            SettingsGroup(key: const Key('group-app'), title: '앱', children: _appRows(1)),
+            SettingsGroup(flat: true, key: const Key('group-screen'), title: '화면', children: [_lookRow()]),
+            SettingsGroup(flat: true, key: const Key('group-agent'), title: '에이전트', children: _agentRows(1)),
+            SettingsGroup(flat: true, key: const Key('group-connection'), title: '계정·기기', children: _connectionRows(0)),
+            SettingsGroup(flat: true, key: const Key('group-app'), title: '앱', children: _appRows(1)),
             SettingsGroup(
+              flat: true,
               children: [
                 SettingsRow(
+                  flat: true,
                   danger: true,
                   icon: Icons.logout_rounded,
                   title: account == null ? '주소 바꾸기 · 지우기' : '로그아웃',

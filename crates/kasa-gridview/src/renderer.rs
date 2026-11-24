@@ -685,7 +685,7 @@ impl GridRenderer {
         });
     }
 
-    pub fn color_picker(&mut self, rect: (f32, f32, f32, f32), hue: f32, hue_strip: bool) {
+    pub fn color_picker(&mut self, rect: (f32, f32, f32, f32), hue: f32, hue_strip: bool, radius: f32) {
         let (x, y, w, h) = rect;
         if w <= 0.0 || h <= 0.0 { return; }
         let s = self.scale;
@@ -693,7 +693,9 @@ impl GridRenderer {
             cell_px: [x * s, y * s, w * s, h * s],
             uv_min: [0.0, 0.0], uv_max: [1.0, 1.0],
             fg_rgba: [hue.rem_euclid(360.0) / 360.0, 0.0, 0.0, 1.0],
-            flags: CellInstance::FLAG_COLOR_PICKER | if hue_strip { CellInstance::FLAG_PICKER_HUE } else { 0 },
+            flags: CellInstance::FLAG_COLOR_PICKER
+                | (CellInstance::rounded_rect_flags(radius * s, 0.0) & !255)
+                | if hue_strip { CellInstance::FLAG_PICKER_HUE } else { 0 },
             ..Default::default()
         });
     }

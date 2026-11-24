@@ -36,24 +36,26 @@ pub(super) fn paint_palette_strip(
         let colors = palette.surface_colors();
         let selected = s.theme == key;
         let hover = contains(rect, s.cursor);
-        let radius = theme::radius_md();
-        round_rect(g, rect.0, rect.1, rect.2, rect.3, radius,
-            if selected { theme::lerp(theme::surface(), theme::accent(), 0.12) } else { theme::surface_hover() });
-        let preview = (rect.0 + 8.0, rect.1 + 8.0, (rect.2 - 16.0).max(0.0), 54.0);
-        round_rect(g, preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), colors.sidebar);
-        let win = (preview.0 + preview.2 * 0.17, preview.1 + 9.0, preview.2 * 0.69, 36.0);
-        round_rect(g, win.0, win.1, win.2, win.3, theme::radius_sm().min(6.0), colors.pane);
-        for (line, portion) in [0.64, 0.42, 0.51].into_iter().enumerate() {
-            g.rect(win.0 + 8.0, win.1 + 10.0 + line as f32 * 7.0, (win.2 - 16.0).max(0.0) * portion, 2.0, palette.text_dim);
+        let preview = (rect.0, rect.1, rect.2, 58.0);
+        let radius = crate::native_controls::capsule_radius(preview);
+        round_rect(g, preview.0, preview.1, preview.2, preview.3, radius, colors.sidebar);
+        let line_w = (preview.2 - 44.0).max(0.0).min(84.0);
+        for (line, portion) in [1.0, 0.63, 0.82].into_iter().enumerate() {
+            let ink = if line == 0 { palette.fg } else { palette.text_dim };
+            round_rect(g, preview.0 + 22.0, preview.1 + 17.0 + line as f32 * 9.0, line_w * portion, 3.0, 1.5, ink);
         }
-        let label = fit(g, label, (rect.2 - 32.0).max(0.0), 12.0, selected);
-        draw_text(g, rect.0 + 12.0, rect.1 + 74.0, &label, 12.0, theme::text(), selected);
+        stroke_round(g, preview, radius, if selected {
+            theme::accent()
+        } else if hover {
+            theme::text_dim()
+        } else {
+            theme::edge_on(colors.sidebar)
+        });
+        let label = fit(g, label, (rect.2 - 24.0).max(0.0), 12.0, selected);
+        draw_text(g, rect.0 + 5.0, rect.1 + 68.0, &label, 12.0, theme::text(), selected);
         if selected {
-            g.queue_icon("check", rect.0 + rect.2 - 24.0, rect.1 + 73.0, 14.0,
-                theme::enforce_contrast_at(theme::accent(), theme::surface(), 4.5));
-        }
-        if selected || hover {
-            stroke_round(g, rect, radius, if selected { theme::accent() } else { theme::edge_on(theme::surface_hover()) });
+            g.queue_icon("check", rect.0 + rect.2 - 20.0, rect.1 + 66.0, 14.0,
+                theme::enforce_contrast_at(theme::accent(), theme::bg(), 4.5));
         }
         register_clipped(g, hits, Target::Setting(SettingsAction::ThemeMode(key.into())), rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
@@ -61,38 +63,52 @@ pub(super) fn paint_palette_strip(
     height
 }
 
-pub(super) fn paint_accents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: f32, w: f32) -> f32 {
-    let inset = 8.0;
-    let gap = 4.0;
-    let inner_w = (w - inset * 2.0).max(0.0);
+pub(super) fn paint_accents(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: f32,
+    w: f32,
+) -> f32 {
+    draw_text(g, x, y, "강조색", 13.0, theme::text(), true);
+
+    let change = "색 고르기";
+    let change_w = crate::native_controls::button_width(g, &crate::native_strings::text(change), CTL_H, false);
     let count = theme::ACCENT_PRESETS.len();
-    let columns = (((inner_w + gap) / 64.0).floor() as usize).clamp(1, count);
-    let cell_w = ((inner_w - (columns - 1) as f32 * gap) / columns as f32).min(72.0);
-    let rows = count.div_ceil(columns);
-    let height = rows as f32 * 64.0 + inset * 2.0;
-    let tray = (x, y, columns as f32 * cell_w + (columns - 1) as f32 * gap + inset * 2.0, height);
-    let surface = theme::surface();
-    round_rect(g, tray.0, tray.1, tray.2, tray.3, theme::radius_md(), surface);
-    stroke_round(g, tray, theme::radius_md(), theme::edge_on(surface));
+    let cell_w = 56.0;
+    let columns = ((w / cell_w) as usize).clamp(1, count);
+    let top = y + 23.0;
+    let row_h = 57.0;
     for (i, (name, color)) in theme::ACCENT_PRESETS.iter().enumerate() {
-        let rect = (x + inset + (i % columns) as f32 * (cell_w + gap), y + inset + (i / columns) as f32 * 64.0, cell_w, 58.0);
+        let rect = (x + (i % columns) as f32 * cell_w, top + (i / columns) as f32 * row_h, cell_w.min(w), row_h);
         let hot = contains(rect, s.cursor);
         let selected = s.accent == *name;
-        let cx = rect.0 + (cell_w - 36.0) * 0.5;
-        circle_rect(g, cx, rect.1, 36.0, *color);
+        let (cx, cy) = (rect.0 + 3.0, rect.1 + 4.0);
+        round_rect(g, cx, cy, 36.0, 36.0, 18.0, *color);
         if selected {
-            g.queue_icon("check", cx + 10.0, rect.1 + 10.0, 16.0, theme::foreground_on(*color));
+            g.queue_icon("check", cx + 10.0, cy + 10.0, 16.0, theme::foreground_on(*color));
         }
         if selected || hot {
-            stroke_round(g, (cx - 3.0, rect.1 - 3.0, 42.0, 42.0), 21.0 * theme::roundness(), theme::enforce_contrast_at(*color, theme::surface(), 3.0));
+            stroke_round(g, (cx - 3.0, cy - 3.0, 42.0, 42.0), 21.0,
+                theme::enforce_contrast_at(*color, theme::bg(), 3.0));
         }
         let label = preset_label(name);
         let width = g.measure_chrome_text(label, 10.5, false);
-        draw_text(g, rect.0 + (cell_w - width) * 0.5, rect.1 + 44.0, label, 10.5, theme::text_dim(), false);
+        draw_text(g, cx + (36.0 - width) * 0.5, rect.1 + 43.0, label, 10.5, theme::text_dim(), false);
         register_clipped(g, hits, Target::AccentPreset(name), rect, HitCursor::Pointer);
         g.hover_pointer |= hot;
     }
-    height
+    let row_count = count.div_ceil(columns);
+    let used = ((count - 1) % columns + 1) as f32 * cell_w;
+    let inline = used + change_w <= w;
+    let button_x = if inline { x + used } else { x };
+    let button_y = if inline { top + (row_count - 1) as f32 * row_h + 6.0 }
+        else { top + row_count as f32 * row_h };
+    if s.input != Some(SettingsInput::AccentHex) {
+        button(g, s, hits, (button_x, button_y, w.min(change_w), CTL_H), change, Target::OpenAccentPicker, false);
+    }
+    top - y + row_count as f32 * row_h + if inline || s.input == Some(SettingsInput::AccentHex) { 8.0 } else { CTL_H + 8.0 }
 }
 
 pub(super) fn accent_column(width: f32) -> Option<f32> {
@@ -116,7 +132,7 @@ pub(super) fn paint(
     if !accent { return pane_height; }
     let (panel_x, panel_y, panel_w) = side.map_or((x, y + pane_height + 10.0, w),
         |column| (x + pane_width + 16.0, y, column));
-    draw_text(g, panel_x, panel_y + 8.0, "강조색", 12.0, theme::text(), true);
+    draw_text(g, panel_x, panel_y + 8.0, "강조색 조정", 12.0, theme::text(), true);
     let picker_end = panel_y + CTL_H + 8.0 + paint_color_picker(
         g, s, hits, caret, panel_x, panel_y + CTL_H + 8.0, panel_w,
         SettingsInput::AccentHex, "강조색", &s.palette_edit,
@@ -139,7 +155,7 @@ fn paint_shell(
     let target = if shell.running { Target::ClosePreviewShell } else { Target::PreviewShell };
     let width = crate::native_controls::button_width(g, &crate::native_strings::text(label), CTL_H, false);
     button(g, s, hits, (x + (w - width).max(0.0), y, width.min(w), CTL_H), label, target, false);
-    let shown = fit(g, "터미널 미리보기", (w - width - 14.0).max(0.0), 12.0, true);
+    let shown = fit(g, "미리보기", (w - width - 14.0).max(0.0), 12.0, true);
     draw_text(g, x, y + 8.0, &shown, 12.0, theme::text(), true);
     let top = y + CTL_H + 8.0;
     let pane = (x, top, w, height);
@@ -197,7 +213,6 @@ fn paint_shell(
     let controls = [
         ("터미널 바탕", Target::Setting(SettingsAction::FocusPaletteHex(27)), s.input == Some(SettingsInput::PaletteHex(27))),
         ("터미널 글자", Target::Setting(SettingsAction::FocusPaletteHex(1)), s.input == Some(SettingsInput::PaletteHex(1))),
-        ("색 고르기", Target::OpenAccentPicker, s.input == Some(SettingsInput::AccentHex)),
     ];
     let buttons = button_row(g, s, hits, (x, top + height + 10.0, w, 0.0), &controls, crate::native_layout::Align::Start);
     CTL_H + 8.0 + height + 10.0 + buttons

@@ -180,7 +180,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let value = select(1.0 - in.uv.y, 1.0, hue_strip);
         let channels = abs(fract(vec3<f32>(hue) + vec3<f32>(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
         let rgb = value * mix(vec3<f32>(1.0), clamp(channels - 1.0, vec3<f32>(0.0), vec3<f32>(1.0)), saturation);
-        return vec4<f32>(prepare_output(rgb), 1.0);
+        let half = 0.5 / max(duv, vec2<f32>(0.00001));
+        let radius = min(f32((in.flags >> 8u) & 1023u) * 0.5, min(half.x, half.y));
+        let point = (in.uv * 2.0 - 1.0) * half;
+        let alpha = clamp(0.5 - rounded_distance(point, half, radius), 0.0, 1.0);
+        return vec4<f32>(prepare_output(rgb), alpha);
     }
     // 테두리(flags & 4 한 바퀴 · flags & 8 점선): 쿼드 전체가 둥근 사각 윤곽 하나다. uv 가 -1..1 이라
     // 1/fwidth(uv) 가 쿼드의 장치 px 반폭·반높이이고, 거기서 둥근 사각까지의 거리 d 와 윤곽 위 자리 s(왼쪽 위

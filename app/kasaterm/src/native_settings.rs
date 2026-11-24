@@ -2871,7 +2871,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 rect.1,
                 rect.2,
                 rect.3,
-                ctrl_radius(),
+                crate::native_controls::capsule_radius(rect),
                 if selected {
                     theme::lerp(theme::surface(), theme::accent(), 0.18)
                 } else {
@@ -2879,7 +2879,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 },
             );
             if selected {
-                g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, ctrl_radius(), 1.0,
+                g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, crate::native_controls::capsule_radius(rect), 1.0,
                     theme::with_alpha(theme::accent(), 150));
             }
         }
@@ -2928,7 +2928,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             close.1,
             close.2,
             close.3,
-            ctrl_radius(),
+            crate::native_controls::capsule_radius(close),
             theme::surface_hover(),
         );
     }
@@ -3008,10 +3008,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             }
             if !crate::lite_mode() {
                 let weather_top = y;
-                appearance_section(g, x, &mut y, w, SettingsCat::Weather);
+                appearance_section(g, x, &mut y, SettingsCat::Weather);
                 paint_weather(g, snapshot, &mut hits, x, &mut y, w);
                 let statusbar_top = y;
-                appearance_section(g, x, &mut y, w, SettingsCat::Statusbar);
+                appearance_section(g, x, &mut y, SettingsCat::Statusbar);
                 paint_statusbar(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
                 appearance_scroll = match snapshot.appearance_jump {
                     Some(SettingsCat::Weather) => Some(weather_top + snapshot.scroll - body_top),
@@ -3411,10 +3411,9 @@ fn paint_general(
     *y += 8.0;
 }
 
-fn appearance_section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, section: SettingsCat) {
+fn appearance_section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, section: SettingsCat) {
     let (title, icon, _) = category_meta(section);
     *y += 10.0;
-    g.rect(x, *y, w, 1.0, theme::border());
     g.queue_icon(icon, x, *y + 13.0, 18.0, theme::accent());
     draw_text(g, x + 27.0, *y + 14.0, title, 14.0, theme::text(), true);
     *y += 44.0;
@@ -3430,7 +3429,6 @@ fn paint_appearance(
     w: f32,
 ) {
     paint_palette_editor(g, s, hits, caret, x, y, w);
-    row_label(g, x, y, "강조색");
     *y += appearance_preview::paint_accents(g, s, hits, x, *y, w);
     if !crate::lite_mode() {
         let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
@@ -3950,12 +3948,12 @@ fn paint_palette_slots(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hi
         let color = theme::parse_hex(hex).map(|rgb| [rgb[0], rgb[1], rgb[2], 255]).unwrap_or(theme::bg());
         let swatch = (rect.0 + 5.0, rect.1 + 5.0, 16.0, 16.0);
         round_rect(
-            g, swatch.0, swatch.1, swatch.2, swatch.3, theme::radius_sm(), color,
+            g, swatch.0, swatch.1, swatch.2, swatch.3, 8.0, color,
         );
-        stroke_round(g, swatch, theme::radius_sm(), theme::edge_on(color));
+        stroke_round(g, swatch, 8.0, theme::edge_on(color));
         let hot = contains(rect, s.cursor);
         stroke_round(
-            g, rect, theme::radius_sm(),
+            g, rect, crate::native_controls::capsule_radius(rect),
             if selected == Some(index) { theme::accent() } else if hot { theme::text_dim() } else { theme::border() },
         );
         let label = fit(g, &theme::palette_slot_label(index), (slot_w - 32.0).max(0.0), 10.5, false);
@@ -3988,18 +3986,13 @@ fn color_picker_layout(x: f32, y: f32, w: f32) -> ColorPickerLayout {
     ColorPickerLayout { sv, hue, preview, eyedropper, height: if stacked { 250.0 } else { 186.0 } }
 }
 
-const ACCENT_PICKER_WELL_HEIGHT: f32 = 192.0;
-const PICKER_WELL_INSET: f32 = 10.0;
-
 fn accent_picker_layout(x: f32, y: f32, w: f32, has_eyedropper: bool) -> ColorPickerLayout {
-    let inner_x = x + PICKER_WELL_INSET;
-    let inner_w = (w - PICKER_WELL_INSET * 2.0).max(0.0);
     ColorPickerLayout {
-        sv: (inner_x, y + 28.0, inner_w, 92.0),
-        hue: (inner_x, y + 130.0, inner_w, 14.0),
-        preview: (inner_x, y + 161.0, 20.0, 20.0),
-        eyedropper: (x, y + ACCENT_PICKER_WELL_HEIGHT + 8.0, w.min(152.0), CTL_H),
-        height: ACCENT_PICKER_WELL_HEIGHT + if has_eyedropper { CTL_H + 16.0 } else { 6.0 },
+        sv: (x, y + 20.0, w, 90.0),
+        hue: (x, y + 120.0, w, 16.0),
+        preview: (x, y + 151.0, 20.0, 20.0),
+        eyedropper: (x, y + 180.0, w.min(152.0), CTL_H),
+        height: if has_eyedropper { 180.0 + CTL_H } else { 182.0 },
     }
 }
 
@@ -4030,27 +4023,18 @@ fn paint_color_picker(
         crate::settings::rgb_to_hsv(theme::parse_hex(value).unwrap_or([0, 0, 0]))
     };
     let accent = field == SettingsInput::AccentHex;
-    let (layout, well_height) = if accent {
-        (accent_picker_layout(x, y, w, eyedropper.is_some()), ACCENT_PICKER_WELL_HEIGHT)
+    let layout = if accent {
+        accent_picker_layout(x, y, w, eyedropper.is_some())
     } else {
-        let mut layout = color_picker_layout(
-            x + PICKER_WELL_INSET, y + PICKER_WELL_INSET, (w - PICKER_WELL_INSET * 2.0).max(0.0),
-        );
-        layout.height += PICKER_WELL_INSET * 2.0;
-        (layout, layout.height)
+        color_picker_layout(x, y, w)
     };
-    let well = (x, y, w, well_height);
-    let surface = theme::surface();
-    round_rect(g, well.0, well.1, well.2, well.3, theme::radius_md(), surface);
-    stroke_round(g, well, theme::radius_md(), theme::edge_on(surface));
     if accent {
-        let label = fit(g, "밝기와 채도", (layout.sv.2 - 5.0).max(0.0), 11.0, false);
-        draw_text(g, layout.sv.0, y + 9.0, &label, 11.0, theme::text_dim(), false);
-        g.rect(layout.sv.0, layout.preview.1 - 8.0, layout.sv.2, 1.0, theme::border());
+        let label = fit(g, "밝기와 채도", layout.sv.2.max(0.0), 11.0, false);
+        draw_text(g, x, y, &label, 11.0, theme::text_dim(), false);
     }
     let sv = layout.sv;
-    g.color_picker(sv, hue, false);
-    stroke_rect(g, sv, theme::border());
+    g.color_picker(sv, hue, false, 18.0);
+    stroke_round(g, sv, 18.0, theme::with_alpha(theme::text(), 55));
     let marker_x = sv.0 + sat * sv.2;
     let marker_y = sv.1 + (1.0 - val) * sv.3;
     if accent && sv.2 >= 12.0 {
@@ -4070,8 +4054,7 @@ fn paint_color_picker(
     );
 
     let hue_rect = layout.hue;
-    g.color_picker(hue_rect, hue, true);
-    stroke_rect(g, hue_rect, theme::border());
+    g.color_picker(hue_rect, hue, true, hue_rect.3 * 0.5);
     let hue_x = hue_rect.0 + (hue / 360.0) * hue_rect.2;
     if accent && hue_rect.2 >= 14.0 {
         let marker_x = hue_x.clamp(hue_rect.0 + 7.0, hue_rect.0 + hue_rect.2 - 7.0) - 7.0;
@@ -4097,13 +4080,13 @@ fn paint_color_picker(
             (color, "미리보기"),
         ].into_iter().enumerate() {
             let at = preview.0 + index as f32 * layout.sv.2.min(240.0) * 0.5;
-            round_rect(g, at, preview.1, 20.0, 20.0, 5.0, sample);
-            stroke_round(g, (at, preview.1, 20.0, 20.0), 5.0, theme::border());
+            round_rect(g, at, preview.1, 20.0, 20.0, 10.0, sample);
+            stroke_round(g, (at, preview.1, 20.0, 20.0), 10.0, theme::edge_on(sample));
             draw_text(g, at + 27.0, preview.1 + 4.0, label, 11.0, theme::text_dim(), false);
         }
     } else {
-        round_rect(g, preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), color);
-        g.round_rect_stroke(preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), 1.0, theme::border());
+        round_rect(g, preview.0, preview.1, preview.2, preview.3, crate::native_controls::capsule_radius(preview), color);
+        g.round_rect_stroke(preview.0, preview.1, preview.2, preview.3, crate::native_controls::capsule_radius(preview), 1.0, theme::border());
         if preview.2 > 100.0 {
             let label = fit(g, slot_label, preview.2 - 16.0, 12.0, true);
             g.centered_chrome_text(preview, &label, gpu::DrawOpts {
@@ -4784,29 +4767,13 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     };
 
     use wm::RainStyle;
-    let panel = theme::lerp(theme::bg(), theme::text(), 0.045);
     let work = ws.style == RainStyle::Showers;
     let modes = [
         ("리퀴드 비", !work, act(Change::Style(RainStyle::Liquid))),
         ("작업 날씨", work, act(Change::Style(RainStyle::Showers))),
     ];
-    let setup_wide = w >= 550.0;
-    let setup_h = if setup_wide { 64.0 } else { 108.0 };
-    round_rect(g, x, *y, w, setup_h, ctrl_radius(), panel);
-    {
-        let _panel = theme::settings_layer(panel);
-        let mut row_y = *y + 8.0;
-        if setup_wide {
-            let left = (w - 310.0).min(216.0);
-            toggle_row(g, s, hits, x + 10.0, &mut row_y, left, "날씨 켜기", ws.enabled, act(Change::Enabled(!ws.enabled)));
-            row_y = *y + 8.0;
-            seg_row(g, s, hits, x + left + 30.0, &mut row_y, w - left - 44.0, "날씨 표현", &modes);
-        } else {
-            toggle_row(g, s, hits, x + 10.0, &mut row_y, w - 20.0, "날씨 켜기", ws.enabled, act(Change::Enabled(!ws.enabled)));
-            segmented(g, s, hits, x + 12.0, row_y + 8.0, w - 24.0, &modes);
-        }
-    }
-    *y += setup_h;
+    toggle_row(g, s, hits, x, y, w, "날씨 켜기", ws.enabled, act(Change::Enabled(!ws.enabled)));
+    seg_row(g, s, hits, x, y, w, "날씨 표현", &modes);
     let os_off = !ws.ignore_os && ws.enabled && (s.weather_os.reduce_transparency || s.weather_os.reduce_motion);
     if os_off {
         *y += 8.0;
@@ -4832,38 +4799,26 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     }
     *y += 18.0;
 
-    let grouped = w >= 420.0;
-    if grouped {
-        round_rect(g, x, *y, w, ROW_H * 3.0 + 42.0, ctrl_radius(), panel);
+    draw_text(g, x, *y, "효과 조절", 12.0, theme::text_dim(), true);
+    *y += 24.0;
+    if work {
+        let levels = ["없음", "약하게", "보통", "강하게"];
+        let cells: Vec<_> = RainAmount::ALL.iter().map(|&a| (levels[a.index()], a == ws.amount, act(Change::Amount(a)))).collect();
+        seg_row(g, s, hits, x, y, w, "효과 강도", &cells);
+    } else {
+        seg_row(g, s, hits, x, y, w, "비 양", &amounts(ws.amount, &|a| Change::Amount(a)));
     }
-    {
-        let _panel = theme::settings_layer(if grouped { panel } else { theme::bg() });
-        let pad = if grouped { 10.0 } else { 0.0 };
-        let x = x + pad;
-        let w = w - 2.0 * pad;
-        draw_text(g, x + 10.0, *y + 11.0, "효과 조절", 12.0, theme::text_dim(), true);
-        *y += 30.0;
-        if work {
-            let levels = ["없음", "약하게", "보통", "강하게"];
-            let cells: Vec<_> = RainAmount::ALL.iter().map(|&a| (levels[a.index()], a == ws.amount, act(Change::Amount(a)))).collect();
-            seg_row(g, s, hits, x, y, w, "효과 강도", &cells);
-        } else {
-            seg_row(g, s, hits, x, y, w, "비 양", &amounts(ws.amount, &|a| Change::Amount(a)));
-        }
-        let dir = wm::quarters(ws.wind_dir);
-        let dir_text = match dir {
-            0 => crate::native_strings::text("없음").into_owned(),
-            d if d < 0 => format!("{} {:.2}", crate::native_strings::text("왼쪽"), -d as f32 / 4.0),
-            d => format!("{} {:.2}", crate::native_strings::text("오른쪽"), d as f32 / 4.0),
-        };
-        stepper_row(g, s, hits, x, y, w, "바람 방향", &dir_text,
-            act(Change::WindDir((dir - 1).max(-4))), act(Change::WindDir((dir + 1).min(4))));
-        let strength = (ws.wind_strength * 4.0).round() as u8;
-        stepper_row(g, s, hits, x, y, w, "바람 세기", &format!("{}%", strength as u32 * 25),
-            act(Change::WindStrength(strength.saturating_sub(1))), act(Change::WindStrength((strength + 1).min(4))));
-
-        if grouped { *y += 12.0; }
-    }
+    let dir = wm::quarters(ws.wind_dir);
+    let dir_text = match dir {
+        0 => crate::native_strings::text("없음").into_owned(),
+        d if d < 0 => format!("{} {:.2}", crate::native_strings::text("왼쪽"), -d as f32 / 4.0),
+        d => format!("{} {:.2}", crate::native_strings::text("오른쪽"), d as f32 / 4.0),
+    };
+    stepper_row(g, s, hits, x, y, w, "바람 방향", &dir_text,
+        act(Change::WindDir((dir - 1).max(-4))), act(Change::WindDir((dir + 1).min(4))));
+    let strength = (ws.wind_strength * 4.0).round() as u8;
+    stepper_row(g, s, hits, x, y, w, "바람 세기", &format!("{}%", strength as u32 * 25),
+        act(Change::WindStrength(strength.saturating_sub(1))), act(Change::WindStrength((strength + 1).min(4))));
 
     if ws.style == RainStyle::Liquid {
         *y += 8.0;
@@ -6805,7 +6760,7 @@ fn section_title(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, _desc: &
 /// 돌려주는 값은 행 사각형.
 fn flat_row(g:&mut gpu::GpuRenderer,x:f32,y:f32,w:f32,label:&str,hint:&str,text_w:f32)->Rect {
     let rect=(x,y,w,ROW_H);
-    let inset=crate::native_controls::CONTROL_PADDING_X;
+    let inset = if theme::in_settings_layer() { 0.0 } else { crate::native_controls::CONTROL_PADDING_X };
     let label=fit(g,label,(text_w-inset).max(0.0),13.0,false);
     if hint.is_empty() {
         let m=g.chrome_text_metrics(&label,13.0,false);
@@ -6833,14 +6788,14 @@ fn seg_row(
 ) {
     let label_w = g.measure_chrome_text(&crate::native_strings::text(label), 13.0, false)
         + crate::native_controls::CONTROL_PADDING_X + 1.0;
-    let controls_w = if cells.iter().any(|(_, _, action)| matches!(action, SettingsAction::Weather(_))) {
+    let weather = cells.iter().any(|(_, _, action)| matches!(action, SettingsAction::Weather(_)));
+    let controls_w = if weather {
         cells.iter().map(|&(label, on, ref action)| weather_choice_width(g, label, on, action)).sum::<f32>()
-            + WEATHER_CHOICE_GAP * cells.len().saturating_sub(1) as f32
     } else {
         cells.iter().map(|(label, active, _)| {
             g.measure_chrome_text(&crate::native_strings::text(label), 13.0, *active) + 20.0
-        }).sum::<f32>() + 4.0
-    };
+        }).sum::<f32>()
+    } + WEATHER_CHOICE_GAP * cells.len().saturating_sub(1) as f32;
     let stacked = label_w + controls_w + 13.0 > w;
     if stacked {
         row_label(g, x, y, label);
@@ -6848,7 +6803,7 @@ fn seg_row(
         *y += CTL_H + 10.0;
     } else {
         flat_row(g, x, *y, w, label, "", label_w);
-        let control_x = x + label_w + 13.0;
+        let control_x = x + w - controls_w;
         segmented(g, s, hits, control_x, *y + (ROW_H - CTL_H) / 2.0, x + w - control_x, cells);
         *y += ROW_H;
     }
@@ -6860,7 +6815,7 @@ fn seg_row(
 /// 칩·카드 묶음 위의 이름. 바로 위 행의 밑줄에 글자가 붙지 않게 10 을 띄운다.
 fn row_label(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, label: &str) {
     *y += 10.0;
-    draw_text(g, x + crate::native_controls::CONTROL_PADDING_X, *y, label, 13.0, theme::text_dim(), false);
+    draw_text(g, x, *y, label, 13.0, theme::text_dim(), false);
     *y += 20.0;
 }
 
@@ -6895,8 +6850,8 @@ fn toggle_row_hint(
     on: bool,
     action: SettingsAction,
 ) {
-    let inset=crate::native_controls::CONTROL_PADDING_X;
-    let text_w=(w-44.0-inset*2.0).max(1.0);
+    let inset = if theme::in_settings_layer() { 0.0 } else { crate::native_controls::CONTROL_PADDING_X };
+    let text_w=(w - 56.0 - inset * 2.0).max(1.0);
     let labels=wrap_text(g,&crate::native_strings::text(label),text_w,13.0);
     let hints=if hint.is_empty(){Vec::new()}else{wrap_text(g,&crate::native_strings::text(hint),text_w,11.0)};
     let text_h=labels.len() as f32*20.0+hints.len() as f32*18.0;
@@ -6906,21 +6861,13 @@ fn toggle_row_hint(
     for(i,(line,_))in hints.iter().enumerate(){draw_text(g,x+inset,ty+labels.len() as f32*20.0+i as f32*18.0,line,11.0,theme::text_dim(),false);}
     g.rect(x+inset,*y+height-1.0,(w-inset*2.0).max(0.0),1.0,theme::with_alpha(theme::border(),45));
     let hover = contains(rect, s.cursor);
-    if matches!(&action, SettingsAction::Weather(_)) {
-        let toggle = (x + w - inset - 44.0, *y + (height - 26.0) / 2.0, 44.0, 26.0);
-        let fill = if on { theme::accent() } else { theme::lerp(theme::bg(), theme::text(), 0.18) };
-        pill_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, fill);
-        let diameter = if on { 20.0 } else { 13.0 };
-        let inset = (toggle.3 - diameter) / 2.0;
-        let thumb_x = if on { toggle.2 - diameter - inset } else { inset };
-        circle_rect(g, toggle.0 + thumb_x, toggle.1 + inset, diameter, [255; 4]);
-    } else {
-        let toggle = (x+w-inset-40.0,*y+(height-22.0)/2.0,40.0,22.0);
-        let fill = if on {theme::accent()} else if hover {theme::surface_active()} else {theme::surface_hover()};
-        pill_rect(g,toggle.0,toggle.1,toggle.2,toggle.3,fill);
-        stroke_round(g,toggle,11.0*theme::roundness(),theme::with_alpha(theme::edge_on(fill),100));
-        circle_rect(g,toggle.0+if on{21.0}else{3.0},toggle.1+3.0,16.0,theme::control_knob(fill));
-    }
+    let toggle = (x + w - inset - 44.0, *y + (height - 26.0) / 2.0, 44.0, 26.0);
+    let fill = if on { theme::accent() } else { theme::lerp(theme::bg(), theme::text(), 0.18) };
+    round_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, 13.0, fill);
+    let diameter = if on { 20.0 } else { 14.0 };
+    let pad = (toggle.3 - diameter) / 2.0;
+    let thumb_x = if on { toggle.2 - diameter - pad } else { pad };
+    round_rect(g, toggle.0 + thumb_x, toggle.1 + pad, diameter, diameter, diameter / 2.0, theme::control_knob(fill));
     register_clipped(g,hits,Target::Setting(action),rect,HitCursor::Pointer);g.hover_pointer|=hover;*y+=height;
 }
 
@@ -6981,8 +6928,8 @@ fn weather_choices(
             weather_control_fill()
         };
         let ink = theme::enforce_contrast_at(if *selected { theme::accent() } else { theme::text_dim() }, fill, 4.5);
-        let radius = width.min(h) * 0.5 * theme::roundness();
-        pill_rect(g, left, y, width, h, fill);
+        let radius = crate::native_controls::capsule_radius(rect);
+        round_rect(g, left, y, width, h, radius, fill);
         if *selected {
             stroke_round(g, rect, radius, theme::with_alpha(theme::accent(), 122));
         }
@@ -7017,30 +6964,32 @@ fn segmented(
         weather_choices(g, s, hits, (x, y, w, CTL_H), cells);
         return;
     }
-    // 목업(플랫): 칸 너비는 글자에 맞추고 상자는 오른쪽 끝에 붙는다. 채움 없이
-    // 테두리 하나, 고른 칸만 강조색 테두리+글자. 두 개짜리(언어)가 화면을
-    // 가로지르던 것을 없앴다(2026-09-10 지적).
-    let h = CTL_H;
-    let inset = 2.0;
-    let pad = 10.0;
     let widths: Vec<f32> = cells
         .iter()
-        .map(|(label, selected, _)| g.measure_chrome_text(label, 13.0, *selected) + pad * 2.0)
+        .map(|(label, selected, _)| g.measure_chrome_text(&crate::native_strings::text(label), 13.0, *selected) + 20.0)
         .collect();
-    let total = widths.iter().sum::<f32>() + inset * 2.0;
-    let outer = (x + w - total.min(w), y, total.min(w), h);
-    let scale = ((outer.2 - inset * 2.0) / (total - inset * 2.0)).min(1.0);
-    round_rect(g, outer.0, outer.1, outer.2, outer.3, seg_outer_radius(), theme::surface_hover());
-    let mut cx = outer.0 + inset;
-    for (i, (label, selected, action)) in cells.iter().enumerate() {
-        let cw = widths[i] * scale;
-        let rect = (cx, y + inset, cw, h - inset * 2.0);
-        cx += cw;
+    let content_w = widths.iter().sum::<f32>();
+    let gaps = WEATHER_CHOICE_GAP * cells.len().saturating_sub(1) as f32;
+    if w <= gaps {
+        return;
+    }
+    let scale = ((w - gaps) / content_w).min(1.0);
+    let mut cx = x + w - gaps - content_w * scale;
+    for ((label, selected, action), preferred_w) in cells.iter().zip(widths) {
+        let label = crate::native_strings::text(label);
+        let cw = preferred_w * scale;
+        let rect = (cx, y, cw, CTL_H);
+        cx += cw + WEATHER_CHOICE_GAP;
         let hover = contains(rect, s.cursor);
-        if *selected {
-            round_rect(g, rect.0, rect.1, rect.2, rect.3, seg_inner_radius(), theme::accent());
-        }
-        let shown = fit(g, label, cw - 8.0, 13.0, *selected);
+        let fill = if *selected {
+            theme::accent()
+        } else if hover {
+            theme::surface_hover()
+        } else {
+            theme::surface()
+        };
+        round_rect(g, rect.0, rect.1, rect.2, rect.3, crate::native_controls::capsule_radius(rect), fill);
+        let shown = fit(g, &label, cw - 8.0, 13.0, *selected);
         g.centered_chrome_text(rect,&shown,gpu::DrawOpts {
             font_size:13.0,color:if *selected { theme::foreground_on(theme::accent()) } else if hover { theme::text() } else { theme::text_dim() },bold:*selected,italic:false,
         });
@@ -7239,8 +7188,8 @@ fn dropdown_row(
     let hover = contains(rect, s.cursor);
     let is_weather = matches!(id, DropdownId::WeatherPhase | DropdownId::WeatherCondition(_));
     if is_weather {
-        let radius = rect.2.min(rect.3) * 0.5 * theme::roundness();
-        pill_rect(g, rect.0, rect.1, rect.2, rect.3,
+        let radius = crate::native_controls::capsule_radius(rect);
+        round_rect(g, rect.0, rect.1, rect.2, rect.3, radius,
             if hover { theme::surface_hover() } else { weather_control_fill() });
         if open { stroke_round(g, rect, radius, theme::with_alpha(theme::accent(), 145)); }
     } else {
@@ -7400,14 +7349,14 @@ fn stepper_row(
     flat_row(g,x,*y,w,label,"",(w-control_w-12.0).max(0.0));
     let boxr=(x+w-control_w,*y+(ROW_H-CTL_H)/2.0,control_w,CTL_H);
     if weather {
-        round_rect(g, boxr.0 + bw + gap, boxr.1, vw, CTL_H, theme::radius_md(), weather_control_fill());
+        round_rect(g, boxr.0 + bw + gap, boxr.1, vw, CTL_H, CTL_H / 2.0, weather_control_fill());
     } else {
         crate::native_controls::field(g,boxr,false);
     }
     for (rect,sign,action) in [((boxr.0,boxr.1,bw,CTL_H),"−",minus),((boxr.0+bw+vw+gap*2.0,boxr.1,bw,CTL_H),"+",plus)] {
         let hover=contains(rect,s.cursor);
         if weather {
-            pill_rect(g, rect.0, rect.1, rect.2, rect.3,
+            round_rect(g, rect.0, rect.1, rect.2, rect.3, crate::native_controls::capsule_radius(rect),
                 if hover { theme::surface_active() } else { weather_control_fill() });
         } else if hover {
             round_rect(g,rect.0,rect.1,rect.2,rect.3,ctrl_radius(),theme::surface_hover());
@@ -7688,11 +7637,7 @@ pub(crate) fn wrap_text(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: 
 
 pub(crate) fn ctrl_radius() -> f32 { theme::radius_sm() }
 
-fn chip_radius() -> f32 { theme::radius_sm() }
-
-fn seg_outer_radius() -> f32 { theme::radius_sm() + 2.0 * theme::roundness() }
-
-fn seg_inner_radius() -> f32 { theme::radius_sm() }
+fn chip_radius() -> f32 { 12.0 }
 
 fn choice_card(
     g: &mut gpu::GpuRenderer,
@@ -7841,8 +7786,7 @@ fn mini_text_button(
     w
 }
 
-/// 둥근 채움 위에 두르는 1px 테두리 — 반지름을 채움과 같게 주면 모서리가 채움
-/// 안에 머문다. 직각 `stroke_rect` 는 사각 격자(SV 판·색상띠)에만 남긴다.
+/// 채움과 반지름을 맞추면 모서리의 테두리가 바깥으로 새지 않는다.
 fn stroke_round(g: &mut gpu::GpuRenderer, rect: Rect, r: f32, color: [u8; 4]) {
     g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, r, theme::border_w().max(1.0), color);
 }

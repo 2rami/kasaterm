@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../contrast.dart';
 import '../grid_canvas.dart';
 import '../hub_actions.dart';
 import '../look.dart';
@@ -175,17 +176,27 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
       if (!shell.canSend && shell.grid.version == 0) {
         return Center(child: Text(shell.note ?? '셸에 연결하는 중'));
       }
-      return WrappedCanvas(
-        grid: shell.grid,
-        version: shell.grid.version + shell.historyVersion,
-        palette: TerminalPalette.forViewer(
-          context, mode: phoneThemeMode.value, source: designTokens.value ?? shell.tokens, cursorOverride: accent,
+      final palette = TerminalPalette.forViewer(
+        context,
+        mode: phoneThemeMode.value,
+        source: designTokens.value ?? shell.tokens,
+        cursorOverride: accent,
+      );
+      return ColoredBox(
+        color: palette.bg,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          child: WrappedCanvas(
+            grid: shell.grid,
+            version: shell.grid.version + shell.historyVersion,
+            palette: palette,
+            history: shell.history,
+            historyVersion: shell.historyVersion,
+            bottomTick: _bottomTick,
+            onViewport: shell.setViewport,
+            fullScreen: shell.grid.alt,
+          ),
         ),
-        history: shell.history,
-        historyVersion: shell.historyVersion,
-        bottomTick: _bottomTick,
-        onViewport: shell.setViewport,
-        fullScreen: shell.grid.alt,
       );
     },
   );
@@ -255,79 +266,118 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
   Widget build(BuildContext context) => TwinBackdrop(
     child: Scaffold(
       backgroundColor: Colors.transparent,
-      appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('외형')),
-      body: LayoutBuilder(builder: (context, constraints) {
-        final theme = Theme.of(context);
-        final savedAccent = _accentColor(_appearance ?? const {}, theme.colorScheme.primary);
-        final draft = _accentDraft;
-        final previewAccent = draft?.toColor() ?? savedAccent;
-        final shell = _shell;
-        final pinned = constraints.maxHeight >= (draft == null ? 430 : 300);
-        final preview = Padding(
-          key: _previewKey,
-          padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 10),
-          child: Column(
-            children: [
-              ValueListenableBuilder<WeatherSettings>(
-                valueListenable: weather.settings,
-                builder: (context, value, _) => Theme(
-                  data: theme.copyWith(
-                    colorScheme: theme.colorScheme.copyWith(primary: previewAccent),
-                  ),
-                  child: WeatherPreview(
-                    key: const Key('appearance-preview'),
-                    settings: value,
-                    phase: _phase,
-                    height: draft == null
-                        ? (constraints.maxHeight * .27).clamp(62.0, 245.0)
-                        : (constraints.maxHeight * .20).clamp(48.0, 180.0),
-                    cornerRadius: switch (_appearance?['shape']) {
-                      'sharp' => 3,
-                      'pixel' => 0,
-                      _ => Look.radius,
-                    },
-                    terminal: shell == null ? null : _shellGrid(shell, previewAccent),
-                    accentOutline: draft != null,
-                    action: TextButton(
-                      onPressed: _openingShell ? null : _toggleShell,
-                      child: Text(shell != null ? '셸 닫기' : _openingShell ? '연결 중' : '셸 열기'),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        title: const Text('외형'),
+      ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final theme = Theme.of(context);
+          final savedAccent = _accentColor(
+            _appearance ?? const {},
+            theme.colorScheme.primary,
+          );
+          final draft = _accentDraft;
+          final previewAccent = draft?.toColor() ?? savedAccent;
+          final shell = _shell;
+          final pinned = constraints.maxHeight >= (draft == null ? 430 : 300);
+          final preview = Padding(
+            key: _previewKey,
+            padding: const EdgeInsets.fromLTRB(
+              Look.pagePad,
+              4,
+              Look.pagePad,
+              10,
+            ),
+            child: Column(
+              children: [
+                ValueListenableBuilder<WeatherSettings>(
+                  valueListenable: weather.settings,
+                  builder: (context, value, _) => Theme(
+                    data: theme.copyWith(
+                      colorScheme: theme.colorScheme.copyWith(
+                        primary: previewAccent,
+                      ),
+                    ),
+                    child: WeatherPreview(
+                      key: const Key('appearance-preview'),
+                      settings: value,
+                      phase: _phase,
+                      height: draft == null
+                          ? (constraints.maxHeight * .27).clamp(62.0, 245.0)
+                          : (constraints.maxHeight * .20).clamp(48.0, 180.0),
+                      cornerRadius: switch (_appearance?['shape']) {
+                        'sharp' => 3,
+                        'pixel' => 0,
+                        _ => Look.radius,
+                      },
+                      terminal: shell == null
+                          ? null
+                          : _shellGrid(shell, previewAccent),
+                      accentOutline: draft != null,
+                      action: TextButton(
+                        onPressed: _openingShell ? null : _toggleShell,
+                        child: Text(
+                          shell != null
+                              ? '셸 닫기'
+                              : _openingShell
+                              ? '연결 중'
+                              : '셸 열기',
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
-              if (shell != null) _shellInput(shell),
-            ],
-          ),
-        );
-        return Column(
-          children: [
-            if (pinned) preview,
-            Expanded(
-              child: CustomScrollView(
-                key: const PageStorageKey('appearance-controls'),
-                controller: _controls,
-                slivers: [
-                  if (!pinned) SliverToBoxAdapter(child: preview),
-                  if (_appearance case final appearance?)
-                    SliverToBoxAdapter(
-                      child: _accentControls(appearance, savedAccent, draft, constraints.maxHeight < 640),
-                    ),
-                  _lookControls(),
-                  WeatherSettingsControls(
-                    phase: _phase,
-                    onPhaseChanged: (phase) => setState(() => _phase = phase),
+                if (shell != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: _shellInput(shell),
                   ),
-                  const SliverToBoxAdapter(child: SizedBox(height: Look.groupGap)),
-                ],
-              ),
+              ],
             ),
-          ],
-        );
-      }),
+          );
+          return Column(
+            children: [
+              if (pinned) preview,
+              Expanded(
+                child: CustomScrollView(
+                  key: const PageStorageKey('appearance-controls'),
+                  controller: _controls,
+                  slivers: [
+                    if (!pinned) SliverToBoxAdapter(child: preview),
+                    if (_appearance case final appearance?)
+                      SliverToBoxAdapter(
+                        child: _accentControls(
+                          appearance,
+                          savedAccent,
+                          draft,
+                          constraints.maxHeight < 640,
+                        ),
+                      ),
+                    _lookControls(),
+                    WeatherSettingsControls(
+                      phase: _phase,
+                      onPhaseChanged: (phase) => setState(() => _phase = phase),
+                    ),
+                    const SliverToBoxAdapter(
+                      child: SizedBox(height: Look.groupGap),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
     ),
   );
 
-  Widget _accentControls(Map<String, Object?> appearance, Color saved, HSVColor? draft, bool compact) {
+  Widget _accentControls(
+    Map<String, Object?> appearance,
+    Color saved,
+    HSVColor? draft,
+    bool compact,
+  ) {
     final selected = draft?.toColor() ?? saved;
     final busy = _pending != null;
     return Padding(
@@ -335,43 +385,41 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          DecoratedBox(
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surface,
-              border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('강조색', style: Theme.of(context).textTheme.titleSmall),
-                  Wrap(
-                    spacing: 3,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      for (final entry in _entries(appearance, 'accents'))
-                        if (parseHexColor(entry['hex'] as String?) case final color?)
-                          _AccentDot(
-                            name: entry['name'] as String? ?? '',
-                            color: color,
-                            selected: color.toARGB32() == selected.toARGB32(),
-                            onTap: busy ? null : () => _chooseAccent(color),
-                          ),
-                      TextButton.icon(
-                        key: const Key('appearance-custom-accent'),
-                        onPressed: busy || draft != null ? null : () => _chooseAccent(saved),
-                        icon: Icon(Icons.circle, color: selected, size: 17),
-                        label: const Text('색 고르기'),
-                      ),
-                    ],
-                  ),
-                ],
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Flexible(
+                child: Text(
+                  '강조색',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
               ),
-            ),
+              if (draft == null)
+                OutlinedButton.icon(
+                  key: const Key('appearance-custom-accent'),
+                  onPressed: busy
+                      ? null
+                      : () => _chooseAccent(saved),
+                  icon: Icon(Icons.circle, color: selected, size: 16),
+                  label: const Text('색 고르기'),
+                ),
+            ],
           ),
-          if (draft != null) const SizedBox(height: 8),
+          Wrap(
+            spacing: 5,
+            runSpacing: 4,
+            children: [
+              for (final entry in _entries(appearance, 'accents'))
+                if (parseHexColor(entry['hex'] as String?) case final color?)
+                  _AccentDot(
+                    name: entry['name'] as String? ?? '',
+                    color: color,
+                    selected: color.toARGB32() == selected.toARGB32(),
+                    onTap: busy ? null : () => _chooseAccent(color),
+                  ),
+            ],
+          ),
+          if (draft != null) const SizedBox(height: 14),
           if (draft != null)
             AccentPicker(
               original: saved,
@@ -389,26 +437,30 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
 
   Widget _lookControls() => SliverPadding(
     padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
-    sliver: SliverList.list(children: [
-      SettingsGroup(
-        title: '이 폰',
-        children: [
-          SettingsRow(
-            key: const Key('phone-brightness'),
-            icon: Icons.brightness_6_outlined,
-            title: '밝기',
-            subtitle: _modeLabel(phoneThemeMode.value),
-            trailing: IconChoice<ThemeMode>(
-              options: phoneModes,
-              selected: phoneThemeMode.value,
-              onSelect: _setMode,
+    sliver: SliverList.list(
+      children: [
+        SettingsGroup(
+          title: '이 폰',
+          flat: true,
+          children: [
+            SettingsRow(
+              key: const Key('phone-brightness'),
+              flat: true,
+              icon: Icons.brightness_6_outlined,
+              title: '밝기',
+              subtitle: _modeLabel(phoneThemeMode.value),
+              trailing: IconChoice<ThemeMode>(
+                options: phoneModes,
+                selected: phoneThemeMode.value,
+                onSelect: _setMode,
+              ),
             ),
-          ),
-        ],
-      ),
-      SettingsGroup(title: '데스크톱', children: _desktopRows(1)),
-      const SizedBox(height: Look.groupGap / 2),
-    ]),
+          ],
+        ),
+        SettingsGroup(flat: true, title: '데스크톱', children: _desktopRows(1)),
+        const SizedBox(height: Look.groupGap / 2),
+      ],
+    ),
   );
 
   /// 데스크톱 「외형」 값을 폰에서 바꾸는 줄 — 강조색·모서리는 누르면 데스크톱이 바뀐다.
@@ -417,11 +469,20 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
     final a = _appearance;
     final busy = _pending != null;
     if (_loading) {
-      return [SettingsRow(tone: tone, icon: Icons.palette_outlined, title: '외형', subtitle: '데스크톱 설정을 받는 중이에요')];
+      return [
+        SettingsRow(
+          flat: true,
+          tone: tone,
+          icon: Icons.palette_outlined,
+          title: '외형',
+          subtitle: '데스크톱 설정을 받는 중이에요',
+        ),
+      ];
     }
     if (a == null) {
       return [
         SettingsRow(
+          flat: true,
           tone: tone,
           icon: Icons.cloud_off_outlined,
           title: '외형',
@@ -432,6 +493,7 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
     }
     return [
       SettingsRow(
+        flat: true,
         tone: tone,
         icon: Icons.rounded_corner_rounded,
         title: '모서리',
@@ -443,7 +505,8 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
         trailing: IconChoice<String>(
           options: [
             for (final sh in _entries(a, 'shapes'))
-              if (sh['key'] case final String key) (key, _shapeIcon(key), sh['label'] as String? ?? key),
+              if (sh['key'] case final String key)
+                (key, _shapeIcon(key), sh['label'] as String? ?? key),
           ],
           selected: a['shape'] as String?,
           onSelect: busy ? null : (key) => _apply('shape', key),
@@ -460,7 +523,10 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
     _ => Icons.category_outlined,
   };
 
-  static List<Map<String, Object?>> _entries(Map<String, Object?> a, String key) {
+  static List<Map<String, Object?>> _entries(
+    Map<String, Object?> a,
+    String key,
+  ) {
     final v = a[key];
     if (v is! List) return const [];
     return [
@@ -472,7 +538,12 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
 
 /// 강조색 동그라미 — 고른 것은 바깥 고리. 누름 영역은 44.
 class _AccentDot extends StatelessWidget {
-  const _AccentDot({required this.name, required this.color, required this.selected, this.onTap});
+  const _AccentDot({
+    required this.name,
+    required this.color,
+    required this.selected,
+    this.onTap,
+  });
 
   final String name;
   final Color color;
@@ -484,22 +555,53 @@ class _AccentDot extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return Tooltip(
       message: name,
-      child: InkResponse(
-        onTap: onTap,
-        radius: Look.tap / 2,
-        child: SizedBox.square(
-          dimension: Look.tap,
-          child: Center(
-            child: Container(
-              width: Look.swatch,
-              height: Look.swatch,
-              padding: const EdgeInsets.all(3),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(color: selected ? scheme.onSurface : Colors.transparent, width: 2),
-              ),
-              child: DecoratedBox(
-                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      child: Semantics(
+        button: true,
+        selected: selected,
+        child: Material(
+          type: MaterialType.transparency,
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onTap,
+            child: SizedBox.square(
+              dimension: Look.tap,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  if (selected)
+                    Container(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: enforceContrast(color, scheme.surface, 3),
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                  Ink(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: enforceContrast(color, scheme.surface, 1.4),
+                      ),
+                    ),
+                    child: selected
+                        ? Icon(
+                            Icons.check_rounded,
+                            size: 17,
+                            color: enforceContrast(
+                              scheme.onSurface,
+                              color,
+                              4.5,
+                            ),
+                          )
+                        : null,
+                  ),
+                ],
               ),
             ),
           ),

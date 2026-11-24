@@ -20,7 +20,6 @@ abstract final class Look {
   static const chipH = 24.0;
 
   /// 아이콘 고르기 알약(`IconChoice`)의 안쪽 여백 — 높이·칸 폭은 [tap].
-  static const choiceInset = 3.0;
   static const chipPadX = 8.0;
 
   static const title = 18.0;

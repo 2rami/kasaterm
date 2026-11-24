@@ -89,152 +89,126 @@ class _AccentPickerState extends State<AccentPicker> {
         }
         return KeyEventResult.ignored;
       },
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: scheme.surface,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(
+              '밝기와 채도',
+              style: Theme.of(
+                context,
+              ).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ),
+          _ColorPlane(
+            color: widget.color,
+            height: widget.compact ? 88 : 120,
+            onChanged: widget.busy ? null : _change,
+          ),
+          const SizedBox(height: 8),
+          Semantics(
+            label: '색 계열',
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 12),
+                  height: 14,
+                  decoration: BoxDecoration(
+                    borderRadius: const BorderRadius.all(Radius.circular(7)),
+                    gradient: const LinearGradient(
+                      colors: [
+                        Color(0xffff0000),
+                        Color(0xffffff00),
+                        Color(0xff00ff00),
+                        Color(0xff00ffff),
+                        Color(0xff0000ff),
+                        Color(0xffff00ff),
+                        Color(0xffff0000),
+                      ],
+                    ),
+                  ),
+                ),
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 0,
+                    activeTrackColor: Colors.transparent,
+                    inactiveTrackColor: Colors.transparent,
+                    thumbColor: scheme.onSurface,
+                    thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 8,
+                      elevation: 2,
+                    ),
+                    overlayShape: const RoundSliderOverlayShape(
+                      overlayRadius: 13,
+                    ),
+                  ),
+                  child: Slider(
+                    key: const Key('appearance-accent-hue'),
+                    value: widget.color.hue,
+                    max: 359.99,
+                    onChanged: widget.busy
+                        ? null
+                        : (hue) => _change(widget.color.withHue(hue)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          Wrap(
+            spacing: 14,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerLowest,
-                  border: Border.all(color: scheme.outlineVariant),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        child: Text(
-                          '밝기와 채도',
-                          style: Theme.of(context).textTheme.labelSmall
-                              ?.copyWith(color: scheme.onSurfaceVariant),
-                        ),
-                      ),
-                      _ColorPlane(
-                        color: widget.color,
-                        height: widget.compact ? 88 : 120,
-                        onChanged: widget.busy ? null : _change,
-                      ),
-                      const SizedBox(height: 8),
-                      Semantics(
-                        label: '색 계열',
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            Container(
-                              margin: const EdgeInsets.symmetric(
-                                horizontal: 13,
-                              ),
-                              height: 14,
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(7),
-                                gradient: const LinearGradient(
-                                  colors: [
-                                    Color(0xffff0000),
-                                    Color(0xffffff00),
-                                    Color(0xff00ff00),
-                                    Color(0xff00ffff),
-                                    Color(0xff0000ff),
-                                    Color(0xffff00ff),
-                                    Color(0xffff0000),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            SliderTheme(
-                              data: SliderTheme.of(context).copyWith(
-                                trackHeight: 0,
-                                activeTrackColor: Colors.transparent,
-                                inactiveTrackColor: Colors.transparent,
-                                thumbColor: scheme.onSurface,
-                                thumbShape: const RoundSliderThumbShape(
-                                  enabledThumbRadius: 8,
-                                  elevation: 2,
-                                ),
-                                overlayShape: const RoundSliderOverlayShape(
-                                  overlayRadius: 13,
-                                ),
-                              ),
-                              child: Slider(
-                                key: const Key('appearance-accent-hue'),
-                                value: widget.color.hue,
-                                max: 359.99,
-                                onChanged: widget.busy
-                                    ? null
-                                    : (hue) =>
-                                          _change(widget.color.withHue(hue)),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Divider(height: 1, color: scheme.outlineVariant),
-                      Wrap(
-                        spacing: 14,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          _Sample(label: '현재', color: widget.original),
-                          _Sample(label: '미리보기', color: selected),
-                          TextButton(
-                            onPressed: widget.busy
-                                ? null
-                                : () {
-                                    setState(() {
-                                      _showHex = !_showHex;
-                                      if (!_showHex) {
-                                        _hex.text = AccentPicker.hex(selected);
-                                        _valid = true;
-                                      }
-                                    });
-                                  },
-                            child: Text(_showHex ? 'HEX 접기' : 'HEX'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              if (_showHex)
-                TextField(
-                  key: const Key('appearance-accent-hex'),
-                  controller: _hex,
-                  enabled: !widget.busy,
-                  decoration: InputDecoration(
-                    labelText: 'HEX 색상 값',
-                    isDense: true,
-                    errorText: _valid ? null : '6자리 색상 코드를 입력하세요',
-                  ),
-                  autocorrect: false,
-                  onChanged: _typeHex,
-                ),
-              const SizedBox(height: 6),
-              Wrap(
-                alignment: WrapAlignment.end,
-                spacing: 8,
-                children: [
-                  TextButton(
-                    onPressed: widget.busy ? null : widget.onCancel,
-                    child: const Text('취소'),
-                  ),
-                  FilledButton(
-                    onPressed: widget.busy || !_valid ? null : widget.onApply,
-                    child: Text(widget.busy ? '적용 중' : '적용'),
-                  ),
-                ],
+              _Sample(label: '현재', color: widget.original),
+              _Sample(label: '미리보기', color: selected),
+              TextButton(
+                onPressed: widget.busy
+                    ? null
+                    : () {
+                        setState(() {
+                          _showHex = !_showHex;
+                          if (!_showHex) {
+                            _hex.text = AccentPicker.hex(selected);
+                            _valid = true;
+                          }
+                        });
+                      },
+                child: Text(_showHex ? 'HEX 접기' : 'HEX'),
               ),
             ],
           ),
-        ),
+          if (_showHex)
+            TextField(
+              key: const Key('appearance-accent-hex'),
+              controller: _hex,
+              enabled: !widget.busy,
+              decoration: InputDecoration(
+                labelText: 'HEX 색상 값',
+                isDense: true,
+                errorText: _valid ? null : '6자리 색상 코드를 입력하세요',
+              ),
+              autocorrect: false,
+              onChanged: _typeHex,
+            ),
+          const SizedBox(height: 6),
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 8,
+            children: [
+              TextButton(
+                onPressed: widget.busy ? null : widget.onCancel,
+                child: const Text('취소'),
+              ),
+              FilledButton(
+                onPressed: widget.busy || !_valid ? null : widget.onApply,
+                child: Text(widget.busy ? '적용 중' : '적용'),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -348,7 +322,7 @@ class _ColorPlane extends StatelessWidget {
                   ? null
                   : (event) => pick(event.localPosition),
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(18),
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
