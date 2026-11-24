@@ -345,11 +345,16 @@ class RealBackend:
         wt = self.worktree(plan)
         ran = []
         cargo = self.tool("cargo")
+        # Personal names and theme choices on a signing machine change the character and greeting fixtures.
+        settings = self.workdir / "verify-settings.json"
+        if not self.dry:
+            settings.write_text("{}\n", encoding="utf-8")
+        test_env = {**self.env(), "KASATERM_SETTINGS_FILE": str(settings)}
         for argv in TESTS:
             argv = [cargo, *argv[1:]]
             # 계획마다 새 워크트리라 워크스페이스 크레이트를 release 로 처음부터 다시 굽는다. 43~53분 걸리던 것이 미니가
             # 다른 일로 바쁠 때 굽기만으로 60분을 넘겨 0.2.246 이 시험도 못 돌고 끊겼다(2026-11-18) — 멈춤이 아니라 느림이다.
-            r = self.runner.run(argv, cwd=wt, timeout=VERIFY_TIMEOUT, env=self.env(), kind="local")
+            r = self.runner.run(argv, cwd=wt, timeout=VERIFY_TIMEOUT, env=test_env, kind="local")
             ran.append(" ".join(argv))
             if r.timed_out:
                 raise Refused(f"검사 시간 초과: {' '.join(argv)}")

@@ -1406,6 +1406,23 @@ class LocalSigningUnlockTests(LocalFixture):
 
 
 class LocalSigningBuildTests(LocalFixture):
+
+    def test_verification_uses_fresh_plan_settings_on_retry(self):
+        plan = self.plan()
+        backend = self.backend(plan, "local")
+        outer = self.work / "personal.json"
+        outer.write_text('{"character_user_name":"fixture"}')
+        with mock.patch.dict(os.environ, {"KASATERM_SETTINGS_FILE": str(outer)}), \
+                mock.patch.object(backend.runner, "run", wraps=backend.runner.run) as run:
+            for _ in range(2):
+                backend.verify(plan, {})
+                check = next(c for c in reversed(run.call_args_list) if c.args[0][1] == "test")
+                settings = Path(check.kwargs["env"]["KASATERM_SETTINGS_FILE"])
+                self.assertEqual(settings.parent, backend.workdir)
+                self.assertEqual(json.loads(settings.read_text()), {})
+                settings.write_text('{"character_user_name":"previous run"}')
+        self.assertEqual(json.loads(outer.read_text()), {"character_user_name": "fixture"})
+
     def test_the_signed_build_bakes_the_version_commit_in_the_plan_workdir(self):
         plan = self.plan()
         state = self.go(plan)
