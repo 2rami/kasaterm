@@ -442,7 +442,11 @@ impl App {
             if v.moving {
                 st.shower_time = (st.shower_time + dt) % 3600.0;
             }
-            let accent = crate::theme::accent();
+            let accent = if st.settings_preview.is_some() {
+                crate::theme::weather_settings_palette().accent
+            } else {
+                crate::theme::accent()
+            };
             let strength = |amount: RainAmount| [0.0, 0.24, 0.62, 1.0][amount.index()];
             let physical = |rect: [f32; 4]| rect.map(|n| n * scale);
             let [w, h] = win.map(|n| (n * scale).max(1.0));

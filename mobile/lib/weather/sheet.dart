@@ -8,10 +8,7 @@ import 'model.dart';
 import 'scene.dart';
 import 'store.dart';
 
-Color _weatherSurface(BuildContext context) {
-  final colors = Theme.of(context).colorScheme;
-  return Color.alphaBlend(colors.primary.withValues(alpha: 0.04), colors.surface);
-}
+Color _weatherSurface(BuildContext context) => WeatherPalette.of(context).canvas;
 
 /// 설정 「날씨」 — docs/weather.md 의 표 전부와 「날씨는 기기마다」.
 Future<void> showWeatherSheet(BuildContext context) => showModalBottomSheet<void>(
@@ -94,7 +91,7 @@ class _WeatherSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) => DraggableScrollableSheet(
     expand: false,
-    initialChildSize: 0.85,
+    initialChildSize: 0.93,
     maxChildSize: 0.95,
     builder: (context, scroll) => WeatherSettingsList(controller: scroll),
   );
@@ -127,7 +124,9 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
   static const _rewet = [30, 60, 120, 180, 300, 600];
 
   @override
-  Widget build(BuildContext context) => ListenableBuilder(
+  Widget build(BuildContext context) => Theme(
+    data: WeatherPalette.of(context).theme(Theme.of(context)),
+    child: ListenableBuilder(
     listenable: Listenable.merge([
       weather.settings,
       weather.perDevice,
@@ -278,6 +277,7 @@ class _WeatherSettingsListState extends State<WeatherSettingsList> {
         ],
       );
     },
+  ),
   );
 
   static int _nearest(int secs) => _rewet.reduce((a, b) => (a - secs).abs() <= (b - secs).abs() ? a : b);
@@ -383,20 +383,22 @@ Widget _conditionSymbol(WeatherCondition? condition, double size, Color color) =
     condition?.material == 0 ? _OpenUmbrella(size: size, color: color) : Icon(_weatherIcon(condition), size: size, color: color);
 
 class _OpenUmbrella extends StatelessWidget {
-  const _OpenUmbrella({required this.size, this.color});
+  const _OpenUmbrella({required this.size, this.color, this.filled = false});
   final double size;
   final Color? color;
+  final bool filled;
 
   @override
   Widget build(BuildContext context) => CustomPaint(
     size: Size.square(size),
-    painter: _UmbrellaOutline(color ?? Theme.of(context).colorScheme.onSurfaceVariant),
+    painter: _UmbrellaOutline(color ?? Theme.of(context).colorScheme.onSurfaceVariant, filled),
   );
 }
 
 class _UmbrellaOutline extends CustomPainter {
-  const _UmbrellaOutline(this.color);
+  const _UmbrellaOutline(this.color, this.filled);
   final Color color;
+  final bool filled;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -412,6 +414,7 @@ class _UmbrellaOutline extends CustomPainter {
       ..quadraticBezierTo(3.8, 4, 12, 4)
       ..quadraticBezierTo(20.2, 4, 21.8, 12.5)
       ..close();
+    if (filled) canvas.drawPath(canopy, Paint()..color = color.withValues(alpha: 0.32));
     canvas.drawPath(canopy, paint);
     canvas.drawLine(const Offset(12, 2), const Offset(12, 4), paint);
     canvas.drawPath(Path()
@@ -422,7 +425,25 @@ class _UmbrellaOutline extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_UmbrellaOutline oldDelegate) => oldDelegate.color != color;
+  bool shouldRepaint(_UmbrellaOutline oldDelegate) => oldDelegate.color != color || oldDelegate.filled != filled;
+}
+
+class _RainRings extends CustomPainter {
+  const _RainRings(this.line);
+  final Color line;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final origin = Offset(size.width / 2, size.height / 2 + 8);
+    final paint = Paint()..color = line..style = PaintingStyle.stroke;
+    final unit = size.height / 4.8;
+    for (final k in [1.1, 1.65, 2.2]) {
+      canvas.drawCircle(origin, unit * k, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_RainRings old) => old.line != line;
 }
 
 class _WeatherPreview extends StatelessWidget {
@@ -436,16 +457,20 @@ class _WeatherPreview extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final work = settings.style == RainStyle.showers;
-    final sky = Color.alphaBlend(scheme.primary.withValues(alpha: 0.09), theme.scaffoldBackgroundColor);
+    final palette = WeatherPalette.of(context);
+    final sky = palette.sky;
+    final condition = work ? settings.indicator(phase).weather : WeatherCondition.rain;
+    final symbol = condition?.material == 0
+        ? _OpenUmbrella(size: 86, color: palette.umbrella, filled: true)
+        : _conditionSymbol(condition, 80, palette.umbrella);
     final label = work ? phase.label : '작업실';
     final sample = ColoredBox(
       color: sky,
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Center(child: work
-              ? _conditionSymbol(settings.indicator(phase).weather, 82, scheme.primary)
-              : _OpenUmbrella(size: 82, color: scheme.primary)),
+          Positioned.fill(child: CustomPaint(painter: _RainRings(palette.line))),
+          Center(child: Padding(padding: const EdgeInsets.only(top: 14), child: symbol)),
           Positioned(top: 10, left: 12, right: 12, child: Row(children: [
             Icon(Icons.terminal_outlined, size: 15, color: scheme.onSurfaceVariant),
             const SizedBox(width: 7),
@@ -459,13 +484,14 @@ class _WeatherPreview extends StatelessWidget {
             radius: Look.smallCorners, builder: (_) => sample)
         : settings.target == WeatherTarget.backgroundOnly
             ? Stack(fit: StackFit.expand, children: [
-                Center(child: _OpenUmbrella(size: 82, color: scheme.primary)),
+                Positioned.fill(child: CustomPaint(painter: _RainRings(palette.line))),
+                Center(child: symbol),
                 Positioned(top: 10, left: 12, child: Text(label, style: theme.textTheme.labelMedium)),
               ])
             : WeatherCard(id: 'settings-liquid-sample', mood: Mood.busy, preview: true, child: sample);
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: Color.alphaBlend(scheme.primary.withValues(alpha: 0.15), theme.scaffoldBackgroundColor),
+        color: palette.panel,
         borderRadius: Look.corners,
         border: Border.all(color: scheme.outlineVariant),
       ),
@@ -484,7 +510,7 @@ class _WeatherPreview extends StatelessWidget {
             borderRadius: Look.smallCorners,
             child: ColoredBox(
               color: sky,
-              child: SizedBox(height: 118, child: IgnorePointer(child: WeatherScene(child: pane))),
+              child: SizedBox(height: 148, child: IgnorePointer(child: WeatherScene(child: pane))),
             ),
           ),
         ]),
@@ -497,7 +523,6 @@ class _IndicatorControls extends StatelessWidget {
   const _IndicatorControls({required this.rule, required this.onChanged});
   final StateIndicator rule;
   final ValueChanged<StateIndicator> onChanged;
-  static const sides = [(1, '위'), (4, '아래'), (8, '왼쪽'), (2, '오른쪽')];
 
   @override
   Widget build(BuildContext context) => Column(
@@ -521,10 +546,8 @@ class _IndicatorControls extends StatelessWidget {
         },
       )),
       const _Title('프로세스바 위치'),
-      _Pad(WeatherChoices(
-        options: sides,
-        selected: {for (final (side, _) in sides) if (rule.edges & side != 0) side},
-        symbol: WeatherEdgeGlyph.new,
+      _Pad(WeatherEdgePad(
+        edges: rule.edges,
         onPressed: (side) => onChanged(StateIndicator(weather: rule.weather, edges: rule.edges ^ side)),
       )),
     ],

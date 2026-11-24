@@ -2669,11 +2669,11 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let mut hits = Vec::new();
     let mut caret_rect = None;
 
-    let [canvas, nav_fill, body_fill] = if snapshot.cat == SettingsCat::Weather {
-        theme::weather_settings_plates()
-    } else {
-        [theme::settings_canvas(), theme::settings_nav(), theme::settings_body()]
-    };
+    let weather = (snapshot.cat == SettingsCat::Weather).then(theme::weather_settings_palette);
+    let [canvas, nav_fill, body_fill] = weather.map_or_else(
+        || [theme::settings_canvas(), theme::settings_nav(), theme::settings_body()],
+        |p| [p.canvas, p.canvas, p.canvas],
+    );
     g.rect(outer_x, outer_y, outer_w, outer_h, canvas);
     if !compact {
         g.rect(ax, ay, nav_w, ah, nav_fill);
@@ -2682,7 +2682,8 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     } else {
         g.rect(ax, ay, aw, ah, body_fill);
     }
-    let nav_layer = theme::settings_layer(if compact { body_fill } else { nav_fill });
+    let nav_base = if compact { body_fill } else { nav_fill };
+    let nav_layer = weather.map_or_else(|| theme::settings_layer(nav_base), |p| theme::weather_settings_layer(nav_base, p));
     draw_text(g, ax + 20.0, ay + 18.0, "설정", 13.0, theme::text(), true);
     let search = (ax + 12.0, ay + 44.0, if compact { aw - 24.0 } else { nav_w - 24.0 }, CTL_H);
     let search_width = search.2 - if snapshot.query.is_empty() { 0.0 } else { CTL_H + 4.0 };
@@ -2808,7 +2809,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     );
     register(&mut hits, Target::Close, close, HitCursor::Pointer);
     drop(nav_layer);
-    let _body_layer = theme::settings_layer(body_fill);
+    let _body_layer = weather.map_or_else(|| theme::settings_layer(body_fill), |p| theme::weather_settings_layer(body_fill, p));
 
     let (content_x, content_w) = if snapshot.cat==SettingsCat::Appearance { content_column_with_max(ax,aw,nav_w,1100.0) } else { content_column(ax,aw,nav_w) };
     let (title, _, _blurb) = category_meta(snapshot.cat);
@@ -4655,25 +4656,64 @@ fn machines_view() -> Vec<MachineRow> {
     rows
 }
 
+fn paint_weather_edge_pad(
+    g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect: Rect,
+    phase: crate::weather::indicator::Phase, edges: u8,
+) {
+    let (x, y, w, _) = rect;
+    let button_w = (w / 3.0).clamp(30.0, 96.0);
+    let start = x + (w - button_w * 3.0) * 0.5;
+    let center = start + button_w;
+    for (label, bit, left, top) in [
+        ("위", 1, center, y), ("왼쪽", 8, start, y + 36.0),
+        ("오른쪽", 2, center + button_w, y + 36.0), ("아래", 4, center, y + 72.0),
+    ] {
+        let cell = (label, edges & bit != 0, SettingsAction::Weather(crate::weather::model::Change::StateEdge(phase, bit)));
+        weather_choices(g, s, hits, (left + 3.0, top, button_w - 6.0, CTL_H), &[cell]);
+    }
+    let sample = (center + 7.0, y + 39.0, button_w - 14.0, 26.0);
+    let p = theme::weather_settings_palette();
+    round_rect(g, sample.0, sample.1, sample.2, sample.3, 5.0, p.sky);
+    stroke_round(g, sample, 5.0, p.line);
+    let (sx, sy, sw, sh) = sample;
+    for (bit, edge) in [
+        (1, (sx + 7.0, sy, sw - 14.0, 2.0)),
+        (2, (sx + sw - 2.0, sy + 6.0, 2.0, sh - 12.0)),
+        (4, (sx + 7.0, sy + sh - 2.0, sw - 14.0, 2.0)),
+        (8, (sx, sy + 6.0, 2.0, sh - 12.0)),
+    ] {
+        if edges & bit != 0 { g.rect(edge.0, edge.1, edge.2, edge.3, p.accent); }
+    }
+}
+
 fn paint_weather_sample(g: &mut gpu::GpuRenderer, s: &Snapshot, rect: Rect) {
     let (x, y, w, h) = rect;
     if w < 80.0 { return; }
-    let [canvas, _, body] = theme::weather_settings_plates();
-    let tint = theme::lerp(body, theme::accent(), 0.10);
-    let sky = theme::lerp(canvas, theme::accent(), 0.10);
+    let palette = theme::weather_settings_palette();
+    let sky = palette.sky;
+    let tint = palette.panel;
     round_rect(g, x, y, w, h, ctrl_radius(), tint);
-    stroke_round(g, rect, ctrl_radius(), theme::edge_on(tint));
-    g.queue_icon("umbrella", x + 13.0, y + 10.0, 16.0, theme::text());
+    stroke_round(g, rect, ctrl_radius(), palette.line);
+    g.queue_icon("umbrella", x + 13.0, y + 10.0, 16.0, palette.accent);
     draw_text(g, x + 36.0, y + 12.0, "미리보기", 12.0, theme::text(), true);
 
     let pane = (x + 10.0, y + 39.0, w - 20.0, h - 49.0);
     g.rect(pane.0, pane.1, pane.2, pane.3, sky);
     let icon = if s.weather.style == crate::weather::model::RainStyle::Showers {
-        s.weather.indicator(s.weather_phase).weather.map_or("monitor", weather_icon)
-    } else { "umbrella" };
-    let icon_size = (pane.3 * 0.66).min(pane.2 * 0.44);
-    g.queue_icon(icon, pane.0 + (pane.2 - icon_size) * 0.5,
-        pane.1 + (pane.3 - icon_size) * 0.5, icon_size, theme::enforce_contrast_at(theme::accent(), sky, 3.0));
+        s.weather.indicator(s.weather_phase).weather.map_or("monitor", |condition| {
+            if condition.material().0 == 0.0 { "weather-canopy" } else { weather_icon(condition) }
+        })
+    } else { "weather-canopy" };
+    let icon_size = (pane.3 * 0.58).min(pane.2 * 0.44);
+    let (cx, cy) = (pane.0 + pane.2 * 0.5, pane.1 + pane.3 * 0.5 + 8.0);
+    let unit = pane.3.min(pane.2) / 4.8;
+    g.push_clip(pane.0, pane.1, pane.2, pane.3);
+    for k in [1.1, 1.65, 2.2] {
+        let radius = unit * k;
+        stroke_round(g, (cx - radius, cy - radius, radius * 2.0, radius * 2.0), radius, palette.line);
+    }
+    g.queue_icon(icon, cx - icon_size * 0.5, cy - icon_size * 0.5, icon_size, palette.umbrella);
+    g.pop_clip();
     g.queue_icon("terminal", pane.0 + 11.0, pane.1 + 11.0, 14.0, theme::text_dim());
     let phase = if s.weather.style == crate::weather::model::RainStyle::Showers { s.weather_phase.label() } else { "작업실" };
     let label = fit(g, phase, pane.2 - 45.0, 12.0, true);
@@ -4709,7 +4749,7 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     };
 
     use wm::RainStyle;
-    let panel = theme::lerp(theme::bg(), theme::text(), 0.045);
+    let panel = theme::weather_settings_palette().panel;
     let work = ws.style == RainStyle::Showers;
     let modes = [
         ("리퀴드 비", !work, act(Change::Style(RainStyle::Liquid))),
@@ -4749,7 +4789,7 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     let preview_w = if wide { w * 0.51 } else { w };
     let preview_x = x + w - preview_w;
     let top = *y;
-    let editor_h = 252.0;
+    let editor_h = 324.0;
     paint_weather_sample(g, s, (preview_x, top, preview_w, if wide { editor_h } else { 178.0 }));
     if !wide { *y += 188.0; }
 
@@ -4765,9 +4805,9 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         dropdown_row(g, s, hits, x, y, controls_w, "상태", &crate::native_strings::text(phase.label()), DropdownId::WeatherPhase);
         let label = rule.weather.map_or("날씨 없음", |c| c.label());
         dropdown_row(g, s, hits, x, y, controls_w, "날씨 효과", &crate::native_strings::text(label), DropdownId::WeatherCondition(phase));
-        let cells: Vec<_> = [("위", 1), ("아래", 4), ("왼쪽", 8), ("오른쪽", 2)].into_iter()
-            .map(|(label, side)| (label, rule.edges & side != 0, act(Change::StateEdge(phase, side)))).collect();
-        seg_row(g, s, hits, x, y, controls_w, "프로세스바 위치", &cells);
+        row_label(g, x, y, "프로세스바 위치");
+        paint_weather_edge_pad(g, s, hits, (x, *y, controls_w, 104.0), phase, rule.edges);
+        *y += 110.0;
         toggle_row(g, s, hits, x, y, controls_w, "표면에 물방울 맺힘", ws.beads, act(Change::Beads(!ws.beads)));
         if wide { *y = (*y).max(top + editor_h); }
     }
@@ -6801,7 +6841,7 @@ fn seg_row(
     let label_w = g.measure_chrome_text(&crate::native_strings::text(label), 13.0, false)
         + crate::native_controls::CONTROL_PADDING_X + 1.0;
     let controls_w = if s.cat == SettingsCat::Weather {
-        cells.iter().map(|&(label, on, ref action)| weather_choice_width(g, label, on, action)).sum::<f32>()
+        cells.iter().map(|&(label, on, _)| weather_choice_width(g, label, on)).sum::<f32>()
             + WEATHER_CHOICE_GAP * cells.len().saturating_sub(1) as f32
     } else {
         cells.iter().map(|(label, active, _)| {
@@ -6875,7 +6915,8 @@ fn toggle_row_hint(
     let hover = contains(rect, s.cursor);
     if s.cat == SettingsCat::Weather {
         let toggle = (x + w - inset - 44.0, *y + (height - 26.0) / 2.0, 44.0, 26.0);
-        let fill = if on { theme::accent() } else { theme::lerp(theme::bg(), theme::text(), 0.18) };
+        let p = theme::weather_settings_palette();
+        let fill = if on { p.switch_track() } else { theme::lerp(p.panel, p.ink, 0.18) };
         pill_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, fill);
         circle_rect(g, toggle.0 + if on { 21.0 } else { 3.0 }, toggle.1 + 3.0, 20.0, [255; 4]);
     } else {
@@ -6894,29 +6935,8 @@ fn weather_control_fill() -> [u8; 4] {
     theme::lerp(theme::bg(), theme::text(), 0.075)
 }
 
-fn weather_edge_bit(action: &SettingsAction) -> Option<u8> {
-    if let SettingsAction::Weather(crate::weather::model::Change::StateEdge(_, bit)) = action {
-        Some(*bit)
-    } else {
-        None
-    }
-}
-
-fn weather_choice_width(g: &mut gpu::GpuRenderer, label: &str, on: bool, action: &SettingsAction) -> f32 {
-    let text = g.measure_chrome_text(&crate::native_strings::text(label), 13.0, on);
-    text + if weather_edge_bit(action).is_some() { 34.0 } else { 22.0 }
-}
-
-fn paint_weather_edge_glyph(g: &mut gpu::GpuRenderer, x: f32, y: f32, bit: u8, ink: [u8; 4]) {
-    let rect = (x, y, 15.0, 11.0);
-    stroke_round(g, rect, 2.0, theme::with_alpha(ink, 105));
-    let edge = match bit {
-        1 => (x + 3.0, y, 9.0, 2.0),
-        4 => (x + 3.0, y + 9.0, 9.0, 2.0),
-        8 => (x, y + 3.0, 2.0, 5.0),
-        _ => (x + 13.0, y + 3.0, 2.0, 5.0),
-    };
-    g.rect(edge.0, edge.1, edge.2, edge.3, ink);
+fn weather_choice_width(g: &mut gpu::GpuRenderer, label: &str, on: bool) -> f32 {
+    g.measure_chrome_text(&crate::native_strings::text(label), 13.0, on) + 22.0
 }
 
 fn weather_choices(
@@ -6927,14 +6947,14 @@ fn weather_choices(
     cells: &[(&str, bool, SettingsAction)],
 ) {
     let (x, y, w, h) = rect;
-    let widths: Vec<f32> = cells.iter().map(|(label, on, action)| weather_choice_width(g, label, *on, action)).collect();
-    let content_w = widths.iter().sum::<f32>();
+    let widths: Vec<f32> = cells.iter().map(|(label, on, _)| weather_choice_width(g, label, *on)).collect();
+    let content_w = if cells.len() == 1 { w } else { widths.iter().sum::<f32>() };
     let gaps = WEATHER_CHOICE_GAP * (cells.len() - 1) as f32;
     if w <= gaps { return; }
     let scale = ((w - gaps) / content_w).min(1.0);
     let mut left = x + w - gaps - content_w * scale;
     for ((label, selected, action), width) in cells.iter().zip(widths) {
-        let width = width * scale;
+        let width = if cells.len() == 1 { w } else { width * scale };
         let rect = (left, y, width, h);
         let hover = contains(rect, s.cursor);
         let fill = if *selected {
@@ -6950,14 +6970,8 @@ fn weather_choices(
         if *selected {
             stroke_round(g, rect, radius, theme::with_alpha(theme::accent(), 122));
         }
-        let glyph = weather_edge_bit(action).filter(|_| width >= 36.0);
-        let label_x = left + if glyph.is_some() { 19.0 } else { 0.0 };
-        let label_width = width - (label_x - left);
-        if let Some(bit) = glyph {
-            paint_weather_edge_glyph(g, left + 6.0, y + (h - 11.0) / 2.0, bit, ink);
-        }
-        let shown = fit(g, label, label_width - 8.0, 13.0, *selected);
-        g.centered_chrome_text((label_x, y, label_width, h), &shown,
+        let shown = fit(g, label, width - 8.0, 13.0, *selected);
+        g.centered_chrome_text(rect, &shown,
             gpu::DrawOpts { font_size: 13.0, color: ink, bold: *selected, italic: false });
         register_clipped(g, hits, Target::Setting(action.clone()), rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
