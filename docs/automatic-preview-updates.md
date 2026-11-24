@@ -22,6 +22,9 @@ preview 태그의 채널 기록(`.github/release-channel.json`)이 `platforms: [
 키로 서명해 `docs/appcast-win-preview.xml` 하나만 게시한다. 게시는 mac 과 같은 `feed_publish` 다 — 태그 커밋·채널·플랫폼,
 판·주소·크기·산출물 해시, 저장소 공개키로 서명 확인, main CAS, Pages 빌드와 공개 피드 대조.
 
+- Windows 굽기 러너는 저장소 변수 `WINDOWS_RUNNER` 를 따른다. `kasa-home` 이면 집 PC 자체 러너가 target 을 이어 써서 굽고,
+  변수가 없으면 GitHub `windows-latest` 다. 집 PC 가 꺼져 있으면 job 이 러너를 기다리며 서 있으니
+  `gh variable delete WINDOWS_RUNNER -R 2rami/kasaterm` 로 되돌리고 `release vX.Y.Z (windows)` 를 다시 부른다.
 - 따로 도는 실행이라 Windows 굽기(CI 에서 수십 분)의 시간·실패가 mac preview 와 controller 를 늦추거나 막지 않는다. controller 는
   mac 실행만 기다리고(`backend.tag_run_platforms`), `(windows)` 실행은 controller 의 실행 찾기에 걸리지 않는다.
 - 같은 이유로 Windows preview 피드는 계획의 기준 해시(`feed_base`)에 넣지 않는다. 늦게 나간 Windows 피드가 다음 계획을 낡게 만들어

@@ -104,7 +104,9 @@ jobs:
   build-msi:
     needs: resolve
     if: needs.resolve.outputs.platforms == 'both' || needs.resolve.outputs.platforms == 'windows'
-    runs-on: windows-latest
+    # 저장소 변수 WINDOWS_RUNNER(예: kasa-home — 집 PC 자체 러너)가 있으면 그 러너, 없으면 GitHub 러너. 집 PC 가 꺼져 있으면
+    # 변수를 지워 되돌린다(`gh variable delete WINDOWS_RUNNER`) — 안 지우면 job 이 러너를 기다리며 서 있다.
+    runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-latest' }}
     steps:
       # 그림 에셋이 git-lfs 라 안 받으면 130바이트 포인터가 내려오고, build.rs 의 에셋 검사가 거기서 빌드를 세운다
       # (의도된 loud failure). 받는 것은 이 굽기가 쓰는 것만 — 폰 앱(mobile/)과 arona-ui 캐릭터 원본(character-src/,
@@ -114,6 +116,14 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.commit }}
           lfs: false
+          # 자체 러너는 target 을 다음 굽기로 이어 쓴다 — 지우면 매번 처음부터 굽는다.
+          clean: ${{ vars.WINDOWS_RUNNER == '' }}
+
+      # 자체 러너엔 지난 판 dist 가 남는다 — 아래 「Locate」가 옛 MSI 를 집지 않게 비운다.
+      - name: Clear previous packages
+        if: vars.WINDOWS_RUNNER != ''
+        shell: pwsh
+        run: Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
 
       - name: Fetch LFS assets for the Windows build
         uses: ./.github/actions/lfs-pull
@@ -124,6 +134,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cargo cache
+        if: vars.WINDOWS_RUNNER == ''
         uses: Swatinem/rust-cache@v2
 
       - name: Setup Node
