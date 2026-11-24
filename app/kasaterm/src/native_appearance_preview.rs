@@ -1,6 +1,8 @@
 use super::*;
 
-const PREVIEW_H: f32 = 224.0;
+pub(super) fn preview_height(available: f32) -> f32 {
+    (available * 0.32).clamp(100.0, 360.0)
+}
 pub(super) const FEATURED_PALETTES: [&str; 4] = ["frost-light", "frost-dark", "graphite", "paper"];
 
 fn palette_strip(x: f32, y: f32, w: f32) -> ([Rect; 4], f32) {
@@ -83,24 +85,6 @@ pub(super) fn paint_accents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut V
     theme::ACCENT_PRESETS.len().div_ceil(columns) as f32 * 64.0
 }
 
-fn regions(x:f32,y:f32,w:f32)->[(usize,Rect);5] {
-    let inset=6.0;let gap=5.0;let header=32.0;
-    let inside=(w-inset*2.0).max(0.0);
-    let side=(inside*0.22).floor();let panel=(inside*0.24).floor();let center=inside-side-panel-gap*2.0;
-    let top=y+inset+header+gap;let body_h=PREVIEW_H-inset*2.0-header-gap-30.0;
-    let middle=x+inset+side+gap;
-    [(30,(middle,y+inset,center,header)),
-     (29,(x+inset,y+inset,side,PREVIEW_H-inset*2.0-30.0)),
-     (28,(middle,top,center,28.0)),
-     (27,(middle,top+33.0,center,body_h-33.0)),
-     (31,(middle+center+gap,y+inset,panel,PREVIEW_H-inset*2.0-30.0))]
-}
-
-fn text(g: &mut gpu::GpuRenderer, rect: Rect, value: &str, ink: [u8; 4], bold: bool) {
-    let value = fit(g, value, (rect.2 - 20.0).max(0.0), 10.5, bold);
-    draw_text(g, rect.0 + 10.0, rect.1 + 8.0, &value, 10.5, ink, bold);
-}
-
 pub(super) fn paint(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -108,129 +92,73 @@ pub(super) fn paint(
     x: f32,
     y: f32,
     w: f32,
+    height: f32,
 ) -> f32 {
-    let selected = match s.input {
-        Some(SettingsInput::PaletteHex(index)) => Some(index),
-        _ => None,
-    };
-    let can_edit = s.cat == SettingsCat::Appearance;
-    g.queue_icon("terminal", x + 2.0, y + 1.0, 15.0, theme::text_dim());
-    draw_text(g, x + 23.0, y + 2.0, "미리보기", 12.0, theme::text(), true);
-    let header_h = 24.0;
-    let y = y + header_h;
-    let areas = regions(x, y, w);
-    // Only the miniature workspace uses the application's palette; its editor buttons belong to the settings panel.
+    let shell = &s.appearance_shell;
+    let label = if shell.running { "셸 닫기" } else { "셸 열기" };
+    let target = if shell.running { Target::ClosePreviewShell } else { Target::PreviewShell };
+    let width = crate::native_controls::button_width(g, &crate::native_strings::text(label), CTL_H, false);
+    button(g, s, hits, (x + (w - width).max(0.0), y, width.min(w), CTL_H), label, target, false);
+    let shown = fit(g, "터미널 미리보기", (w - width - 14.0).max(0.0), 12.0, true);
+    draw_text(g, x, y + 8.0, &shown, 12.0, theme::text(), true);
+    let top = y + CTL_H + 8.0;
+    let pane = (x, top, w, height);
     let app_layer = theme::without_settings_layer();
-    crate::native_controls::panel(g,(x,y,w,PREVIEW_H),theme::bg());
-    for (slot, rect) in areas {
-        let fill = match slot {
-            27 => theme::pane_bg(),
-            28 => theme::header_bg(),
-            29 => theme::sidebar_bg(),
-            30 => theme::titlebar_bg(),
-            _ => theme::side_panel_bg(),
-        };
-        g.round_rect_fill(rect.0,rect.1,rect.2,rect.3,theme::radius_sm().min(8.0),fill);
-        if can_edit {
-            register_clipped(g, hits, Target::Setting(SettingsAction::FocusPaletteHex(slot)), rect, HitCursor::Pointer);
-        }
-        let hover = can_edit && contains(rect, s.cursor);
-        g.hover_pointer |= hover;
-        if selected == Some(slot) || hover {
-            stroke_rect(
-                g,
-                (
-                    rect.0 + 1.0,
-                    rect.1 + 1.0,
-                    (rect.2 - 2.0).max(0.0),
-                    (rect.3 - 2.0).max(0.0),
-                ),
-                theme::accent(),
-            );
-        }
-    }
-    let header_ink = theme::enforce_contrast_at(theme::text(), theme::header_bg(), 4.5);
-    let title_ink = theme::enforce_contrast_at(theme::text(), theme::titlebar_bg(), 4.5);
-    let side_ink = theme::enforce_contrast_at(theme::text(), theme::sidebar_bg(), 4.5);
-    let panel_ink = theme::enforce_contrast_at(theme::text(), theme::side_panel_bg(), 4.5);
-    let pane_ink = theme::enforce_min_contrast(theme::fg(), theme::pane_bg());
-    text(g, areas[0].1, "KASA · 상단바", title_ink, true);
-    let left = areas[1].1;
-    for (line, label) in ["사이드바", "작업 방", "프로젝트", "터미널"]
-        .iter()
-        .enumerate()
-    {
-        text(
-            g,
-            (left.0, left.1 + line as f32 * 30.0, left.2, 26.0),
-            label,
-            side_ink,
-            line == 0,
-        );
-    }
-    let tab = areas[2].1;
-    g.rect(tab.0 + 5.0, tab.1 + tab.3 - 2.0, (tab.2 * 0.36).max(0.0), 2.0, theme::accent());
-    text(g, tab, "터미널 · main", header_ink, true);
-    let body = areas[3].1;
-    text(g, body, "$ git status", pane_ink, false);
-    text(
-        g,
-        (body.0, body.1 + 24.0, body.2, 26.0),
-        "프로젝트의 변경 사항",
-        pane_ink,
-        false,
-    );
-    if !crate::lite_mode() && s.weather.enabled {
-        let work = s.weather.style == crate::weather::model::RainStyle::Showers;
-        let condition = if work {
-            s.weather.indicator(s.weather_phase).weather.map_or("monitor", weather_icon)
-        } else {
-            "umbrella"
-        };
-        let size = (body.2 * 0.38).min(body.3 * 0.65).clamp(12.0, 92.0);
-        g.queue_icon(condition, body.0 + (body.2 - size) * 0.5, body.1 + body.3 - size - 6.0, size,
-            theme::enforce_contrast_at(theme::accent(), theme::pane_bg(), 3.0));
-    }
-    if let Some((px, py, pw, ph)) = g.clip_hit(body).filter(|r| r.2 >= 32.0 && r.3 >= 32.0) {
-        PAINT_FEEDBACK.with(|f| f.borrow_mut().weather_preview = Some(crate::weather::SettingsPreview {
+    crate::native_controls::panel(g, pane, theme::pane_bg());
+    let ink = theme::enforce_min_contrast(theme::fg(), theme::pane_bg());
+    if shell.focused { stroke_round(g, pane, theme::radius_md(), theme::accent()); }
+    let body = (x + 12.0, top + 9.0, (w - 24.0).max(0.0), height - 18.0);
+    register_clipped(g, hits, Target::PreviewShell, pane, HitCursor::Text);
+
+    let (cw, ch) = (g.cell_w.max(1.0), g.cell_h.max(1.0));
+    let cols = (body.2 / cw).floor().max(1.0) as u16;
+    let rows = (body.3 / ch).floor().max(1.0) as u16;
+    PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().preview_shell_size = Some((cols, rows)));
+    if let Some((px, py, pw, ph)) = g.clip_hit(pane).filter(|r| r.2 >= 32.0 && r.3 >= 32.0) {
+        PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().weather_preview = Some(crate::weather::SettingsPreview {
             rect: [px, py, pw, ph], phase: s.weather_phase, popup: None,
         }));
     }
-    let right = areas[4].1;
-    for (line, label) in ["Git · Info", "변경 파일", "src/main.rs"]
-        .iter()
-        .enumerate()
-    {
-        text(
-            g,
-            (right.0, right.1 + line as f32 * 30.0, right.2, 26.0),
-            label,
-            panel_ink,
-            line == 0,
-        );
+    if let Some(visible) = g.clip_hit(body) {
+        let first = ((visible.1 - body.1) / ch).ceil().max(0.0) as usize;
+        let end = ((visible.1 + visible.3 - body.1) / ch).floor().max(0.0) as usize;
+        let end = end.min(rows as usize).min(shell.rows.len());
+        if first < end {
+            let scale = g.scale();
+            let lines = &shell.rows[first..end];
+            let clipped;
+            let lines = if lines.iter().any(|line| line.len() > cols as usize) {
+                clipped = lines.iter().map(|line| line[..line.len().min(cols as usize)].to_vec()).collect::<Vec<_>>();
+                clipped.as_slice()
+            } else { lines };
+            g.draw_cells(&[gpu::PaneSlot {
+                rows: lines, origin_px: (body.0 * scale, (body.1 + first as f32 * ch) * scale),
+                font_scale: 1.0, dim: false, links: Vec::new(), default_fg: ink, source: None,
+            }]);
+        }
+        if shell.focused {
+            if let Some((row, col)) = shell.cursor {
+                let cursor = (body.0 + col as f32 * cw, body.1 + row as f32 * ch, cw, ch);
+                if row < rows && col < cols && g.clip_hit(cursor) == Some(cursor) {
+                    stroke_rect(g, cursor, theme::cursor_on_pane(theme::cursor()));
+                }
+            }
+        }
     }
-
-    statusbar_preview(g, s, (x + 6.0, y + PREVIEW_H - 30.0, (w - 12.0).max(0.0), 24.0));
+    if !shell.running && shell.rows.is_empty() {
+        let message = shell.error.as_deref().unwrap_or("셸을 열고 입력을 테스트하세요");
+        let message = fit(g, message, (w - 28.0).max(0.0), 12.0, false);
+        g.centered_chrome_text(pane, &message, gpu::DrawOpts { font_size: 12.0, color: ink, bold: false, italic: false });
+    }
     drop(app_layer);
-    if !can_edit {
-        return header_h + PREVIEW_H;
-    }
-    let options = [
-        (0, "창 바탕"),
-        (1, "터미널 글자"),
-        (6, "화면 글자"),
-        (5, "구분선"),
-    ];
-    let h=crate::native_controls::CONTROL_HEIGHT;
-    let labels:Vec<_>=options.iter().map(|(_,label)|crate::native_strings::text(label)).collect();
-    let widths:Vec<_>=labels.iter().map(|label|crate::native_controls::button_width(g,label,h,true)).collect();
-    let (rects,height)=crate::native_layout::flow(&widths,(x,y+PREVIEW_H+12.0,w,0.0),h,8.0,crate::native_layout::Align::Start);
-    for (((slot,_),label),r) in options.into_iter().zip(labels).zip(rects) {
-        let r=crate::native_controls::text_button(g,r,s.cursor,&label,crate::native_controls::Style{active:selected==Some(slot),..Default::default()});
-        register_clipped(g,hits,Target::Setting(SettingsAction::FocusPaletteHex(slot)),r,HitCursor::Pointer);
-    }
-    header_h + PREVIEW_H + 12.0 + height
 
+    let controls = [
+        ("터미널 바탕", Target::Setting(SettingsAction::FocusPaletteHex(27)), s.input == Some(SettingsInput::PaletteHex(27))),
+        ("터미널 글자", Target::Setting(SettingsAction::FocusPaletteHex(1)), s.input == Some(SettingsInput::PaletteHex(1))),
+        ("강조색 직접 입력", Target::Setting(SettingsAction::FocusColor(SettingsInput::AccentHex)), s.input == Some(SettingsInput::AccentHex)),
+    ];
+    let buttons = button_row(g, s, hits, (x, top + height + 10.0, w, 0.0), &controls, crate::native_layout::Align::Start);
+    CTL_H + 8.0 + height + 10.0 + buttons
 }
 
 #[cfg(test)]
@@ -255,35 +183,17 @@ mod tests {
     }
 
     #[test]
-    fn preview_regions_stay_inside_the_frame_without_overlapping() {
-        for width in [280.0, 430.0, 600.0, 800.0] {
-            let areas = regions(20.0, 40.0, width);
-            for (index, (_, a)) in areas.iter().enumerate() {
-                assert!(a.0 >= 20.0 && a.1 >= 40.0 && a.2 > 0.0 && a.3 >= 26.0);
-                assert!(a.0 + a.2 <= 20.0 + width && a.1 + a.3 <= 40.0 + PREVIEW_H);
-                for (_, b) in areas.iter().skip(index + 1) {
-                    let overlap_w = (a.0 + a.2).min(b.0 + b.2) - a.0.max(b.0);
-                    let overlap_h = (a.1 + a.3).min(b.1 + b.3) - a.1.max(b.1);
-                    assert!(overlap_w <= 0.0 || overlap_h <= 0.0);
-                }
-            }
+    fn preview_stays_readable_on_compact_and_four_k_layouts() {
+        for scale in [1.0, 1.5, 2.0] {
+            let width = 3840.0 / scale;
+            let visible_height = 2160.0 / scale - 100.0;
+            let (x, pane_width) = appearance_content_column(0.0, width, 208.0);
+            assert_eq!(pane_width, 1120.0);
+            assert!(x >= 208.0 && x + pane_width < width);
+            assert!(preview_height(visible_height) + 252.0 < visible_height);
         }
-    }
-
-    #[test]
-    fn each_surface_has_an_independent_editor_target() {
-        let areas = regions(20.0, 40.0, 600.0);
-        assert_eq!(areas.map(|(slot, _)| slot), [30, 29, 28, 27, 31]);
-        for index in [1, 4] {
-            let (slot, rect) = areas[index];
-            let top_point = (rect.0 + rect.2 / 2.0, areas[0].1.1 + 12.0);
-            let matches: Vec<_> = areas.iter().filter(|(_, area)| contains(*area, top_point)).map(|(slot, _)| *slot).collect();
-            assert_eq!(matches, [slot], "sidebar headers edit their own surface color");
-        }
-        for (slot, rect) in areas {
-            let center = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
-            let matches: Vec<_> = areas.iter().filter(|(_, area)| contains(*area, center)).map(|(slot, _)| *slot).collect();
-            assert_eq!(matches, [slot]);
-        }
+        let (x, width) = appearance_content_column(0.0, 390.0, 0.0);
+        assert_eq!((x, width), (16.0, 358.0));
+        assert_eq!(preview_height(150.0), 100.0);
     }
 }

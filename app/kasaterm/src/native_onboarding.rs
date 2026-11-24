@@ -1095,6 +1095,7 @@ pub(crate) fn paint(
         motion_preview_visible: false,
         weather_preview: None,
         appearance_scroll: None,
+        preview_shell_size: None,
     }
 }
 

@@ -4590,6 +4590,16 @@ impl App {
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
             "custom-color-probe" if crate::verification_run() => self.probe_custom_colors(),
+            "appearance-shell-probe" if crate::verification_run() => {
+                let target = self.settings_scene.hits().iter()
+                    .find(|hit| hit.target == crate::native_settings::Target::PreviewShell)
+                    .map(|hit| hit.rect);
+                if let Some((x, y, w, h)) = target {
+                    self.native_settings_click(x + w * 0.5, y + h * 0.5);
+                    self.settings_scene.appearance_shell.send(br#"printf '\033[36m%s%s\033[0m\n' KASA_ PTY_OK"#);
+                    self.settings_scene.appearance_shell.send(b"\r");
+                }
+            }
             "focus-custom-accent" if crate::verification_run() => self.settings_apply(SettingsAction::FocusColor(SettingsInput::AccentHex)),
             "focus-statusbar-color" if crate::verification_run() => self.settings_apply(SettingsAction::FocusColor(SettingsInput::StatusbarHex("claude"))),
             "settings-search" if crate::verification_run() => {

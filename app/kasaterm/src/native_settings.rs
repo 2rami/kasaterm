@@ -5,6 +5,7 @@
 
 use super::*;
 mod login_probe;
+pub(crate) mod appearance_shell;
 
 #[path = "native_device_account.rs"]
 pub(crate) mod device_account;
@@ -39,6 +40,11 @@ fn content_column_with_max(ax:f32,aw:f32,nav_w:f32,max:f32)->(f32,f32) {
     let width=available.min(max);
     (ax+nav_w+gap+gutter+((available-width)*0.5).floor(),width)
 }
+fn appearance_content_column(x: f32, width: f32, nav: f32) -> (f32, f32) {
+    let max = if width >= 1440.0 { 1120.0 } else { CONTENT_MAX_W };
+    content_column_with_max(x, width, nav, max)
+}
+
 const SPRITE_DROP_MAX_BYTES: u64 = 4 << 20;
 const THEMEGEN_DROP_MAX_BYTES: u64 = 32 << 20;
 
@@ -615,6 +621,8 @@ pub(crate) enum Target {
     FinishInput,
     CancelInput,
     Category(SettingsCat),
+    PreviewShell,
+    ClosePreviewShell,
     WeatherPhase(crate::weather::indicator::Phase),
     NavigationScroll(u32),
     Disclosure(&'static str),
@@ -705,6 +713,7 @@ pub(crate) struct PaintOutput {
     pub(crate) motion_preview_visible: bool,
     pub(crate) weather_preview: Option<crate::weather::SettingsPreview>,
     pub(crate) appearance_scroll: Option<f32>,
+    pub(crate) preview_shell_size: Option<(u16, u16)>,
 }
 
 #[derive(Clone, Debug)]
@@ -729,6 +738,7 @@ struct PaintFeedback {
     multiline_layouts: Vec<MultilineLayout>,
     motion_preview_visible: bool,
     weather_preview: Option<crate::weather::SettingsPreview>,
+    preview_shell_size: Option<(u16, u16)>,
     /// 이번 프레임에 그린 「펼쳐진」 선택 상자의 머리 자리. 팝업은 본문을 다 그린 뒤
     /// 이 자리에 붙여 맨 위에 올린다.
     dropdown_anchor: Option<(DropdownId, Rect)>,
@@ -774,6 +784,7 @@ pub(crate) struct Snapshot {
     pub(crate) area: Rect,
     pub(crate) cat: SettingsCat,
     pub(crate) appearance_jump: Option<SettingsCat>,
+    pub(crate) appearance_shell: appearance_shell::View,
     pub(crate) keyboard_focus: Option<Target>,
     pub(crate) keyboard_anchor: Option<Rect>,
     pub(crate) cursor: (f32, f32),
@@ -975,9 +986,17 @@ impl App {
         self.settings_scene.refresh_device_cache();
     }
 
+    pub(crate) fn settings_shell_polling(&self) -> bool {
+        self.settings_room_active() && self.settings_scene.appearance_shell.running()
+    }
+
     pub(crate) fn native_settings_tick(&mut self) {
         self.device_account_poll();
         self.poll_feedback_delivery();
+        if self.settings_shell_polling() && self.settings_scene.appearance_shell.tick() {
+            self.chrome_dirty = true;
+            if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+        }
         if self.settings_room_active() {
             self.pump_autosettings_scroll();
             self.pump_autosettings_tour();
@@ -1027,6 +1046,7 @@ impl App {
             area,
             cat: scene.category(),
             appearance_jump: self.settings_scene.appearance_jump,
+            appearance_shell: self.settings_scene.appearance_shell.view(),
             keyboard_focus: scene.keyboard_focus().cloned(),
             keyboard_anchor: scene.keyboard_anchor(),
             cursor: self.cursor_px,
@@ -1153,6 +1173,9 @@ impl App {
     }
 
     pub(crate) fn finish_native_settings_paint(&mut self, output: PaintOutput) -> bool {
+        if let Some(size) = output.preview_shell_size {
+            self.settings_scene.appearance_shell.set_size(size);
+        }
         self.settings_scene.finish_paint(
             output.hits,
             output.dropdown_scroll_max,
@@ -1209,7 +1232,13 @@ impl App {
         if !matches!(target, Some(Target::Dropdown(_))) {
             self.settings_scene.close_dropdown();
         }
+        if target != Some(Target::PreviewShell) { self.settings_scene.appearance_shell.blur(); }
         match target {
+            Some(Target::PreviewShell) => {
+                self.native_settings_blur();
+                self.settings_scene.appearance_shell.open(&self.set_shell);
+            }
+            Some(Target::ClosePreviewShell) => self.settings_scene.appearance_shell.close(),
             Some(Target::ClearSearch) => {
                 if self.settings_input == Some(SettingsInput::Search) { self.native_settings_cancel_field(); }
                 self.settings_scene.query.clear();
@@ -1255,6 +1284,12 @@ impl App {
                     return true;
                 }
                 self.native_settings_blur();
+                if action == SettingsAction::FocusColor(SettingsInput::AccentHex) {
+                    if !self.settings_scene.disclosures().contains("color-values-accent") {
+                        self.settings_scene.toggle_disclosure("color-values-accent");
+                    }
+                    self.settings_scene.appearance_jump = Some(SettingsCat::Appearance);
+                }
                 self.native_settings_apply(action);
                 if let Some(field) = self.settings_input {
                     self.native_settings_arm_backup(field);
@@ -1858,6 +1893,12 @@ impl App {
 
     pub(crate) fn native_settings_paste_clipboard(&mut self) -> bool {
         if !self.settings_room_active() { return false; }
+        if self.settings_scene.appearance_shell.focused() {
+            if let Ok(text) = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+                self.settings_scene.appearance_shell.paste(&text);
+            }
+            return true;
+        }
         let Some(field) = self.settings_input.filter(|f| self.settings_scene.field_is_current(*f)) else { return true };
         let pasted = if crate::verification_run() && std::env::var_os("KASATERM_LOGIN_PASTE_PROBE").is_some() {
             Ok(login_probe::CODE.to_string())
@@ -1888,9 +1929,19 @@ impl App {
         let editor_mod = if cfg!(target_os = "macos") { self.modifiers.super_key() } else { self.modifiers.control_key() };
         if editor_mod && !self.settings_scene.first_run()
             && matches!(&event.logical_key, Key::Character(key) if key.eq_ignore_ascii_case("f")) {
+            self.settings_scene.appearance_shell.blur();
             self.native_settings_focus(SettingsInput::Search);
             self.settings_scene.select_all_field();
             self.chrome_dirty = true;
+            return true;
+        }
+        if self.settings_scene.appearance_shell.focused() {
+            if editor_mod && matches!(&event.logical_key, Key::Character(key) if key.eq_ignore_ascii_case("v")) {
+                return self.native_settings_paste_clipboard();
+            }
+            if !self.modifiers.super_key() {
+                self.settings_scene.appearance_shell.key(event, self.modifiers.control_key());
+            }
             return true;
         }
         let modified = self.host_mod() || self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key();
@@ -2148,6 +2199,12 @@ impl App {
         if !self.settings_room_active() {
             return;
         }
+        if self.settings_scene.appearance_shell.focused() {
+            if let winit::event::Ime::Commit(text) = ime {
+                self.settings_scene.appearance_shell.send(text.as_bytes());
+            }
+            return;
+        }
         if self.settings_input.is_some_and(|field| !self.settings_scene.field_is_current(field)) {
             self.native_settings_blur();
             return;
@@ -2186,6 +2243,12 @@ impl App {
             winit::event::MouseScrollDelta::LineDelta(_, y) => y * 42.0,
             winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
+        if self.settings_scene.appearance_shell.focused()
+            && self.settings_scene.hit_at(self.cursor_px.0, self.cursor_px.1).is_some_and(|hit| hit.target == Target::PreviewShell)
+        {
+            self.settings_scene.appearance_shell.scroll((dy / 18.0).round() as i32);
+            return;
+        }
         let scrolled = if self.settings_scene.dropdown().is_some() {
             self.settings_scene.dropdown_scroll_by(-dy)
         } else if let Some(max) = self.settings_scene.hits().iter().find_map(|hit| {
@@ -2828,7 +2891,11 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     drop(nav_layer);
     let _body_layer = theme::settings_layer(body_fill);
 
-    let (content_x, content_w) = content_column(ax, aw, nav_w);
+    let (content_x, content_w) = if appearance {
+        appearance_content_column(ax, aw, nav_w)
+    } else {
+        content_column(ax, aw, nav_w)
+    };
     let (title, _, _) = category_meta(if appearance { SettingsCat::Appearance } else { snapshot.cat });
     let title_y = if compact { navigation.viewport.1 + navigation.viewport.3 + 12.0 } else { ay + 24.0 };
     draw_text(g, content_x, title_y, title, 24.0, theme::text(), true);
@@ -2838,17 +2905,18 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         SettingsInput::Search | SettingsInput::MachineLabel | SettingsInput::MachineAddress | SettingsInput::LoginCode)
         && !device_account::owns(field));
     let body_bottom = ay + ah - 12.0 - if input_footer { ROW_H } else { 0.0 };
-    let fixed_preview = appearance && ay + ah - 12.0 - body_top >= 480.0;
+    let preview_height = appearance_preview::preview_height(ay + ah - 12.0 - body_top);
+    let fixed_preview = appearance && body_bottom - body_top >= preview_height + 252.0;
     if fixed_preview {
         g.push_clip(content_x, body_top, content_w, body_bottom - body_top);
-        body_top += appearance_preview::paint(g, snapshot, &mut hits, content_x, body_top, content_w) + 16.0;
+        body_top += appearance_preview::paint(g, snapshot, &mut hits, content_x, body_top, content_w, preview_height) + 16.0;
         g.pop_clip();
     }
     let view_h = (body_bottom - body_top).max(0.0);
     g.push_clip(content_x, body_top, content_w, view_h);
     let mut y = body_top - snapshot.scroll;
     if appearance && !fixed_preview {
-        y += appearance_preview::paint(g, snapshot, &mut hits, content_x, y, content_w) + 16.0;
+        y += appearance_preview::paint(g, snapshot, &mut hits, content_x, y, content_w, preview_height) + 16.0;
     }
 
     let mut appearance_scroll = None;
@@ -2864,10 +2932,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         ),
         SettingsCat::Appearance | SettingsCat::Statusbar | SettingsCat::Weather => {
             let (x, w) = (content_x, content_w);
+            let controls_top = y + snapshot.scroll - body_top;
+            if snapshot.appearance_jump == Some(SettingsCat::Appearance) {
+                appearance_scroll = Some(controls_top);
+            }
             paint_appearance(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
-            if disclosure(g, snapshot, &mut hits, x, &mut y, w, "appearance-palette", "팔레트·세부 색")
-                || snapshot.input == Some(SettingsInput::AccentHex)
-            {
+            if disclosure(g, snapshot, &mut hits, x, &mut y, w, "appearance-palette", "팔레트·세부 색") {
                 paint_appearance_palette(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
             }
             if !crate::lite_mode() {
@@ -2880,7 +2950,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 appearance_scroll = match snapshot.appearance_jump {
                     Some(SettingsCat::Weather) => Some(weather_top + snapshot.scroll - body_top),
                     Some(SettingsCat::Statusbar) => Some(statusbar_top + snapshot.scroll - body_top),
-                    _ => None,
+                    _ => appearance_scroll,
                 };
             }
             paint_appearance_details(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, w);
@@ -2992,6 +3062,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         motion_preview_visible: feedback.motion_preview_visible,
         weather_preview: feedback.weather_preview,
         appearance_scroll,
+        preview_shell_size: feedback.preview_shell_size,
     }
 }
 
@@ -3295,6 +3366,14 @@ fn paint_appearance(
     paint_palette_editor(g, s, hits, caret, x, y, w);
     row_label(g, x, y, "강조색");
     *y += appearance_preview::paint_accents(g, s, hits, x, *y, w);
+    if s.input == Some(SettingsInput::AccentHex) {
+        let color = theme::accent();
+        let accent_hex = theme::hex_str([color[0], color[1], color[2]]);
+        *y += paint_color_picker(g, s, hits, caret, x, *y, w, SettingsInput::AccentHex,
+            "강조색", if s.input == Some(SettingsInput::AccentHex) { &s.palette_edit } else { &accent_hex },
+            s.eyedropper.then_some(SettingsAction::ColorEyedropper(SettingsInput::AccentHex)));
+        *y += 12.0;
+    }
     if !crate::lite_mode() {
         let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
             (preset_label(label), s.shape == *key, SettingsAction::Shape(key))).collect();
@@ -3353,12 +3432,6 @@ fn paint_appearance_palette(
                 SettingsAction::ThemeMode(palette.key.clone()))).collect();
         chips_owned(g, s, hits, x, y, w, choices);
     }
-    let color = theme::accent();
-    let accent_hex = theme::hex_str([color[0], color[1], color[2]]);
-    *y += paint_color_picker(g, s, hits, caret, x, *y, w, SettingsInput::AccentHex,
-        "강조색", if s.input == Some(SettingsInput::AccentHex) { &s.palette_edit } else { &accent_hex },
-        s.eyedropper.then_some(SettingsAction::ColorEyedropper(SettingsInput::AccentHex)));
-    *y += 12.0;
     let mut actions=vec![("현재 색으로 복제",Target::Setting(SettingsAction::StartCustomTheme),false)];
     if !s.custom_active.is_empty(){actions.push(("색 초기화",Target::Setting(SettingsAction::ResetCustomTheme),false));}
     *y+=button_row(g,s,hits,(x,*y,w,0.0),&actions,crate::native_layout::Align::Start)+12.0;
@@ -3639,113 +3712,12 @@ fn statusbar_widget_label(id: &str) -> &'static str {
     }
 }
 
-fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
-    if matches!(id, "claude" | "codex") {
-        let mut parts = vec![if id == "claude" { "Claude" } else { "Codex" }.to_string()];
-        let fields = s.statusbar_usage_fields.get(id);
-        for field in crate::statusbar_config::USAGE_FIELDS {
-            if !fields.is_some_and(|values| values.iter().any(|value| value == field)) {
-                continue;
-            }
-            let value = match (id, field) {
-                ("claude", "account") => "지메일",
-                ("codex", "account") => "개인",
-                (_, "email") => "me@example.com",
-                ("claude", "session") => "5h 42%",
-                ("codex", "session") => continue,
-                (_, "weekly") => "7d 68%",
-                ("claude", "model") => "Fable 24%",
-                ("codex", "model") => continue,
-                _ => continue,
-            };
-            parts.push(crate::native_strings::text(value).into_owned());
-        }
-        return parts.join(" ");
-    }
-    match id {
-        "ports" => ":3000 · :5173",
-        "schedules" => "예약 2",
-        "clipboard" => "클립보드",
-        "notes" => "쪽지 2",
-        "resources" => "CPU 18% · RAM 42%",
-        "sleep" => "마저 하고 잠자기",
-        "tunnel" => "모바일 연결됨",
-        "devices" => "기기 2대",
-        _ => "",
-    }
-    .to_string()
-}
-
-fn statusbar_preview_group(id: &str) -> u8 {
-    crate::statusbar_config::group(id)
-}
-
 fn statusbar_item_color(s: &Snapshot, id: &str) -> [u8; 4] {
     s.statusbar_colors
         .get(id)
         .and_then(|value| theme::parse_hex(value))
         .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
         .unwrap_or_else(theme::text_dim)
-}
-
-fn statusbar_preview(g: &mut gpu::GpuRenderer, s: &Snapshot, bar: Rect) {
-    round_rect(
-        g,
-        bar.0,
-        bar.1,
-        bar.2,
-        bar.3,
-        theme::radius_sm(),
-        theme::surface_hover(),
-    );
-    g.push_clip(bar.0 + 7.0, bar.1, (bar.2 - 14.0).max(0.0), bar.3);
-    let right = bar.0 + bar.2 - 7.0;
-    let mut cx = bar.0 + 7.0;
-    let mut last_group = None;
-    let visible: Vec<&String> = s
-        .statusbar_order
-        .iter()
-        .filter(|id| !s.statusbar_hidden.contains(id.as_str()))
-        .collect();
-    if visible.is_empty() {
-        draw_text(
-            g,
-            cx,
-            bar.1 + 8.0,
-            "표시 항목 없음",
-            10.5,
-            theme::text_mute(),
-            false,
-        );
-    }
-    for id in visible {
-        let group = statusbar_preview_group(id);
-        if last_group.is_some_and(|previous| previous != group) {
-            cx += 8.0;
-            if s.statusbar_separators {
-                g.rect(cx, bar.1 + 6.0, 1.0, bar.3 - 12.0, theme::border());
-                cx += 9.0;
-            }
-        }
-        let available = right - cx;
-        if available < 28.0 {
-            break;
-        }
-        let text = statusbar_preview_text(s, id);
-        let shown = fit(g, &text, available, 10.5, false);
-        draw_text(
-            g,
-            cx,
-            bar.1 + 8.0,
-            &shown,
-            10.5,
-            statusbar_item_color(s, id),
-            false,
-        );
-        cx += g.measure_chrome_text(&shown, 10.5, false) + 14.0;
-        last_group = Some(group);
-    }
-    g.pop_clip();
 }
 
 fn statusbar_widget_row(
@@ -3913,7 +3885,7 @@ fn paint_palette_slots(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hi
     let cols = ((w + 8.0) / 138.0).floor().max(1.0) as usize;
     let slot_w = (w - (cols - 1) as f32 * 8.0) / cols as f32;
     let selected = match s.input { Some(SettingsInput::PaletteHex(index)) => Some(index), _ => None };
-    for (index, hex) in s.palette_hex.iter().take(theme::SURFACE_PALETTE_START).enumerate() {
+    for (index, hex) in s.palette_hex.iter().enumerate() {
         let rect = (
             x + (index % cols) as f32 * (slot_w + 8.0),
             *y + (index / cols) as f32 * (CTL_H + 8.0), slot_w, CTL_H,
@@ -8033,15 +8005,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn statusline_preview_tracks_visible_fields_and_empty_state() {
-        assert_eq!(agent_statusline_preview([false, false, false]), "선택한 항목 없음");
-        assert_eq!(agent_statusline_preview([true, false, true]), "Claude Sonnet  ·  ~/project");
-        assert_eq!(agent_statusline_preview([false, true, false]), "사용량 24%");
-    }
-
-    /// 넓은 창에서 남는 폭은 좌우로 똑같이 갈라져야 한다. 고치기 전에는 열이
-    /// nav 바로 옆에 못박혀 남는 폭이 전부 오른쪽에 쌓였다(2560 창 기준 1026px).
     #[test]
     fn content_column_centers_the_surplus_on_wide_windows() {
         let nav = 200.0;

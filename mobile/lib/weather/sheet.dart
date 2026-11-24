@@ -378,9 +378,18 @@ class _UmbrellaOutline extends CustomPainter {
 }
 
 class WeatherPreview extends StatelessWidget {
-  const WeatherPreview({super.key, required this.settings, required this.phase, required this.height, this.cornerRadius = Look.radius});
+  const WeatherPreview({
+    super.key,
+    required this.settings,
+    required this.phase,
+    required this.height,
+    this.cornerRadius = Look.radius,
+    this.terminal,
+    this.action,
+  });
 
   final double height, cornerRadius;
+  final Widget? terminal, action;
 
   final WeatherSettings settings;
   final IndicatorPhase phase;
@@ -395,7 +404,7 @@ class WeatherPreview extends StatelessWidget {
     final corners = BorderRadius.circular(cornerRadius);
     final paneCorners = BorderRadius.circular(cornerRadius * 2 / 3);
     final symbolSize = (height * .56).clamp(38.0, 104.0);
-    final sample = ColoredBox(
+    final sample = terminal ?? ColoredBox(
       color: sky,
       child: Stack(
         fit: StackFit.expand,
@@ -415,10 +424,7 @@ class WeatherPreview extends StatelessWidget {
         ? WorkWeather(id: 'settings-weather-sample', phase: phase, doneUntilMs: 0,
             radius: paneCorners, builder: (_) => sample)
         : settings.target == WeatherTarget.backgroundOnly
-            ? Stack(fit: StackFit.expand, children: [
-                Center(child: _OpenUmbrella(size: symbolSize, color: scheme.primary)),
-                Positioned(top: 10, left: 12, child: Text(label, style: theme.textTheme.labelMedium)),
-              ])
+            ? (terminal ?? sample)
             : WeatherCard(id: 'settings-liquid-sample', mood: Mood.busy, preview: true, child: sample);
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -434,14 +440,15 @@ class WeatherPreview extends StatelessWidget {
             child: Row(children: [
               SettingsMark(SettingsGlyph.weather, size: 16, color: scheme.primary),
               const SizedBox(width: 7),
-              Text('미리보기', style: theme.textTheme.labelLarge),
+              Expanded(child: Text('미리보기', style: theme.textTheme.labelLarge)),
+              ?action,
             ]),
           ),
           ClipRRect(
             borderRadius: paneCorners,
             child: ColoredBox(
               color: sky,
-              child: SizedBox(height: height, child: IgnorePointer(child: WeatherScene(child: pane))),
+              child: SizedBox(height: height, child: WeatherScene(child: pane)),
             ),
           ),
         ]),

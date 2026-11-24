@@ -22,10 +22,10 @@ pub(crate) struct SettingsSceneSnapshot {
 ///
 /// 방 순서를 바꾸거나 앞쪽 방을 닫으면 인덱스는 흔들리지만 marker leaf는 그대로다.
 /// 돌아갈 자리도 같은 이유로 window index가 아니라 pane id를 기억한다.
-#[derive(Clone, Debug)]
 pub(crate) struct SettingsScene {
     category: SettingsCat,
     pub(crate) appearance_jump: Option<SettingsCat>,
+    pub(crate) appearance_shell: crate::native_settings::appearance_shell::PreviewShell,
     pub(crate) weather_phase: crate::weather::indicator::Phase,
     return_pane: Option<String>,
     cache: crate::native_settings::SettingsCache,
@@ -67,6 +67,7 @@ impl Default for SettingsScene {
         Self {
             category: SettingsCat::NAV[0],
             appearance_jump: None,
+            appearance_shell: Default::default(),
             weather_phase: crate::weather::indicator::Phase::Working,
             return_pane: None,
             cache: crate::native_settings::SettingsCache::default(),
@@ -207,6 +208,7 @@ impl SettingsScene {
             SettingsCat::Weather | SettingsCat::Statusbar => SettingsCat::Appearance,
             _ => category,
         };
+        if category != SettingsCat::Appearance { self.appearance_shell.close(); }
         if self.category != category || category == SettingsCat::Appearance {
             self.category = category;
             self.scroll = 0.0;
@@ -516,6 +518,7 @@ impl SettingsScene {
     }
 
     pub(crate) fn leave(&mut self) {
+        self.appearance_shell.close();
         self.return_pane = None;
         self.hits.clear();
         self.caret_rect = None;

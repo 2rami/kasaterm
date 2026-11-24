@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/screens/settings.dart';
+import 'package:kasaterm_mobile/screens/settings_look.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/wide_layout.dart';
 
@@ -106,6 +107,33 @@ void main() {
     expect(find.widgetWithText(AppBar, '외형'), findsOneWidget);
     expect(tester.getRect(preview), before);
     expect(find.text('색과 모양'), findsNothing);
+  });
+
+  testWidgets('작은 창에서도 사용자 지정 강조색을 입력하고 외형을 스크롤한다', (tester) async {
+    tester.view.physicalSize = const Size(320, 420);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final fx = SettingsFixture();
+    addTearDown(fx.server.close);
+    await tester.pumpWidget(MaterialApp(home: LookSettingsScreen(server: fx.server)));
+    await tester.pumpAndSettle();
+
+    final hex = find.byKey(const Key('appearance-custom-accent'));
+    await tester.scrollUntilVisible(hex.hitTestable(), 115);
+    await tester.tap(hex);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField), 'nope');
+    await tester.tap(find.text('적용'));
+    await tester.pumpAndSettle();
+    expect(find.text('6자리 색상 코드를 입력하세요'), findsOneWidget);
+    await tester.enterText(find.byType(TextFormField), '#12a4c8');
+    await tester.tap(find.text('적용'));
+    await tester.pumpAndSettle();
+    expect(fx.accent, '#12a4c8');
+    expect(find.text('#12a4c8'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('날씨 켜기'), 115);
+    expect(find.text('날씨 켜기').hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('계정 없이 붙은 주소 연결은 계정·캐릭터·기기 이름·비밀 승인을 감춘다', (tester) async {

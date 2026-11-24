@@ -1,6 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../grid_canvas.dart';
+import '../hub_actions.dart';
 import '../look.dart';
+import '../term_session.dart';
 import '../main.dart' show designTokens;
 import '../server.dart';
 import '../theme_prefs.dart';
@@ -42,12 +47,171 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
   bool _loading = true;
   String? _pending;
   IndicatorPhase _phase = IndicatorPhase.working;
+  final _previewKey = GlobalKey();
+  final _command = TextEditingController();
+  TermSession? _shell;
+  bool _openingShell = false;
+  int _bottomTick = 0;
 
   @override
   void initState() {
     super.initState();
     _reload();
   }
+
+  @override
+  void dispose() {
+    final shell = _shell;
+    if (shell != null) {
+      shell.dispose();
+      unawaited(_discardShell(server, shell.pane));
+    }
+    _command.dispose();
+    super.dispose();
+  }
+
+  static Future<void> _closeShell(Server server, Pane pane) async {
+    final current = (await server.panes(machine: pane.machine))
+        .where((row) => !row.closed && row.id == pane.id && row.surfaceKey == pane.surfaceKey)
+        .firstOrNull;
+    if (current == null) return;
+    final target = (await HubActions(server).prepare([current])).single;
+    await server.cmd(
+      'window.close_checked',
+      {'idx': current.window, 'addresses': [target.address]},
+      machine: current.machine,
+    );
+  }
+
+  static Future<void> _discardShell(Server server, Pane pane) async {
+    try {
+      await _closeShell(server, pane);
+    } on ServerException {
+      // The desktop may already have disconnected or moved the pane out of its temporary room.
+    }
+  }
+
+  Future<void> _toggleShell() async {
+    if (_openingShell) return;
+    setState(() => _openingShell = true);
+    final host = server;
+    try {
+      final active = _shell;
+      if (active != null) {
+        await _closeShell(host, active.pane);
+        if (mounted) {
+          setState(() => _shell = null);
+          active.dispose();
+        }
+        return;
+      }
+      final reply = await host.desktopAction('spawn-shell', query: const {'window': 'new'});
+      final surface = reply['surface'];
+      if (surface is! String || surface.isEmpty) {
+        throw const ServerException('시험용 셸을 찾지 못했어요.');
+      }
+      Pane? pane;
+      for (var attempt = 0; attempt < 5 && pane == null; attempt++) {
+        pane = (await host.panes()).where((row) =>
+            !row.closed && row.id == surface && (row.surfaceKey?.isNotEmpty ?? false)).firstOrNull;
+        if (pane == null) await Future<void>.delayed(const Duration(milliseconds: 150));
+      }
+      if (pane == null) {
+        throw const ServerException('시험용 셸의 주소를 확인하지 못했어요.');
+      }
+      if (!mounted) {
+        await _discardShell(host, pane);
+        return;
+      }
+      final session = TermSession(host, pane)..holdViewport = true;
+      session.connect();
+      setState(() => _shell = session);
+    } on ServerException catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+    } finally {
+      if (mounted) setState(() => _openingShell = false);
+    }
+  }
+
+  Future<void> _customAccent() async {
+    final current = _appearance?['accent'];
+    var value = current is String && current.startsWith('#')
+        ? current
+        : '#${(Theme.of(context).colorScheme.primary.toARGB32() & 0xffffff).toRadixString(16).padLeft(6, '0')}';
+    final form = GlobalKey<FormState>();
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('강조색 직접 입력'),
+        content: Form(
+          key: form,
+          child: TextFormField(
+            autofocus: true,
+            initialValue: value,
+            decoration: const InputDecoration(labelText: 'HEX', hintText: '#5B9BF5'),
+            autocorrect: false,
+            onChanged: (next) => value = next,
+            validator: (text) => RegExp(r'^#?[0-9a-fA-F]{6}$').hasMatch(text?.trim() ?? '')
+                ? null : '6자리 색상 코드를 입력하세요',
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialog), child: const Text('취소')),
+          FilledButton(
+            onPressed: () {
+              if (form.currentState?.validate() != true) return;
+              final hex = value.trim().toLowerCase();
+              Navigator.pop(dialog, hex.startsWith('#') ? hex : '#$hex');
+            },
+            child: const Text('적용'),
+          ),
+        ],
+      ),
+    );
+    if (choice != null && mounted) await _apply('accent', choice);
+  }
+
+  Widget _shellGrid(TermSession shell) => ListenableBuilder(
+    listenable: shell,
+    builder: (context, _) {
+      if (!shell.canSend && shell.grid.version == 0) {
+        return Center(child: Text(shell.note ?? '셸에 연결하는 중'));
+      }
+      return WrappedCanvas(
+        grid: shell.grid,
+        version: shell.grid.version + shell.historyVersion,
+        palette: TerminalPalette.forViewer(
+          context, mode: phoneThemeMode.value, source: designTokens.value ?? shell.tokens,
+        ),
+        history: shell.history,
+        historyVersion: shell.historyVersion,
+        bottomTick: _bottomTick,
+        onViewport: shell.setViewport,
+        fullScreen: shell.grid.alt,
+      );
+    },
+  );
+
+  Widget _shellInput(TermSession shell) => ListenableBuilder(
+    listenable: shell,
+    builder: (context, _) => TextField(
+      controller: _command,
+      decoration: InputDecoration(
+        labelText: '셸 명령',
+        isDense: true,
+        helperText: shell.canSend ? null : shell.note ?? '셸에 연결하는 중',
+      ),
+      textInputAction: TextInputAction.send,
+      autocorrect: false,
+      enabled: shell.canSend,
+      onSubmitted: (text) {
+        if (!shell.canSend) return;
+        shell.sendText('$text\r');
+        _command.clear();
+        setState(() => _bottomTick++);
+      },
+    ),
+  );
 
   Future<void> _reload() async {
     Map<String, Object?>? a;
@@ -92,15 +256,20 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
       appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('외형')),
       body: LayoutBuilder(builder: (context, constraints) {
         final theme = Theme.of(context);
-        final previewAccent = _entries(_appearance ?? const {}, 'accents')
-            .where((entry) => entry['name'] == _appearance?['accent'])
-            .map((entry) => parseHexColor(entry['hex'] as String?))
-            .firstOrNull;
-        return Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 10),
-              child: ValueListenableBuilder<WeatherSettings>(
+        final current = _appearance?['accent'];
+        final previewAccent = parseHexColor(current is String ? current : null)
+            ?? _entries(_appearance ?? const {}, 'accents')
+                .where((entry) => entry['name'] == current)
+                .map((entry) => parseHexColor(entry['hex'] as String?))
+                .firstOrNull;
+        final shell = _shell;
+        final pinned = constraints.maxHeight >= 430;
+        final preview = Padding(
+          key: _previewKey,
+          padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 10),
+          child: Column(
+            children: [
+              ValueListenableBuilder<WeatherSettings>(
                 valueListenable: weather.settings,
                 builder: (context, value, _) => Theme(
                   data: previewAccent == null ? theme : theme.copyWith(
@@ -110,20 +279,32 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
                     key: const Key('appearance-preview'),
                     settings: value,
                     phase: _phase,
-                    height: (constraints.maxHeight * .27).clamp(56.0, 208.0),
+                    height: (constraints.maxHeight * .27).clamp(62.0, 245.0),
                     cornerRadius: switch (_appearance?['shape']) {
                       'sharp' => 3,
                       'pixel' => 0,
                       _ => Look.radius,
                     },
+                    terminal: shell == null ? null : _shellGrid(shell),
+                    action: TextButton(
+                      onPressed: _openingShell ? null : _toggleShell,
+                      child: Text(shell != null ? '셸 닫기' : _openingShell ? '연결 중' : '셸 열기'),
+                    ),
                   ),
                 ),
               ),
-            ),
+              if (shell != null) _shellInput(shell),
+            ],
+          ),
+        );
+        return Column(
+          children: [
+            if (pinned) preview,
             Expanded(
               child: CustomScrollView(
                 key: const PageStorageKey('appearance-controls'),
                 slivers: [
+                  if (!pinned) SliverToBoxAdapter(child: preview),
                   _lookControls(),
                   WeatherSettingsControls(
                     phase: _phase,
@@ -187,7 +368,7 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
         tone: tone,
         icon: Icons.palette_outlined,
         title: '강조색',
-        subtitle: '누르면 데스크톱 강조색이 바뀌어요',
+        subtitle: a['accent'] is String && (a['accent'] as String).startsWith('#') ? a['accent'] as String : null,
         below: Wrap(
           spacing: 6,
           runSpacing: 6,
@@ -199,6 +380,11 @@ class _LookSettingsScreenState extends State<LookSettingsScreen> {
                 selected: c['name'] == a['accent'],
                 onTap: busy || c['name'] is! String ? null : () => _apply('accent', c['name'] as String),
               ),
+            TextButton(
+              key: const Key('appearance-custom-accent'),
+              onPressed: busy ? null : _customAccent,
+              child: const Text('직접 입력'),
+            ),
           ],
         ),
       ),

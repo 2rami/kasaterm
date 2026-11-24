@@ -7901,6 +7901,7 @@ impl ApplicationHandler<UserEvent> for App {
             || (self.sidebar_visible && !self.tabs_on_top && self.has_expanded_rooms())
             // 설정 상세의 모션 미리보기는 보일 때만 30fps 펌프를 탄다.
             || self.settings_media_animating()
+            || self.settings_shell_polling()
             || self.media_preview.active()
             // 비가 오는 동안(꺼져 있으면 여기서 끝난다 — 끈 사람은 깨우지 않는다).
             || (self.weather.settings.enabled && self.weather_animating())
