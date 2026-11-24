@@ -141,8 +141,19 @@ fn search_memory(query: &str, generation: u64, current: &AtomicU64) -> Option<Se
         Err(_) => return None,
     }
     // 연결이 거절됐을 때만 포워딩을 연다. 이미 포워딩된 데몬의 HTTP 오류는 재전송하지 않는다.
-    let machine = kasa_device::machines::find_route("나쵸네코").filter(|machine| !machine.guest)?;
-    let (url, _, _) = kasa_remote::netfwd::show_from_machine_blocking(&machine, SEARCH_URL).ok()?;
+    let url = ["나쵸네코", "nachoneko"].into_iter()
+        .filter_map(kasa_device::machines::find_route)
+        .filter(|machine| {
+            // 역방향 명부의 이름만으로는 개인 볼트 검색어를 보낼 대상을 정할 수 없다.
+            !machine.guest || (machine.machine_id.is_some() && matches!(
+                kasa_device::kasanet::path(&machine.base),
+                Some(("kasanet" | "kasanet-relay", _))
+            ))
+        })
+        .find_map(|machine| {
+            kasa_remote::netfwd::show_from_machine_blocking(&machine, SEARCH_URL)
+                .ok().map(|(url, _, _)| url)
+        })?;
     if current.load(Ordering::Relaxed) != generation {
         return None;
     }
