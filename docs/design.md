@@ -1567,7 +1567,7 @@ PC 미러의 `[[ki:…]]` 이미지 표식은 원본 기기의 인증된 이미�
 
 ### 앱 아이콘
 
-- 원본은 Icon Composer 문서 `assets/AppIcon.icon` 하나다. 흰 블라우스 차림의 Sky 를 우산 꼭지부터 물방울 장식까지 확대해
+- 원본은 Icon Composer 문서 `assets/AppIcon.icon` 하나다. 흰 블라우스 차림의 Sky 얼굴을 중심으로 확대하고 우산 꼭지와 물방울 장식까지
   1024×1024 투명 레이어(`Assets/sky.png`)에 담는다. macOS 26 이 모양(라이트·다크·투명·색조)에 맞춰 타일을 채운다.
   그림 결정은 `assets/original/README.md`.
 - `scripts/build-icon.sh`(Xcode 26 의 actool·ictool)가 `AppIcon.car`(앱의 `Resources/Assets.car`, `CFBundleIconName`)·
