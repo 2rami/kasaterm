@@ -678,10 +678,34 @@ export function CharactersTab({
   /// 고른 id 가 목록에 없으면(테마를 지웠다) 첫 칸으로 떨어진다 — 빈 오른쪽을
   /// 보여 주면 「고장」으로 읽힌다.
   const selTheme = data.themes.find((c) => c.id === selThemeId) ?? data.themes[0];
+  const [userName, setUserName] = useState(data.user_name ?? '');
+  useEffect(() => setUserName(data.user_name ?? ''), [data.user_name]);
 
   return (
     <TabCard>
       <Notice notice={notice} />
+
+      {data.user_name !== undefined && (
+        <Section title={t.theme.userName} hint={t.theme.userNameHint}>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              className="kt-field w-full max-w-[300px]"
+              aria-label={t.theme.userName}
+              placeholder={t.theme.userNamePlaceholder}
+              value={userName}
+              onChange={(event) => setUserName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.nativeEvent.isComposing && !busy && userName.trim() !== data.user_name) {
+                  event.preventDefault();
+                  void run('character-user-name', { label: userName });
+                }
+              }}
+            />
+            <MiniButton label={t.theme.userNameSave} disabled={busy || userName.trim() === data.user_name}
+              onClick={() => void run('character-user-name', { label: userName })} />
+          </div>
+        </Section>
+      )}
 
       <ThemeGenEngine />
 

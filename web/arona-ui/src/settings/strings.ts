@@ -85,6 +85,10 @@ export const ko = {
     menuPickOff: '끄기',
     members: (a: { count: number }) => `${a.count}명`,
     persona: '말투',
+    userName: '부를 이름',
+    userNameHint: '새로 시작하는 캐릭터가 이 이름으로 불러요. 비워 두면 테마의 기본 호칭을 써요.',
+    userNamePlaceholder: '기본 호칭',
+    userNameSave: '저장',
     personaHint: '켜면 캐릭터 말투로 대답해요 — 새로 여는 pane 부터',
     images: '그림 폴더',
     imagesHint:
@@ -455,6 +459,10 @@ export const en: Strings = {
     menuPickOff: 'Turn off',
     members: (a) => `${a.count} characters`,
     persona: 'Persona',
+    userName: 'What characters call you',
+    userNameHint: 'New agents use this name. Leave it blank to use the theme’s default.',
+    userNamePlaceholder: 'Theme default',
+    userNameSave: 'Save',
     personaHint: 'Replies come in the character’s voice — from newly opened panes on',
     images: 'Art folder',
     imagesHint:

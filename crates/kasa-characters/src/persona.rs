@@ -204,14 +204,16 @@ pub fn set_character(name: &str) -> Result<String, String> {
 
 fn system_prompt(name: &str, digest: &str, unprompted: bool) -> String {
     let identity = identity_for(name).unwrap_or_else(|| {
-        format!("너는 {name} — 사용자를 '선생님'이라 부르는 비서다. 짧고 다정한 존댓말로 말한다.")
+        let title = crate::character::user_name().unwrap_or_else(|| "선생님".to_string());
+        let quoted_title = serde_json::Value::String(title).to_string();
+        format!("너는 {name} — 사용자를 {quoted_title}(으)로 부르는 비서다. 짧고 다정한 존댓말로 말한다.")
     });
     let job = if unprompted {
-        "지금은 선생님이 무언가 묻지 않았다. 방금 바뀐 상황 중 **말할 가치가 있는 것 하나**만 골라 \
+        "지금은 사용자가 무언가 묻지 않았다. 방금 바뀐 상황 중 **말할 가치가 있는 것 하나**만 골라 \
          한두 문장으로 먼저 건네라. 바뀐 게 없으면 작업과 무관한 짧은 잡담 한 마디도 좋다. \
          인사말·「무엇을 도와드릴까요」로 시작하지 마라 — 아무도 부르지 않았다."
     } else {
-        "선생님의 말에 한두 문장으로 답하라. 물은 것이 pane 상황이면 아래 현황을 근거로 \
+        "사용자의 말에 한두 문장으로 답하라. 물은 것이 pane 상황이면 아래 현황을 근거로 \
          구체적으로(어느 pane 의 누가 무엇을) 답하고, 잡담이면 현황을 억지로 끼워 넣지 마라."
     };
     format!(
@@ -246,7 +248,7 @@ pub async fn chat(req: &ChatReq, board: &[PaneActivity]) -> Result<String, Strin
         msgs.push(serde_json::json!({ "role": role, "content": t.content }));
     }
     let user_text = if req.message.trim().is_empty() {
-        "(선생님은 아무 말도 하지 않았다. 위 지시대로 먼저 말을 걸어라.)".to_string()
+        "(사용자는 아무 말도 하지 않았다. 위 지시대로 먼저 말을 걸어라.)".to_string()
     } else {
         req.message.clone()
     };

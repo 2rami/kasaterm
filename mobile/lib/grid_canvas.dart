@@ -878,6 +878,7 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
               StudentStyle(
                 slug: slug,
                 name: st.name,
+                userName: st.userName,
                 accent: st.accent,
                 bg: st.bg,
                 hasWalk: slug != null && spriteCache.available(slug, 'walk'),

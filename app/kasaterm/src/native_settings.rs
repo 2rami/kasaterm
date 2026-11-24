@@ -160,6 +160,7 @@ pub(crate) struct SettingsCache {
     roster: Option<serde_json::Value>,
     open_apps: Arc<Vec<(String, String)>>,
     character_theme: String,
+    character_user_name: String,
     language: String,
     system_light: String,
     system_dark: String,
@@ -233,6 +234,7 @@ impl SettingsCache {
         self.roster = roster;
         self.open_apps = Arc::new(proc::open_with_apps().to_vec());
         self.character_theme = socket::read_character_theme();
+        self.character_user_name = kasa_characters::character::user_name().unwrap_or_default();
         self.language = socket::read_ui_language();
 
         let mut theme_rosters = std::collections::HashMap::new();
@@ -783,6 +785,7 @@ pub(crate) struct Snapshot {
     pub(crate) file_open_mode: String,
     pub(crate) file_open_app: String,
     pub(crate) file_open_cmd: String,
+    character_user_name: String,
     pub(crate) file_tree_default: bool,
     pub(crate) autosave_ms: u64,
     pub(crate) shell: String,
@@ -1036,6 +1039,11 @@ impl App {
             file_open_mode: self.set_file_open_mode.clone(),
             file_open_app: self.set_file_open_app.clone(),
             file_open_cmd: self.set_file_open_cmd.clone(),
+            character_user_name: if self.settings_input == Some(SettingsInput::CharacterUserName) {
+                self.character_user_name_draft.clone()
+            } else {
+                cache.character_user_name.clone()
+            },
             file_tree_default: self.set_file_tree_default,
             autosave_ms: self.set_autosave.map_or(0, |d| d.as_millis() as u64),
             shell: self.set_shell.clone(),
@@ -1329,6 +1337,9 @@ impl App {
             match field {
                 SettingsInput::PaletteHex(slot) => self.settings_apply(SettingsAction::FocusPaletteHex(slot)),
                 SettingsInput::AccentHex | SettingsInput::StatusbarHex(_) => self.focus_custom_color(field),
+                SettingsInput::CharacterUserName => {
+                    self.character_user_name_draft = kasa_characters::character::user_name().unwrap_or_default();
+                }
                 SettingsInput::CustomThemeLabel if self.custom_theme_label_edit.is_none() => {
                     if let Some(slug) = theme::active_custom_slug() {
                         self.settings_apply(SettingsAction::FocusCustomThemeLabel(slug));
@@ -1365,6 +1376,7 @@ impl App {
                 self.settings_caret = self.set_shell.chars().count();
             }
             SettingsInput::StudentName => self.settings_caret = self.students_name.chars().count(),
+            SettingsInput::CharacterUserName => self.settings_caret = self.character_user_name_draft.chars().count(),
             SettingsInput::StudentPersona => {
                 self.students_caret = self.students_persona.chars().count()
             }
@@ -1442,6 +1454,7 @@ impl App {
             SettingsInput::FileOpenCmd => (self.set_file_open_cmd.clone(), self.settings_caret),
             SettingsInput::Shell => (self.set_shell.clone(), self.settings_caret),
             SettingsInput::StudentName => (self.students_name.clone(), self.settings_caret),
+            SettingsInput::CharacterUserName => (self.character_user_name_draft.clone(), self.settings_caret),
             SettingsInput::StudentPersona => (self.students_persona.clone(), self.students_caret),
             SettingsInput::FeedbackBody => (self.feedback_body.clone(), self.feedback_caret),
             SettingsInput::StudentRaw => (self.students_raw.text.clone(), self.students_raw.caret),
@@ -1528,6 +1541,9 @@ impl App {
             SettingsInput::StudentName => {
                 crate::lineedit::insert(&mut self.students_name, &mut self.settings_caret, text)
             }
+            SettingsInput::CharacterUserName => {
+                crate::lineedit::insert(&mut self.character_user_name_draft, &mut self.settings_caret, text)
+            }
             SettingsInput::StudentPersona => {
                 crate::lineedit::insert(&mut self.students_persona, &mut self.students_caret, text)
             }
@@ -1613,6 +1629,12 @@ impl App {
                 self.native_settings_restore_backup(backup);
             }
         }
+        if self.settings_input == Some(SettingsInput::CharacterUserName) && dirty {
+            let draft = self.character_user_name_draft.clone();
+            if let Err(error) = self.save_character_user_name(&draft) {
+                self.set_toast(error);
+            }
+        }
         if self.settings_input == Some(SettingsInput::StudentPersona) {
             self.flush_student_persona();
         }
@@ -1672,6 +1694,7 @@ impl App {
             SettingsInput::FileOpenCmd => self.set_file_open_cmd = backup.value,
             SettingsInput::Shell => self.set_shell = backup.value,
             SettingsInput::StudentName => self.students_name = backup.value,
+            SettingsInput::CharacterUserName => self.character_user_name_draft = backup.value,
             SettingsInput::StudentPersona => self.students_persona = backup.value,
             SettingsInput::FeedbackBody => self.feedback_body = backup.value,
             SettingsInput::StudentRaw => self.students_raw.text = backup.value,
@@ -2523,6 +2546,7 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
         SettingsInput::FileOpenCmd => Some((&mut app.set_file_open_cmd, &mut app.settings_caret)),
         SettingsInput::Shell => Some((&mut app.set_shell, &mut app.settings_caret)),
         SettingsInput::StudentName => Some((&mut app.students_name, &mut app.settings_caret)),
+        SettingsInput::CharacterUserName => Some((&mut app.character_user_name_draft, &mut app.settings_caret)),
         SettingsInput::StudentPersona => Some((&mut app.students_persona, &mut app.students_caret)),
         SettingsInput::FeedbackBody => Some((&mut app.feedback_body, &mut app.feedback_caret)),
         SettingsInput::StudentRaw => Some((&mut app.students_raw.text, &mut app.students_raw.caret)),
@@ -2599,7 +2623,7 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
         SettingsCat::Weather => "날씨 비 애니메이션 움직임 투명도 weather rain motion",
         SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth kasa 구글 github 프로필 account login password profile",
         SettingsCat::Claude => "클로드 claude 코덱스 codex 계정 로그인 재인증 자동 전환 한도 사용량 차례 순서 기본 에이전트 권한 상태줄 account login order permission",
-        SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
+        SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 호칭 부를 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
         SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 덮개 덮어 마저 잠자기 핫스팟 폰 face id 키체인 비밀 승인 열쇠 lid sleep hotspot 브라우저 기기 카사브라우저 페이지 열기 device connection machine browser phone keychain secret",
         SettingsCat::Feedback => "피드백 문의 오류 버그 문제 제안 feedback bug report",
     };
@@ -5151,6 +5175,10 @@ fn paint_students(
     w: f32,
 ) {
     if s.student_selected.is_none() {
+        text_field(g, s, hits, caret, x, *y, w, "부를 이름", &s.character_user_name,
+            SettingsInput::CharacterUserName, s.settings_caret, false);
+        *y += ROW_H;
+        plain_hint(g, x, y, w, "새로 시작하는 캐릭터가 이 이름으로 불러요. 비워 두면 테마의 기본 호칭을 써요.");
         paint_setup_section(g, s, hits, caret, x, y, w, 0);
         if disclosure(g, s, hits, x, y, w, "characters", "세부 캐릭터 · 사용할 캐릭터와 개별 편집") {
             paint_character_theme_row(g, s, hits, x, y, w);
@@ -6848,6 +6876,7 @@ fn field_placeholder(field: SettingsInput) -> &'static str {
         SettingsInput::FileOpenCmd => "편집기 실행 명령…",
         SettingsInput::Shell => "셸 실행 파일 경로…",
         SettingsInput::StudentName => "캐릭터 이름…",
+        SettingsInput::CharacterUserName => "기본 호칭",
         SettingsInput::StudentPersona => "말투와 특징…",
         SettingsInput::FeedbackBody => "문제와 재현 방법…",
         SettingsInput::StudentRaw => "JSON 또는 YAML…",

@@ -124,6 +124,53 @@ pub fn read_setting_str(key: &str) -> Option<String> {
     read_setting_value(key)?.as_str().map(String::from)
 }
 
+pub const USER_NAME_SETTING: &str = "character_user_name";
+pub const MAX_USER_NAME_CHARS: usize = 40;
+
+pub fn normalize_user_name(value: &str) -> Result<&str, &'static str> {
+    if value.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
+        return Err("이름은 한 줄로 입력해 주세요.");
+    }
+    let value = value.trim();
+    if value.chars().count() > MAX_USER_NAME_CHARS {
+        return Err("이름은 40자까지 입력할 수 있어요.");
+    }
+    Ok(value)
+}
+
+pub fn user_name() -> Option<String> {
+    let saved = read_setting_str(USER_NAME_SETTING)?;
+    let name = normalize_user_name(&saved).ok()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(test)]
+mod user_name_tests {
+    use super::*;
+
+    #[test]
+    fn names_are_trimmed_single_line_and_bounded_by_characters() {
+        assert_eq!(normalize_user_name("  유나  "), Ok("유나"));
+        assert_eq!(normalize_user_name("   "), Ok(""));
+        assert!(normalize_user_name(&"한".repeat(40)).is_ok());
+        assert!(normalize_user_name(&"한".repeat(41)).is_err());
+        for invalid in ["유나\n", "유나\u{2028}", "유나\t별칭"] {
+            assert!(normalize_user_name(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn personalization_changes_the_address_but_keeps_each_speech_style() {
+        let banmal = "사용자를 '팀장님'이라 부른다. 예: 여기 좀 봐봐!";
+        let respectful = "사용자를 '팀장님'이라 부른다. 예: 여기 보세요.";
+        assert_eq!(persona_with_user_name(banmal, "팀장님", "유나"),
+            "사용자를 \"유나\"이라 부른다. 예: 여기 좀 봐봐!");
+        assert_eq!(persona_with_user_name(respectful, "팀장님", "유나"),
+            "사용자를 \"유나\"이라 부른다. 예: 여기 보세요.");
+        assert!(persona_with_user_name("말이 짧다.", "", "유나").contains("\"유나\""));
+    }
+}
+
 /// 폰 앱을 내려받는 주소(설치 링크 `…/relay/install/<token>/` 같은 것). 하단바 「기기」 QR 이 여는
 /// 안내 페이지가 「설치」 단추에 단다. 없으면 페이지가 케이블 설치 안내로 대신한다 —
 /// 무료 Apple ID 로는 공중 설치 경로가 없어서다. env 가 설정을 이긴다(헤드리스 검증).
@@ -926,10 +973,19 @@ fn find_character<'a>(chars: &'a Value, name: &str) -> Option<&'a Value> {
 /// 빠지면 협업이 깨지는 것은 문장 대신 장치가 맡는다 — 완료 보고는 summon·`tell --title`
 /// 이 브리프 끝에 붙이고, 셸·닫힌 창 전달과 서브에이전트 위임·파일 겹침은 서버·훅이 막는다.
 pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
-    find_character(chars, name)
-        .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
-        .filter(|p| !p.is_empty())
-        .map(String::from)
+    let persona = raw_persona_for(chars, name).filter(|p| !p.is_empty())?;
+    let Some(name) = user_name() else { return Some(persona) };
+    let title = chars.get("user_title").and_then(Value::as_str).unwrap_or("선생님");
+    Some(persona_with_user_name(&persona, title, &name))
+}
+
+fn persona_with_user_name(persona: &str, title: &str, name: &str) -> String {
+    let quoted_name = serde_json::Value::String(name.to_string()).to_string();
+    let previous = format!("'{title}'");
+    if !title.is_empty() && persona.contains(&previous) {
+        return persona.replace(&previous, &quoted_name);
+    }
+    format!("{persona}\n사용자를 {quoted_name}(으)로 부른다.")
 }
 
 /// 이 학생이 뜰 때 붙일 `--model` 값. `claude-opus-5[1m]` 처럼 CLI 가 그대로

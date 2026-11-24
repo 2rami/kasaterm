@@ -498,6 +498,9 @@ async fn settings_action_handler(backend: Arc<dyn Backend>, auth: Option<MobileA
     if action.is_empty() {
         return bad("action required".to_string());
     }
+    if action == "character-user-name" && auth.as_ref().is_some_and(|auth| !auth.0.owner) {
+        return answer(StatusCode::FORBIDDEN, serde_json::json!({"ok": false, "error": "이 기기의 소유자만 부를 이름을 바꿀 수 있어요."}));
+    }
     if action.starts_with("lid-away-") && auth.as_ref().is_some_and(|auth| !auth.0.owner) {
         return answer(StatusCode::FORBIDDEN, serde_json::json!({"ok": false, "error": "이 기기의 소유자만 잠자기와 핫스팟 설정을 바꿀 수 있어요"}));
     }

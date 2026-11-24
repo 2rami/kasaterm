@@ -64,6 +64,7 @@ class StudentStyle {
     required this.accent,
     required this.bg,
     this.name,
+    this.userName,
     this.hasWalk = true,
     this.hasIdle = true,
     this.codex = false,
@@ -78,6 +79,7 @@ class StudentStyle {
 
   /// 표시 이름(「아리스」) — 시작 배너의 제목·환영문에 들어간다.
   final String? name;
+  final String? userName;
   final Color accent;
   final Color bg;
   final bool hasWalk;
@@ -682,10 +684,10 @@ void _replaceBannerTitle(
   }
 }
 
-String _welcomeFor(String name, String user) => switch (name) {
-  '츠유' => '$user 선생님, 오셨네요.',
-  '아메' => '$user 선생님, 어서 오세요!',
-  _ => '$user 선생님, 어서 오세요.',
+String _welcomeFor(String name, String addressee) => switch (name) {
+  '츠유' => '$addressee, 오셨네요.',
+  '아메' => '$addressee, 어서 오세요!',
+  _ => '$addressee, 어서 오세요.',
 };
 
 /// 「Welcome back `<user>`!」 를 학생 말투의 인사로. 배너 위 네 줄만 본다.
@@ -695,6 +697,7 @@ void _replaceWelcome(
   int br,
   String name,
   RgbColor accent,
+  String? userName,
 ) {
   final prefix = 'Welcome back '.runes.toList();
   final hi = br.clamp(0, rows.length), lo = math.max(0, br - 4);
@@ -727,7 +730,8 @@ void _replaceWelcome(
         break;
       }
     }
-    final greet = _welcomeFor(name, user);
+    final addressee = (userName?.isNotEmpty ?? false) ? userName! : '$user 선생님'.trim();
+    final greet = _welcomeFor(name, addressee);
     final cells = <_Cell>[
       for (final ch in greet.runes)
         _Cell(ch, accent, row[wc].bg, row[wc].flags),
@@ -839,7 +843,7 @@ bool _restyleBanners(
     any = true;
     final acc = _rgb(st.accent);
     _replaceBannerTitle(rows, touched, br, bc, name, acc);
-    _replaceWelcome(rows, touched, br, name, acc);
+    _replaceWelcome(rows, touched, br, name, acc, st.userName);
     _tintWelcomeBox(rows, touched, math.max(0, br), br + clawdRows, acc);
   }
   return any;

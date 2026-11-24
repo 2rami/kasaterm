@@ -25,6 +25,8 @@ class CharacterPicksStore extends ChangeNotifier {
   String? error;
   List<ThemeCard> themes = const [];
   String? machine;
+  String? userName;
+  bool savingUserName = false;
   final Map<String, Roster> rosters = {};
   final Set<String> _noRoster = {};
   final Map<String, Future<void>> _rosterLoads = {};
@@ -83,6 +85,7 @@ class CharacterPicksStore extends ChangeNotifier {
         error = snapshot.$2 is AccountException ? (snapshot.$2 as AccountException).message : '계정 설정을 받지 못했어요.';
       } else {
         themes = ThemeCard.listFrom(choices.$1);
+        userName = choices.$1?['user_name'] as String?;
         _take(snapshot.$1!);
         unawaited(_loadMachine());
         await _ensure({themeKeyOf(_activeTheme), for (final e in _saved) e.$1});
@@ -116,6 +119,22 @@ class CharacterPicksStore extends ChangeNotifier {
     _saved = parsePicks(snapshot.settings['character_picks']);
     final theme = snapshot.settings['character_theme'];
     _activeTheme = theme is String ? theme : '';
+  }
+
+  Future<String?> setUserName(String value) async {
+    if (savingUserName) return null;
+    savingUserName = true;
+    _notify();
+    try {
+      await server.settingsAction('character-user-name', label: value);
+      userName = value.trim();
+      return null;
+    } on ServerException catch (error) {
+      return error.message;
+    } finally {
+      savingUserName = false;
+      _notify();
+    }
   }
 
   Picks livePicksOf() => livePicks(picks, rosters);
@@ -294,6 +313,30 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
       ..showSnackBar(SnackBar(content: Text(text)));
   }
 
+  Future<void> _editUserName() async {
+    var draft = store.userName ?? '';
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('부를 이름'),
+        content: TextFormField(
+          initialValue: draft,
+          autofocus: true,
+          maxLength: 40,
+          textInputAction: TextInputAction.done,
+          decoration: const InputDecoration(hintText: '비워 두면 기본 호칭'),
+          onChanged: (value) => draft = value,
+          onFieldSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('취소')),
+          FilledButton(onPressed: () => Navigator.pop(context, draft), child: const Text('저장')),
+        ],
+      ),
+    );
+    if (value != null && mounted) _say(await store.setUserName(value));
+  }
+
   Future<void> _chooseTheme() async {
     final id = await showModalBottomSheet<String>(
       context: context,
@@ -331,6 +374,15 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
       children: [
         SettingsGroup(
           children: [
+            if (store.userName != null)
+              SettingsRow(
+                key: const Key('character-user-name'),
+                icon: Icons.badge_outlined,
+                title: '부를 이름',
+                subtitle: store.userName!.isEmpty ? '기본 호칭 · 연결된 PC에서 사용' : '${store.userName} · 연결된 PC에서 사용',
+                chevron: true,
+                onTap: store.savingUserName ? null : _editUserName,
+              ),
             SettingsRow(
               key: const Key('pick-order'),
               icon: Icons.format_list_numbered_rounded,

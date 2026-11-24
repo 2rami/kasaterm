@@ -162,6 +162,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
 
 fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
     let board = backend.collab_board().unwrap_or_default();
+    let user_name = kasa_characters::character::user_name();
     // 방별 그룹핑(폰 목록을 사이드바처럼) — board 는 claude 바인딩 pane 만 담아
     // 순수 셸이 빠지므로, 트리 전체를 아는 pane_windows 가 정본이다.
     let pane_windows: std::collections::HashMap<String, usize> =
@@ -315,6 +316,7 @@ fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
                 // pc 처럼」). session = `/rename` 으로 붙인 세션 이름(codex 는 없다),
                 // harness = claude/codex, context_pct·branch = 상태줄의 그것.
                 "session": b.and_then(pane_session_name),
+                "user_name": user_name,
                 "harness": harness,
                 "context_pct": b.map(|p| p.context_pct).filter(|v| *v > 0),
                 "branch": b.and_then(|p| p.branch.clone()).filter(|s| !s.is_empty()),

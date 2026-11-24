@@ -298,6 +298,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   static bool _samePane(Pane a, Pane b) =>
       a.name == b.name &&
+      a.userName == b.userName &&
       a.slug == b.slug &&
       a.status == b.status &&
       a.kind == b.kind &&
@@ -1045,6 +1046,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
           : StudentStyle(
               slug: pane.slug,
               name: pane.name,
+              userName: pane.userName,
               accent: studentAccent(context, pane, tokens),
               bg: palette.bg,
               codex: pane.harness == 'codex',

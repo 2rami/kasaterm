@@ -485,6 +485,16 @@ void bannerTests() {
     expect(text(v.lines[2]), contains('츠유'));
     expect(text(v.lines[2]), contains('v2.1.0'));
     expect(text(v.lines[1]), contains('kasa 선생님, 오셨네요.'));
+    const personalized = StudentStyle(
+      slug: 'kasa_tsuyu',
+      name: '츠유',
+      userName: '유나',
+      accent: accent,
+      bg: bg,
+    );
+    final greeting = text(restyleClaude(g, personalized, 0).lines[1]);
+    expect(greeting, contains('유나, 오셨네요.'));
+    expect(greeting, isNot(contains('선생님')));
     // 상자 선은 학생색.
     final corner = v.lines[0].first;
     expect(corner.fg, isA<RgbColor>());

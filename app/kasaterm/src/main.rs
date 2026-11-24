@@ -4675,6 +4675,7 @@ pub(crate) enum SettingsInput {
     CwdPath,
     /// 터미널 편집기 명령줄 필드("파일 열기"가 `terminal` 일 때만 보인다).
     FileOpenCmd,
+    CharacterUserName,
     /// 직접 적는 기본 셸 경로.
     Shell,
     /// 캐릭터 상세 화면의 이름 칸. 어느 캐릭터인지는 `App.students_selected` 가
@@ -5881,6 +5882,7 @@ struct App {
     /// 유지한다 — 타이핑 도중의 반쯤 지운 이름으로 persona·그림을 조회하면
     /// 한 글자 지울 때마다 화면이 빈 캐릭터로 튄다.
     students_name: String,
+    character_user_name_draft: String,
     /// 상세 화면의 「원본」 뷰 — 열림/형식/버퍼를 한 덩어리로.
     students_raw: StudentRawEdit,
     /// 이름을 고치는 중인 테마 — `(폴더 id, 편집 버퍼)`. 캐럿은 `settings_caret`
@@ -6413,6 +6415,7 @@ impl App {
             students_caret: 0,
             students_raw: StudentRawEdit::default(),
             students_name: std::env::var("KASATERM_TEST_STUDENT").unwrap_or_default(),
+            character_user_name_draft: String::new(),
             theme_label_edit: None,
             custom_theme_label_edit: None,
             account_label_edit: None,

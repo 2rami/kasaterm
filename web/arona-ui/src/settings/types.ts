@@ -19,6 +19,7 @@ export type DesignTokens = {
 export type SettingsCharacters = {
   /// 활성 테마 폴더 이름. 번들을 쓰는 중이면 빈 문자열이다.
   active_theme: string;
+  user_name?: string;
   /// 캐릭터 말투로 대답하는지(`claude_persona`). 새로 여는 pane 부터 적용된다.
   persona_enabled: boolean;
   themes: ThemeCard[];

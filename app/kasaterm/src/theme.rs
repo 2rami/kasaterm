@@ -1978,10 +1978,12 @@ fn name_beyond_active(slug: &str, extra: &[Roster]) -> Option<&'static str> {
 
 /// The banner fits a brief greeting and uses the roster's configured title.
 pub fn character_welcome(name: &str, user: &str) -> Option<String> {
-    let title = kasa_characters::character::characters_json()
-        .and_then(|roster| roster.get("user_title").and_then(serde_json::Value::as_str).map(str::to_owned))
-        .unwrap_or_else(|| "선생님".into());
-    let addressee = format!("{user} {title}").trim().to_owned();
+    let addressee = kasa_characters::character::user_name().unwrap_or_else(|| {
+        let title = kasa_characters::character::characters_json()
+            .and_then(|roster| roster.get("user_title").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| "선생님".into());
+        format!("{user} {title}").trim().to_owned()
+    });
     Some(match name {
         "츠유" => format!("{addressee}, 오셨네요."),
         "아메" => format!("{addressee}, 어서 오세요!"),

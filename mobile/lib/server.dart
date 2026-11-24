@@ -37,6 +37,7 @@ class Pane {
     required this.window,
     required this.cwd,
     this.slug,
+    this.userName,
     this.color,
     this.model,
     this.effort,
@@ -69,6 +70,7 @@ class Pane {
   final int window;
   final String cwd;
   final String? slug;
+  final String? userName;
   final String? color;
   final String? model;
   final String? effort;
@@ -233,6 +235,7 @@ class Pane {
     window: (j['window'] as num?)?.toInt() ?? 0,
     cwd: j['cwd'] as String? ?? '',
     slug: j['slug'] as String?,
+    userName: j['user_name'] as String?,
     color: j['color'] as String?,
     model: j['model'] as String?,
     effort: j['effort'] as String?,

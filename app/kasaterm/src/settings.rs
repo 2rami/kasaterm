@@ -22,6 +22,26 @@ fn open_path(path: &std::path::Path) {
 }
 
 impl App {
+    pub(crate) fn save_character_user_name(&mut self, value: &str) -> Result<(), String> {
+        use kasa_characters::character::{normalize_user_name, USER_NAME_SETTING};
+
+        let name = normalize_user_name(value)?;
+        let path = socket::settings_file_path().ok_or("설정 파일을 찾을 수 없어요.")?;
+        kasa_device::account_sync::local::edit_json(&path, serde_json::json!({}), |settings| {
+            let settings = settings.as_object_mut().ok_or("설정 파일을 읽을 수 없어요.")?;
+            if name.is_empty() {
+                settings.remove(USER_NAME_SETTING);
+            } else {
+                settings.insert(USER_NAME_SETTING.into(), serde_json::json!(name));
+            }
+            Ok(())
+        }).map_err(|_| "부를 이름을 저장할 수 없어요.".to_string())?;
+        self.regen_pane_shims();
+        self.settings_scene.refresh_cache();
+        self.chrome_dirty = true;
+        Ok(())
+    }
+
     pub(crate) fn claude_account_usage(&self, id: &str) -> Option<crate::UsageBadge> {
         if id.is_empty() || !self.set_claude_accounts.iter().any(|account| account.id == id) {
             return None;
@@ -1799,6 +1819,10 @@ impl App {
                 Ok(true)
             }
             // ── 화면 데이터 ──────────────────────────────────────────────
+            "character-user-name" => {
+                self.save_character_user_name(label.ok_or("이름 입력값이 없어요.")?)?;
+                Ok(true)
+            }
             "values" => {
                 publish_web_values(self.settings_values_json());
                 Ok(true)
