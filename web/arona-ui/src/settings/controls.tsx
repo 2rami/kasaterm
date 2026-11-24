@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Minus, Plus } from 'lucide-react';
+import { ChevronDown, Minus, Plus } from 'lucide-react';
 import { postAction } from './api';
 import type { SettingsActionResult } from './api';
 import { serverText, useT } from './lang';
@@ -100,49 +100,38 @@ export function Row({
   );
 }
 
-/// 세그먼트 컨트롤 — 네이티브 `segmented`. 고른 칸만 채워지고 나머지는 트랙 위에
-/// 얹힌다.
-export function Segmented({
+export function ChoiceSelect({
+  label,
   value,
   options,
   onPick,
   disabled,
 }: {
+  label: string;
   value: string;
   options: { key: string; label: string }[];
   onPick: (key: string) => void;
   disabled?: boolean;
 }) {
   return (
-    <div
-      className="inline-flex p-[2px]"
-      style={{
-        borderRadius: 'var(--kt-radius-md)',
-        background: 'var(--kt-surface)',
-        boxShadow: 'inset 0 0 0 var(--kt-border-w) var(--kt-border)',
-      }}
-    >
-      {options.map((o) => {
-        const on = o.key === value;
-        return (
-          <button
-            key={o.key}
-            type="button"
-            disabled={disabled}
-            aria-pressed={on}
-            onClick={() => !on && onPick(o.key)}
-            className="min-h-[36px] whitespace-nowrap px-3 py-1 text-[12.5px] disabled:opacity-40"
-            style={{
-              borderRadius: 'calc(var(--kt-radius-md) - 2px)',
-              background: on ? 'var(--kt-surface-active)' : 'transparent',
-              color: on ? 'var(--kt-text)' : 'var(--kt-text-dim)',
-              fontWeight: on ? 600 : 400,
-            }}
-          >
-            {o.label}
-          </button>
-        );
-      })}
+    <div className="relative inline-flex">
+      <select
+        aria-label={label}
+        className="min-h-9 w-[clamp(136px,25vw,235px)] appearance-none truncate py-1 pl-3 pr-8 text-[13px] disabled:opacity-50"
+        style={{
+          borderRadius: 'var(--kt-radius-md)',
+          background: 'var(--kt-surface)',
+          color: 'var(--kt-text)',
+          boxShadow: 'inset 0 0 0 var(--kt-border-w) var(--kt-border)',
+        }}
+        value={value}
+        onChange={(event) => onPick(event.currentTarget.value)}
+        disabled={disabled}
+      >
+        {!options.some((option) => option.key === value) && <option value={value} disabled>{value || '—'}</option>}
+        {options.map(({ key, label: text }) => <option key={key} value={key}>{text}</option>)}
+      </select>
+      <ChevronDown aria-hidden="true" className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-[var(--kt-text-mute)]" />
     </div>
   );
 }

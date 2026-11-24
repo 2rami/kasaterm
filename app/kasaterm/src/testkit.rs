@@ -1484,7 +1484,7 @@ impl App {
                 } else {
                     "에이전트·이맥북칸"
                 };
-                if !check(self, label, "AccountScopeHome", &mut total_bad) {
+                if !check(self, label, "계정 기기", &mut total_bad) {
                     unseen.push(label);
                 }
             }

@@ -2,7 +2,7 @@ import {
   Notice,
   NumberSlider,
   Row,
-  Segmented,
+  ChoiceSelect,
   Stepper,
   TabCard,
   TextField,
@@ -64,8 +64,9 @@ export function GeneralTab({
 
           `run` 을 안 쓰고 `setLang` 을 쓴다 — 이 값은 GUI 를 거치지 않고 파일로
           바로 가고, 화면은 회신을 기다리지 않고 즉시 바뀌어야 한다. */}
-      <Row label={t.language.title} desc={[t.language.hint]}>
-        <Segmented
+      <Row label={t.language.title}>
+        <ChoiceSelect
+          label={t.language.title}
           value={lang}
           disabled={false}
           options={[
@@ -76,8 +77,9 @@ export function GeneralTab({
         />
       </Row>
 
-      <Row label={t.general.startupFolder} desc={[t.general.startupFolderHint]}>
-        <Segmented
+      <Row label={t.general.startupFolder}>
+        <ChoiceSelect
+          label={t.general.startupFolder}
           value={cwd}
           disabled={busy}
           options={[
@@ -127,8 +129,9 @@ export function GeneralTab({
         />
       </Row>
 
-      <Row label={t.general.fileOpen} desc={[t.general.fileOpenHint]}>
-        <Segmented
+      <Row label={t.general.fileOpen}>
+        <ChoiceSelect
+          label={t.general.fileOpen}
           value={open}
           disabled={busy}
           options={[
@@ -142,8 +145,9 @@ export function GeneralTab({
       {open === 'app' && (
         // 설치된 것만 뜬다. 마지막 「기본 앱」은 OS 연결 프로그램 — 목록에 없는
         // 앱을 쓰는 사람의 탈출구다. 앱 이름 자체는 옮길 말이 아니라 데이터다.
-        <div className="mb-4 flex flex-wrap gap-1.5">
-          <Segmented
+        <Row label={t.general.openApp}>
+          <ChoiceSelect
+            label={t.general.openApp}
             value={data.file_open_app}
             disabled={busy}
             options={[
@@ -152,7 +156,7 @@ export function GeneralTab({
             ]}
             onPick={(key) => void run('file-open-app', { id: key })}
           />
-        </div>
+        </Row>
       )}
       {open === 'terminal' && (
         <div className="mb-4">
@@ -179,8 +183,9 @@ export function GeneralTab({
         />
       </Row>
 
-      <Row label={t.general.tabPosition} desc={[t.general.tabPositionHint]}>
-        <Segmented
+      <Row label={t.general.tabPosition}>
+        <ChoiceSelect
+          label={t.general.tabPosition}
           value={data.tabs_on_top ? 'top' : 'side'}
           disabled={busy}
           options={[
@@ -191,8 +196,9 @@ export function GeneralTab({
         />
       </Row>
 
-      <Row label={t.general.cursorShape} desc={[t.general.cursorShapeHint]}>
-        <Segmented
+      <Row label={t.general.cursorShape}>
+        <ChoiceSelect
+          label={t.general.cursorShape}
           value={data.cursor_shape}
           disabled={busy}
           options={[
@@ -224,8 +230,9 @@ export function GeneralTab({
         />
       </Row>
 
-      <Row label={t.general.mousePointer} desc={[t.general.mousePointerHint]}>
-        <Segmented
+      <Row label={t.general.mousePointer}>
+        <ChoiceSelect
+          label={t.general.mousePointer}
           value={data.mouse_cursor === 'ibeam' ? 'ibeam' : 'arrow'}
           disabled={busy}
           options={[

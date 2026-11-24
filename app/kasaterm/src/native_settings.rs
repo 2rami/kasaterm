@@ -603,8 +603,10 @@ pub(crate) enum HitCursor {
 }
 
 /// 펼쳐지는 선택 상자. 한 번에 하나만 열린다.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DropdownId {
+    Choice(&'static str),
+    DeviceIcon(String),
     UiFont,
     /// 시스템 따라가기에서 밝은(true)·어두운(false) 화면에 입힐 팔레트.
     SystemPalette(bool),
@@ -806,7 +808,7 @@ struct PaintFeedback {
     motion_preview_visible: bool,
     /// 이번 프레임에 그린 「펼쳐진」 선택 상자의 머리 자리. 팝업은 본문을 다 그린 뒤
     /// 이 자리에 붙여 맨 위에 올린다.
-    dropdown_anchor: Option<(DropdownId, Rect)>,
+    dropdown: Option<DropdownMenu>,
 }
 
 thread_local! {
@@ -821,8 +823,20 @@ fn push_multiline_layout(layout: MultilineLayout) {
     PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().multiline_layouts.push(layout));
 }
 
-fn mark_dropdown_anchor(id: DropdownId, rect: Rect) {
-    PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().dropdown_anchor = Some((id, rect)));
+type DropdownItem = (String, bool, SettingsAction);
+
+struct DropdownMenu {
+    anchor: Rect,
+    items: Vec<DropdownItem>,
+}
+
+fn finish_dropdown_paint(
+    g: &mut gpu::GpuRenderer,
+    snapshot: &Snapshot,
+    hits: &mut Vec<Hit>,
+    menu: Option<DropdownMenu>,
+) -> f32 {
+    menu.map_or(0.0, |menu| paint_dropdown_popup(g, snapshot, hits, menu))
 }
 
 fn mark_motion_preview_visible() {
@@ -2813,7 +2827,9 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     begin_paint_feedback();
     if snapshot.first_run {
         let mut output = crate::native_onboarding::paint(g, &snapshot.onboarding, snapshot);
-        output.multiline_layouts = take_paint_feedback().multiline_layouts;
+        let feedback = take_paint_feedback();
+        output.multiline_layouts = feedback.multiline_layouts;
+        output.dropdown_scroll_max = finish_dropdown_paint(g, snapshot, &mut output.hits, feedback.dropdown);
         paint_keyboard_focus(g, snapshot, &output.hits);
         return output;
     }
@@ -3092,12 +3108,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     );
 
     let feedback = take_paint_feedback();
-    let mut dropdown_scroll_max = 0.0;
-    if let (Some(open), Some((id, anchor))) = (snapshot.dropdown, feedback.dropdown_anchor) {
-        if open == id {
-            dropdown_scroll_max = paint_dropdown_popup(g, snapshot, &mut hits, id, anchor);
-        }
-    }
+    let dropdown_scroll_max = finish_dropdown_paint(g, snapshot, &mut hits, feedback.dropdown);
     paint_keyboard_focus(g, snapshot, &hits);
     PaintOutput {
         hits,
@@ -3179,7 +3190,7 @@ fn paint_general(
     w: f32,
 ) {
     *y += 6.0;
-    seg_row(
+    choice_row(
         g,
         s,
         hits,
@@ -3201,7 +3212,7 @@ fn paint_general(
         "새 작업 방과 파일을 여는 기본 동작입니다",
     );
     *y += 54.0;
-    seg_row(
+    choice_row(
         g,
         s,
         hits,
@@ -3240,7 +3251,7 @@ fn paint_general(
         );
         *y += ROW_H;
     }
-    seg_row(
+    choice_row(
         g,
         s,
         hits,
@@ -3267,7 +3278,7 @@ fn paint_general(
         ],
     );
     if matches!(s.file_open_mode.as_str(), "app" | "system") {
-        let mut choices: Vec<(String, bool, SettingsAction)> = s
+        let mut choices: Vec<_> = s
             .open_apps
             .iter()
             .map(|(name, short)| {
@@ -3283,7 +3294,7 @@ fn paint_general(
             s.file_open_app.is_empty(),
             SettingsAction::FileOpenApp(String::new()),
         ));
-        chips_owned(g, s, hits, x, y, w, choices);
+        choice_row(g, s, hits, x, y, w, "파일을 여는 앱", &choices);
     }
     if s.file_open_mode == "terminal" {
         text_field(
@@ -3322,11 +3333,7 @@ fn paint_general(
     if cfg!(target_os = "windows") {
         crate::native_onboarding::paint_platform(g, &s.onboarding, hits, caret, x, y, w);
     } else {
-        seg_row(g, s, hits, x, y, w, "기본 셸", &[
-            ("시스템 기본", s.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
-            ("zsh", s.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".into())),
-            ("bash", s.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".into())),
-        ]);
+        shell_dropdown(g, s, hits, x, y, w);
     }
     let known = matches!(s.shell.as_str(), "" | "/bin/zsh" | "/bin/bash");
     text_field(
@@ -3363,6 +3370,15 @@ fn paint_general(
         autosave.into_iter().map(|(ms, _)| (ms, SettingsAction::AutosaveDelay(ms))));
     range_row(g, s, hits, x, y, w, "휠 스크롤 속도", RangeSetting::WheelSpeed,
         (s.wheel_gain * 100.0).round() as u32);
+}
+
+fn shell_dropdown(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
+    let cells = [
+        ("시스템 기본", s.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
+        ("zsh", s.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".into())),
+        ("bash", s.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".into())),
+    ];
+    choice_row_with_id(g, s, hits, x, y, w, "기본 셸", DropdownId::Choice("기본 셸"), "직접 지정", &cells);
 }
 
 fn paint_appearance(
@@ -3417,23 +3433,16 @@ fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<H
                 .map_or(current.as_str(), |palette| palette.label.as_str());
             dropdown_row(g, s, hits, x, y, w, label, value, DropdownId::SystemPalette(light));
         }
-        plain_hint(g, x, y, w, "아래에서 팔레트를 하나 고르면 시스템 따라가기가 꺼지고 그 팔레트로 고정됩니다.");
+        plain_hint(g, x, y, w, "팔레트를 직접 고르면 고정됩니다.");
     }
     row_label(g, x, y, "팔레트");
     *y += appearance_preview::paint_palette_strip(g, s, hits, x, *y, w);
-    if !follow && !appearance_preview::FEATURED_PALETTES.contains(&s.theme.as_str()) {
-        if let Some(current) = s.palettes.iter().find(|palette| palette.key == s.theme) {
-            plain_hint(g, x, y, w, &format!("현재 · {}", current.label));
-        }
-    }
-    if disclosure(g, s, hits, x, y, w, "other-palettes", "다른 팔레트") {
-        let choices = s.palettes.iter()
-            .filter(|palette| palette.key != "system"
-                && !appearance_preview::FEATURED_PALETTES.contains(&palette.key.as_str()))
-            .map(|palette| (palette.label.clone(), s.theme == palette.key,
-                SettingsAction::ThemeMode(palette.key.clone()))).collect();
-        chips_owned(g, s, hits, x, y, w, choices);
-    }
+    let choices: Vec<_> = s.palettes.iter()
+        .filter(|palette| palette.key != "system"
+            && !appearance_preview::FEATURED_PALETTES.contains(&palette.key.as_str()))
+        .map(|palette| (palette.label.as_str(), !follow && s.theme == palette.key,
+            SettingsAction::ThemeMode(palette.key.clone()))).collect();
+    choice_row(g, s, hits, x, y, w, "다른 팔레트", &choices);
     row_label(g, x, y, "강조색");
     *y += appearance_preview::paint_accents(g, s, hits, x, *y, w);
     let color = theme::accent();
@@ -3500,7 +3509,7 @@ fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<H
     }
     let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
         (preset_label(label), s.shape == *key, SettingsAction::Shape(key))).collect();
-    seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
+    choice_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
     let contrasts = theme::CONTRAST_PRESETS;
     let contrast_label = contrasts.iter().find(|(_, value)| *value == s.min_contrast)
         .map(|(label, _)| preset_label(label).to_owned())
@@ -3570,7 +3579,7 @@ fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<H
     *y += 12.0;
     section_title(g, x, *y, "창 배치", "");
     *y += 54.0;
-    seg_row(
+    choice_row(
         g,
         s,
         hits,
@@ -3583,7 +3592,7 @@ fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<H
             ("옆", !s.tabs_on_top, SettingsAction::TabPosition("side")),
         ],
     );
-    seg_row(
+    choice_row(
         g,
         s,
         hits,
@@ -3653,30 +3662,18 @@ fn paint_statusbar(
     );
     *y += 54.0;
     for (provider, title) in [("claude", "Claude"), ("codex", "Codex")] {
-        row_label(g, x, y, title);
         let selected = s.statusbar_usage_fields.get(provider);
-        let fields = [
-            ("account", "계정 별명"),
-            ("email", "이메일"),
-            ("session", "5시간"),
-            ("weekly", "7일"),
-            ("model", "모델별 한도"),
-        ];
-        let choices = fields
-            .into_iter()
-            .map(|(field, label)| {
-                (
-                    label.to_string(),
-                    selected.is_some_and(|values| values.iter().any(|value| value == field)),
-                    SettingsAction::ToggleStatusbarUsageField(
-                        provider.to_string(),
-                        field.to_string(),
-                    ),
-                )
-            })
-            .collect();
-        chips_owned(g, s, hits, x, y, w, choices);
-        *y += 4.0;
+        let count = selected.map_or(0, Vec::len);
+        if disclosure(g, s, hits, x, y, w, provider, &format!("{title} · {count}")) {
+            for (field, label) in [
+                ("account", "계정 별명"), ("email", "이메일"), ("session", "5시간"),
+                ("weekly", "7일"), ("model", "모델별 한도"),
+            ] {
+                let on = selected.is_some_and(|values| values.iter().any(|value| value == field));
+                toggle_row(g, s, hits, x, y, w, label, on,
+                    SettingsAction::ToggleStatusbarUsageField(provider.to_string(), field.to_string()));
+            }
+        }
     }
 
     *y += 12.0;
@@ -4155,17 +4152,16 @@ fn paint_device_icons(
     section_title(g, x, *y, "기기 아이콘", "기기마다 종류를 고르거나 SVG 그림을 가져옵니다");
     *y += 54.0;
     for row in s.device_icons.iter() {
-        g.queue_icon(&row.icon, x, *y + (ROW_H - theme::ICON_SIZE) / 2.0, theme::ICON_SIZE, theme::text());
         let name = crate::render::pane_identity::device_name(&row.label);
-        let label = if row.local { format!("{name} · 이 기기") } else { name };
-        let label = fit(g, &label, (w - theme::ICON_SIZE - 12.0).max(0.0), 12.0, false);
-        draw_text(g, x + theme::ICON_SIZE + 12.0, *y + 12.0, &label, 12.0, theme::text(), false);
-        *y += ROW_H;
-        let cells = crate::device_icons::PRESETS.iter().map(|(key, label)| (
-            label.to_string(), row.choice == *key,
+        let name = if row.local { format!("{name} · 이 기기") } else { name };
+        let cells: Vec<_> = crate::device_icons::PRESETS.iter().map(|(key, label)| (
+            *label, row.choice == *key,
             SettingsAction::DeviceIcon(row.label.clone(), key.to_string()),
         )).collect();
-        chips_owned(g, s, hits, x, y, w, cells);
+        g.queue_icon(&row.icon, x, *y + (ROW_H - theme::ICON_SIZE) / 2.0, theme::ICON_SIZE, theme::text());
+        let inset = theme::ICON_SIZE + 6.0;
+        choice_row_with_id(g, s, hits, x + inset, y, (w - inset).max(0.0), &name, DropdownId::DeviceIcon(row.label.clone()),
+            "사용자 SVG", &cells);
         let import_label = if row.choice == "custom" { "SVG 바꾸기" } else { "SVG 가져오기" };
         button(g, s, hits, (x, *y, 110.0, CTL_H), import_label,
             Target::Setting(SettingsAction::ImportDeviceIcon(row.label.clone())), row.choice == "custom");
@@ -4312,7 +4308,7 @@ fn paint_cursor(
             s.cursor_thickness.round() as u32);
     }
     *y += 12.0;
-    seg_row(
+    choice_row(
         g,
         s,
         hits,
@@ -4372,12 +4368,11 @@ pub(crate) fn paint_setup_section(
             toggle_row(g, s, hits, x, y, w, "캐릭터 페르소나", s.claude_persona, SettingsAction::ToggleClaudePersona);
             plain_hint(g, x, y, w, "외형은 그림과 장식에 즉시 적용됩니다. 페르소나는 새로 시작하는 에이전트의 말투에 적용됩니다.");
             if s.first_run {
-                row_label(g, x, y, "캐릭터 테마");
-                let choices = s.themes.iter().map(|row| (
+                let choices: Vec<_> = s.themes.iter().map(|row| (
                     row.label.clone(), s.character_theme == row.id,
                     SettingsAction::SelectTheme(row.id.clone()),
                 )).collect();
-                chips_owned(g, s, hits, x, y, w, choices);
+                choice_row(g, s, hits, x, y, w, "캐릭터 테마", &choices);
             } else {
                 // 같은 고르기가 「캐릭터 테마」 페이지 카드로 또 있어 칩 줄을 걷었다(2026-10-07 승인).
                 // 지금 테마만 보이고 바꾸는 길은 「테마 관리」 하나다.
@@ -4399,47 +4394,36 @@ pub(crate) fn paint_setup_section(
         1 => {
             row_label(g, x, y, "색상 테마");
             *y += appearance_preview::paint_palette_strip(g, s, hits, x, *y, w);
-            if !appearance_preview::FEATURED_PALETTES.contains(&s.theme.as_str()) {
-                if let Some(current) = s.palettes.iter().find(|palette| palette.key == s.theme) {
-                    plain_hint(g, x, y, w, &format!("현재 팔레트 · {}", current.label));
-                }
-            }
-            if disclosure(g, s, hits, x, y, w, "other-palettes", "다른 팔레트") {
-                let choices = s.palettes.iter()
-                    .filter(|palette| !appearance_preview::FEATURED_PALETTES.contains(&palette.key.as_str()))
-                    .map(|palette| (
-                        palette.label.clone(), s.theme == palette.key,
-                        SettingsAction::ThemeMode(palette.key.clone()),
-                    )).collect();
-                chips_owned(g, s, hits, x, y, w, choices);
-            }
+            let choices: Vec<_> = s.palettes.iter()
+                .filter(|palette| !appearance_preview::FEATURED_PALETTES.contains(&palette.key.as_str()))
+                .map(|palette| (palette.label.as_str(), s.theme == palette.key,
+                    SettingsAction::ThemeMode(palette.key.clone()))).collect();
+            choice_row(g, s, hits, x, y, w, "다른 팔레트", &choices);
             if !crate::lite_mode() {
                 let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
                     (preset_label(label), s.shape == *key, SettingsAction::Shape(key))).collect();
-                seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
+                choice_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
             }
         }
         2 => {
-            seg_row(g, s, hits, x, y, w, "기본 에이전트", &[
+            choice_row(g, s, hits, x, y, w, "기본 에이전트", &[
                 ("Claude Code", s.preferred_agent == "claude", SettingsAction::PreferredAgent("claude")),
                 ("Codex", s.preferred_agent == "codex", SettingsAction::PreferredAgent("codex")),
             ]);
-            row_label(g, x, y, "권한 기본값 · 새 작업부터 적용");
+            row_label(g, x, y, "새 작업의 권한");
             for (i, (provider, label)) in [("claude", "Claude Code"), ("codex", "Codex")].iter().enumerate() {
                 let cells: Vec<_> = [("기존 설정", "default"), ("작업 폴더", "workspace"), ("제한 없음", "unrestricted")].iter().map(|(label, mode)|
                     (*label, s.agent_permissions[i] == *mode, SettingsAction::AgentPermission(provider, mode))).collect();
-                seg_row(g, s, hits, x, y, w, label, &cells);
+                choice_row_with_id(g, s, hits, x, y, w, label, DropdownId::Choice(provider), "기존 설정", &cells);
             }
-            plain_hint(g, x, y, w, "Claude는 파일 편집을 자동 승인하고, Codex는 작업 폴더 쓰기를 허용합니다.");
-            plain_hint(g, x, y, w, "제한 없음은 승인 확인을 건너뜁니다.");
+            plain_hint(g, x, y, w, "작업 폴더는 편집을 허용하고, 제한 없음은 승인 확인을 건너뜁니다.");
             section_title(g, x, *y, "에이전트 상태줄", "");
             *y += 54.0;
             toggle_row(g, s, hits, x, y, w, "상태줄 직접 설정", s.agent_statusline_customized, SettingsAction::AgentStatuslineCustom(!s.agent_statusline_customized));
             if !s.agent_statusline_customized {
-                plain_hint(g, x, y, w, "각 에이전트의 기존 상태줄 설정을 유지합니다.");
                 return;
             }
-            row_label(g, x, y, "선택 항목 미리보기 · 예시");
+            row_label(g, x, y, "미리보기");
             let preview = agent_statusline_preview(s.agent_statusline);
             flat_row(g, x, *y, w, &preview, "", w);
             *y += ROW_H;
@@ -4447,20 +4431,15 @@ pub(crate) fn paint_setup_section(
                 toggle_row(g, s, hits, x, y, w, label, s.agent_statusline[i], SettingsAction::AgentStatusline(field, !s.agent_statusline[i]));
             }
             plain_hint(g, x, y, w, "Claude는 다음 표시부터, Codex는 새 작업부터 적용됩니다.");
-            plain_hint(g, x, y, w, "협업 상태 수집은 유지됩니다. 앱 하단바는 별도 메뉴에서 설정해요.");
         }
         3 => {
             if cfg!(target_os = "windows") {
                 crate::native_onboarding::paint_platform(g, &s.onboarding, hits, caret, x, y, w);
             } else {
-                seg_row(g, s, hits, x, y, w, "기본 셸", &[
-                    ("시스템 기본", s.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
-                    ("zsh", s.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".into())),
-                    ("bash", s.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".into())),
-                ]);
+                shell_dropdown(g, s, hits, x, y, w);
             }
             stepper_row(g, s, hits, x, y, w, "터미널 글자 크기", &format!("{:.0}px", s.font_size), SettingsAction::FontSizeDelta(-1), SettingsAction::FontSizeDelta(1));
-            seg_row(g, s, hits, x, y, w, "커서 모양", &[
+            choice_row(g, s, hits, x, y, w, "커서 모양", &[
                 ("블록", s.cursor_shape == cursor::CursorShape::Block, SettingsAction::CursorShape(cursor::CursorShape::Block)),
                 ("빔", s.cursor_shape == cursor::CursorShape::Bar, SettingsAction::CursorShape(cursor::CursorShape::Bar)),
                 ("밑줄", s.cursor_shape == cursor::CursorShape::Underline, SettingsAction::CursorShape(cursor::CursorShape::Underline)),
@@ -4561,7 +4540,7 @@ fn autoswitch_rows(
     if switch_on {
         let fine = switch_home.is_none_or(|home| home.fine_threshold);
         range_row(g, s, hits, x, y, w, "전환 기준", RangeSetting::Autoswitch { fine }, switch_pct);
-        plain_hint(g, x, y, w, "지금 쓰는 계정이 기준에 닿으면 목록의 위에서부터 여유 있는 계정을 고릅니다.");
+        plain_hint(g, x, y, w, "기준에 닿으면 위에서부터 여유 있는 계정으로 전환합니다.");
     }
 }
 
@@ -4767,9 +4746,9 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     *y += 54.0;
     let targets: Vec<(&str, bool, SettingsAction)> =
         WeatherTarget::ALL.iter().map(|&t| (t.label(), ws.target == t, act(Change::Target(t)))).collect();
-    seg_row(g, s, hits, x, y, w, "비가 오는 곳", &targets);
+    choice_row(g, s, hits, x, y, w, "비가 오는 곳", &targets);
     *y += 4.0;
-    plain_hint(g, x, y, w, "창 우클릭 「이 창 날씨」로 창마다 따로 정할 수 있고, 그 값이 이 선택보다 먼저입니다. 「고른 창만」은 거기서 고른 창에만 비가 옵니다");
+    plain_hint(g, x, y, w, "창 우클릭 → 「이 창 날씨」에서 창별로 정할 수 있습니다");
 
     *y += 8.0;
     section_title(g, x, *y, "효과", "");
@@ -4811,7 +4790,7 @@ fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
     *y += 54.0;
     let lid = &s.lid_away;
     let on = lid.on;
-    seg_row(g, s, hits, x, y, w, "덮었을 때", &[
+    choice_row(g, s, hits, x, y, w, "덮었을 때", &[
         ("바로 잠자기", !on, SettingsAction::LidAway(false)),
         ("마저 하고 잠자기", on, SettingsAction::LidAway(true)),
     ]);
@@ -4829,16 +4808,17 @@ fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
     toggle_row_hint(g, s, hits, x, y, w, "덮으면 폰 핫스팟 연결",
         "마저 하고 잠자기가 켜져 있고 작업 중일 때 등록한 핫스팟으로 연결합니다",
         lid.hotspot_on, SettingsAction::LidHotspot(!lid.hotspot_on));
-    let registered = if lid.hotspot_ssid.is_empty() { "등록된 폰 없음" } else { &lid.hotspot_ssid };
-    if disclosure(g, s, hits, x, y, w, "lid-hotspot", &format!("핫스팟 등록 · {registered}")) {
-        for ssid in &lid.hotspot.networks {
-            seg_row(g, s, hits, x, y, w, "", &[(ssid, *ssid == lid.hotspot_ssid, SettingsAction::LidHotspotSelect(ssid.clone()))]);
-        }
-        *y += button_row(g, s, hits, (x, *y, w, CTL_H), &[
-            ("목록 새로고침", Target::Setting(SettingsAction::LidHotspotRefresh), false),
-            ("등록 해제", Target::Setting(SettingsAction::LidHotspotSelect(String::new())), false),
-        ], crate::native_layout::Align::Start) + 8.0;
+    let mut networks = vec![("등록 안 함", lid.hotspot_ssid.is_empty(), SettingsAction::LidHotspotSelect(String::new()))];
+    for ssid in &lid.hotspot.networks {
+        networks.push((ssid.as_str(), *ssid == lid.hotspot_ssid, SettingsAction::LidHotspotSelect(ssid.clone())));
     }
+    if !lid.hotspot_ssid.is_empty() && !lid.hotspot.networks.contains(&lid.hotspot_ssid) {
+        networks.push((&lid.hotspot_ssid, true, SettingsAction::LidHotspotSelect(lid.hotspot_ssid.clone())));
+    }
+    choice_row(g, s, hits, x, y, w, "등록 핫스팟", &networks);
+    *y += button_row(g, s, hits, (x, *y, w, CTL_H), &[
+        ("목록 새로고침", Target::Setting(SettingsAction::LidHotspotRefresh), false),
+    ], crate::native_layout::Align::Start) + 8.0;
     if !lid.hotspot_ssid.is_empty() && !lid.hotspot.busy {
         *y += button_row(g, s, hits, (x, *y, w, CTL_H), &[
             ("지금 연결 확인", Target::Setting(SettingsAction::LidHotspotTest), false),
@@ -5275,45 +5255,18 @@ fn paint_students(
             }
         }
         *y += 48.0;
-        segmented(
-            g,
-            s,
-            hits,
-            x,
-            *y,
-            w.min(280.0),
-            &[
-                (
-                    "화면으로",
-                    !s.student_raw_open,
-                    SettingsAction::ToggleStudentRaw(false),
-                ),
-                (
-                    "원본",
-                    s.student_raw_open,
-                    SettingsAction::ToggleStudentRaw(true),
-                ),
-            ],
-        );
-        *y += 46.0;
+        toggle_row(g, s, hits, x, y, w, "원본 편집", s.student_raw_open,
+            SettingsAction::ToggleStudentRaw(!s.student_raw_open));
         if s.student_raw_open {
-            segmented(
-                g,
-                s,
-                hits,
-                x,
-                *y,
-                230.0,
-                &[
-                    ("JSON", !s.student_raw_yaml, SettingsAction::StudentRawFormat(false)),
-                    ("YAML", s.student_raw_yaml, SettingsAction::StudentRawFormat(true)),
-                ],
-            );
+            choice_row(g, s, hits, x, y, w, "원본 형식", &[
+                ("JSON", !s.student_raw_yaml, SettingsAction::StudentRawFormat(false)),
+                ("YAML", s.student_raw_yaml, SettingsAction::StudentRawFormat(true)),
+            ]);
             button(
                 g,
                 s,
                 hits,
-                (x + 242.0, *y, 104.0, CTL_H),
+                (x + w - 104.0, *y, 104.0, CTL_H),
                 "원본 저장",
                 Target::Setting(SettingsAction::SaveStudentRaw),
                 true,
@@ -5354,14 +5307,6 @@ fn paint_students(
             false,
         );
         *y += 60.0;
-        section_title(
-            g,
-            x,
-            *y,
-            "모델",
-            "이 캐릭터만 다른 실행 통로를 쓸 수 있습니다",
-        );
-        *y += 52.0;
         let choices: Vec<(String, bool, SettingsAction)> = s
             .models
             .iter()
@@ -5375,7 +5320,7 @@ fn paint_students(
                 )
             })
             .collect();
-        chips_owned(g, s, hits, x, y, w, choices);
+        choice_row(g, s, hits, x, y, w, "모델", &choices);
         section_title(
             g,
             x,
@@ -5601,15 +5546,8 @@ fn paint_themegen_engine(
     y: &mut f32,
     w: f32,
 ) {
-    section_title(
-        g,
-        x,
-        *y,
-        "그림 생성 엔진",
-        "준비되지 않은 엔진은 이유를 함께 표시합니다",
-    );
-    *y += 54.0;
-    let providers = s
+    *y += 12.0;
+    let providers: Vec<_> = s
         .themegen_providers
         .iter()
         .map(|provider| {
@@ -5624,7 +5562,7 @@ fn paint_themegen_engine(
             )
         })
         .collect();
-    chips_owned(g, s, hits, x, y, w, providers);
+    choice_row(g, s, hits, x, y, w, "그림 생성 엔진", &providers);
     if let Some(provider) = s
         .themegen_providers
         .iter()
@@ -5888,11 +5826,10 @@ fn account_group(
     *y += 38.0;
     if provider == AccountProvider::Claude {
         if let Some(view) = s.home_accounts.as_ref() {
-            segmented(g, s, hits, x, *y, w.min(360.0), &[
+            choice_row(g, s, hits, x, y, w, "계정 기기", &[
                 ("이 기기", !s.account_scope_home, SettingsAction::AccountScopeHome(false)),
-                (&view.label, s.account_scope_home, SettingsAction::AccountScopeHome(true)),
+                (view.label.as_str(), s.account_scope_home, SettingsAction::AccountScopeHome(true)),
             ]);
-            *y += 40.0;
         }
     }
     let rows: Vec<&AccountChoice> = home.map_or(s.accounts.as_ref(), |h| h.accounts.as_ref())
@@ -6447,8 +6384,20 @@ fn flat_row(g:&mut gpu::GpuRenderer,x:f32,y:f32,w:f32,label:&str,hint:&str,text_
     rect
 }
 
-/// 이름표 + 구분 선택을 한 행에. 목업의 「새 방의 시작 폴더 · [마지막 위치|홈|직접 지정]」.
-fn seg_row(
+fn choice_row<T: AsRef<str>>(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    label: &'static str,
+    cells: &[(T, bool, SettingsAction)],
+) {
+    choice_row_with_id(g, s, hits, x, y, w, label, DropdownId::Choice(label), "선택", cells);
+}
+
+fn choice_row_with_id<T: AsRef<str>>(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
@@ -6456,29 +6405,22 @@ fn seg_row(
     y: &mut f32,
     w: f32,
     label: &str,
-    cells: &[(&str, bool, SettingsAction)],
+    id: DropdownId,
+    fallback: &str,
+    cells: &[(T, bool, SettingsAction)],
 ) {
-    let label_w = g.measure_chrome_text(&crate::native_strings::text(label), 13.0, false)
-        + crate::native_controls::CONTROL_PADDING_X + 1.0;
-    let controls_w = cells.iter().map(|(label, active, _)|
-        g.measure_chrome_text(&crate::native_strings::text(label), 13.0, *active) + 20.0).sum::<f32>() + 4.0;
-    let stacked = label_w + controls_w + 13.0 > w;
-    if stacked {
-        row_label(g, x, y, label);
-        segmented(g, s, hits, x, *y, w, cells);
-        *y += CTL_H + 10.0;
-    } else {
-        flat_row(g, x, *y, w, label, "", label_w);
-        let control_x = x + label_w + 13.0;
-        segmented(g, s, hits, control_x, *y + (ROW_H - CTL_H) / 2.0, x + w - control_x, cells);
-        *y += ROW_H;
+    if cells.is_empty() {
+        return;
     }
+    let value = cells.iter().find(|(_, selected, _)| *selected)
+        .map_or(fallback, |(label, _, _)| label.as_ref());
+    dropdown_control(g, s, hits, x, y, w, label, value, &id, || {
+        cells.iter().map(|(label, selected, action)|
+            (label.as_ref().to_owned(), *selected, action.clone())).collect()
+    });
 }
 
-/// 선택 줄(`segmented`) 위에 서는 한 줄 이름표. 줄이 둘 이상 잇달아 서면 어느 줄이
-/// 무엇을 고르는지 칸 글자만으로는 안 읽혔다(「끔 · 1초 · 3초」가 무엇의 간격인지) —
-/// 2026-09-07 「자잘한 것들 다 수정」.
-/// 칩·카드 묶음 위의 이름. 바로 위 행의 밑줄에 글자가 붙지 않게 10 을 띄운다.
+/// 칩·카드 묶음 위의 이름. 위 행의 밑줄에서 한 칸 띄운다.
 fn row_label(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, label: &str) {
     *y += 10.0;
     draw_text(g, x + crate::native_controls::CONTROL_PADDING_X, *y, label, 13.0, theme::text_dim(), false);
@@ -6534,90 +6476,6 @@ fn toggle_row_hint(
     register_clipped(g,hits,Target::Setting(action),rect,HitCursor::Pointer);g.hover_pointer|=hover;*y+=height;
 }
 
-fn segmented(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    x: f32,
-    y: f32,
-    w: f32,
-    cells: &[(&str, bool, SettingsAction)],
-) {
-    if cells.is_empty() || w <= 4.0 {
-        return;
-    }
-    // 목업(플랫): 칸 너비는 글자에 맞추고 상자는 오른쪽 끝에 붙는다. 채움 없이
-    // 테두리 하나, 고른 칸만 강조색 테두리+글자. 두 개짜리(언어)가 화면을
-    // 가로지르던 것을 없앴다(2026-09-10 지적).
-    let h = CTL_H;
-    let inset = 2.0;
-    let pad = 10.0;
-    let widths: Vec<f32> = cells
-        .iter()
-        .map(|(label, selected, _)| g.measure_chrome_text(label, 13.0, *selected) + pad * 2.0)
-        .collect();
-    let total = widths.iter().sum::<f32>() + inset * 2.0;
-    let outer = (x + w - total.min(w), y, total.min(w), h);
-    let scale = ((outer.2 - inset * 2.0) / (total - inset * 2.0)).min(1.0);
-    round_rect(g, outer.0, outer.1, outer.2, outer.3, seg_outer_radius(), theme::surface_hover());
-    let mut cx = outer.0 + inset;
-    for (i, (label, selected, action)) in cells.iter().enumerate() {
-        let cw = widths[i] * scale;
-        let rect = (cx, y + inset, cw, h - inset * 2.0);
-        cx += cw;
-        let hover = contains(rect, s.cursor);
-        if *selected {
-            round_rect(g, rect.0, rect.1, rect.2, rect.3, seg_inner_radius(), theme::accent());
-        }
-        let shown = fit(g, label, cw - 8.0, 13.0, *selected);
-        g.centered_chrome_text(rect,&shown,gpu::DrawOpts {
-            font_size:13.0,color:if *selected { theme::foreground_on(theme::accent()) } else if hover { theme::text() } else { theme::text_dim() },bold:*selected,italic:false,
-        });
-        register_clipped(g, hits, Target::Setting(action.clone()), rect, HitCursor::Pointer);
-        g.hover_pointer |= hover;
-    }
-}
-
-fn chips_owned(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-    cells: Vec<(String, bool, SettingsAction)>,
-) {
-    let mut cx = x;
-    let mut cy = *y;
-    for (label, selected, action) in cells {
-        let cw = (g.measure_chrome_text(&label, 12.0, selected) + 22.0).min(w);
-        if cx + cw > x + w && cx > x {
-            cx = x;
-            cy += 30.0;
-        }
-        let rect = (cx, cy, cw, 24.0);
-        choice_card_with_radius(g, s, hits, rect, selected, Target::Setting(action), chip_radius());
-        // 반 픽셀을 더 준다. 칸 너비를 같은 함수로 재 놓고 그 값으로 다시 자르는데,
-        // 두 번의 재기가 소수점에서 갈리면 딱 맞는 이름이 「Ma…」로 잘린다(실측).
-        let shown = fit(g, &label, rect.2 - 21.5, 12.0, selected);
-        draw_text(
-            g,
-            rect.0 + 11.0,
-            rect.1 + 5.5,
-            &shown,
-            12.0,
-            if selected {
-                theme::enforce_contrast_at(theme::accent(), theme::lerp(theme::surface(), theme::accent(), 0.14), 4.5)
-            } else {
-                theme::text_dim()
-            },
-            selected,
-        );
-        cx += cw + 6.0;
-    }
-    *y = cy + 36.0;
-}
-
 /// 선택 상자에 뜨는 값 이름. 「terminal」·「system」·빈 값은 사람 말로 바꾼다.
 /// 테마 표의 영어 이름(값이자 웹 설정의 키라 못 바꾼다)을 설정 화면에 보일 이름으로.
 fn preset_label(name: &str) -> &str {
@@ -6647,8 +6505,9 @@ fn ui_font_label(value: &str) -> String {
 }
 
 /// 선택 상자에 들어갈 항목들: (보이는 이름, 지금 골라진 것인지, 고르면 할 일).
-fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAction)> {
+fn dropdown_items(s: &Snapshot, id: &DropdownId) -> Vec<DropdownItem> {
     match id {
+        DropdownId::Choice(_) | DropdownId::DeviceIcon(_) => Vec::new(),
         DropdownId::UiFont => {
             let custom = !matches!(s.ui_font.as_str(), "" | "terminal" | "system");
             let mut items = vec![
@@ -6673,6 +6532,7 @@ fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAc
             items
         }
         DropdownId::SystemPalette(light) => {
+            let light = *light;
             let current = if light { &s.system_light } else { &s.system_dark };
             s.palettes
                 .iter()
@@ -6735,7 +6595,26 @@ fn dropdown_row(
     value: &str,
     id: DropdownId,
 ) {
-    let fw=DROPDOWN_FIELD_W.min(w*0.55).max(120.0).min(w);
+    dropdown_control(g, s, hits, x, y, w, label, value, &id, || dropdown_items(s, &id));
+}
+
+fn dropdown_control(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    label: &str,
+    value: &str,
+    id: &DropdownId,
+    items: impl FnOnce() -> Vec<DropdownItem>,
+) {
+    let ideal_width = match id {
+        DropdownId::Choice(_) | DropdownId::DeviceIcon(_) => 184.0,
+        _ => DROPDOWN_FIELD_W,
+    };
+    let fw = ideal_width.min(w * 0.55).max(120.0).min(w);
     let label_width=g.measure_chrome_text(&crate::native_strings::text(label),13.0,false)+crate::native_controls::CONTROL_PADDING_X;
     let stacked=label_width+fw+12.0>w;
     let mut row_h=ROW_H;
@@ -6748,21 +6627,20 @@ fn dropdown_row(
         flat_row(g,x,*y,w,label,"",w-fw-12.0);
         (x+w-fw,*y+(ROW_H-CTL_H)/2.0,fw,CTL_H)
     };
-    let open = s.dropdown == Some(id);
+    let open = s.dropdown.as_ref() == Some(id);
     let hover = contains(rect, s.cursor);
     crate::native_controls::field(g,rect,open);
-    let shown=fit(g,value,(rect.2-42.0).max(0.0),13.0,false);
+    let shown=fit(g,&crate::native_strings::text(value),(rect.2-42.0).max(0.0),13.0,false);
     let m=g.chrome_text_metrics(&shown,13.0,false);
     let (_,ty)=m.centered_origin(rect,g.scale());
     draw_text(g,rect.0+12.0,ty,&shown,13.0,theme::text(),false);
     g.queue_icon(if open {"chevron-up"}else{"chevron-down"},rect.0+rect.2-25.0,rect.1+(rect.3-14.0)/2.0,14.0,theme::text_dim());
-    register_clipped(g, hits, Target::Dropdown(id), rect, HitCursor::Pointer);
+    register_clipped(g, hits, Target::Dropdown(id.clone()), rect, HitCursor::Pointer);
     g.hover_pointer |= hover;
-    if open {
-        if let Some(visible) = g.clip_hit(rect) {
-            let _ = visible;
-            mark_dropdown_anchor(id, rect);
-        }
+    if open && g.clip_hit(rect).is_some() {
+        PAINT_FEEDBACK.with(|feedback| {
+            feedback.borrow_mut().dropdown = Some(DropdownMenu { anchor: rect, items: items() });
+        });
     }
     *y += row_h;
 }
@@ -6774,10 +6652,9 @@ fn paint_dropdown_popup(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
-    id: DropdownId,
-    anchor: Rect,
+    menu: DropdownMenu,
 ) -> f32 {
-    let items = dropdown_items(s, id);
+    let DropdownMenu { anchor, items } = menu;
     if items.is_empty() {
         return 0.0;
     }
@@ -6795,7 +6672,12 @@ fn paint_dropdown_popup(
         let h = full_h.min(max_h).min(above.max(DROPDOWN_ITEM_H + pad * 2.0));
         (h, anchor.1 - 4.0 - h)
     };
-    let panel = (anchor.0, top, anchor.2, h);
+    let widest = items.iter().map(|(label, selected, _)| {
+        g.measure_chrome_text(&crate::native_strings::text(label), 12.0, *selected)
+    }).fold(0.0_f32, f32::max);
+    let width = (widest + 54.0).max(anchor.2).min(420.0).min((s.area.2 - 16.0).max(anchor.2));
+    let left = (anchor.0 + anchor.2 - width).max(s.area.0 + 8.0);
+    let panel = (left, top, width, h);
     let scroll_max = (full_h - h).max(0.0);
     let scroll = s.dropdown_scroll.clamp(0.0, scroll_max);
 
@@ -6836,7 +6718,7 @@ fn paint_dropdown_popup(
                 },
             );
         }
-        let shown = fit(g, &label, rect.2 - 40.0, 12.0, selected);
+        let shown = fit(g, &crate::native_strings::text(&label), rect.2 - 40.0, 12.0, selected);
         draw_text(
             g,
             rect.0 + 12.0,
@@ -7250,10 +7132,6 @@ pub(crate) fn wrap_text(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: 
 pub(crate) fn ctrl_radius() -> f32 { theme::radius_sm() }
 
 fn chip_radius() -> f32 { theme::radius_sm() }
-
-fn seg_outer_radius() -> f32 { theme::radius_sm() + 2.0 * theme::roundness() }
-
-fn seg_inner_radius() -> f32 { theme::radius_sm() }
 
 fn choice_card(
     g: &mut gpu::GpuRenderer,

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Notice, Row, Segmented, TabCard, TextField, useSettingsAction } from './controls';
+import { Notice, Row, ChoiceSelect, TabCard, TextField, useSettingsAction } from './controls';
 import { useT } from './lang';
 import type { SettingsValues } from './types';
 
@@ -26,7 +26,8 @@ export function ShellTab({
     <TabCard>
       <Notice notice={notice} />
       <Row label={t.shell.defaultShell} desc={[t.shell.defaultShellHint]}>
-        <Segmented
+        <ChoiceSelect
+          label={t.shell.defaultShell}
           value={showField ? 'custom' : data.shell}
           options={[
             { key: '', label: t.shell.systemDefault },

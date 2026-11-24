@@ -212,7 +212,7 @@ impl SettingsScene {
     }
 
     pub(crate) fn dropdown(&self) -> Option<crate::native_settings::DropdownId> {
-        self.dropdown
+        self.dropdown.clone()
     }
 
     pub(crate) fn dropdown_scroll(&self) -> f32 {
@@ -221,7 +221,7 @@ impl SettingsScene {
 
     pub(crate) fn toggle_dropdown(&mut self, id: crate::native_settings::DropdownId) {
         self.invalidate_hits();
-        self.dropdown = if self.dropdown == Some(id) { None } else { Some(id) };
+        self.dropdown = if self.dropdown.as_ref() == Some(&id) { None } else { Some(id) };
         self.dropdown_scroll = 0.0;
         self.dropdown_scroll_max = 0.0;
     }

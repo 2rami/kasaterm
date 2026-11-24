@@ -159,7 +159,7 @@ pub(super) fn paint(
             SettingsAction::ChromeMachine(label.clone()),
         ));
     }
-    seg_row(g, s, hits, x, y, w, "열 기기", &cells);
+    choice_row(g, s, hits, x, y, w, "열 기기", &cells);
     plain_hint(
         g,
         x,

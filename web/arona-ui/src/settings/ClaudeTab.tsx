@@ -6,7 +6,7 @@ import {
   NumberSlider,
   Row,
   Section,
-  Segmented,
+  ChoiceSelect,
   TabCard,
   TextField,
   Toggle,
@@ -330,8 +330,9 @@ export function ClaudeTab({
         {accountList('codex', data.codex_accounts, data.codex_account)}
       </Section>
 
-      <Row label={t.claude.model} desc={[t.claude.modelHint]}>
-        <Segmented
+      <Row label={t.claude.model}>
+        <ChoiceSelect
+          label={t.claude.model}
           value={data.model}
           disabled={busy}
           options={[
@@ -344,8 +345,9 @@ export function ClaudeTab({
         />
       </Row>
 
-      <Row label={t.claude.effort} desc={[t.claude.effortHint]}>
-        <Segmented
+      <Row label={t.claude.effort}>
+        <ChoiceSelect
+          label={t.claude.effort}
           value={data.effort}
           disabled={busy}
           options={[

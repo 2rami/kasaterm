@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import {
   Button,
+  ChoiceSelect,
   Notice,
+  Row,
   Section,
   Stepper,
   TabCard,
@@ -265,47 +267,20 @@ export function AppearanceTab({
         {data.theme === 'system' && (
           <div className="mt-4 space-y-2">
             <p className="text-[13px] text-[var(--kt-text)]">{t.appearance.systemSlots}</p>
-            <p className="text-[12px] text-[var(--kt-text-mute)]">
-              {t.appearance.systemSlotsHint}
-            </p>
-            {(
-              [
-                ['light', t.appearance.systemLightSlot, data.theme_system_light],
-                ['dark', t.appearance.systemDarkSlot, data.theme_system_dark],
-              ] as const
-            ).map(([slot, label, current]) => (
-              <div key={slot} className="flex flex-wrap items-center gap-1.5">
-                <span className="w-[88px] shrink-0 text-[12.5px] text-[var(--kt-text-dim)]">
-                  {label}
-                </span>
-                {data.themes
-                  .filter((p) => p.key !== 'system')
-                  .map((p) => (
-                    <button
-                      key={p.key}
-                      type="button"
-                      disabled={busy}
-                      aria-pressed={p.key === current}
-                      onClick={() =>
-                        p.key !== current && void run(`theme-system-${slot}`, { id: p.key })
-                      }
-                      className="px-2.5 py-1 text-[12px] disabled:opacity-40"
-                      style={{
-                        borderRadius: 'var(--kt-radius-sm)',
-                        // 미리보기 배지: 그 테마의 실제 배경·글자색으로 물들인다 —
-                        // 라벨만 나열하면 이름을 외운 사람만 고를 수 있다.
-                        background: p.bg,
-                        color: p.text,
-                        boxShadow:
-                          p.key === current
-                            ? '0 0 0 2px var(--kt-accent)'
-                            : `inset 0 0 0 1px var(--kt-border)`,
-                      }}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-              </div>
+            {([
+              ['light', t.appearance.systemLightSlot, data.theme_system_light],
+              ['dark', t.appearance.systemDarkSlot, data.theme_system_dark],
+            ] as const).map(([slot, label, current]) => (
+              <Row key={slot} label={label}>
+                <ChoiceSelect
+                  label={label}
+                  value={current}
+                  disabled={busy}
+                  options={data.themes.filter((palette) => palette.key !== 'system')
+                    .map((palette) => ({ key: palette.key, label: palette.label }))}
+                  onPick={(key) => void run(`theme-system-${slot}`, { id: key })}
+                />
+              </Row>
             ))}
           </div>
         )}
