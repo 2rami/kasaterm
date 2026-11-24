@@ -66,6 +66,7 @@ impl Drop for RestoredSurfaceKey {
 #[derive(Default, Debug, PartialEq, Eq)]
 pub(crate) struct RestoreSummary {
     pub(crate) panes: usize,
+    pub(crate) hidden_panes: usize,
     pub(crate) agents: usize,
     pub(crate) shells: usize,
     pub(crate) faces: Vec<String>,
@@ -75,28 +76,32 @@ pub(crate) struct RestoreSummary {
 fn summarize_restore_node(node: &serde_json::Value, summary: &mut RestoreSummary) {
     if crate::internal_room::is_saved_window(node) { return; }
     if let Some(leaf) = node.get("leaf") {
-        let mut surfaces = super::local_restore::surfaces(leaf).peekable();
-        summary.panes += usize::from(surfaces.peek().is_some());
-        for surface in surfaces {
-            // A character assignment alone also exists on old plain-shell records.
-            // Counts and faces must use the same local, resumable-agent evidence.
-            let agent = saved_agent_marker(surface).is_some()
-                || surface["session_id"].as_str().is_some_and(|s| !s.is_empty());
-            if surface.is_object() { summary.items.push(super::restore_dialog::Item::from_record(surface, agent)); }
-            if !agent {
-                summary.shells += usize::from(surface.is_object() && surface.get("web_url").is_none());
-                continue;
-            }
-            summary.agents += 1;
-            if let Some(face) = surface["character"].as_str().filter(|s| !s.is_empty()) {
-                if !summary.faces.iter().any(|name| name == face) {
-                    summary.faces.push(face.to_owned());
-                }
-            }
-        }
+        summarize_restore_record(leaf, summary);
     } else if let Some(split) = node.get("split") {
         for key in ["a", "b"] {
             if let Some(child) = split.get(key) { summarize_restore_node(child, summary); }
+        }
+    }
+}
+
+fn summarize_restore_record(leaf: &serde_json::Value, summary: &mut RestoreSummary) {
+    let mut surfaces = super::local_restore::surfaces(leaf).peekable();
+    summary.panes += usize::from(surfaces.peek().is_some());
+    for surface in surfaces {
+        // A character assignment alone also exists on old plain-shell records.
+        // Counts and faces must use the same local, resumable-agent evidence.
+        let agent = saved_agent_marker(surface).is_some()
+            || surface["session_id"].as_str().is_some_and(|s| !s.is_empty());
+        if surface.is_object() { summary.items.push(super::restore_dialog::Item::from_record(surface, agent)); }
+        if !agent {
+            summary.shells += usize::from(surface.is_object() && surface.get("web_url").is_none());
+            continue;
+        }
+        summary.agents += 1;
+        if let Some(face) = surface["character"].as_str().filter(|s| !s.is_empty()) {
+            if !summary.faces.iter().any(|name| name == face) {
+                summary.faces.push(face.to_owned());
+            }
         }
     }
 }
@@ -151,6 +156,10 @@ impl App {
                     }
                 }
             }
+        }
+        for rec in super::local_restore::hidden_records(state) {
+            summary.hidden_panes += 1;
+            summarize_restore_record(rec, &mut summary);
         }
         summary
     }
@@ -277,6 +286,13 @@ impl App {
         }
         for u in Self::saved_undocked(state) {
             walk(u, &mut out);
+        }
+        for rec in super::local_restore::hidden_records(state) {
+            for surface in super::local_restore::surfaces(rec) {
+                if let Some(name) = surface["character"].as_str().filter(|s| !s.is_empty()) {
+                    out.push(name.to_owned());
+                }
+            }
         }
         out
     }
@@ -405,6 +421,7 @@ impl App {
             }
         }
         self.active_window = restored_active.min(self.windows.len().saturating_sub(1));
+        self.restore_hidden_panes(state, cols, rows, &restored_indices);
         // 활성 방이 하나도 안 살아났을 때 화면이 비지 않게 메운다.
         //
         // ⚠️ **다른 방은 절대 건드리지 마라.** 예전에는 여기서 `windows` 를 통째로
@@ -458,7 +475,7 @@ impl App {
             let Some(leaf) = u.get("leaf").filter(|l| !l.is_null()) else {
                 continue;
             };
-            let Some(id) = self.restore_leaf(leaf, cols, rows) else {
+            let Some(id) = self.restore_leaf(leaf, cols, rows, None) else {
                 continue;
             };
             let home = (u.get("home_window").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
@@ -470,14 +487,6 @@ impl App {
             self.queue_aux_terminal(id, home, frame);
         }
         self.release_reserved_characters();
-        // 숨겨 둔 pane 을 되살리기 목록으로 되돌린다. **띄우지는 않는다** — 숨긴
-        // 것은 화면에 없는 게 그 사람이 고른 상태고, 켜자마자 우르르 튀어나오면
-        // 숨긴 의미가 없다. 목록에 서 있다가 사용자가 부를 때 뜬다.
-        //
-        // `alive: false` 로 들어간다 — 재시작으로 PTY 는 다 죽었으니 되살리기는
-        // 레코드로 새로 띄우는 쪽이다. claude 였던 pane 은 `rec` 의 세션 id 를
-        // `restore_leaf` 가 `--resume` 으로 이어 준다.
-        self.restore_closed_history(state);
         // 재접속 자동 따라잡기 — 이 기계가 꺼져 있는 동안 원격(본진)에 쌓인
         // 미push 커밋·미저장 변경을, 거울이 다시 붙은 레포마다 이사와 같은
         // 관문으로 끌어와 로컬을 따라잡는다(2026-09-02 감사 ②). origin 에 이미
@@ -557,6 +566,21 @@ impl App {
             win.request_redraw();
         }
     }
+    fn restore_hidden_panes(&mut self, state: &serde_json::Value, cols: u16, rows: u16, indices: &[Option<usize>]) {
+        for entry in state["stashed_panes"].as_array().into_iter().flatten() {
+            let Some(mut closed) = super::local_restore::history_entry(entry) else { continue };
+            closed.window = indices.get(closed.window).copied().flatten().unwrap_or(self.active_window);
+            if let Some(record) = super::local_restore::hidden_record(entry) {
+                if let Some(id) = self.restore_leaf(record, cols, rows, Some(&closed)) {
+                    closed.rec["pane_id"] = serde_json::json!(&id);
+                    closed.pane_id = id;
+                    closed.alive = true;
+                }
+            }
+            self.closed_panes.push(closed);
+        }
+    }
+
     /// Recursively rebuild one window's BSP tree from its saved JSON, spawning a
     /// pane per surviving leaf. A leaf whose record is null (cwd/pid unresolved
     /// at save) or whose PTY fails to spawn is dropped, and a split with one
@@ -581,7 +605,7 @@ impl App {
             if leaf.is_null() {
                 return None;
             }
-            let id = self.restore_leaf(leaf, cols, rows)?;
+            let id = self.restore_leaf(leaf, cols, rows, None)?;
             return Some(kasa_pty::PtyLayout::Leaf { pane_id: id });
         }
         if let Some(split) = node.get("split") {
@@ -621,10 +645,19 @@ impl App {
     /// Spawn one restored pane from its saved record and, when it was running an
     /// agent, queue the command that brings it back. Returns the new pane id, or
     /// None if the PTY failed to start (caller then collapses the split).
-    pub(super) fn restore_leaf(&mut self, rec: &serde_json::Value, cols: u16, rows: u16) -> Option<String> {
+    pub(super) fn restore_leaf(
+        &mut self, rec: &serde_json::Value, cols: u16, rows: u16, hidden: Option<&crate::ClosedPane>,
+    ) -> Option<String> {
         let local = super::local_restore::record(rec)?;
         let rec = &local;
-        let id = self.restore_surface(rec, cols, rows, None)?;
+        let launch = |app: &mut Self, record: &serde_json::Value, parent: Option<&str>| {
+            let id = app.restore_surface(record, cols, rows, parent, hidden)?;
+            if let Some(progress) = app.restore_progress.as_mut().filter(|_| hidden.is_some()) {
+                progress.track(&id, record);
+            }
+            Some(id)
+        };
+        let id = launch(self, rec, None)?;
         // pane 안에 겹쳐 둔 탭들(저장은 layout_to_json 의 `tabs`). leaf 와 **같은
         // 길**로 되살린다 — 이어갈 대화가 실재하는지, 캐릭터를 되살릴지, 권한
         // 모드를 승계할지가 한 함수에 있어야 둘이 어긋나지 않는다.
@@ -640,7 +673,16 @@ impl App {
             self.ws.lock().unwrap().pane_mut(&id);
         }
         for t in tabs.into_iter().flatten() {
-            if self.restore_surface(t, cols, rows, Some(&id)).is_none() {
+            if launch(self, t, Some(&id)).is_none() {
+                if let Some(hidden) = hidden {
+                    // Keep the failed tab available in history without adding it to any layout.
+                    let mut failed = hidden.clone();
+                    failed.ui_id = crate::ClosedPane::next_ui_id();
+                    failed.pane_id = t["pane_id"].as_str().unwrap_or_default().to_owned();
+                    failed.character = t["character"].as_str().unwrap_or_default().to_owned();
+                    failed.rec = t.clone();
+                    self.closed_panes.push(failed);
+                }
                 // 조용히 빠지면 「탭이 왜 안 돌아왔나」를 사후에 짚을 수가 없다 —
                 // 2026-09-14 에 학생 넷을 잃고도 로그가 한 줄도 없어 저장·복원 중
                 // 어느 쪽인지 가리는 데만 한참 걸렸다.
@@ -665,12 +707,13 @@ impl App {
     /// leaf 하나, 또는 그 pane 안의 탭 하나를 되살린다.
     ///
     /// `tab_of` 가 있으면 원격도 바깥 pane 의 탭으로 앉힌 뒤 출력을 연결한다.
-    pub(super) fn restore_surface(
+    fn restore_surface(
         &mut self,
         rec: &serde_json::Value,
         cols: u16,
         rows: u16,
         tab_of: Option<&str>,
+        hidden: Option<&crate::ClosedPane>,
     ) -> Option<String> {
         // Restoring a view must not establish connections to another device or spawn a fallback shell.
         if !super::local_restore::is_local(rec) { return None; }
@@ -683,7 +726,9 @@ impl App {
         // ID allocation already excluded every living PTY/tab. Register the
         // identity on that resolved free ID, never overwrite a live source ID.
         let mut key_registration = RestoredSurfaceKey::register(&id, rec);
-        if let Some(progress) = self.restore_progress.as_mut() { progress.track(&id, rec); }
+        if let Some(progress) = self.restore_progress.as_mut().filter(|_| hidden.is_none()) {
+            progress.track(&id, rec);
+        }
         // 웹 pane — PTY 를 안 띄운다. 그리드 자리(WebPane)만 앉히고 자식 창은
         // pending_web_hosts 로 미룬다: 복원 경로엔 ActiveEventLoop 가 없어
         // 창을 만들 수 없다(about_to_wait 의 drain 이 다음 턴에 만든다).
@@ -1013,6 +1058,15 @@ impl App {
                         "복원에서 {} 창을 잃었어요({e}) — 대화 파일은 남아 있어요",
                         rec.get("character").and_then(|c| c.as_str()).unwrap_or(&id)
                     ));
+                if hidden.is_some() {
+                    let mut ws = self.ws.lock().unwrap();
+                    if let Some(pane) = tab_of.and_then(|outer| ws.panes.get_mut(outer)) {
+                        pane.tabs.retain(|tab| tab.pid.as_deref() != Some(&id));
+                    }
+                    ws.pid_to_pane.remove(&id);
+                    ws.pane_character.remove(&id);
+                    ws.pane_room.remove(&id);
+                }
                 return None;
             }
         };

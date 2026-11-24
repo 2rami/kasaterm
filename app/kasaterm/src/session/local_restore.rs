@@ -16,7 +16,7 @@ pub(super) fn is_local(record: &Value) -> bool {
         && record["remote_view"] != true
 }
 
-pub(super) fn surfaces(record: &Value) -> impl Iterator<Item = &Value> {
+pub(crate) fn surfaces(record: &Value) -> impl Iterator<Item = &Value> {
     std::iter::once(record)
         .chain(
             record
@@ -215,6 +215,20 @@ pub(super) fn state(original: &Value) -> Value {
     result
 }
 
+pub(crate) fn hidden_record(entry: &Value) -> Option<&Value> {
+    let rec = entry.get("rec")?;
+    // Older builds saved explicit hide intent without recording PTY liveness.
+    (entry["retained_by"] == "user"
+        && entry["stashed"] == true
+        && entry.get("resume_hidden").is_none_or(|value| value == true)
+        && surfaces(rec).any(Value::is_object))
+    .then_some(rec)
+}
+
+pub(crate) fn hidden_records(state: &Value) -> impl Iterator<Item = &Value> {
+    state["stashed_panes"].as_array().into_iter().flatten().filter_map(hidden_record)
+}
+
 pub(super) fn selected(original: &Value, chosen: &[usize]) -> Value {
     let mut result = state(original);
     if let Some(object) = result.as_object_mut() {
@@ -250,6 +264,12 @@ pub(super) fn selected(original: &Value, chosen: &[usize]) -> Value {
     for entry in &mut stashed {
         if let Some(window) = entry.get_mut("window") {
             *window = json!(mapped(window, &indices));
+        }
+        if hidden_record(entry).is_some() {
+            if !chosen.contains(&index) {
+                entry["resume_hidden"] = json!(false);
+            }
+            index += 1;
         }
     }
     // Each unchecked tab keeps its own launch recipe, never a parent record containing selected tabs.
@@ -289,40 +309,30 @@ pub(super) fn history(original: &Value) -> Vec<crate::ClosedPane> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|entry| {
-            let rec = entry.get("rec")?.clone();
-            if rec.is_null() {
-                return None;
-            }
-            let text = |key: &str| {
-                entry
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned()
-            };
-            Some(crate::ClosedPane {
-                ui_id: crate::ClosedPane::next_ui_id(),
-                rec,
-                pane_id: text("pane_id"),
-                character: text("character"),
-                folder: text("folder"),
-                neighbor: entry
-                    .get("neighbor")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                window: entry["window"].as_u64().unwrap_or(0) as usize,
-                alive: false,
-                stashed: entry["stashed"].as_bool().unwrap_or(true),
-                retained_by: entry
-                    .get("retained_by")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok()),
-                idle_since: None,
-                preview: None,
-            })
-        })
+        .filter_map(history_entry)
         .collect()
+}
+
+pub(super) fn history_entry(entry: &Value) -> Option<crate::ClosedPane> {
+    let rec = entry.get("rec")?.clone();
+    if rec.is_null() {
+        return None;
+    }
+    let text = |key: &str| entry[key].as_str().unwrap_or_default().to_owned();
+    Some(crate::ClosedPane {
+        ui_id: crate::ClosedPane::next_ui_id(),
+        rec,
+        pane_id: text("pane_id"),
+        character: text("character"),
+        folder: text("folder"),
+        neighbor: entry["neighbor"].as_str().map(str::to_owned),
+        window: entry["window"].as_u64().unwrap_or(0) as usize,
+        alive: false,
+        stashed: entry["stashed"].as_bool().unwrap_or(true),
+        retained_by: serde_json::from_value(entry["retained_by"].clone()).ok(),
+        idle_since: None,
+        preview: None,
+    })
 }
 
 #[cfg(test)]

@@ -289,7 +289,7 @@ impl App {
             c.pane_id.clone()
         } else {
             let (cols, rows) = self.window_cells();
-            let Some(id) = self.restore_leaf(&c.rec, cols, rows) else {
+            let Some(id) = self.restore_leaf(&c.rec, cols, rows, None) else {
                 eprintln!("[reopen] {} 되살리기 실패 — PTY 를 못 띄웠다", c.pane_id);
                 self.closed_panes.push(c);
                 self.set_toast("되살리지 못했어요. 닫힘 기록은 보관했어요".into());

@@ -37,13 +37,16 @@ impl State {
     }
 
     pub(crate) fn control_view(&self) -> Value {
-        json!({"selected_count":self.count(), "items": self.plan.rows.iter().enumerate().map(|(i, row)|
+        json!({"selected_count":self.count(), "hidden_selected_count":self.hidden_count(), "items": self.plan.rows.iter().enumerate().map(|(i, row)|
             json!({"index":i, "title":row.title, "kind":row.kind, "character":row.character,
-                "selected":self.selected[i], "group":row.group})).collect::<Vec<_>>()})
+                "selected":self.selected[i], "group":row.group, "hidden":row.hidden})).collect::<Vec<_>>()})
     }
 
     fn count(&self) -> usize {
         self.selected.iter().filter(|v| **v).count()
+    }
+    fn hidden_count(&self) -> usize {
+        self.plan.rows.iter().zip(&self.selected).filter(|(row, selected)| row.hidden && **selected).count()
     }
     fn content_height(&self) -> f32 {
         self.plan.rows.len() as f32 * ROW_H + self.plan.groups.len() as f32 * self.group_height
@@ -617,7 +620,7 @@ fn paint_selection(
                     true,
                     theme::text(),
                 );
-                let meta = if l.dense {
+                let meta = if l.dense && !row.hidden {
                     format!("방 {} · {}", row.group + 1, row.identity)
                 } else {
                     format!("{} · 탭 {}", row.identity, row.tab + 1)
@@ -699,7 +702,7 @@ fn paint_selection(
         label(
             g,
             (l.footer.0, fy, l.footer.2, 16.0),
-            "고르지 않은 작업은 ‘복원 보류’로 보관해요",
+            "고르지 않은 작업은 보관돼요",
             11.5,
             false,
             theme::text_dim(),

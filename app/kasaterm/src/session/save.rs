@@ -106,6 +106,8 @@ impl App {
 
     pub(crate) fn session_state_json(&self) -> Option<serde_json::Value> {
         let mut sessions_json = Vec::new();
+        let mut active_indices = Vec::new();
+        let mut fallback_window = 0;
         // 창별 워크스페이스 락을 잡기 전에 한 번만 뜬다(락 순서 얽힘 방지).
         let agent_cfg = self.agent_cfg_snapshot();
         for i in 0..self.sessions.len() {
@@ -192,7 +194,11 @@ impl App {
                 }
                 windows_json.push(saved);
             }
-            if windows_json.is_empty() {
+            if i == self.active_session {
+                active_indices.clone_from(&persisted_idx);
+                fallback_window = new_active;
+            }
+            if windows_json.is_empty() && (i != self.active_session || self.closed_panes.is_empty()) {
                 continue;
             }
             // 별도 OS 창으로 뗀 pane — 트리에 없어 위 루프가 못 싣는다. leaf 기록은
@@ -266,31 +272,20 @@ impl App {
         if sessions_json.is_empty() {
             return None;
         }
-        // 숨겨 둔 pane 도 함께 싣는다. 여태 안 실려서, 화면에서 치워 둔 작업은
-        // **재시작 한 번에 통째로 사라졌다**(2026-08-27 지적 「재시작하면 완전히
-        // 없어지고」). 숨기기의 약속이 「돌아왔을 때 그 자리에 있다」인데 그 약속이
-        // 앱 수명까지만이었던 셈이다.
-        //
-        // `alive` 는 싣지 않는다 — 재시작하면 PTY 는 어차피 다 죽으므로 되살리기는
-        // 레코드로 새로 띄우는 쪽이고, claude 였던 pane 은 `rec` 에 세션 id 가 실려
-        // 있어 `restore_leaf` 가 `--resume` 까지 붙여 준다. 살아 있다고 적어 두면
-        // 되살리기가 「있지도 않은 PTY 에 재부착」을 시도한다.
-        //
-        // Both stashes and the bounded closed-pane history survive app restart.
-        // Expiring execution must not also erase the user's recovery record.
-        let internal_windows: Vec<usize> = (0..self.windows.len())
-            .filter(|idx| self.internal_room_kind_at(*idx).is_some())
-            .collect();
-        let closed_json: Vec<serde_json::Value> = self
-            .closed_panes
-            .iter()
-            .filter(|c| !c.rec.is_null())
-            .map(|c| {
-                let window = c.window.saturating_sub(
-                    internal_windows.iter().filter(|idx| **idx < c.window).count(),
-                );
+        let closed_json: Vec<serde_json::Value> = {
+            let ws = self.ws.lock().unwrap();
+            self.closed_panes.iter().filter(|c| !c.rec.is_null()).map(|c| {
+                let resume_hidden = c.stashed && c.alive && c.retained_by == Some(RetainedBy::User)
+                    && self.pty.contains_key(&c.pane_id);
+                // A hidden pane can change cwd, conversation, or tabs after it leaves the layout.
+                let live = resume_hidden.then(|| Self::layout_to_json(
+                    &kasa_pty::PtyLayout::single(&c.pane_id), &self.pty, &ws,
+                    &self.pane_claude_sid, &agent_cfg,
+                ));
+                let rec = live.as_ref().and_then(|node| node.get("leaf")).unwrap_or(&c.rec);
+                let window = active_indices.get(c.window).copied().flatten().unwrap_or(fallback_window);
                 serde_json::json!({
-                    "rec": c.rec,
+                    "rec": rec,
                     "pane_id": c.pane_id,
                     "character": c.character,
                     "folder": c.folder,
@@ -298,9 +293,10 @@ impl App {
                     "window": window,
                     "stashed": c.stashed,
                     "retained_by": c.retained_by,
+                    "resume_hidden": resume_hidden,
                 })
-            })
-            .collect();
+            }).collect()
+        };
         let mut state = serde_json::json!({
             "active_session": self.active_session,
             "sessions": sessions_json,

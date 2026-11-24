@@ -11,6 +11,7 @@ pub(crate) struct Row {
     pub detail: String,
     pub group: usize,
     pub tab: usize,
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -88,63 +89,26 @@ impl Plan {
                 });
             }
         }
+        let start = plan.rows.len();
+        let group = plan.groups.len();
+        for record in super::local_restore::hidden_records(&state) {
+            let visible_tab = record["active_tab"].as_u64().unwrap_or(0) as usize;
+            if let Some(rec) = super::local_restore::surfaces(record).nth(visible_tab)
+                .or_else(|| super::local_restore::surfaces(record).next())
+            {
+                plan.surface(rec, group, visible_tab, true);
+            }
+        }
+        if plan.rows.len() > start {
+            plan.groups.push(Group { title: "직접 숨김".into(), start, end: plan.rows.len() });
+        }
         plan
     }
 
     fn node(&mut self, node: &Value, group: usize) {
         if let Some(rec) = node.get("leaf") {
             for (tab, rec) in super::local_restore::surfaces(rec).enumerate() {
-                let agent = agent_kind(rec);
-                let item = super::restore_dialog::Item::from_record(rec, agent.is_some());
-                let kind = match agent {
-                    Some("claude") => "Claude".into(),
-                    Some("codex") => "Codex".into(),
-                    Some(other) => other.to_owned(),
-                    None if rec.get("web_url").is_some() => "웹".into(),
-                    None if rec.get("server").is_some() => "서버".into(),
-                    None => "터미널".into(),
-                };
-                let folder = text(rec, "cwd").unwrap_or("").to_owned();
-                let title = text(rec, "title")
-                    .or_else(|| text(rec, "restore_title"))
-                    .or_else(|| rec.get("server").and_then(|s| text(s, "name")))
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| {
-                        let project = folder.rsplit(['/', '\\']).find(|s| !s.is_empty());
-                        project
-                            .map(|p| format!("{p} · {kind}"))
-                            .unwrap_or_else(|| kind.clone())
-                    });
-                let mut identity = kind.clone();
-                if agent.is_some() {
-                    if let Some(name) = text(rec, "character") {
-                        identity.push_str(&format!(" · {}", name));
-                    }
-                }
-                if let Some(pane) = text(rec, "pane_id") {
-                    identity.push_str(&format!(" · {pane}"));
-                }
-                let mut details = Vec::new();
-                if let Some(model) = text(rec, "model") {
-                    details.push(model.to_owned());
-                }
-                if let Some(sid) = text(rec, "session_id") {
-                    details.push(format!("세션 {sid}"));
-                }
-                if details.is_empty() {
-                    details.push("저장된 작업 공간".into());
-                }
-                self.rows.push(Row {
-                    title,
-                    kind,
-                    character: item.character,
-                    icon: item.icon,
-                    folder,
-                    identity,
-                    detail: details.join(" · "),
-                    group,
-                    tab,
-                });
+                self.surface(rec, group, tab, false);
             }
         } else if let Some(split) = node.get("split") {
             for side in ["a", "b"] {
@@ -153,6 +117,61 @@ impl Plan {
                 }
             }
         }
+    }
+
+    fn surface(&mut self, rec: &Value, group: usize, tab: usize, hidden: bool) {
+        let agent = agent_kind(rec);
+        let item = super::restore_dialog::Item::from_record(rec, agent.is_some());
+        let kind = match agent {
+            Some("claude") => "Claude".into(),
+            Some("codex") => "Codex".into(),
+            Some(other) => other.to_owned(),
+            None if rec.get("web_url").is_some() => "웹".into(),
+            None if rec.get("server").is_some() => "서버".into(),
+            None => "터미널".into(),
+        };
+        let folder = text(rec, "cwd").unwrap_or("").to_owned();
+        let title = text(rec, "title")
+            .or_else(|| text(rec, "restore_title"))
+            .or_else(|| rec.get("server").and_then(|s| text(s, "name")))
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                let project = folder.rsplit(['/', '\\']).find(|s| !s.is_empty());
+                project
+                    .map(|p| format!("{p} · {kind}"))
+                    .unwrap_or_else(|| kind.clone())
+            });
+        let mut identity = if hidden { format!("직접 숨김 · {kind}") } else { kind.clone() };
+        if agent.is_some() {
+            if let Some(name) = text(rec, "character") {
+                identity.push_str(&format!(" · {}", name));
+            }
+        }
+        if let Some(pane) = text(rec, "pane_id") {
+            identity.push_str(&format!(" · {pane}"));
+        }
+        let mut details = Vec::new();
+        if let Some(model) = text(rec, "model") {
+            details.push(model.to_owned());
+        }
+        if let Some(sid) = text(rec, "session_id") {
+            details.push(format!("세션 {sid}"));
+        }
+        if details.is_empty() {
+            details.push("저장된 작업 공간".into());
+        }
+        self.rows.push(Row {
+            title,
+            kind,
+            character: item.character,
+            icon: item.icon,
+            folder,
+            identity,
+            detail: details.join(" · "),
+            group,
+            tab,
+            hidden,
+        });
     }
 }
 
@@ -196,8 +215,9 @@ mod tests {
     fn selected_tabs_keep_identity_and_active_tab_while_unchecked_work_is_retained() {
         let original = snapshot();
         let plan = Plan::new(&original);
-        assert_eq!(plan.rows.len(), 6);
-        assert_eq!(plan.groups.len(), 3);
+        assert_eq!(plan.rows.len(), 7);
+        assert_eq!(plan.groups.len(), 4);
+        assert!(plan.rows[6].hidden);
         assert_eq!(plan.rows[0].title, plan.rows[1].title);
         assert_ne!(plan.rows[0].identity, plan.rows[1].identity);
         let result = choose(original.clone(), &[1, 2, 5]);
@@ -218,6 +238,7 @@ mod tests {
         let stash = result["stashed_panes"].as_array().unwrap();
         assert_eq!(stash.len(), 4);
         assert_eq!(stash[0]["retained_by"], "user");
+        assert_eq!(stash[0]["resume_hidden"], false);
         assert_eq!(stash[0]["window"], 0);
         let first = &stash[1]["rec"];
         assert_eq!(first["session_id"], "session-one");
@@ -238,11 +259,59 @@ mod tests {
     #[test]
     fn all_selected_is_lossless_and_none_launches_nothing() {
         let original = snapshot();
-        assert_eq!(choose(original.clone(), &[0, 1, 2, 3, 4, 5]), original);
+        assert_eq!(choose(original.clone(), &[0, 1, 2, 3, 4, 5, 6]), original);
         let none = choose(original, &[]);
         assert_eq!(crate::App::count_panes(&none), 0);
         assert_eq!(none["stashed_panes"].as_array().unwrap().len(), 7);
         assert!(Plan::new(&none).rows.is_empty());
+    }
+
+    #[test]
+    fn hidden_pane_and_tabs_round_trip_with_their_resume_records() {
+        let mut original = snapshot();
+        let hidden = &mut original["stashed_panes"][0];
+        hidden["resume_hidden"] = json!(true);
+        hidden["rec"]["cwd"] = json!("/workspace/hidden");
+        hidden["rec"]["was_agent"] = json!("claude");
+        hidden["rec"]["session_id"] = json!("hidden-session");
+        hidden["rec"]["character"] = json!("Hidden student");
+        hidden["rec"]["active_tab"] = json!(1);
+        hidden["rec"]["tabs"] = json!([{
+            "pane_id":"%8", "surface_key":"eight", "cwd":"/workspace/tab",
+            "was_agent":"codex", "session_id":"hidden-tab", "character":"Tab student"
+        }]);
+        let expected = hidden["rec"].clone();
+        let stashed = original["stashed_panes"].as_array_mut().unwrap();
+        for (pane, retained_by, resume_hidden) in [
+            ("%9", "recovery", true), ("%10", "deferred_restore", true),
+            ("%11", "user", false), ("%12", "legacy", true),
+        ] {
+            stashed.push(json!({
+                "pane_id":pane, "stashed":true, "retained_by":retained_by, "resume_hidden":resume_hidden,
+                "rec":{"pane_id":pane,"was_agent":"claude","character":"History"}
+            }));
+        }
+        let selected = choose(original, &[6]);
+        let bytes = serde_json::to_vec(&selected).unwrap();
+        let restored: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(super::super::local_restore::state(&restored), restored);
+        assert!(restored["sessions"][0]["windows"].as_array().unwrap().is_empty());
+        let pending: Vec<_> = super::super::local_restore::hidden_records(&restored).collect();
+        assert_eq!(pending, vec![&expected]);
+        let summary = crate::App::restore_summary(&restored);
+        assert_eq!((summary.panes, summary.hidden_panes, summary.agents, summary.shells), (1, 1, 2, 0));
+        assert_eq!(summary.faces, ["Hidden student", "Tab student"]);
+        assert_eq!(crate::App::saved_characters(&restored), summary.faces);
+        assert_eq!(crate::restore_progress::RestoreProgress::new(restored.clone()).expected, 2);
+        let plan = Plan::new(&restored);
+        assert_eq!(plan.rows.len(), 1);
+        assert!(plan.rows[0].hidden);
+        assert_eq!(plan.rows[0].character, "Tab student");
+        assert_eq!(plan.groups[0].title, "직접 숨김");
+        let next = choose(restored, &[]);
+        assert_eq!(crate::App::count_panes(&next), 0);
+        assert_eq!(next["stashed_panes"][0]["retained_by"], "user");
+        assert_eq!(next["stashed_panes"][0]["rec"], expected);
     }
 
     #[test]

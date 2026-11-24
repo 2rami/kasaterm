@@ -3086,6 +3086,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         if was_active {
             self.handoff_ime_to_active_surface();
         }
+        self.session_touched = true;
         self.chrome_dirty = true;
         self.prune_zoom();
         let (cols, rows) = self.window_cells();

@@ -249,7 +249,10 @@ impl RestoreProgress {
     /// current workspace. A half-started shell is not a new saved session.
     pub(crate) fn preserve_record(&self, record: &mut serde_json::Value) {
         let id = record.get("pane_id").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(entry) = self.entries.get(id).filter(|entry| !entry.ready) {
+        if let Some(entry) = self.entries.get(id).filter(|entry| {
+            !entry.ready && entry.record["surface_key"].as_str().zip(record["surface_key"].as_str())
+                .is_none_or(|(restoring, current)| restoring == current)
+        }) {
             let current = record.clone();
             *record = entry.record.clone();
             if let Some(obj) = record.as_object_mut() {
@@ -357,6 +360,8 @@ impl RestoreProgress {
                     .map_or(0, |nodes| nodes.iter().map(surface_count).sum::<usize>())
             }).sum()
         });
+        let expected = expected + crate::session::local_restore::hidden_records(&state)
+            .map(|rec| crate::session::local_restore::surfaces(rec).count()).sum::<usize>();
         Self { state, expected, ready: 0, failure: None, started: Instant::now(), built: false, background: false, entries: HashMap::new(), entry_order: Vec::new(), cancelled_ids: HashSet::new() }
     }
 

@@ -270,7 +270,7 @@ pub(super) fn paint(
         } else {
             "선택 안 됨"
         };
-        let detail = if l.dense {
+        let detail = if l.dense || row.hidden {
             format!("{chosen} · {}", row.identity)
         } else {
             format!("{chosen} · {} · 방 {}", row.identity, row.group + 1)
@@ -305,11 +305,13 @@ pub(super) fn paint(
     }
     g.pop_clip();
     if !l.dense {
-        let note = format!(
-            "{} / {}개 선택 · 고르지 않은 작업은 보관돼요",
-            state.count(),
-            state.selected.len()
-        );
+        let hidden = state.hidden_count();
+        let detail = if hidden > 0 {
+            format!("직접 숨김 {hidden}개 포함")
+        } else {
+            "고르지 않은 작업은 보관돼요".into()
+        };
+        let note = format!("{} / {}개 선택 · {detail}", state.count(), state.selected.len());
         label(
             g,
             (l.footer.0, l.footer.1 + 10.0, l.footer.2, 16.0),
