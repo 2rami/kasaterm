@@ -1,5 +1,6 @@
-import { Editor, type ChainedCommands } from '@tiptap/core';
-import { TextSelection } from '@tiptap/pm/state';
+import { Editor, Extension, type ChainedCommands } from '@tiptap/core';
+import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import { closeHistory } from '@tiptap/pm/history';
 import Placeholder from '@tiptap/extension-placeholder';
 import { DocumentSource, extensions } from './document';
@@ -20,6 +21,28 @@ declare global { interface Window {
 } }
 type Content = { markdown: string; revision: number };
 type Init = Content & { token: string; theme?: any; editable?: boolean };
+type FindMatch = { from: number; to: number };
+const findMatchKey = new PluginKey<DecorationSet>('documentFindMatch');
+const FindMatchHighlight = Extension.create({
+  name: 'documentFindMatch',
+  addProseMirrorPlugins() {
+    return [new Plugin({
+      key: findMatchKey,
+      state: {
+        init: () => DecorationSet.empty,
+        apply(transaction, previous) {
+          const match = transaction.getMeta(findMatchKey) as FindMatch | null | undefined;
+          if (match === undefined) return previous.map(transaction.mapping, transaction.doc);
+          if (!match) return DecorationSet.empty;
+          return DecorationSet.create(transaction.doc, [
+            Decoration.inline(match.from, match.to, { class: 'document-find-match-current' }),
+          ]);
+        },
+      },
+      props: { decorations: state => findMatchKey.getState(state) },
+    })];
+  },
+});
 let token = window.__KASATERM_DOC_TOKEN__ ?? '', revision = 0, editor: Editor | undefined;
 let source = new DocumentSource(), composing = false, pending: { kind: string; extra: object }[] = [], muted = false;
 let lastMarkdown = '', zoom = 1, slashRange: { from: number; to: number } | undefined;
@@ -112,7 +135,8 @@ function floatNear(element: HTMLElement, anchor: Rectangle, preferred: 'above' |
 }
 function dismissTools() {
   if (editor) { const selection = editor.state.selection; dismissedSelection = `${selection.from}:${selection.to}`; dismissedSlash = `${selection.from}:${selection.$from.parent.textContent}`; }
-  blockMenu = false; menuTarget = undefined; bubble.hidden = slash.hidden = panel.hidden = blockTools.hidden = true;
+  closePanel();
+  blockMenu = false; menuTarget = undefined; bubble.hidden = slash.hidden = blockTools.hidden = true;
 }
 function currentBlock(): BlockTarget | undefined {
   if (!editor) return;
@@ -250,6 +274,7 @@ function updateMenus() {
 }
 function linkPanel() {
   if (!editor) return;
+  closePanel();
   panel.replaceChildren(); panel.hidden = false;
   const field = document.createElement('input'); field.type = 'url'; field.placeholder = 'https://'; field.setAttribute('aria-label', '링크 주소'); field.value = editor.getAttributes('link').href ?? '';
   const apply = () => {
@@ -270,18 +295,60 @@ for (const [label, mark, title, command] of [
   const b = button(label, () => { (editor!.chain().focus()[command]() as any).run(); }, title); b.dataset.mark = mark; bubble.append(b);
 }
 bubble.append(button('링크', linkPanel));
+function closePanel() {
+  panel.hidden = true;
+  if (editor && findMatchKey.getState(editor.state) !== DecorationSet.empty) {
+    editor.view.dispatch(editor.state.tr.setMeta(findMatchKey, null));
+  }
+}
 function find() {
-  if (!editor) return;
+  const current = editor;
+  if (!current) return;
+  const existing = !panel.hidden && panel.querySelector<HTMLInputElement>('input[type=search]');
+  if (existing) { existing.focus(); existing.select(); return; }
+  closePanel();
   panel.replaceChildren(); panel.hidden = false; panel.setAttribute('aria-label', '문서에서 찾기');
   const input = document.createElement('input'); input.type = 'search'; input.placeholder = '문서에서 찾기'; input.setAttribute('aria-label', '검색어');
-  const count = document.createElement('span'); count.className = 'result-count'; let hits: { from: number; to: number }[] = [], index = -1;
-  const select = (delta: number) => { if (!hits.length) return; index = (index + delta + hits.length) % hits.length; editor!.commands.setTextSelection(hits[index]); editor!.commands.scrollIntoView(); count.textContent = `${index + 1} / ${hits.length}`; };
-  input.addEventListener('input', () => { hits = []; index = -1; const q = input.value.toLocaleLowerCase(); if (q) editor!.state.doc.descendants((node, pos) => { if (!node.isText) return; let offset = 0; const text = node.text!.toLocaleLowerCase(); while ((offset = text.indexOf(q, offset)) >= 0) { hits.push({ from: pos + offset, to: pos + offset + q.length }); offset += q.length; } }); count.textContent = hits.length ? `${hits.length}개` : '결과 없음'; if (hits.length) select(1); });
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); select(e.shiftKey ? -1 : 1); } if (e.key === 'Escape') { panel.hidden = true; editor!.commands.focus(); } });
-  panel.append(input, count, button('이전', () => select(-1)), button('다음', () => select(1)), button('닫기', () => { panel.hidden = true; editor!.commands.focus(); })); position(panel, innerWidth - 390, 12); input.focus();
+  const count = document.createElement('span'); count.className = 'result-count';
+  let hits: FindMatch[] = [], index = 0;
+  const showMatch = () => {
+    // WebKit hides the editor selection while the search field has focus.
+    current.view.dispatch(current.state.tr.setMeta(findMatchKey, hits[index] ?? null));
+    current.view.dom.querySelector('.document-find-match-current')?.scrollIntoView({ block: 'center' });
+    count.textContent = hits.length ? `${index + 1} / ${hits.length}` : input.value ? '결과 없음' : '';
+  };
+  const step = (delta: number) => {
+    if (!hits.length) return;
+    index = (index + delta + hits.length) % hits.length;
+    showMatch();
+  };
+  const close = () => { closePanel(); current.commands.focus(undefined, { scrollIntoView: false }); };
+  input.addEventListener('input', () => {
+    hits = [];
+    index = 0;
+    if (input.value) {
+      const pattern = new RegExp(input.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu');
+      current.state.doc.descendants((node, pos) => {
+        if (node.text === undefined) return;
+        for (const match of node.text.matchAll(pattern)) {
+          const from = pos + match.index;
+          hits.push({ from, to: from + match[0].length });
+        }
+      });
+    }
+    showMatch();
+  });
+  input.addEventListener('keydown', e => {
+    if (e.isComposing) return;
+    if (e.key === 'Enter') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  panel.append(input, count, button('이전', () => step(-1)), button('다음', () => step(1)), button('닫기', close));
+  position(panel, innerWidth - 390, 12); input.focus();
 }
 function headings() { const entries: { label: string; pos: number; level: number }[] = []; editor?.state.doc.descendants((node, pos) => { if (node.type.name === 'heading') entries.push({ label: node.textContent || '빈 제목', pos, level: node.attrs.level }); }); return entries; }
 function toc() {
+  closePanel();
   panel.replaceChildren(); panel.hidden = false; panel.setAttribute('aria-label', '목차');
   panel.append(button('목차 닫기', () => { panel.hidden = true; }));
   const entries = headings();
@@ -304,7 +371,7 @@ function command(name: string, payload?: any) {
       const slug = (text: string) => text.normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, '').trim().replace(/\s+/g, '-');
       const anchor = typeof payload?.anchor === 'string' ? payload.anchor.replace(/^#/, '') : undefined;
       const item = anchor === undefined ? headings()[payload?.index ?? 0] : headings().find(item => item.label === anchor || slug(item.label) === slug(anchor));
-      if (item) { editor.commands.setTextSelection(item.pos + 1); editor.commands.scrollIntoView(); panel.hidden = true; }
+      if (item) { editor.commands.setTextSelection(item.pos + 1); editor.commands.scrollIntoView(); closePanel(); }
       else if (anchor !== undefined) { live.textContent = '문서에서 해당 제목을 찾지 못했어요.'; live.classList.add('visible'); }
       break;
     }
@@ -317,6 +384,7 @@ function command(name: string, payload?: any) {
 }
 function setContent(data: Content) {
   if (composing) return;
+  if (!panel.hidden && panel.querySelector('input[type=search]')) closePanel();
   muted = true; source = new DocumentSource(); lastMarkdown = data.markdown; revision = data.revision;
   editor?.commands.setContent(source.load(data.markdown), { emitUpdate: false }); muted = false; slash.hidden = true; bubble.hidden = true;
   menuTarget = hoverTarget = undefined; blockMenu = false; resetBlockDrag(); updateBlockTools();
@@ -328,11 +396,11 @@ window.kasatermEditor = {
     clearTimeout(compositionTimer); pending = []; composing = false; slashRange = undefined; blockMenu = false; dismissedSelection = dismissedSlash = '';
     slash.hidden = bubble.hidden = panel.hidden = copy.hidden = blockTools.hidden = true; menuTarget = hoverTarget = undefined; resetBlockDrag(); live.textContent = ''; live.classList.remove('visible');
     token = data.token; window.__KASATERM_DOC_TOKEN__ = token; revision = data.revision; lastMarkdown = data.markdown; applyTheme(data.theme); editor?.destroy(); source = new DocumentSource();
-    editor = new Editor({ element: mount, extensions: [...extensions(), Placeholder.configure({ placeholder: '내용을 입력하거나 / 로 블록을 추가하세요' })], content: source.load(data.markdown), editable: data.editable !== false,
+    editor = new Editor({ element: mount, extensions: [...extensions(), FindMatchHighlight, Placeholder.configure({ placeholder: '내용을 입력하거나 / 로 블록을 추가하세요' })], content: source.load(data.markdown), editable: data.editable !== false,
       editorProps: { attributes: { class: 'document-content', role: 'textbox', 'aria-label': '마크다운 문서 본문', 'aria-multiline': 'true', spellcheck: 'false' },
         handleKeyDown(_view, event) {
           if (ownGeneration !== generation) return false;
-          if ((event.metaKey || event.ctrlKey) && ['s', 'w', 'f', 'k'].includes(event.key.toLowerCase())) { event.preventDefault(); const key = event.key.toLowerCase(); if (key === 's') commit('save'); else if (key === 'w') commit('close'); else if (key === 'f') find(); else linkPanel(); return true; }
+          if ((event.metaKey || event.ctrlKey) && ['s', 'w', 'k'].includes(event.key.toLowerCase())) { event.preventDefault(); const key = event.key.toLowerCase(); if (key === 's') commit('save'); else if (key === 'w') commit('close'); else linkPanel(); return true; }
           if (event.isComposing || composing) return false;
           if (event.key === 'Tab' && !event.shiftKey && !bubble.hidden) { event.preventDefault(); bubble.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true }); return true; }
           if (!slash.hidden) { if (event.key === 'Escape') { dismissTools(); return true; } if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); stepBlockMenu(event.key === 'ArrowDown' ? 1 : -1); updateMenus(); slash.querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest' }); return true; } if (event.key === 'Enter') { event.preventDefault(); runSlash(slashIndex); return true; } }
@@ -349,6 +417,9 @@ window.kasatermEditor = {
 };
 document.addEventListener('keydown', e => {
   if (e.defaultPrevented || e.isComposing || composing) return;
+  if (editor && !root.hidden && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+    e.preventDefault(); find(); return;
+  }
   const toolFocus = bubble.contains(document.activeElement) || slash.contains(document.activeElement) || blockTools.contains(document.activeElement);
   if (e.key === 'Escape') { dismissTools(); if (toolFocus) editor?.view.focus(); return; }
   if (!slash.hidden && toolFocus && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
@@ -356,7 +427,7 @@ document.addEventListener('keydown', e => {
     updateMenus(); const selected = slash.querySelector<HTMLButtonElement>('[aria-selected=true]'); selected?.focus({ preventScroll: true }); selected?.scrollIntoView({ block: 'nearest' });
   } else if (!slash.hidden && toolFocus && e.key === 'Enter') { e.preventDefault(); runSlash(slashIndex); }
 });
-document.addEventListener('mousedown', e => { if (!panel.contains(e.target as globalThis.Node) && !bubble.contains(e.target as globalThis.Node) && !slash.contains(e.target as globalThis.Node) && !blockTools.contains(e.target as globalThis.Node)) { panel.hidden = true; blockMenu = false; menuTarget = undefined; if (!root.contains(e.target as globalThis.Node)) dismissTools(); } });
+document.addEventListener('mousedown', e => { if (!panel.contains(e.target as globalThis.Node) && !bubble.contains(e.target as globalThis.Node) && !slash.contains(e.target as globalThis.Node) && !blockTools.contains(e.target as globalThis.Node)) { closePanel(); blockMenu = false; menuTarget = undefined; if (!root.contains(e.target as globalThis.Node)) dismissTools(); } });
 function blockFromElement(target: EventTarget | null): BlockTarget | undefined {
   if (!editor || !(target instanceof HTMLElement)) return;
   const element = target.closest('p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,table,hr');
@@ -407,6 +478,6 @@ document.addEventListener('mouseover', e => {
   copy.hidden = !copyTarget;
   if (copyTarget) { const rect = copyTarget.getBoundingClientRect(); copy.textContent = '복사'; position(copy, rect.right - 62, rect.top + 8); }
 });
-window.addEventListener('resize', () => { panel.hidden = true; updateMenus(); });
+window.addEventListener('resize', () => { closePanel(); updateMenus(); });
 window.addEventListener('scroll', () => { copy.hidden = true; updateMenus(); }, { passive: true });
 send('ready');
