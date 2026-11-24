@@ -586,7 +586,11 @@ class _AccentDot extends StatelessWidget {
                       color: color,
                       shape: BoxShape.circle,
                       border: Border.all(
-                        color: enforceContrast(color, scheme.surface, 1.4),
+                        color: Color.lerp(
+                          color,
+                          enforceContrast(scheme.onSurface, color, 3),
+                          0.19,
+                        )!,
                       ),
                     ),
                     child: selected

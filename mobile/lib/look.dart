@@ -2,6 +2,35 @@ import 'package:flutter/material.dart';
 
 import 'contrast.dart';
 
+({Color fill, Color line, Color ink}) settingsButtonColors(
+  ColorScheme scheme, {
+  bool selected = false,
+  bool primary = false,
+  bool enabled = true,
+  bool hovered = false,
+}) {
+  final base = scheme.surface;
+  final accent = scheme.primary;
+  final text = scheme.onSurface;
+  final emphasis = enabled && (primary || selected);
+  final tint = emphasis ? accent : Color.lerp(text, accent, 0.48)!;
+  final wash = switch ((enabled, emphasis, hovered)) {
+    (false, _, _) => 0.04,
+    (_, true, true) => 0.31,
+    (_, true, _) => 0.23,
+    (_, _, true) => 0.14,
+    _ => 0.08,
+  };
+  final fill = Color.lerp(base, tint, wash)!;
+  final lineWeight = emphasis ? (primary ? 0.67 : 0.52) : wash + 0.09;
+  final ink = emphasis ? Color.lerp(text, accent, 0.28)! : text;
+  return (
+    fill: fill,
+    line: Color.lerp(base, tint, lineWeight)!,
+    ink: enabled ? enforceContrast(ink, fill, 4.5) : scheme.onSurfaceVariant.withValues(alpha: 0.66),
+  );
+}
+
 /// 카사모바일 폰의 단추·배치 값. 정본은 docs/design.md 「카사모바일 폰 — 단추·배치」 — 값을 바꾸려면
 /// 거기부터 고치고 여기를 맞춘다. 화면 파일 안에 새 치수를 만들지 않는다.
 abstract final class Look {

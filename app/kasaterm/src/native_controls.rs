@@ -95,8 +95,31 @@ pub(crate) fn focus_ring(g: &mut gpu::GpuRenderer, rect: Rect) {
     }
 }
 
+pub(crate) fn settings_button_colors(style: Style, hover: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
+    let base = theme::bg();
+    let accent = theme::accent();
+    let text = theme::text();
+    let emphasis = style.enabled && (style.primary || style.active);
+    let tint = if emphasis { accent } else { theme::lerp(text, accent, 0.48) };
+    let wash = match (style.enabled, emphasis, hover) {
+        (false, _, _) => 0.04,
+        (_, true, true) => 0.31,
+        (_, true, _) => 0.23,
+        (_, _, true) => 0.14,
+        _ => 0.08,
+    };
+    let fill = theme::lerp(base, tint, wash);
+    let border = theme::lerp(base, tint, if emphasis { if style.primary { 0.67 } else { 0.52 } } else { wash + 0.09 });
+    let ink = if !style.enabled { theme::text_mute() }
+        else if emphasis { theme::lerp(text, accent, 0.28) }
+        else { text };
+    (fill, border, button_ink(ink, fill))
+}
+
 fn colors(style: Style, hover: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
-    if !style.enabled {
+    if theme::in_settings_layer() && !style.danger {
+        settings_button_colors(style, hover)
+    } else if !style.enabled {
         (theme::surface(), theme::border(), theme::text_mute())
     } else if style.danger {
         let fill = theme::lerp(

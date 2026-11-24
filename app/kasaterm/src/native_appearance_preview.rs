@@ -44,13 +44,14 @@ pub(super) fn paint_palette_strip(
             let ink = if line == 0 { palette.fg } else { palette.text_dim };
             round_rect(g, preview.0 + 22.0, preview.1 + 17.0 + line as f32 * 9.0, line_w * portion, 3.0, 1.5, ink);
         }
-        stroke_round(g, preview, radius, if selected {
-            theme::accent()
-        } else if hover {
-            theme::text_dim()
+        let edge = if selected {
+            theme::enforce_contrast_at(theme::accent(), colors.sidebar, 3.0)
         } else {
-            theme::edge_on(colors.sidebar)
-        });
+            theme::lerp(colors.sidebar, theme::foreground_on(colors.sidebar),
+                if hover { 0.44 } else { 0.23 })
+        };
+        g.round_rect_stroke(preview.0, preview.1, preview.2, preview.3, radius,
+            if selected { 2.0 } else { 1.0 }, edge);
         let label = fit(g, label, (rect.2 - 24.0).max(0.0), 12.0, selected);
         draw_text(g, rect.0 + 5.0, rect.1 + 68.0, &label, 12.0, theme::text(), selected);
         if selected {
@@ -86,6 +87,8 @@ pub(super) fn paint_accents(
         let selected = s.accent == *name;
         let (cx, cy) = (rect.0 + 3.0, rect.1 + 4.0);
         round_rect(g, cx, cy, 36.0, 36.0, 18.0, *color);
+        stroke_round(g, (cx, cy, 36.0, 36.0), 18.0,
+            theme::lerp(*color, theme::foreground_on(*color), 0.19));
         if selected {
             g.queue_icon("check", cx + 10.0, cy + 10.0, 16.0, theme::foreground_on(*color));
         }

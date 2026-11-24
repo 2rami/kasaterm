@@ -231,18 +231,38 @@ ThemeData settingsControlsTheme(ThemeData theme) {
         borderSide: border?.borderSide ?? fallback,
       );
 
+  ButtonStyle painted(ButtonStyle? style, {bool primary = false}) {
+    ({Color fill, Color line, Color ink}) palette(Set<WidgetState> states) => settingsButtonColors(
+      scheme,
+      primary: primary,
+      enabled: !states.contains(WidgetState.disabled),
+      hovered: states.contains(WidgetState.hovered) || states.contains(WidgetState.focused),
+    );
+    return (style ?? const ButtonStyle()).copyWith(
+      shape: shape,
+      backgroundColor: WidgetStateProperty.resolveWith((states) => palette(states).fill),
+      foregroundColor: WidgetStateProperty.resolveWith((states) => palette(states).ink),
+      side: WidgetStateProperty.resolveWith((states) => BorderSide(color: palette(states).line)),
+    );
+  }
+
   return theme.copyWith(
     filledButtonTheme: FilledButtonThemeData(
-      style: (theme.filledButtonTheme.style ?? const ButtonStyle()).copyWith(shape: shape),
+      style: painted(theme.filledButtonTheme.style, primary: true),
     ),
-    outlinedButtonTheme: OutlinedButtonThemeData(
-      style: (theme.outlinedButtonTheme.style ?? const ButtonStyle()).copyWith(shape: shape),
-    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(style: painted(theme.outlinedButtonTheme.style)),
+    elevatedButtonTheme: ElevatedButtonThemeData(style: painted(theme.elevatedButtonTheme.style)),
     textButtonTheme: TextButtonThemeData(
-      style: (theme.textButtonTheme.style ?? const ButtonStyle()).copyWith(shape: shape),
-    ),
-    elevatedButtonTheme: ElevatedButtonThemeData(
-      style: (theme.elevatedButtonTheme.style ?? const ButtonStyle()).copyWith(shape: shape),
+      style: (theme.textButtonTheme.style ?? const ButtonStyle()).copyWith(
+        shape: shape,
+        foregroundColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.disabled)) {
+            return scheme.onSurfaceVariant.withValues(alpha: 0.66);
+          }
+          final ink = Color.lerp(scheme.onSurface, scheme.primary, 0.38)!;
+          return enforceContrast(ink, scheme.surface, 4.5);
+        }),
+      ),
     ),
     iconButtonTheme: IconButtonThemeData(
       style: (theme.iconButtonTheme.style ?? const ButtonStyle()).copyWith(shape: shape),
@@ -490,6 +510,7 @@ class IconChoice<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final active = settingsButtonColors(scheme, selected: true);
     return SizedBox(
       height: Look.tap,
       child: Row(
@@ -517,14 +538,15 @@ class IconChoice<T> extends StatelessWidget {
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
                           color: value == selected
-                              ? scheme.primary.withValues(alpha: 0.18)
+                              ? active.fill
                               : Colors.transparent,
+                          border: value == selected ? Border.all(color: active.line) : null,
                         ),
                         child: Icon(
                           icon,
                           size: Look.iconSize,
                           color: value == selected
-                              ? enforceContrast(scheme.primary, scheme.surface, 3)
+                              ? active.ink
                               : scheme.onSurfaceVariant.withValues(alpha: onSelect == null ? 0.5 : 1),
                         ),
                       ),

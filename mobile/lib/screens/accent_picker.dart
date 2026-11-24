@@ -340,6 +340,12 @@ class _ColorPlane extends StatelessWidget {
                         ),
                       ),
                     ),
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+                      ),
+                    ),
                     Positioned(
                       left: (color.saturation * width).clamp(8, width - 8) - 8,
                       top:

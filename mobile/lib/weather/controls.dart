@@ -1,12 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../contrast.dart';
 import '../look.dart';
-
-Color weatherControlFill(BuildContext context) {
-  final scheme = Theme.of(context).colorScheme;
-  return Color.alphaBlend(scheme.onSurface.withValues(alpha: 0.075), scheme.surface);
-}
 
 class WeatherToggle extends StatelessWidget {
   const WeatherToggle({
@@ -25,7 +19,8 @@ class WeatherToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final idle = Color.alphaBlend(colors.onSurface.withValues(alpha: 0.18), colors.surface);
+    final idle = settingsButtonColors(colors);
+    final active = settingsButtonColors(colors, selected: true);
     return SwitchListTile(
       title: title,
       subtitle: subtitle,
@@ -33,11 +28,13 @@ class WeatherToggle extends StatelessWidget {
       onChanged: onChanged,
       minTileHeight: 48,
       contentPadding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
-      activeTrackColor: colors.primary,
-      inactiveTrackColor: idle,
-      activeThumbColor: Colors.white,
-      inactiveThumbColor: Colors.white,
-      trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
+      activeTrackColor: active.fill,
+      inactiveTrackColor: idle.fill,
+      activeThumbColor: active.ink,
+      inactiveThumbColor: colors.onSurfaceVariant,
+      trackOutlineColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected) ? active.line : idle.line,
+      ),
     );
   }
 }
@@ -58,35 +55,30 @@ class WeatherChoices<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colors = theme.colorScheme;
-    final idle = weatherControlFill(context);
-    final selectedFill = Color.alphaBlend(colors.primary.withValues(alpha: 0.19), colors.surface);
     return Row(
       children: [
         for (final (index, (value, label)) in options.indexed) ...[
           if (index > 0) const SizedBox(width: 6),
           Expanded(
-            child: _button(context, value, label, idle, selectedFill),
+            child: _button(context, value, label),
           ),
         ],
       ],
     );
   }
 
-  Widget _button(BuildContext context, T value, String label, Color idle, Color selectedFill) {
+  Widget _button(BuildContext context, T value, String label) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final on = selected.contains(value);
-    final fill = on ? selectedFill : idle;
-    final ink = enforceContrast(on ? colors.primary : colors.onSurfaceVariant, fill, 4.5);
+    final (:fill, :line, :ink) = settingsButtonColors(colors, selected: on);
     return Semantics(
       selected: on,
       button: true,
       child: Material(
         color: fill,
         shape: StadiumBorder(
-          side: BorderSide(color: on ? colors.primary.withValues(alpha: 0.48) : Colors.transparent),
+          side: BorderSide(color: on ? line : Colors.transparent),
         ),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -174,9 +166,9 @@ class WeatherPick<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final fill = weatherControlFill(context);
+    final (:fill, :line, ink: _) = settingsButtonColors(colors);
     return DecoratedBox(
-      decoration: ShapeDecoration(color: fill, shape: const StadiumBorder()),
+      decoration: ShapeDecoration(color: fill, shape: StadiumBorder(side: BorderSide(color: line))),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12),
         child: DropdownButtonHideUnderline(

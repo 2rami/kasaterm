@@ -4034,7 +4034,7 @@ fn paint_color_picker(
     }
     let sv = layout.sv;
     g.color_picker(sv, hue, false, 18.0);
-    stroke_round(g, sv, 18.0, theme::with_alpha(theme::text(), 55));
+    stroke_round(g, sv, 18.0, theme::lerp(theme::bg(), theme::text(), 0.29));
     let marker_x = sv.0 + sat * sv.2;
     let marker_y = sv.1 + (1.0 - val) * sv.3;
     if accent && sv.2 >= 12.0 {
@@ -6862,8 +6862,11 @@ fn toggle_row_hint(
     g.rect(x+inset,*y+height-1.0,(w-inset*2.0).max(0.0),1.0,theme::with_alpha(theme::border(),45));
     let hover = contains(rect, s.cursor);
     let toggle = (x + w - inset - 44.0, *y + (height - 26.0) / 2.0, 44.0, 26.0);
-    let fill = if on { theme::accent() } else { theme::lerp(theme::bg(), theme::text(), 0.18) };
+    let (fill, line, _) = crate::native_controls::settings_button_colors(
+        crate::native_controls::Style { active: on, ..Default::default() }, hover,
+    );
     round_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, 13.0, fill);
+    stroke_round(g, toggle, 13.0, line);
     let diameter = if on { 20.0 } else { 14.0 };
     let pad = (toggle.3 - diameter) / 2.0;
     let thumb_x = if on { toggle.2 - diameter - pad } else { pad };
@@ -6874,7 +6877,7 @@ fn toggle_row_hint(
 const WEATHER_CHOICE_GAP: f32 = 4.0;
 
 fn weather_control_fill() -> [u8; 4] {
-    theme::lerp(theme::bg(), theme::text(), 0.075)
+    crate::native_controls::settings_button_colors(Default::default(), false).0
 }
 
 fn weather_edge_bit(action: &SettingsAction) -> Option<u8> {
@@ -6920,18 +6923,13 @@ fn weather_choices(
         let width = width * scale;
         let rect = (left, y, width, h);
         let hover = contains(rect, s.cursor);
-        let fill = if *selected {
-            theme::lerp(theme::bg(), theme::accent(), 0.19)
-        } else if hover {
-            theme::surface_hover()
-        } else {
-            weather_control_fill()
-        };
-        let ink = theme::enforce_contrast_at(if *selected { theme::accent() } else { theme::text_dim() }, fill, 4.5);
+        let (fill, line, ink) = crate::native_controls::settings_button_colors(
+            crate::native_controls::Style { active: *selected, ..Default::default() }, hover,
+        );
         let radius = crate::native_controls::capsule_radius(rect);
-        round_rect(g, left, y, width, h, radius, fill);
-        if *selected {
-            stroke_round(g, rect, radius, theme::with_alpha(theme::accent(), 122));
+        round_rect(g, rect.0, rect.1, rect.2, rect.3, radius, fill);
+        if *selected || hover {
+            stroke_round(g, rect, radius, line);
         }
         let glyph = weather_edge_bit(action).filter(|_| width >= 36.0);
         let label_x = left + if glyph.is_some() { 19.0 } else { 0.0 };
@@ -6981,17 +6979,17 @@ fn segmented(
         let rect = (cx, y, cw, CTL_H);
         cx += cw + WEATHER_CHOICE_GAP;
         let hover = contains(rect, s.cursor);
-        let fill = if *selected {
-            theme::accent()
-        } else if hover {
-            theme::surface_hover()
-        } else {
-            theme::surface()
-        };
-        round_rect(g, rect.0, rect.1, rect.2, rect.3, crate::native_controls::capsule_radius(rect), fill);
+        let (fill, line, ink) = crate::native_controls::settings_button_colors(
+            crate::native_controls::Style { active: *selected, ..Default::default() }, hover,
+        );
+        let radius = crate::native_controls::capsule_radius(rect);
+        round_rect(g, rect.0, rect.1, rect.2, rect.3, radius, fill);
+        if *selected || hover {
+            stroke_round(g, rect, radius, line);
+        }
         let shown = fit(g, &label, cw - 8.0, 13.0, *selected);
         g.centered_chrome_text(rect,&shown,gpu::DrawOpts {
-            font_size:13.0,color:if *selected { theme::foreground_on(theme::accent()) } else if hover { theme::text() } else { theme::text_dim() },bold:*selected,italic:false,
+            font_size:13.0,color:ink,bold:*selected,italic:false,
         });
         register_clipped(g, hits, Target::Setting(action.clone()), rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
