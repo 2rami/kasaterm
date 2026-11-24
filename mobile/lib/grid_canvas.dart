@@ -77,20 +77,6 @@ class TerminalPalette {
     return of(context);
   }
 
-  TerminalPalette withTerminalColors({Color? background, Color? foreground}) {
-    if (background == null && foreground == null) return this;
-    return TerminalPalette(
-      dark: background == null ? dark : ThemeData.estimateBrightnessForColor(background) == Brightness.dark,
-      fg: foreground ?? fg,
-      bg: background ?? bg,
-      cursor: cursor,
-      ansi: ansi,
-      minContrast: minContrast,
-      sourceFg: sourceFg,
-      sourceBg: sourceBg,
-    );
-  }
-
   /// 서버 색을 아직 못 받았을 때의 앱 기본색.
   static TerminalPalette of(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;

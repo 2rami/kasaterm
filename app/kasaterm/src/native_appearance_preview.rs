@@ -62,10 +62,20 @@ pub(super) fn paint_palette_strip(
 }
 
 pub(super) fn paint_accents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: f32, w: f32) -> f32 {
-    let columns = ((w + 8.0) / 64.0).floor().max(1.0) as usize;
-    let cell_w = ((w - (columns - 1) as f32 * 8.0) / columns as f32).min(76.0);
+    let inset = 8.0;
+    let gap = 4.0;
+    let inner_w = (w - inset * 2.0).max(0.0);
+    let count = theme::ACCENT_PRESETS.len();
+    let columns = (((inner_w + gap) / 64.0).floor() as usize).clamp(1, count);
+    let cell_w = ((inner_w - (columns - 1) as f32 * gap) / columns as f32).min(72.0);
+    let rows = count.div_ceil(columns);
+    let height = rows as f32 * 64.0 + inset * 2.0;
+    let tray = (x, y, columns as f32 * cell_w + (columns - 1) as f32 * gap + inset * 2.0, height);
+    let surface = theme::surface();
+    round_rect(g, tray.0, tray.1, tray.2, tray.3, theme::radius_md(), surface);
+    stroke_round(g, tray, theme::radius_md(), theme::edge_on(surface));
     for (i, (name, color)) in theme::ACCENT_PRESETS.iter().enumerate() {
-        let rect = (x + (i % columns) as f32 * (cell_w + 8.0), y + (i / columns) as f32 * 64.0, cell_w, 58.0);
+        let rect = (x + inset + (i % columns) as f32 * (cell_w + gap), y + inset + (i / columns) as f32 * 64.0, cell_w, 58.0);
         let hot = contains(rect, s.cursor);
         let selected = s.accent == *name;
         let cx = rect.0 + (cell_w - 36.0) * 0.5;
@@ -82,7 +92,7 @@ pub(super) fn paint_accents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut V
         register_clipped(g, hits, Target::AccentPreset(name), rect, HitCursor::Pointer);
         g.hover_pointer |= hot;
     }
-    theme::ACCENT_PRESETS.len().div_ceil(columns) as f32 * 64.0
+    height
 }
 
 pub(super) fn accent_column(width: f32) -> Option<f32> {
@@ -99,23 +109,18 @@ pub(super) fn paint(
     w: f32,
     height: f32,
 ) -> f32 {
-    let field = s.input.filter(|field| field.is_preview_color());
-    let side = field.and_then(|_| accent_column(w));
+    let accent = s.input == Some(SettingsInput::AccentHex);
+    let side = if accent { accent_column(w) } else { None };
     let pane_width = side.map_or(w, |column| w - column - 16.0);
     let pane_height = paint_shell(g, s, hits, x, y, pane_width, height);
-    let Some(field) = field else { return pane_height };
-    let label = match field {
-        SettingsInput::PaletteHex(index) => PREVIEW_PALETTE_ROLES.iter()
-            .find(|&&(slot, _)| slot == index).map_or("색상", |&(_, label)| label),
-        _ => "강조색",
-    };
+    if !accent { return pane_height; }
     let (panel_x, panel_y, panel_w) = side.map_or((x, y + pane_height + 10.0, w),
         |column| (x + pane_width + 16.0, y, column));
-    draw_text(g, panel_x, panel_y + 8.0, label, 12.0, theme::text(), true);
+    draw_text(g, panel_x, panel_y + 8.0, "강조색", 12.0, theme::text(), true);
     let picker_end = panel_y + CTL_H + 8.0 + paint_color_picker(
         g, s, hits, caret, panel_x, panel_y + CTL_H + 8.0, panel_w,
-        field, label, &s.palette_edit,
-        s.eyedropper.then_some(SettingsAction::ColorEyedropper(field)),
+        SettingsInput::AccentHex, "강조색", &s.palette_edit,
+        s.eyedropper.then_some(SettingsAction::ColorEyedropper(SettingsInput::AccentHex)),
     );
     pane_height.max(picker_end - y)
 }
@@ -139,24 +144,11 @@ fn paint_shell(
     let top = y + CTL_H + 8.0;
     let pane = (x, top, w, height);
     let app_layer = theme::without_settings_layer();
-    let (h, sat, val) = s.picker_hsv;
-    let [r, green, b] = hsv_rgb(h, sat, val);
-    let draft = [r, green, b, 255];
-    let palette_color = |slot, saved| {
-        if s.input == Some(SettingsInput::PaletteHex(slot)) { draft } else { saved }
-    };
-    let background = palette_color(27, theme::pane_bg());
-    let foreground = palette_color(1, theme::fg());
-    let ink = theme::enforce_min_contrast(foreground, background);
-    crate::native_controls::panel(g, pane, background);
-    let border = if s.input == Some(SettingsInput::PaletteHex(5)) {
-        draft
-    } else if shell.focused || s.input == Some(SettingsInput::AccentHex) {
-        theme::accent()
-    } else {
-        theme::border()
-    };
-    stroke_round(g, pane, theme::radius_md(), border);
+    crate::native_controls::panel(g, pane, theme::pane_bg());
+    let ink = theme::enforce_min_contrast(theme::fg(), theme::pane_bg());
+    if shell.focused || s.input == Some(SettingsInput::AccentHex) {
+        stroke_round(g, pane, theme::radius_md(), theme::accent());
+    }
     let body = (x + 12.0, top + 9.0, (w - 24.0).max(0.0), height - 18.0);
     register_clipped(g, hits, Target::PreviewShell, pane, HitCursor::Text);
 
@@ -181,13 +173,10 @@ fn paint_shell(
                 clipped = lines.iter().map(|line| line[..line.len().min(cols as usize)].to_vec()).collect::<Vec<_>>();
                 clipped.as_slice()
             } else { lines };
-            let original_palette = g.palette;
-            g.palette.bg = background;
             g.draw_cells(&[gpu::PaneSlot {
                 rows: lines, origin_px: (body.0 * scale, (body.1 + first as f32 * ch) * scale),
                 font_scale: 1.0, dim: false, links: Vec::new(), default_fg: ink, source: None,
             }]);
-            g.palette = original_palette;
         }
         if shell.focused {
             if let Some((row, col)) = shell.cursor {
@@ -205,29 +194,13 @@ fn paint_shell(
     }
     drop(app_layer);
 
-    let choices = [
-        (PREVIEW_PALETTE_ROLES[0].1, Target::Setting(SettingsAction::FocusPaletteHex(27)), s.input == Some(SettingsInput::PaletteHex(27)), background),
-        (PREVIEW_PALETTE_ROLES[1].1, Target::Setting(SettingsAction::FocusPaletteHex(1)), s.input == Some(SettingsInput::PaletteHex(1)), foreground),
-        (PREVIEW_PALETTE_ROLES[2].1, Target::Setting(SettingsAction::FocusPaletteHex(5)), s.input == Some(SettingsInput::PaletteHex(5)), palette_color(5, theme::border())),
-        ("강조색 고르기", Target::OpenAccentPicker, s.input == Some(SettingsInput::AccentHex), theme::accent()),
+    let controls = [
+        ("터미널 바탕", Target::Setting(SettingsAction::FocusPaletteHex(27)), s.input == Some(SettingsInput::PaletteHex(27))),
+        ("터미널 글자", Target::Setting(SettingsAction::FocusPaletteHex(1)), s.input == Some(SettingsInput::PaletteHex(1))),
+        ("색 고르기", Target::OpenAccentPicker, s.input == Some(SettingsInput::AccentHex)),
     ];
-    let widths: Vec<f32> = choices.iter().map(|(label, _, _, _)| {
-        let label = crate::native_strings::text(label);
-        (g.measure_chrome_text(&label, 12.0, false) + 44.0).max(88.0)
-    }).collect();
-    let (rects, controls_height) = crate::native_layout::flow(
-        &widths, (x, top + height + 10.0, w, 0.0), CTL_H, 8.0, crate::native_layout::Align::Start,
-    );
-    for ((label, target, selected, color), rect) in choices.into_iter().zip(rects) {
-        choice_card(g, s, hits, rect, selected, target);
-        let swatch = (rect.0 + 9.0, rect.1 + 8.0, 16.0, 16.0);
-        round_rect(g, swatch.0, swatch.1, swatch.2, swatch.3, 4.0, color);
-        stroke_round(g, swatch, 4.0, theme::edge_on(color));
-        let label = fit(g, label, (rect.2 - 36.0).max(0.0), 12.0, false);
-        draw_text(g, rect.0 + 32.0, rect.1 + 9.0, &label, 12.0, theme::text(), false);
-    }
-    CTL_H + 8.0 + height + 10.0 + controls_height
-
+    let buttons = button_row(g, s, hits, (x, top + height + 10.0, w, 0.0), &controls, crate::native_layout::Align::Start);
+    CTL_H + 8.0 + height + 10.0 + buttons
 }
 
 #[cfg(test)]

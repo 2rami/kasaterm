@@ -64,8 +64,9 @@ class _AccentPickerState extends State<AccentPicker> {
         ? int.parse(rgb, radix: 16)
         : null;
     setState(() => _valid = parsed != null);
-    if (parsed != null)
+    if (parsed != null) {
       widget.onChanged(HSVColor.fromColor(Color(0xff000000 | parsed)));
+    }
   }
 
   @override
@@ -91,7 +92,6 @@ class _AccentPickerState extends State<AccentPicker> {
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: scheme.surface,
-          border: Border.all(color: scheme.outlineVariant),
           borderRadius: BorderRadius.circular(14),
         ),
         child: Padding(
@@ -99,89 +99,110 @@ class _AccentPickerState extends State<AccentPicker> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _ColorPlane(
-                color: widget.color,
-                height: widget.compact ? 88 : 120,
-                onChanged: widget.busy ? null : _change,
-              ),
-              const SizedBox(height: 8),
-              Semantics(
-                label: '색 계열',
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 13),
-                      height: 14,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(7),
-                        gradient: const LinearGradient(
-                          colors: [
-                            Color(0xffff0000),
-                            Color(0xffffff00),
-                            Color(0xff00ff00),
-                            Color(0xff00ffff),
-                            Color(0xff0000ff),
-                            Color(0xffff00ff),
-                            Color(0xffff0000),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerLowest,
+                  border: Border.all(color: scheme.outlineVariant),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          '밝기와 채도',
+                          style: Theme.of(context).textTheme.labelSmall
+                              ?.copyWith(color: scheme.onSurfaceVariant),
+                        ),
+                      ),
+                      _ColorPlane(
+                        color: widget.color,
+                        height: widget.compact ? 88 : 120,
+                        onChanged: widget.busy ? null : _change,
+                      ),
+                      const SizedBox(height: 8),
+                      Semantics(
+                        label: '색 계열',
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            Container(
+                              margin: const EdgeInsets.symmetric(
+                                horizontal: 13,
+                              ),
+                              height: 14,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(7),
+                                gradient: const LinearGradient(
+                                  colors: [
+                                    Color(0xffff0000),
+                                    Color(0xffffff00),
+                                    Color(0xff00ff00),
+                                    Color(0xff00ffff),
+                                    Color(0xff0000ff),
+                                    Color(0xffff00ff),
+                                    Color(0xffff0000),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            SliderTheme(
+                              data: SliderTheme.of(context).copyWith(
+                                trackHeight: 0,
+                                activeTrackColor: Colors.transparent,
+                                inactiveTrackColor: Colors.transparent,
+                                thumbColor: scheme.onSurface,
+                                thumbShape: const RoundSliderThumbShape(
+                                  enabledThumbRadius: 8,
+                                  elevation: 2,
+                                ),
+                                overlayShape: const RoundSliderOverlayShape(
+                                  overlayRadius: 13,
+                                ),
+                              ),
+                              child: Slider(
+                                key: const Key('appearance-accent-hue'),
+                                value: widget.color.hue,
+                                max: 359.99,
+                                onChanged: widget.busy
+                                    ? null
+                                    : (hue) =>
+                                          _change(widget.color.withHue(hue)),
+                              ),
+                            ),
                           ],
                         ),
                       ),
-                    ),
-                    SliderTheme(
-                      data: SliderTheme.of(context).copyWith(
-                        trackHeight: 0,
-                        activeTrackColor: Colors.transparent,
-                        inactiveTrackColor: Colors.transparent,
-                        thumbColor: HSVColor.fromAHSV(
-                          1,
-                          widget.color.hue,
-                          1,
-                          1,
-                        ).toColor(),
-                        thumbShape: const RoundSliderThumbShape(
-                          enabledThumbRadius: 8,
-                          elevation: 2,
-                        ),
-                        overlayShape: const RoundSliderOverlayShape(
-                          overlayRadius: 13,
-                        ),
+                      Divider(height: 1, color: scheme.outlineVariant),
+                      Wrap(
+                        spacing: 14,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          _Sample(label: '현재', color: widget.original),
+                          _Sample(label: '미리보기', color: selected),
+                          TextButton(
+                            onPressed: widget.busy
+                                ? null
+                                : () {
+                                    setState(() {
+                                      _showHex = !_showHex;
+                                      if (!_showHex) {
+                                        _hex.text = AccentPicker.hex(selected);
+                                        _valid = true;
+                                      }
+                                    });
+                                  },
+                            child: Text(_showHex ? 'HEX 접기' : 'HEX'),
+                          ),
+                        ],
                       ),
-                      child: Slider(
-                        key: const Key('appearance-accent-hue'),
-                        value: widget.color.hue,
-                        max: 359.99,
-                        onChanged: widget.busy
-                            ? null
-                            : (hue) => _change(widget.color.withHue(hue)),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 14,
-                runSpacing: 4,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  _Sample(label: '현재', color: widget.original),
-                  _Sample(label: '미리보기', color: selected),
-                  TextButton(
-                    onPressed: widget.busy
-                        ? null
-                        : () {
-                            setState(() {
-                              _showHex = !_showHex;
-                              if (!_showHex) {
-                                _hex.text = AccentPicker.hex(selected);
-                                _valid = true;
-                              }
-                            });
-                          },
-                    child: Text(_showHex ? 'HEX 접기' : 'HEX'),
+                    ],
                   ),
-                ],
+                ),
               ),
               if (_showHex)
                 TextField(
@@ -283,8 +304,9 @@ class _ColorPlane extends StatelessWidget {
     child: Focus(
       canRequestFocus: onChanged != null,
       onKeyEvent: (_, event) {
-        if (event is! KeyDownEvent && event is! KeyRepeatEvent)
+        if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
           return KeyEventResult.ignored;
+        }
         final key = event.logicalKey;
         if (key == LogicalKeyboardKey.arrowLeft) {
           _nudge(-0.03, 0);
