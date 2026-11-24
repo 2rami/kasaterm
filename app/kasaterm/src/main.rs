@@ -71,6 +71,7 @@ mod shell_picker;
 mod spawn_env;
 mod server_restore;
 mod session_transfer;
+mod confirm_card;
 mod drag_transfer;
 mod settings;
 mod agent_preferences;

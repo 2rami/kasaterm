@@ -41,65 +41,14 @@ pub(crate) type ConfirmationHits = Vec<(ConfirmBtn, (f32, f32, f32, f32))>;
 pub(crate) fn paint_confirmation(
     g: &mut gpu::GpuRenderer,
     dlg: &ConfirmClose,
-    (win_w, win_h): (f32, f32),
+    win: (f32, f32),
     cursor: (f32, f32),
 ) -> ConfirmationHits {
-    g.rect(
-        0.0,
-        0.0,
-        win_w,
-        win_h,
-        theme::with_alpha([0, 0, 0, 255], 0xB0),
-    );
     let dirty = matches!(dlg.why, crate::CloseWhy::Dirty(_));
     let mirror = matches!(dlg.why, crate::CloseWhy::Mirror { .. });
     let retry = matches!(dlg.why, crate::CloseWhy::Mirror { error: Some(_), .. });
     let mirror_closing = matches!(dlg.why, crate::CloseWhy::Mirror { closing: true, .. });
     let (title, subtitle) = confirmation_text(dlg);
-    let subtitle = subtitle.as_str();
-    // 부제에 파일 이름이 들어와 길이가 변하니 카드도 재서 정한다 —
-    // 고정 폭이던 시절엔 이름 셋이 그대로 카드 밖으로 나갔다.
-    let pad = 24.0_f32;
-    let title_w = g.measure_chrome_text(&title, 15.0, true);
-    let sub_w = g.measure_chrome_text(subtitle, 13.0, false);
-    let card_w = (title_w.max(sub_w) + pad * 2.0)
-        .max(if dirty || mirror { 420.0 } else { 360.0 })
-        .min((win_w - 48.0).max(1.0));
-    let subtitle = info::fit_text(g, subtitle, card_w - pad * 2.0, 13.0, false);
-    let card_h = 168.0_f32;
-    let cx0 = ((win_w - card_w) / 2.0).round();
-    let cy0 = ((win_h - card_h) / 2.0).round();
-    panel_rect_outlined(
-        g,
-        cx0,
-        cy0,
-        card_w,
-        card_h,
-        theme::radius_md(),
-        theme::surface_active(),
-    );
-    g.draw_text(
-        cx0 + pad,
-        cy0 + 30.0,
-        &title,
-        gpu::DrawOpts {
-            font_size: 15.0,
-            color: theme::text(),
-            bold: true,
-            italic: false,
-        },
-    );
-    g.draw_text(
-        cx0 + pad,
-        cy0 + 60.0,
-        &subtitle,
-        gpu::DrawOpts {
-            font_size: 13.0,
-            color: theme::text_dim(),
-            bold: false,
-            italic: false,
-        },
-    );
     let close = (if retry { "다시 시도" } else { "닫기" }, ConfirmBtn::Close);
     let cancel = ("취소", ConfirmBtn::Cancel);
     let dirty_buttons = [("저장", ConfirmBtn::Save), ("저장 안 함", ConfirmBtn::Close), cancel];
@@ -111,24 +60,26 @@ pub(crate) fn paint_confirmation(
     } else {
         &close_buttons
     };
-    let btn_h = crate::native_controls::CONTROL_HEIGHT;
-    let btn_y = cy0 + card_h - 20.0 - btn_h;
-    let mut right = cx0 + card_w - pad;
-    buttons.iter().map(|&(label, button)| {
-        let style = crate::native_controls::Style {
-            primary: button == ConfirmBtn::Save,
-            danger: button == ConfirmBtn::Close,
-            ..Default::default()
-        };
-        let width = crate::native_controls::button_width(g, label, btn_h, style.primary);
-        let x = right - width;
-        right = x - 8.0;
-        let rect = crate::native_controls::text_button(g, (x, btn_y, width, btn_h), cursor, label, style);
-        if button == default_button(&dlg.why) {
-            crate::native_controls::focus_ring(g, rect);
-        }
-        (button, rect)
-    }).collect()
+    let buttons: Vec<(&str, ConfirmBtn, crate::native_controls::Style)> = buttons
+        .iter()
+        .map(|&(label, button)| {
+            let style = crate::native_controls::Style {
+                primary: button == ConfirmBtn::Save,
+                danger: button == ConfirmBtn::Close,
+                ..Default::default()
+            };
+            (label, button, style)
+        })
+        .collect();
+    // 부제에 파일 이름이 들어와 길이가 변하니 카드 폭은 글에 맞춰 잰다 — 고정 폭이던
+    // 시절엔 이름 셋이 그대로 카드 밖으로 나갔다.
+    crate::confirm_card::paint(g, win, cursor, &crate::confirm_card::Card {
+        title: &title,
+        lines: &[(subtitle, theme::text_dim())],
+        buttons: &buttons,
+        focus: Some(default_button(&dlg.why)),
+        min_w: if dirty || mirror { 420.0 } else { 360.0 },
+    })
 }
 
 pub(crate) fn default_button(why: &CloseWhy) -> ConfirmBtn {

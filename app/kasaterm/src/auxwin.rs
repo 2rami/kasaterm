@@ -1214,125 +1214,28 @@ impl AuxWindow {
     }
 
     fn draw_viewer_prompt(&mut self, width: f32, height: f32) {
-        self.viewer_prompt_hits.clear();
-        self.gpu.rect(
-            0.0,
-            0.0,
-            width,
-            height,
-            crate::theme::with_alpha([0, 0, 0, 255], 0x88),
-        );
-        let panel_w = (width - 24.0).min(460.0).max(280.0);
-        let panel_h = 172.0;
-        let x = (width - panel_w) * 0.5;
-        let y = (height - panel_h) * 0.5;
-        crate::round_rect(
-            &mut self.gpu,
-            x - 1.0,
-            y - 1.0,
-            panel_w + 2.0,
-            panel_h + 2.0,
-            crate::theme::radius_md() + 1.0,
-            crate::theme::border(),
-        );
-        crate::round_rect(
-            &mut self.gpu,
-            x,
-            y,
-            panel_w,
-            panel_h,
-            crate::theme::radius_md(),
-            crate::theme::surface(),
-        );
         let name = std::path::Path::new(&self.editor.doc.path)
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("이 문서");
-        let prompt = format!("{name}에 저장하지 않은 내용이 있어요");
-        let prompt = crate::screenread::clip_px(&mut self.gpu, &prompt, 14.0, true, panel_w - 44.0);
-        self.gpu.draw_text(
-            x + 22.0,
-            y + 24.0,
-            &prompt,
-            gpu::DrawOpts {
-                font_size: 14.0,
-                color: crate::theme::text(),
-                bold: true,
-                italic: false,
-            },
-        );
-        let detail = self
-            .status
-            .as_deref()
-            .filter(|message| message.contains("실패"))
-            .unwrap_or("저장할까요? 저장 실패 시 창과 내용은 그대로 남습니다.");
-        let detail = crate::screenread::clip_px(&mut self.gpu, detail, 12.0, false, panel_w - 44.0);
-        self.gpu.draw_text(
-            x + 22.0,
-            y + 56.0,
-            &detail,
-            gpu::DrawOpts {
-                font_size: 12.0,
-                color: if detail.contains("실패") {
-                    crate::theme::danger()
-                } else {
-                    crate::theme::text_dim()
-                },
-                bold: false,
-                italic: false,
-            },
-        );
-        let labels = [
-            (ViewerPromptButton::Cancel, "취소"),
-            (ViewerPromptButton::Discard, "저장 안 함"),
-            (ViewerPromptButton::Save, "저장"),
-        ];
-        let button_h = 36.0;
-        let gap = 8.0;
-        let widths: Vec<f32> = labels
-            .iter()
-            .map(|(_, label)| self.gpu.measure_chrome_text(label, 12.0, true) + 24.0)
-            .collect();
-        let total: f32 = widths.iter().sum::<f32>() + gap * 2.0;
-        let mut button_x = x + panel_w - 20.0 - total;
-        let button_y = y + panel_h - button_h - 20.0;
-        for ((button, label), button_w) in labels.into_iter().zip(widths) {
-            let rect = (button_x, button_y, button_w, button_h);
-            let hot = hit(self.cursor_px, rect);
-            let color = if button == ViewerPromptButton::Save {
-                crate::theme::accent()
-            } else if hot {
-                crate::theme::surface_active()
-            } else {
-                crate::theme::surface_hover()
-            };
-            crate::round_rect(
-                &mut self.gpu,
-                button_x,
-                button_y,
-                button_w,
-                button_h,
-                crate::theme::radius_sm(),
-                color,
-            );
-            self.gpu.draw_text(
-                button_x + 12.0,
-                button_y + 10.0,
-                label,
-                gpu::DrawOpts {
-                    font_size: 12.0,
-                    color: if button == ViewerPromptButton::Save {
-                        crate::theme::foreground_on(crate::theme::accent())
-                    } else {
-                        crate::theme::text()
-                    },
-                    bold: true,
-                    italic: false,
-                },
-            );
-            self.viewer_prompt_hits.push((button, rect));
-            button_x += button_w + gap;
-        }
+        let title = format!("{name}에 저장하지 않은 내용이 있어요");
+        let failed = self.status.as_deref().filter(|message| message.contains("실패"));
+        let detail = match failed {
+            Some(message) => (message.to_string(), crate::theme::danger()),
+            None => ("저장할까요? 저장 실패 시 창과 내용은 그대로 남습니다.".to_string(), crate::theme::text_dim()),
+        };
+        let save = crate::native_controls::Style { primary: true, ..Default::default() };
+        self.viewer_prompt_hits = crate::confirm_card::paint(&mut self.gpu, (width, height), self.cursor_px, &crate::confirm_card::Card {
+            title: &title,
+            lines: &[detail],
+            buttons: &[
+                ("저장", ViewerPromptButton::Save, save),
+                ("저장 안 함", ViewerPromptButton::Discard, Default::default()),
+                ("취소", ViewerPromptButton::Cancel, Default::default()),
+            ],
+            focus: None,
+            min_w: 420.0,
+        });
     }
 }
 

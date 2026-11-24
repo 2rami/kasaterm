@@ -4923,13 +4923,18 @@ impl App {
             }
             if let Some(p) = self.move_confirm.as_ref() {
                 use crate::drag_transfer::MoveBtn;
-                move_confirm_hits = paint_confirm_card(
+                // Enter 는 취소다 — 포커스 테도 「취소」에 둔다.
+                move_confirm_hits = confirm_lines_card(
                     g,
                     (win_px.0 / scale, win_px.1 / scale),
                     self.cursor_px,
                     &p.title,
                     &p.lines,
-                    &[("옮기기", MoveBtn::Move, Some(theme::accent())), ("취소", MoveBtn::Cancel, None)],
+                    &[
+                        ("옮기기", MoveBtn::Move, crate::native_controls::Style { primary: true, ..Default::default() }),
+                        ("취소", MoveBtn::Cancel, Default::default()),
+                    ],
+                    MoveBtn::Cancel,
                 );
             }
             // File-tree drag ghost — a small pill trailing the cursor with the
@@ -6309,122 +6314,6 @@ fn paint_account_flash(g: &mut gpu::GpuRenderer, r: (f32, f32, f32, f32), k: f32
 /// **자유함수인 이유**: 메인 창 안의 여러 계정 진입점이 같은 카드를 그린다.
 /// 확인 카드 한 장 — 스크림 + 제목 + 본문 + 오른쪽 정렬 버튼들.
 ///
-/// 계정 전환과 학생 교체가 같은 층에 같은 모양으로 뜬다. 그리는 몸통이 둘이면
-/// 한쪽만 고쳐져 카드 두 장이 조용히 달라진다.
-///
-/// 버튼은 **오른쪽부터** 주어진 순서로 놓인다 — 첫 항목이 가장 오른쪽, 즉 기본
-/// 행동이다. `tone` 이 있으면 채운 버튼, 없으면 테두리 버튼: 흑백에서도 어느 쪽이
-/// 기본인지 형태로 읽혀야 한다.
-pub(crate) fn paint_confirm_card<B: Copy>(
-    g: &mut gpu::GpuRenderer,
-    win: (f32, f32),
-    cursor: (f32, f32),
-    title: &str,
-    lines: &[String],
-    buttons: &[(&str, B, Option<[u8; 4]>)],
-) -> Vec<(B, (f32, f32, f32, f32))> {
-    let (win_w, win_h) = win;
-    g.rect(
-        0.0,
-        0.0,
-        win_w,
-        win_h,
-        theme::with_alpha([0, 0, 0, 255], 0xB0),
-    );
-
-    let pad = 24.0_f32;
-    let line_h = 20.0_f32;
-    let title_w = g.measure_chrome_text(title, 15.0, true);
-    let body_w = lines
-        .iter()
-        .map(|l| g.measure_chrome_text(l, 13.0, false))
-        .fold(0.0_f32, f32::max);
-    let card_w = (title_w.max(body_w) + pad * 2.0).clamp(380.0, (win_w - 48.0).max(380.0));
-    // 마지막 설명 줄과 단추 사이에 14px 를 둔다. 104 로는 그 줄 아래가 단추 위보다 2px 내려가,
-    // 줄이 길면 글자가 「취소」 밑으로 들어갔다(2026-11-24 이사 확인 카드).
-    let card_h = 120.0 + lines.len() as f32 * line_h;
-    let cx0 = ((win_w - card_w) / 2.0).round();
-    let cy0 = ((win_h - card_h) / 2.0).round();
-    panel_rect_outlined(
-        g,
-        cx0,
-        cy0,
-        card_w,
-        card_h,
-        theme::radius_md(),
-        theme::surface_active(),
-    );
-    g.draw_text(
-        cx0 + pad,
-        cy0 + 28.0,
-        title,
-        gpu::DrawOpts {
-            font_size: 15.0,
-            color: theme::text(),
-            bold: true,
-            italic: false,
-        },
-    );
-    for (i, l) in lines.iter().enumerate() {
-        g.draw_text(
-            cx0 + pad,
-            cy0 + 56.0 + i as f32 * line_h,
-            l,
-            gpu::DrawOpts {
-                font_size: 13.0,
-                color: theme::text_dim(),
-                bold: false,
-                italic: false,
-            },
-        );
-    }
-
-    let (mx, my) = cursor;
-    let bf = 13.0_f32;
-    let bpad = 18.0_f32;
-    let btn_h = 34.0_f32;
-    let btn_y = cy0 + card_h - 20.0 - btn_h;
-    let mut right = cx0 + card_w - pad;
-    let mut hits: Vec<(B, (f32, f32, f32, f32))> = Vec::new();
-    for (label, btn, tone) in buttons {
-        let w = g.measure_chrome_text(label, bf, tone.is_some()) + bpad * 2.0;
-        let x = right - w;
-        right = x - 10.0;
-        let hot = mx >= x && mx <= x + w && my >= btn_y && my <= btn_y + btn_h;
-        g.hover_pointer |= hot;
-        let (fill, fg, bold) = match tone {
-            Some(c) => (
-                theme::with_alpha(*c, if hot { 0xFF } else { 0xDD }),
-                [0xFF, 0xFF, 0xFF, 0xFF],
-                true,
-            ),
-            None => (
-                theme::raised_on(theme::surface_active(), hot),
-                theme::text(),
-                false,
-            ),
-        };
-        if tone.is_some() {
-            panel_rect(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
-        } else {
-            panel_rect_outlined(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
-        }
-        g.draw_text(
-            x + bpad,
-            btn_y + (btn_h - bf) / 2.0,
-            label,
-            gpu::DrawOpts {
-                font_size: bf,
-                color: fg,
-                bold,
-                italic: false,
-            },
-        );
-        hits.push((*btn, (x, btn_y, w, btn_h)));
-    }
-    hits
-}
-
 pub(crate) fn paint_account_switch_confirm(
     g: &mut gpu::GpuRenderer,
     win: (f32, f32),
@@ -6433,24 +6322,33 @@ pub(crate) fn paint_account_switch_confirm(
 ) -> Vec<(crate::session::AccountSwitchBtn, (f32, f32, f32, f32))> {
     use crate::session::AccountSwitchBtn;
     let (title, lines) = crate::session::account_switch_confirm_text(&p.to_label, &p.impact);
-    // 채움색이 곧 뜻이다 — 이어붙일 대화가 없는 pane 이 섞여 있으면 그 전환은
-    // 되돌릴 수 없으므로 빨강. 아니면 대화가 이어지니 기본 accent.
-    let tone = if p.impact.fresh > 0 {
-        theme::danger()
-    } else {
-        theme::accent()
-    };
-    paint_confirm_card(
-        g,
-        win,
-        cursor,
-        &title,
-        &lines,
-        &[
-            ("전환", AccountSwitchBtn::Switch, Some(tone)),
-            ("취소", AccountSwitchBtn::Cancel, None),
-        ],
-    )
+    // 이어붙일 대화가 없는 pane 이 섞여 있으면 그 전환은 되돌릴 수 없으므로 위험 단추.
+    let fresh = p.impact.fresh > 0;
+    let switch = crate::native_controls::Style { primary: !fresh, danger: fresh, ..Default::default() };
+    confirm_lines_card(g, win, cursor, &title, &lines, &[
+        ("전환", AccountSwitchBtn::Switch, switch),
+        ("취소", AccountSwitchBtn::Cancel, Default::default()),
+    ], AccountSwitchBtn::Switch)
+}
+
+/// 제목과 흐린 설명 줄의 확인 카드 — Enter 가 누르는 `focus` 단추에 포커스 테를 두른다.
+pub(crate) fn confirm_lines_card<B: Copy + PartialEq>(
+    g: &mut gpu::GpuRenderer,
+    win: (f32, f32),
+    cursor: (f32, f32),
+    title: &str,
+    lines: &[String],
+    buttons: &[(&str, B, crate::native_controls::Style)],
+    focus: B,
+) -> Vec<(B, (f32, f32, f32, f32))> {
+    let lines: Vec<(String, [u8; 4])> = lines.iter().map(|line| (line.clone(), theme::text_dim())).collect();
+    crate::confirm_card::paint(g, win, cursor, &crate::confirm_card::Card {
+        title,
+        lines: &lines,
+        buttons,
+        focus: Some(focus),
+        min_w: 380.0,
+    })
 }
 
 /// 학생 교체 확인 — 계정 전환과 같은 층·같은 모양이다.
@@ -6462,24 +6360,12 @@ pub(crate) fn paint_character_swap_confirm(
 ) -> Vec<(crate::session::CharacterSwapBtn, (f32, f32, f32, f32))> {
     use crate::session::CharacterSwapBtn;
     let (title, lines) = crate::session::character_swap_confirm_text(&p.to, p.resumable);
-    // 이어붙일 대화가 없으면 다시 띄우기가 지금 내용을 버린다 — 계정 카드의
-    // `fresh` 와 같은 규칙으로 빨강.
-    let tone = if p.resumable {
-        theme::accent()
-    } else {
-        theme::danger()
-    };
-    paint_confirm_card(
-        g,
-        win,
-        cursor,
-        &title,
-        &lines,
-        &[
-            ("다시 띄우기", CharacterSwapBtn::Relaunch, Some(tone)),
-            ("취소", CharacterSwapBtn::Cancel, None),
-        ],
-    )
+    // 이어붙일 대화가 없으면 다시 띄우기가 지금 내용을 버린다 — 계정 카드의 `fresh` 와 같은 규칙.
+    let relaunch = crate::native_controls::Style { primary: p.resumable, danger: !p.resumable, ..Default::default() };
+    confirm_lines_card(g, win, cursor, &title, &lines, &[
+        ("다시 띄우기", CharacterSwapBtn::Relaunch, relaunch),
+        ("취소", CharacterSwapBtn::Cancel, Default::default()),
+    ], CharacterSwapBtn::Relaunch)
 }
 
 /// 창 목록을 [이름][막대][퍼센트] 로 늘어놓는다. claude 의 배지와 codex 의
