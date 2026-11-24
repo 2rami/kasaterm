@@ -539,6 +539,10 @@ Windows 는 책상 위 모니터와 책상 밑 타워, 맥미니는 왼벽 선�
   연결 안 된 Google·GitHub 계정이면 새 계정을 만들지 않고(`choose: true`) 카사텀에서 먼저 잇게 안내한다. 자격은 상태 폴더 `account.json`(0600).
 - 기기 목록: `/relay/account-machines` 와 기기마다 `/relay/account/m/~<id>/version`(30초마다). 이 기기 본 앱 명부와 같은 카사넷 id 면 한
   줄로 합치고, 내 보기 앱 id 를 알리는 기기(이 컴퓨터의 본 앱)는 뺀다. 관문이 401 이면 로그아웃한다.
+- Y60 조명은 Windows 카사텀의 `/version.kasadesk_rgb`를 확인한 뒤 계정 소유 기기의
+  `POST /relay/account/m/~<id>/kasadesk/rgb`로 연결한다. 관문과 호스트 양쪽에 RGB 지원 판이 필요하다.
+  관문은 현재 계정에 등록된 데스크톱의 직접 업링크에만 소유 권한을 싣는다. 호스트는 RGB Control의 루프백 대시보드에
+  여섯 팬의 배치 확인(`capability`), 색·냉각·LCD 조회(`snapshot`), 자리별 고정 색 지정·해제(`color`)만 전달한다.
 - 허락: 기기마다 `POST …/kasanet/view {id}`(5분마다, 데스크톱 수명 15분). 데스크톱은 폰 등록과 같은 자격(관문을 거친 주인 주소, 카사넷·직접
   요청은 403)만 받아 빈 포트 돌리기 + 허용 목록에 넣고(`kasanet::allow_viewer`), 서비스에는 폰 줄(만료 있는 id)로 넘긴다. 폰 등록 길을
   빌리지 않는 까닭: 폰 앱 표식(`note_phone_app`)이 켜져 「폰 보여 주기」가 localhost 주소를 넘기는 길로 바뀐다.

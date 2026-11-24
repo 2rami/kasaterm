@@ -35,6 +35,7 @@ pub const WS_PONG: u8 = 8;
 pub const CLOSE: u8 = 9; // 스트림 종료(어느 쪽이든). payload = 사유(utf8, 선택)
 
 pub const CONTEXT_HEADER: &str = "x-kasa-uplink-context";
+const RGB_HEADER: &str = "x-kasa-rgb-owner";
 pub const MACHINES_HEADER: &str = "x-kasa-uplink-machines";
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -116,7 +117,7 @@ pub fn skip_header(name: &str) -> bool {
 }
 
 pub fn is_internal_header(name: &str) -> bool {
-    name.eq_ignore_ascii_case(CONTEXT_HEADER) || name.eq_ignore_ascii_case(MACHINES_HEADER)
+    name.eq_ignore_ascii_case(CONTEXT_HEADER) || name.eq_ignore_ascii_case(MACHINES_HEADER) || name.eq_ignore_ascii_case(RGB_HEADER)
 }
 
 /// 이 경로가 `/u/<slug>/` 밑에 머무는가. 조각마다 퍼센트 디코딩해 `.`·`..`·경로
@@ -155,6 +156,15 @@ fn percent_decode(s: &str) -> Vec<u8> {
 fn context_token() -> &'static str {
     static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TOKEN.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+}
+
+fn rgb_token() -> &'static str {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+}
+
+pub(crate) fn rgb_owner(headers: &axum::http::HeaderMap) -> bool {
+    headers.get(RGB_HEADER).and_then(|h| h.to_str().ok()) == Some(rgb_token())
 }
 
 fn encode_machines(machines: &[GatewayMachine]) -> String {
@@ -709,6 +719,9 @@ async fn handle_stream(
     rb = rb
         .header(CONTEXT_HEADER, context_token())
         .header(MACHINES_HEADER, encode_machines(&gateway_machines));
+    if path == "/kasadesk/rgb" && open["account_rgb"] == true {
+        rb = rb.header(RGB_HEADER, rgb_token());
+    }
     let sent = tokio::select! {
         r = rb.send() => r,
         _ = &mut closed_rx => {
@@ -891,6 +904,35 @@ mod tests {
                 return (k, p.to_vec());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn rgb_marker_is_forwarded_only_for_an_authorized_rgb_stream() {
+        let app = axum::Router::new().fallback(|headers: axum::http::HeaderMap| async move {
+            if rgb_owner(&headers) { "owner" } else { "public" }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (path, account_rgb, expected) in [
+            ("/kasadesk/rgb", true, "owner"),
+            ("/kasadesk/rgb", false, "public"),
+            ("/version", true, "public"),
+        ] {
+            let (stx, srx) = mpsc::channel(STREAM_QUEUE);
+            let (wtx, mut wrx) = mpsc::channel(STREAM_QUEUE);
+            let open = serde_json::json!({
+                "slug": SLUG, "path": path, "method": "POST", "account_rgb": account_rgb,
+                "headers": [[RGB_HEADER, rgb_token()]]
+            });
+            let stream = tokio::spawn(handle_stream(1, open, srx, wtx, port));
+            stx.send((END, Vec::new())).await.unwrap();
+            assert_eq!(next_frame(&mut wrx).await.0, HEAD);
+            let (kind, body) = next_frame(&mut wrx).await;
+            assert_eq!((kind, body.as_slice()), (BODY, expected.as_bytes()));
+            stream.await.unwrap();
+        }
+        server.abort();
     }
 
     #[tokio::test]

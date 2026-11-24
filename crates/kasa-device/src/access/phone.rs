@@ -167,6 +167,7 @@ async fn mobile_users_delete(req: axum::extract::Request) -> axum::response::Res
 /// 이 모듈 창구의 라우트. `router` 가 한 표로 합친 뒤 공통 레이어(Origin·토큰 가드)를 두른다.
 pub fn routes() -> axum::Router {
     axum::Router::new()
+        .route("/kasadesk/rgb", axum::routing::post(super::rgb::handle))
         .route("/kasanet/phone", axum::routing::post(kasanet_phone_handler))
         .route("/kasanet/view", axum::routing::post(kasanet_view_handler))
         // 폰 허브·유저별 주소 관리·다른 기계로 넘기는 문(mobile.rs 머리말).

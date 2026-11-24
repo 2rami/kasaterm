@@ -1362,7 +1362,10 @@ fn nacho_app_path(rest: &str) -> bool {
 }
 
 fn nacho_hub_available(gate: &Gate, up: &Uplink) -> bool {
-    if !up.nacho_app.load(Ordering::Relaxed) { return false; }
+    up.nacho_app.load(Ordering::Relaxed) && authenticated_owner_uplink(gate, up)
+}
+
+fn authenticated_owner_uplink(gate: &Gate, up: &Uplink) -> bool {
     let (Some(account), Some(device_id), Some(owner)) = (&up.account, &up.device_id, &up.owner_slug) else {
         return false;
     };
@@ -1457,9 +1460,15 @@ async fn forward_scoped(gate: Gate, slug: String, rest: String, req: axum::extra
     let (stx, mut srx) = mpsc::channel::<Frame>(STREAM_QUEUE);
     up.streams.lock().unwrap().insert(id, stx);
     let guard = StreamGuard { up: up.clone(), id };
+    // An owner URL, guest URL or fallback through a hub cannot authorize lighting on another PC.
+    let account_rgb = routed_rest == "kasadesk/rgb" && req.method() == axum::http::Method::POST
+        && !is_ws && matches!(route, RoutePick::Machine(_))
+        && requested_machine.and_then(|m| m.strip_prefix('~')) == Some(up.machine_id.as_str())
+        && access.as_ref().is_some_and(|a| a.valid() && up.account.as_deref() == Some(a.account.as_str()))
+        && authenticated_owner_uplink(&gate, &up);
     let open = serde_json::json!({
         "slug": slug, "method": req.method().as_str(), "path": path, "headers": headers,
-        "machines": live_machines, "ws": is_ws,
+        "machines": live_machines, "ws": is_ws, "account_rgb": account_rgb,
     })
     .to_string();
     if up.tx.send(Message::Binary(encode(OPEN, id, open.as_bytes()).into())).await.is_err() {
@@ -2199,6 +2208,50 @@ mod tests {
         assert_eq!(post(addr, "/relay/logout", Some(&token), serde_json::json!({})).await.0, 200);
         assert!(lines(&allow).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn rgb_authority_is_bound_to_the_authenticated_account_and_exact_machine() {
+        let dir = std::env::temp_dir().join(format!("kasa-rgb-{}", uuid::Uuid::new_v4()));
+        let gate = account_gate(&dir);
+        let file = dir.join("relay-accounts.json");
+        let mut accounts = kasa_identity::relay_auth::load_accounts(&file);
+        accounts.accounts.insert("other".into(), accounts.accounts["tester"].clone());
+        kasa_identity::relay_auth::save_accounts(&file, &accounts).unwrap();
+        let addr = spawn_relay(gate).await;
+        let (status, desktop) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"tester", "password":"correct horse", "machine_id":"rgb-test-pc"
+        })).await;
+        assert_eq!(status, 200);
+        let mut hello = desktop_hello("rgb-test-pc", desktop["token"].as_str().unwrap());
+        hello["slugs"] = serde_json::json!([SLUG]);
+        hello["owner_slug"] = SLUG.into();
+        let _pc = fake_uplink_at(addr, hello, |id, open, out| {
+            let response = serde_json::json!({"granted": open["account_rgb"], "path": open["path"]});
+            reply(&out, id, serde_json::json!({"status":200}), response.to_string().as_bytes());
+        }).await;
+        let op = serde_json::json!({"op":"capability"});
+        let path = "/relay/account/m/~rgb-test-pc/kasadesk/rgb";
+        assert_eq!(post(addr, path, None, op.clone()).await.0, 401);
+        for account in ["other", "tester"] {
+            let (status, phone) = post(addr, "/relay/login", None, serde_json::json!({
+                "account":account, "password":"correct horse", "kind":"phone"
+            })).await;
+            assert_eq!(status, 200);
+            let token = phone["token"].as_str().unwrap();
+            let (status, result) = post(addr, path, Some(token), op.clone()).await;
+            if account == "other" {
+                assert!(!(200..300).contains(&status));
+                continue;
+            }
+            assert_eq!(result, serde_json::json!({"granted":true,"path":"/kasadesk/rgb"}));
+            let shared = format!("/u/{SLUG}/kasadesk/rgb");
+            for path in [shared.as_str(), "/relay/account/kasadesk/rgb", "/relay/account/m/~absent/kasadesk/rgb"] {
+                assert_ne!(post(addr, path, Some(token), op.clone()).await.1["granted"], true);
+            }
+            post(addr, "/relay/logout", Some(token), serde_json::json!({})).await;
+            assert_eq!(post(addr, path, Some(token), op.clone()).await.0, 401);
+        }
     }
 
     #[tokio::test]

@@ -29,6 +29,7 @@ async fn version_handler() -> impl IntoResponse {
             "kasanet": kasa_device::kasanet::info(),
             // 폰은 이것을 보고서야 답 없는 요청을 같은 표식으로 다시 보낸다(`http/replay.rs`) — 옛 판은 두 번 넣는다.
             "replay": true,
+            "kasadesk_rgb": cfg!(windows),
         })),
     )
 }
