@@ -3394,7 +3394,6 @@ impl GpuRenderer {
             "play" => include_str!("../assets/icons/play.svg"),
             "pause" => include_str!("../assets/icons/pause.svg"),
             "umbrella" => include_str!("../assets/icons/umbrella.svg"),
-            "weather-canopy" => include_str!("../assets/icons/weather-canopy.svg"),
             "weather-cloud" => include_str!("../assets/icons/weather-cloud.svg"),
             "weather-sun" => include_str!("../assets/icons/weather-sun.svg"),
             "weather-wind" => include_str!("../assets/icons/weather-wind.svg"),

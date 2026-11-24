@@ -58,16 +58,14 @@ color_slot!(S_FG, fg, [255, 255, 255, 255]);
 layered_slot!(S_SURFACE, surface, surface, [26, 29, 35, 255]);
 layered_slot!(S_SURFACE_HOVER, surface_hover, surface_hover, [48, 56, 67, 255]);
 layered_slot!(S_SURFACE_ACTIVE, surface_active, surface_active, [60, 70, 84, 255]);
-layered_slot!(S_BORDER, border, border, [80, 92, 110, 110]);
-layered_slot!(S_ACCENT, accent, accent, [90, 140, 230, 255]);
+color_slot!(S_BORDER, border, [80, 92, 110, 110]);
+color_slot!(S_ACCENT, accent, [90, 140, 230, 255]);
 color_slot!(S_CURSOR, cursor, [90, 140, 230, 255]);
-layered_slot!(S_TEXT, text, text, [236, 238, 243, 255]);
+color_slot!(S_TEXT, text, [236, 238, 243, 255]);
 static S_TEXT_DIM: AtomicU32 = AtomicU32::new(pack([160, 166, 176, 255]));
 #[inline]
 pub fn text_dim() -> [u8; 4] {
-    let ink = SETTINGS_LAYER.with(|layer| layer.get()).and_then(|layer| layer.weather)
-        .map_or_else(|| unpack(S_TEXT_DIM.load(Ordering::Relaxed)), |palette| palette.muted);
-    enforce_contrast_at(ink, bg(), 4.5)
+    enforce_contrast_at(unpack(S_TEXT_DIM.load(Ordering::Relaxed)), bg(), 4.5)
 }
 layered_slot!(S_TEXT_MUTE, text_mute, text_mute, [120, 126, 138, 255]);
 color_slot!(S_SUCCESS, success, [63, 185, 80, 255]);
@@ -1591,47 +1589,19 @@ pub(crate) fn settings_body() -> [u8; 4] {
     current_settings_plates()[2]
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct WeatherPalette {
-    pub canvas: [u8; 4],
-    pub panel: [u8; 4],
-    pub sky: [u8; 4],
-    pub ink: [u8; 4],
-    pub muted: [u8; 4],
-    pub accent: [u8; 4],
-    pub umbrella: [u8; 4],
-    pub line: [u8; 4],
-}
-
-pub(crate) fn weather_settings_palette() -> WeatherPalette {
-    if is_light(unpack(S_BG.load(Ordering::Relaxed))) {
-        WeatherPalette {
-            canvas: [234, 244, 242, 255], panel: [248, 252, 247, 255], sky: [220, 239, 235, 255],
-            ink: [22, 53, 59, 255], muted: [71, 99, 103, 255], accent: [0, 105, 93, 255],
-            umbrella: [134, 80, 0, 255], line: [178, 206, 200, 255],
-        }
+pub(crate) fn weather_settings_plates() -> [[u8; 4]; 3] {
+    let regular = current_settings_plates();
+    let weather = if is_light(regular[2]) {
+        [[228, 239, 250, 255], [234, 242, 252, 255], [243, 248, 254, 255]]
     } else {
-        WeatherPalette {
-            canvas: [14, 32, 41, 255], panel: [23, 46, 55, 255], sky: [16, 40, 49, 255],
-            ink: [241, 245, 239, 255], muted: [175, 203, 204, 255], accent: [121, 224, 206, 255],
-            umbrella: [246, 198, 119, 255], line: [50, 83, 91, 255],
-        }
-    }
-}
-
-impl WeatherPalette {
-    pub(crate) fn switch_track(self) -> [u8; 4] {
-        if is_light(self.canvas) { self.accent } else { lerp(self.canvas, self.accent, 0.60) }
-    }
+        [[12, 20, 34, 255], [17, 29, 47, 255], [20, 35, 56, 255]]
+    };
+    std::array::from_fn(|i| lerp(regular[i], weather[i], 0.82))
 }
 
 #[derive(Clone, Copy)]
 struct SettingsLayerColors {
     bg: [u8; 4],
-    text: [u8; 4],
-    border: [u8; 4],
-    accent: [u8; 4],
-    weather: Option<WeatherPalette>,
     surface: [u8; 4],
     surface_hover: [u8; 4],
     surface_active: [u8; 4],
@@ -1648,10 +1618,6 @@ fn settings_layer_colors(base: [u8; 4], ink: [u8; 4], mute: [u8; 4]) -> Settings
         if is_light(base) { (0.04, 0.07, 0.12) } else { (0.07, 0.12, 0.18) };
     SettingsLayerColors {
         bg: base,
-        text: ink,
-        border: unpack(S_BORDER.load(Ordering::Relaxed)),
-        accent: unpack(S_ACCENT.load(Ordering::Relaxed)),
-        weather: None,
         surface: lerp(base, ink, rest),
         surface_hover: lerp(base, ink, hover),
         surface_active: lerp(base, ink, active),
@@ -1673,19 +1639,7 @@ impl Drop for SettingsLayer {
 }
 
 pub(crate) fn settings_layer(base: [u8; 4]) -> SettingsLayer {
-    if let Some(palette) = SETTINGS_LAYER.with(|layer| layer.get()).and_then(|layer| layer.weather) {
-        return weather_settings_layer(base, palette);
-    }
-    let colors = settings_layer_colors(base, unpack(S_TEXT.load(Ordering::Relaxed)),
-        unpack(S_TEXT_MUTE.load(Ordering::Relaxed)));
-    SettingsLayer(SETTINGS_LAYER.with(|layer| layer.replace(Some(colors))))
-}
-
-pub(crate) fn weather_settings_layer(base: [u8; 4], palette: WeatherPalette) -> SettingsLayer {
-    let mut colors = settings_layer_colors(base, palette.ink, palette.muted);
-    colors.accent = palette.accent;
-    colors.border = palette.line;
-    colors.weather = Some(palette);
+    let colors = settings_layer_colors(base, text(), unpack(S_TEXT_MUTE.load(Ordering::Relaxed)));
     SettingsLayer(SETTINGS_LAYER.with(|layer| layer.replace(Some(colors))))
 }
 
