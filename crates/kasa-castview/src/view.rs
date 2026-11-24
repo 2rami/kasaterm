@@ -349,6 +349,7 @@ impl ScreenView {
                 ("한/영", "Lang1", 0),
                 ("창 전환 (Alt+Tab)", "Tab", 4),
                 ("작업 관리자 (Ctrl+Shift+Esc)", "Escape", 2 | 1),
+                ("프린트 스크린 (PrtSc)", "PrintScreen", 0),
             ]
         } else {
             &[("Spotlight (⌘ Space)", "Space", 8), ("앱 전환 (⌘ Tab)", "Tab", 8), ("강제 종료 (⌥⌘ Esc)", "Escape", 4 | 8)]

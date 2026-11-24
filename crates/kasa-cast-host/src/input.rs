@@ -92,6 +92,8 @@ fn key_of(code: &str) -> Option<(u16, u16, bool)> {
         "Backquote" => (50, 0xC0, false),
         "Insert" => (114, 0x2D, true),
         "ContextMenu" => (110, 0x5D, true),
+        // 맥 쪽은 F13 자리다 — 맥은 PC 키보드의 PrtSc 를 F13 으로 받는다.
+        "PrintScreen" => (105, 0x2C, true),
         // 한/영·한자(웹 이름은 Lang1·Lang2). 맥 쪽은 표준 대응대로 가나·영숫 키다.
         "Lang1" => (104, 0x15, false),
         "Lang2" => (102, 0x19, false),
@@ -407,7 +409,8 @@ mod os {
     /// VK 와 스캔 코드를 같이 실은 키 — 게임처럼 키보드를 원시 입력으로 읽는 앱은 VK 가 아니라 스캔 코드를 보고, 0 이면
     /// 아무 키도 안 눌린 것으로 친다(마우스는 먹는데 키만 안 먹던 까닭).
     fn press(vk: u16, extended: bool, up: bool) -> INPUT {
-        let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) } as u16;
+        // PrtSc 의 VK→스캔은 Alt+PrtSc 의 SysRq(0x54)로 나온다. 실제 키처럼 확장 0x37 을 실어야 게임이 PrtSc 로 받는다.
+        let scan = if vk == 0x2C { 0x37 } else { (unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) }) as u16 };
         let mut flags = if extended { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) };
         if up {
             flags |= KEYEVENTF_KEYUP;
@@ -530,6 +533,7 @@ mod tests {
         assert_eq!(key_of("AltLeft"), Some((58, 0x12, false)), "⌘ 혼자 누르기 — Windows Alt");
         assert_eq!(key_of("ArrowUp"), Some((126, 0x26, true)));
         assert_eq!(key_of("Lang1"), Some((104, 0x15, false)), "맥 Caps Lock 이 보내는 Windows 한/영");
+        assert_eq!(key_of("PrintScreen"), Some((105, 0x2C, true)), "키 메뉴·PC 키보드 PrtSc(맥에선 F13)");
         assert_eq!(key_of("Numpad7"), Some((89, 0x67, false)));
         assert_eq!(key_of("NumpadEnter"), Some((76, 0x0D, true)));
         for unknown in ["", "Key", "KeyAA", "Keya", "F13", "F0", "Digit10", "Numpad10", "ShiftLeft", "CapsLock"] {

@@ -285,7 +285,8 @@ impl ScreenView {
         if option || is_modifier(code) {
             return repaint;
         }
-        let name = format!("{code:?}");
+        // 맥은 PC 키보드의 PrtSc 를 F13 으로 받는다(맥 키보드에는 없는 키) — 게임 스크린샷이 PrtSc 만 받는다.
+        let name = if code == KeyCode::F13 { "PrintScreen".to_string() } else { format!("{code:?}") };
         let mods = self.remote_mods(mods);
         if kasa_cast_host::input::known_key(&name) {
             self.key(&name, mods);
