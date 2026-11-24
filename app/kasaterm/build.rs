@@ -50,7 +50,8 @@ fn main() {
 /// 봐도 갈리고, 3300개를 매 빌드 열면 그 값을 못 한다.
 fn assert_assets_are_real() {
     const SAMPLES: &[&str] = &[
-        "assets/students/standing/kasa_tsuyu.png",
+        "assets/students/idle/kasa_tsuyu-0.png",
+        "assets/students/walk/kasa_tsuyu-0.png",
         "assets/students/profile/kasa_tsuyu.png",
         "../../assets/AppIcon.png",
     ];

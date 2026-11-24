@@ -1,9 +1,19 @@
-//! Portraits and standing art shared by native and web clients.
+//! Portraits and sprite frames shared by native and web clients.
 
 struct CharacterArt {
     slug: &'static str,
     portrait: &'static [u8],
-    standing: &'static [u8],
+    idle: &'static [&'static [u8]],
+    walk: &'static [&'static [u8]],
+    wave: &'static [&'static [u8]],
+    cheer: &'static [&'static [u8]],
+    idle_gif: &'static [u8],
+}
+
+macro_rules! frames {
+    ($slug:literal, $motion:literal, $($index:literal),+) => {
+        &[$(include_bytes!(concat!("../../../app/kasaterm/assets/students/", $motion, "/", $slug, "-", $index, ".png"))),+]
+    };
 }
 
 macro_rules! art {
@@ -11,7 +21,11 @@ macro_rules! art {
         &[$(CharacterArt {
             slug: $slug,
             portrait: include_bytes!(concat!("../../../app/kasaterm/assets/students/profile/", $slug, ".png")),
-            standing: include_bytes!(concat!("../../../app/kasaterm/assets/students/standing/", $slug, ".png")),
+            idle: frames!($slug, "idle", 0, 1, 2, 3),
+            walk: frames!($slug, "walk", 0, 1, 2, 3, 4, 5),
+            wave: frames!($slug, "wave", 0, 1, 2, 3),
+            cheer: frames!($slug, "cheer", 0, 1, 2, 3),
+            idle_gif: include_bytes!(concat!("../../../app/kasaterm/assets/students/gif/", $slug, ".gif")),
         }),*]
     };
 }
@@ -53,6 +67,17 @@ pub fn portrait(slug: &str) -> Option<&'static [u8]> {
     CHARACTERS.iter().find(|art| art.slug == slug).map(|art| art.portrait)
 }
 
-pub fn standing(slug: &str) -> Option<&'static [u8]> {
-    CHARACTERS.iter().find(|art| art.slug == slug).map(|art| art.standing)
+pub fn sprite_frames(slug: &str, motion: &str) -> Option<&'static [&'static [u8]]> {
+    let art = CHARACTERS.iter().find(|art| art.slug == slug)?;
+    match motion {
+        "idle" => Some(art.idle),
+        "walk" => Some(art.walk),
+        "wave" => Some(art.wave),
+        "cheer" => Some(art.cheer),
+        _ => None,
+    }
+}
+
+pub fn idle_gif(slug: &str) -> Option<&'static [u8]> {
+    CHARACTERS.iter().find(|art| art.slug == slug).map(|art| art.idle_gif)
 }

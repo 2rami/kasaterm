@@ -544,6 +544,10 @@ export function characterStandingUrl(slug: string, theme?: string): string {
   return `${BASE}/character-sprite?${q}`;
 }
 
+export function characterWalkUrl(slug: string): string {
+  return `${BASE}/term/walk/${encodeURIComponent(slug)}.png`;
+}
+
 export interface RecentSession {
   harness?: Harness;
   id: string;

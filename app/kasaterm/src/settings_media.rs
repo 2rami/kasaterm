@@ -666,7 +666,10 @@ fn load_gif_motion(theme: &str, slug: &str) -> LoadResult {
             return Ok(Some((source, frames)));
         }
     }
-    Ok(None)
+    let Some(gif) = kasa_characters::bundled::idle_gif(slug) else {
+        return Ok(None);
+    };
+    decode_gif_bytes(gif).map(|frames| Some((MediaSource::Bundled, frames)))
 }
 
 fn decode_static_path(
@@ -942,14 +945,14 @@ mod tests {
     }
 
     #[test]
-    fn bundled_portrait_and_standing_art_fit_the_cache_budget() {
+    fn bundled_portrait_and_animations_fit_the_cache_budget() {
         let mut plan = MediaPlan::new();
         plan.include_student_detail("", "kasa_tsuyu");
         let mut cache = SettingsMediaCache::default();
         cache.refresh(&plan);
         assert!(cache.face_status("", "kasa_tsuyu").is_ready());
         assert!(cache.motion_status("", "kasa_tsuyu", "idle").is_ready());
-        assert_eq!(cache.motion_status("", "kasa_tsuyu", "gif"), MediaStatus::Missing);
+        assert!(cache.motion_status("", "kasa_tsuyu", "gif").is_ready());
         assert!(cache.decoded_bytes() <= MAX_CACHE_BYTES);
     }
 

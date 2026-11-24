@@ -2797,7 +2797,7 @@ impl Backend for PtyBackend {
                 let user = user_sprite_layout(slug, m).is_some();
                 let bundled = match *m {
                     "profile" => crate::render::student_profile_png(slug).is_some(),
-                    "gif" => false,
+                    "gif" => kasa_characters::bundled::idle_gif(slug).is_some(),
                     _ => crate::render::student_sprite_png(slug, m).is_some(),
                 };
                 // `none` 은 오류가 아니다 — 번들에 gif 가 없는 캐릭터가 대부분이라,
@@ -6385,7 +6385,9 @@ mod face_png_tests {
         }
         let mut plain = std::io::Cursor::new(Vec::new());
         image::RgbaImage::from_raw(w, h, rgba.clone()).unwrap().write_to(&mut plain, image::ImageFormat::Png).unwrap();
-        assert!(small.len() * 2 < plain.get_ref().len(), "{} vs {}", small.len(), plain.get_ref().len());
+        // Pixel portraits already compress well in RGBA, but the transfer still has a byte budget.
+        assert!(small.len() <= 6 * 1024 && small.len() < plain.get_ref().len(),
+            "{} vs {}", small.len(), plain.get_ref().len());
         let back = image::load_from_memory(&small).unwrap().to_rgba8();
         assert_eq!((back.width(), back.height()), (w, h));
         let (mut diff, mut opaque) = (0u64, 0u64);
@@ -6450,7 +6452,7 @@ pub(crate) fn character_sprite_bytes(
     }
     match motion {
         "profile" => crate::render::student_profile_png(slug).map(<[u8]>::to_vec),
-        "gif" => None,
+        "gif" => kasa_characters::bundled::idle_gif(slug).map(<[u8]>::to_vec),
         _ => crate::render::student_sprite_png(slug, motion)
             .and_then(|frames| frames.get(frame).copied())
             .map(<[u8]>::to_vec),
@@ -6484,7 +6486,7 @@ pub(crate) fn character_sprite_bytes_in_theme(
     }
     match motion {
         "profile" => crate::render::student_profile_png(slug).map(<[u8]>::to_vec),
-        "gif" => None,
+        "gif" => kasa_characters::bundled::idle_gif(slug).map(<[u8]>::to_vec),
         _ => crate::render::student_sprite_png(slug, motion)
             .and_then(|frames| frames.get(frame).copied())
             .map(<[u8]>::to_vec),

@@ -194,12 +194,14 @@ canvas { image-rendering: pixelated; }
   html, body { overscroll-behavior: none; }
 }
 
-
 @media (prefers-reduced-motion: no-preference) {
-  .kasa-standing-walk { animation: kasa-standing-step .55s ease-in-out infinite alternate; }
+  .kasa-walk-sprite {
+    animation-name: kasa-walk-frames;
+    animation-iteration-count: infinite;
+  }
 }
 
-@keyframes kasa-standing-step {
-  from { translate: 0 0; }
-  to { translate: 0 -2px; }
+@keyframes kasa-walk-frames {
+  from { background-position-x: 0; }
+  to { background-position-x: var(--kasa-walk-shift); }
 }

@@ -218,6 +218,7 @@ async fn term_walk(
             (header::CONTENT_TYPE, "image/png".to_string()),
             // 테마를 갈아입으면 같은 주소가 다른 학생 그림이 된다 — 얼굴의 디스크 그림과 같은 짧은 캐시.
             (header::CACHE_CONTROL, "public, max-age=60".to_string()),
+            (header::ACCESS_CONTROL_EXPOSE_HEADERS, "x-kasa-walk-frames, x-kasa-walk-ms".to_string()),
             (axum::http::HeaderName::from_static("x-kasa-walk-frames"), frames.to_string()),
             (axum::http::HeaderName::from_static("x-kasa-walk-ms"), frame_ms.to_string()),
         ],

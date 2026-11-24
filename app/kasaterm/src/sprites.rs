@@ -247,12 +247,8 @@ pub(crate) fn sprite_key_prefix(motion: &str) -> &'static str {
     }
 }
 
-/// Keep a four-slot idle export for tools that consume the existing frame protocol.
-pub(crate) fn student_sprite_png(slug: &str, motion: &str) -> Option<[&'static [u8]; STUDENT_IDLE_FRAMES]> {
-    if motion != "idle" {
-        return None;
-    }
-    Some([kasa_characters::bundled::standing(slug)?; STUDENT_IDLE_FRAMES])
+pub(crate) fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8]]> {
+    kasa_characters::bundled::sprite_frames(slug, motion)
 }
 
 /// 지금 쓰는 학생 그림을 전부 파일로 꺼낸다(테마 복제용). 쓴 파일 수를 돌려준다.
@@ -298,13 +294,16 @@ pub(crate) fn export_student_sprites(dir: &std::path::Path) -> std::io::Result<u
             for i in 0..motion_frame_count(motion) {
                 let rels =
                     [sprite_rel(slug, motion, i, true), sprite_rel(slug, motion, i, false)];
-                if copy(rels, frames.as_ref().and_then(|f| f.get(i).copied()))? {
+                if copy(rels, frames.and_then(|f| f.get(i).copied()))? {
                     n += 1;
                 }
             }
         }
         let rels = [profile_rel(slug, true), profile_rel(slug, false)];
         if copy(rels, student_profile_png(slug))? {
+            n += 1;
+        }
+        if copy([gif_rel(slug), gif_rel(slug)], kasa_characters::bundled::idle_gif(slug))? {
             n += 1;
         }
     }
@@ -392,7 +391,7 @@ pub(crate) const SPRITE_README: &str = r#"# 학생 그림 폴더
 /// 존재만 본다. 디코딩까지 되는지는 안 본다 — 그건 번들 테스트가 잡는 문제고,
 /// 여기서 매 프레임 디코딩할 수는 없다.
 pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
-    if !theme::character_appearance() {
+    if !theme::character_appearance() || kasa_characters::character::retired_asset_slug(slug) {
         return false;
     }
     if slug.starts_with("mirror-") {
@@ -770,11 +769,14 @@ pub(crate) fn gif_rel(slug: &str) -> String {
 
 /// 지금 쓰는 대기 gif 의 바이트 — 고른 테마가 활성을, 활성이 번들을 덮는다.
 pub(crate) fn student_idle_gif_bytes(slug: &str) -> Option<Vec<u8>> {
+    if kasa_characters::character::retired_asset_slug(slug) {
+        return None;
+    }
     if let Some(bytes) = crate::mirror_theme::asset(slug, "gif", 0) { return Some(bytes.to_vec()); }
     selected_asset(
         picked_theme_sprite_dir(slug),
         |d| std::fs::read(d.join(gif_rel(slug))).ok(),
-        || None,
+        || kasa_characters::bundled::idle_gif(slug).map(<[u8]>::to_vec),
         crate::socket::students_dir().as_deref(),
         other_theme_sprite_dirs(),
     )
@@ -1229,21 +1231,21 @@ mod student_asset_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// 번들 내장 프레임이 **모든 학생 × 모든 모션**에서 실제로 디코딩되는지.
-    ///
-    /// `student_sprite_frames` 는 프레임 크기가 하나라도 다르거나 PNG 하나가
-    /// 안 풀리면 그 모션을 통째로 `None` 으로 돌려주고, 호출측은 업로드를 건너뛴
-    /// 뒤 없는 키로 `queue_image_above` 를 부른다 — **아무것도 안 그려지고 에러도
-    /// 없다**. 그래서 "프사(정적 로더)는 뜨는데 애니만 안 뜬다" 가 되면 원인을
+    /// A partially decoded motion would suppress the entire sprite on screen.
     #[test]
-    fn bundled_roster_has_portraits_and_standing_art() {
+    fn bundled_roster_has_portraits_and_complete_motion_frames() {
         assert_eq!(crate::theme::CHARACTER_SLUGS.len(), 30);
         for (_, slug) in crate::theme::CHARACTER_SLUGS {
             let portrait = image::load_from_memory(student_profile_png(slug).unwrap()).unwrap();
             assert_eq!((portrait.width(), portrait.height()), (160, 160), "{slug}");
-            let standing = student_sprite_frames(slug, "idle").unwrap();
-            assert_eq!(standing.len(), STUDENT_IDLE_FRAMES, "{slug}");
-            assert!(standing[0].1 > 0 && standing[0].2 > 0, "{slug}");
+            for motion in ["idle", "walk", "wave", "cheer"] {
+                let frames = student_sprite_frames(slug, motion).expect(motion);
+                assert_eq!(frames.len(), motion_frame_count(motion), "{slug} {motion}");
+                assert!(frames.iter().all(|(pixels, w, h)| {
+                    *w > 0 && *h > 0 && pixels.chunks_exact(4).any(|pixel| pixel[3] > 128)
+                }), "{slug} {motion}");
+                assert!(frames.windows(2).any(|pair| pair[0].0 != pair[1].0), "{slug} {motion}");
+            }
         }
     }
 
@@ -1404,10 +1406,6 @@ mod student_asset_tests {
 mod sidebar_blink_tests {
     use super::*;
     use crate::screenread::{teammate_sender_accent, teammate_sender_slug};
-
-    // 걷기 스프라이트가 전 학생에게 있는지는 `student_asset_tests` 의
-    // `bundled_sprite_frames_decode_for_every_student_and_motion` 이 이미, 더 깐깐하게
-    // 본다(프레임 수 + RGBA 길이까지). 여기서 또 보지 않는다.
 
     /// 깜빡임은 켜짐·꺼짐이 **둘 다 평평해야** 깜빡임으로 읽힌다. 사인파로 돌아가면
     /// (그게 걷어낸 숨쉬기다) 6px 점에서는 그냥 흐린 점이 된다.
