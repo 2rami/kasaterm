@@ -1469,6 +1469,7 @@ impl App {
                     active: "acct-1".to_string(),
                     autoswitch: true,
                     autoswitch_pct: 85.0,
+                    fine_threshold: true,
                     login: None,
                     sync: None,
                     shared: None,

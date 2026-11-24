@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
 import { postAction } from './api';
 import type { SettingsActionResult } from './api';
@@ -250,6 +250,63 @@ export function TextField({
 }
 
 /// 감소/값/증가 스테퍼 — 네이티브 `stepper_btn` 한 벌.
+export function NumberSlider({
+  label,
+  value,
+  unit,
+  values,
+  disabled,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  unit: string;
+  values: readonly number[];
+  disabled?: boolean;
+  onCommit: (value: number) => Promise<unknown>;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const [draft, setDraft] = useState<number | null>(null);
+  const shown = draft ?? value;
+  const index = values.reduce((best, entry, i) =>
+    Math.abs(entry - shown) < Math.abs(values[best] - shown) ? i : best, 0);
+
+  useEffect(() => {
+    const slider = input.current;
+    if (!slider) return;
+    // React의 onChange는 드래그 중에도 호출되므로 브라우저의 change에서만 저장한다.
+    function commit(event: Event) {
+      const next = values[(event.currentTarget as HTMLInputElement).valueAsNumber];
+      if (next === value) {
+        setDraft(null);
+        return;
+      }
+      setDraft(next);
+      void onCommit(next).finally(() => setDraft(null));
+    }
+    slider.addEventListener('change', commit);
+    return () => slider.removeEventListener('change', commit);
+  }, [onCommit, value, values]);
+
+  return (
+    <div className="flex items-center gap-3 text-[13px] text-[var(--kt-text)]">
+      <input
+        ref={input}
+        type="range"
+        min={0}
+        max={values.length - 1}
+        value={index}
+        aria-label={label}
+        aria-valuetext={`${shown}${unit}`}
+        className="h-9 w-[clamp(110px,18vw,220px)] accent-[var(--kt-accent)] disabled:opacity-40"
+        disabled={disabled}
+        onChange={(event) => setDraft(values[event.currentTarget.valueAsNumber])}
+      />
+      <span className="w-[44px] text-right tabular-nums">{shown}{unit}</span>
+    </div>
+  );
+}
+
 export function Stepper({
   text,
   onStep,

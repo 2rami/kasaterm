@@ -1302,10 +1302,10 @@ impl App {
                 }
             },
             SettingsAction::CursorThickness(px) => {
-                let want = (px as f32).clamp(1.0, 6.0);
-                if (self.cursor_thickness - want).abs() > 0.01 {
-                    self.cursor_thickness = want;
-                    socket::write_setting("cursor_thickness", serde_json::Value::from(px));
+                let want = (px as u32).clamp(*socket::CURSOR_WIDTH_RANGE.start(), *socket::CURSOR_WIDTH_RANGE.end());
+                if (self.cursor_thickness - want as f32).abs() > 0.01 {
+                    self.cursor_thickness = want as f32;
+                    socket::write_setting("cursor_thickness", serde_json::Value::from(want));
                     self.chrome_dirty = true;
                 }
             }
@@ -1959,7 +1959,7 @@ impl App {
             }
             "cursor-thickness" => {
                 let px: u8 = id.parse().map_err(|_| unknown(id))?;
-                if !(1..=4).contains(&px) {
+                if !socket::CURSOR_WIDTH_RANGE.contains(&(px as u32)) {
                     return Err(unknown(id));
                 }
                 self.settings_apply(SettingsAction::CursorThickness(px));
@@ -1983,7 +1983,7 @@ impl App {
             }
             "wheel-gain" => {
                 let x100: u32 = id.parse().map_err(|_| unknown(id))?;
-                if !matches!(x100, 30 | 60 | 100 | 150) {
+                if !socket::WHEEL_SLIDER_RANGE.contains(&x100) {
                     return Err(unknown(id));
                 }
                 self.settings_apply(SettingsAction::WheelPixelGain(x100));
@@ -2456,7 +2456,7 @@ impl App {
             }
             "autoswitch-pct" => {
                 let p: u32 = id.parse().map_err(|_| unknown(id))?;
-                if !socket::ACCOUNT_AUTOSWITCH_LEVELS.contains(&p) {
+                if !socket::ACCOUNT_AUTOSWITCH_RANGE.contains(&p) {
                     return Err(unknown(id));
                 }
                 self.settings_apply(SettingsAction::AccountAutoswitchPct(p));
@@ -2838,6 +2838,7 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         let lid_away = serde_json::json!({"supported": false});
         serde_json::json!({
+            "numeric_sliders": true,
             "lid_away": lid_away,
             "general": {
                 "cwd_mode": self.set_cwd_mode,

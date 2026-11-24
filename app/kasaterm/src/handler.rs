@@ -4632,7 +4632,7 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    if self.native_settings_end_drag() {
+                    if self.native_settings_finish_range() || self.native_settings_end_drag() {
                         window.request_redraw();
                         return;
                     }

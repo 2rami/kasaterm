@@ -28,6 +28,7 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
   bool _busy = false;
   Timer? _refresh;
   String _filter = '';
+  final _sliderDrafts = <String, int>{};
 
   @override
   void initState() {
@@ -142,6 +143,44 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
         : (next) => _apply(action, id: id, label: explicit ? '$next' : null),
   );
 
+  Widget _slider(
+    String title,
+    Object? value,
+    String action,
+    String unit,
+    List<int> available,
+  ) {
+    final saved = (value as num?)?.round() ?? available.first;
+    final current = _sliderDrafts[action] ?? saved;
+    var closest = 0;
+    for (var i = 1; i < available.length; i++) {
+      if ((available[i] - current).abs() < (available[closest] - current).abs()) {
+        closest = i;
+      }
+    }
+    return ListTile(
+      title: Text(title),
+      trailing: Text('$current$unit'),
+      subtitle: Semantics(
+        label: title,
+        child: Slider(
+          value: closest.toDouble(),
+          max: (available.length - 1).toDouble(),
+          divisions: available.length - 1,
+          semanticFormatterCallback: (index) => '${available[index.round()]}$unit',
+          onChanged: _busy
+              ? null
+              : (index) => setState(() => _sliderDrafts[action] = available[index.round()]),
+          onChangeEnd: (index) async {
+            final next = available[index.round()];
+            if (next != saved) await _apply(action, id: '$next');
+            if (mounted) setState(() => _sliderDrafts.remove(action));
+          },
+        ),
+      ),
+    );
+  }
+
   Widget _step(String title, Object? value, String action) => ListTile(
     title: Text(title),
     subtitle: Text('${value ?? ''}'),
@@ -165,6 +204,7 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final v = _values;
+    final fine = v?['numeric_sliders'] == true;
     final g = desktopMap(v?['general']);
     final a = desktopMap(v?['appearance']);
     final c = desktopMap(v?['claude']);
@@ -278,13 +318,14 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
             c['autoswitch'] == true,
             'toggle-account-autoswitch',
           ),
-        if (c.containsKey('autoswitch_pct'))
-          _choice('계정 전환 사용량', c['autoswitch_pct'], 'autoswitch-pct', const [
-            ('80', '80%'),
-            ('85', '85%'),
-            ('90', '90%'),
-            ('95', '95%'),
-          ]),
+        if (c['autoswitch'] == true && c.containsKey('autoswitch_pct'))
+          _slider(
+            '계정 전환 사용량',
+            c['autoswitch_pct'],
+            'autoswitch-pct',
+            '%',
+            fine ? List.generate(21, (i) => i + 80) : const [80, 85, 90, 95, 100],
+          ),
         if (desktopMap(agents['statusline']).containsKey('customized'))
           _toggle(
             '에이전트 상태줄 직접 설정',
@@ -429,11 +470,12 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
             ('corner-marks', '모서리'),
           ]),
         if (g.containsKey('cursor_thickness'))
-          _choice(
+          _slider(
             '커서 굵기',
-            (g['cursor_thickness'] as num?)?.round(),
+            g['cursor_thickness'],
             'cursor-thickness',
-            const [('1', '1px'), ('2', '2px'), ('3', '3px'), ('4', '4px')],
+            'px',
+            fine ? const [1, 2, 3, 4, 5, 6] : const [1, 2, 3, 4],
           ),
         if (g.containsKey('mouse_cursor'))
           _choice('마우스 포인터', g['mouse_cursor'], 'mouse-cursor', const [
@@ -441,12 +483,13 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
             ('ibeam', '글자 선택'),
           ]),
         if (g.containsKey('wheel_gain_x100'))
-          _choice('스크롤 감도', g['wheel_gain_x100'], 'wheel-gain', const [
-            ('30', '0.3배'),
-            ('60', '0.6배'),
-            ('100', '1배'),
-            ('150', '1.5배'),
-          ]),
+          _slider(
+            '스크롤 감도',
+            g['wheel_gain_x100'],
+            'wheel-gain',
+            '%',
+            fine ? List.generate(121, (i) => i + 30) : const [30, 60, 100, 150],
+          ),
       ],
     };
     String rowTitle(Widget row) => switch (row) {

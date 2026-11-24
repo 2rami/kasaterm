@@ -76,10 +76,10 @@ declare global {
 const TABS: Partial<
   Record<CatKey, (v: SettingsValues, reload: () => Promise<void>) => React.ReactNode>
 > = {
-  general: (v, reload) => <GeneralTab data={v.general} reload={reload} />,
+  general: (v, reload) => <GeneralTab data={v.general} fine={v.numeric_sliders} reload={reload} />,
   appearance: (v, reload) => <AppearanceTab data={v.appearance} reload={reload} />,
   shell: (v, reload) => <ShellTab data={v.shell} reload={reload} />,
-  claude: (v, reload) => <ClaudeTab data={v.claude} reload={reload} />,
+  claude: (v, reload) => <ClaudeTab data={v.claude} fine={v.numeric_sliders} reload={reload} />,
   feedback: (v, reload) => <FeedbackTab data={v.feedback} reload={reload} />,
 };
 

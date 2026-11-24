@@ -69,6 +69,7 @@ export type ModelChoice = {
 /// 카테고리마다 하위 객체 하나씩이라 탭이 늘어도 라우트가 늘지 않는다. 값의 정본은
 /// 앱의 메모리다(파일이 아니다) — UI 배율처럼 저장되지 않는 값이 섞여 있다.
 export type SettingsValues = {
+  numeric_sliders?: boolean;
   general: GeneralValues;
   appearance: AppearanceValues;
   shell: { shell: string };

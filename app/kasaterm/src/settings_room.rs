@@ -45,6 +45,7 @@ pub(crate) struct SettingsScene {
     inspected_theme: Option<String>,
     dynamic_at: Option<std::time::Instant>,
     picker_drag: Option<(SettingsAction, crate::native_settings::Rect)>,
+    pub(crate) range_drag: Option<crate::native_settings::RangeDrag>,
     sprite_slot: Option<(String, usize)>,
     field_select_all: bool,
     media: Arc<crate::settings_media::SettingsMediaCache>,
@@ -84,6 +85,7 @@ impl Default for SettingsScene {
             inspected_theme: None,
             dynamic_at: None,
             picker_drag: None,
+            range_drag: None,
             sprite_slot: None,
             field_select_all: false,
             media: Arc::new(crate::settings_media::SettingsMediaCache::default()),
@@ -507,6 +509,7 @@ impl SettingsScene {
         self.inspected_theme = None;
         self.dynamic_at = None;
         self.picker_drag = None;
+        self.range_drag = None;
         self.sprite_slot = None;
         self.field_select_all = false;
         self.media = Arc::new(crate::settings_media::SettingsMediaCache::default());

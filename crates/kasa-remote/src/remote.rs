@@ -2481,6 +2481,7 @@ pub struct RemoteAccounts {
     pub active: String,
     pub autoswitch: bool,
     pub autoswitch_pct: f32,
+    pub fine_threshold: bool,
     /// 진행 중인 로그인 `(슬롯 id, 상태, 실패 이유)`. 상태는 `running` ·
     /// `need_code` · `ok` · `error`.
     pub login: Option<(String, String, Option<String>)>,
@@ -2528,6 +2529,7 @@ pub fn fetch_accounts(base: &str, token: Option<&str>) -> Result<RemoteAccounts>
             .get("autoswitch_pct")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(90.0) as f32,
+        fine_threshold: v["numeric_sliders"].as_bool().unwrap_or(false),
         login,
         sync: c.get("sync").filter(|v| v.is_object()).cloned(),
         shared: c.get("shared").filter(|v| v.is_object()).cloned(),

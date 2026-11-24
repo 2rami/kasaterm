@@ -60,6 +60,49 @@ Map<String, Object?> fixture() => {
 };
 
 void main() {
+  for (final fine in [true, false]) {
+    testWidgets('threshold slider saves once on release (fine: $fine)', (tester) async {
+      tester.view.physicalSize = const Size(320, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final values = <String, dynamic>{'autoswitch': true, 'autoswitch_pct': 90};
+      final posts = <Map<String, dynamic>>[];
+      final server = Server(Uri.parse('https://fixture.test/'), client: MockClient((request) async {
+        if (request.method == 'POST') {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          posts.add(body);
+          values['autoswitch_pct'] = int.parse(body['id'] as String);
+          return reply('{"ok":true}', 200);
+        }
+        return reply(jsonEncode({'numeric_sliders': fine, 'claude': values}), 200);
+      }));
+      addTearDown(server.close);
+      await tester.pumpWidget(MaterialApp(
+        builder: (_, child) => MediaQuery(
+          data: const MediaQueryData(size: Size(320, 844), textScaler: TextScaler.linear(2)),
+          child: child!,
+        ),
+        home: DesktopSettingsScreen(server: server, title: '맥북', machine: '~mac'),
+      ));
+      await tester.pumpAndSettle();
+
+      final slider = find.byType(Slider);
+      final index = fine ? 7.0 : 1.0;
+      final expected = fine ? '87' : '85';
+      expect(tester.widget<Slider>(slider).divisions, fine ? 20 : 4);
+      tester.widget<Slider>(slider).onChanged!(index);
+      await tester.pump();
+      expect(find.text('$expected%'), findsOneWidget);
+      expect(posts, isEmpty);
+
+      tester.widget<Slider>(slider).onChangeEnd!(index);
+      await tester.pumpAndSettle();
+      expect(posts, [{'action': 'autoswitch-pct', 'id': expected}], reason:
+        tester.widgetList<Text>(find.byType(Text)).map((t) => t.data).join(' | '));
+      expect(find.text('$expected%'), findsOneWidget);
+    });
+  }
+
   testWidgets('lid and hotspot switches are independent and update the selected Mac', (tester) async {
     final posts = <Map<String, dynamic>>[];
     final lid = <String, dynamic>{'supported': true, 'on': false, 'minutes': 30,

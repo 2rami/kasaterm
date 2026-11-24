@@ -1,5 +1,6 @@
 import {
   Notice,
+  NumberSlider,
   Row,
   Segmented,
   Stepper,
@@ -35,9 +36,11 @@ const STATUS_BAR_H: [number, number] = [18, 40];
 
 export function GeneralTab({
   data,
+  fine,
   reload,
 }: {
   data: SettingsValues['general'];
+  fine?: boolean;
   reload: () => Promise<void>;
 }) {
   const t = useT();
@@ -45,6 +48,11 @@ export function GeneralTab({
   const { busy, notice, run } = useSettingsAction(reload);
   const cwd = cwdKey(data.cwd_mode);
   const open = openKey(data.file_open_mode);
+
+  const autosave = data.autosave_ms;
+  const delays = [0, 1000, 3000, 10000];
+  const shorter = [...delays].reverse().find((ms) => ms < autosave);
+  const longer = delays.find((ms) => ms > autosave);
 
   return (
     <TabCard>
@@ -162,16 +170,12 @@ export function GeneralTab({
       )}
 
       <Row label={t.general.autosave} desc={[t.general.autosaveHint({ mod: PRIMARY_MOD })]}>
-        <Segmented
-          value={String(data.autosave_ms)}
+        <Stepper
+          text={autosave === 0 ? t.general.autosaveOff : `${autosave / 1000}s`}
           disabled={busy}
-          options={[
-            { key: '0', label: t.general.autosaveOff },
-            { key: '1000', label: '1s' },
-            { key: '3000', label: '3s' },
-            { key: '10000', label: '10s' },
-          ]}
-          onPick={(key) => void run('autosave-delay', { id: key })}
+          atMin={shorter === undefined}
+          atMax={longer === undefined}
+          onStep={(d) => void run('autosave-delay', { id: String(d < 0 ? shorter : longer) })}
         />
       </Row>
 
@@ -210,11 +214,13 @@ export function GeneralTab({
             : t.general.cursorThicknessHint,
         ]}
       >
-        <Segmented
-          value={String(Math.round(data.cursor_thickness))}
+        <NumberSlider
+          label={t.general.cursorThickness}
+          value={Math.round(data.cursor_thickness)}
+          unit="px"
           disabled={busy}
-          options={[1, 2, 3, 4].map((n) => ({ key: String(n), label: `${n}px` }))}
-          onPick={(key) => void run('cursor-thickness', { id: key })}
+          values={fine ? [1, 2, 3, 4, 5, 6] : [1, 2, 3, 4]}
+          onCommit={(px) => run('cursor-thickness', { id: String(px) })}
         />
       </Row>
 
@@ -233,16 +239,13 @@ export function GeneralTab({
       {/* 트랙패드와 고해상도 마우스휠은 같은 델타로 들어와 자동으로 못 가른다 —
           한쪽에 맞추면 다른 쪽이 어긋나므로 고르는 몫을 사람에게 넘긴다. */}
       <Row label={t.general.scroll} desc={[t.general.scrollHint]}>
-        <Segmented
-          value={String(data.wheel_gain_x100)}
+        <NumberSlider
+          label={t.general.scroll}
+          value={data.wheel_gain_x100}
+          unit="%"
           disabled={busy}
-          options={[
-            { key: '30', label: t.general.scrollTrackpad },
-            { key: '60', label: t.general.scrollNormal },
-            { key: '100', label: t.general.scrollMouse },
-            { key: '150', label: t.general.scrollFast },
-          ]}
-          onPick={(key) => void run('wheel-gain', { id: key })}
+          values={fine ? Array.from({ length: 121 }, (_, i) => i + 30) : [30, 60, 100, 150]}
+          onCommit={(gain) => run('wheel-gain', { id: String(gain) })}
         />
       </Row>
     </TabCard>

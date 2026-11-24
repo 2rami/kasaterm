@@ -5984,13 +5984,15 @@ pub fn read_mouse_cursor() -> String {
     }
 }
 
+pub(crate) const CURSOR_WIDTH_RANGE: std::ops::RangeInclusive<u32> = 1..=6;
+
 /// 1~6 으로 조인다. 0 이면 커서가 보이지 않고, 셀 폭(≈8.5px)을 넘기면 bar 가 block
 /// 과 구분이 안 된다 — 어느 쪽도 「고를 수 있는 값」이 아니다.
 pub fn read_cursor_thickness() -> f32 {
     read_settings()
         .get("cursor_thickness")
         .and_then(|x| x.as_f64())
-        .map(|v| (v as f32).clamp(1.0, 6.0))
+        .map(|v| (v as f32).clamp(*CURSOR_WIDTH_RANGE.start() as f32, *CURSOR_WIDTH_RANGE.end() as f32))
         .unwrap_or(2.0)
 }
 
@@ -7250,7 +7252,8 @@ pub fn read_account_autoswitch() -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) const ACCOUNT_AUTOSWITCH_LEVELS: [u32; 5] = [80, 85, 90, 95, 100];
+pub(crate) const ACCOUNT_AUTOSWITCH_RANGE: std::ops::RangeInclusive<u32> = 80..=100;
+pub(crate) const WHEEL_SLIDER_RANGE: std::ops::RangeInclusive<u32> = 30..=150;
 
 pub(crate) fn account_has_capacity(percent: f32, threshold: f32) -> bool {
     percent.is_finite() && percent >= 0.0 && percent < threshold && (1.0..=100.0).contains(&threshold)
@@ -9223,7 +9226,7 @@ mod account_autoswitch_tests {
         let remaining = [81.0, 90.0, 92.0, 100.0, f32::NAN];
         assert_eq!(remaining.into_iter().filter(|pct| account_has_capacity(*pct, 85.0)).collect::<Vec<_>>(), [81.0]);
         assert_eq!(remaining.into_iter().filter(|pct| account_has_capacity(*pct, 100.0)).collect::<Vec<_>>(), [81.0, 90.0, 92.0]);
-        assert!(ACCOUNT_AUTOSWITCH_LEVELS.contains(&100));
+        assert!(ACCOUNT_AUTOSWITCH_RANGE.contains(&100) && ACCOUNT_AUTOSWITCH_RANGE.contains(&87));
         assert!(!account_has_capacity(-1.0, 100.0));
     }
 

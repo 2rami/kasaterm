@@ -140,6 +140,7 @@ pub(crate) struct HomeAccountsView {
     pub(crate) accounts: Arc<Vec<AccountChoice>>,
     pub(crate) autoswitch: bool,
     pub(crate) autoswitch_pct: f32,
+    fine_threshold: bool,
     /// `(슬롯 id, 상태, 실패 이유)` — 상태는 `running`·`need_code`·`ok`·`error`.
     pub(crate) login: Option<(String, String, Option<String>)>,
     /// 아직 한 번도 못 읽었거나 마지막 조회가 실패한 이유.
@@ -610,6 +611,73 @@ pub(crate) enum DropdownId {
     TerminalFont,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RangeSetting {
+    Autoswitch { fine: bool },
+    WheelSpeed,
+    CursorWidth,
+}
+
+impl RangeSetting {
+    fn bounds(self) -> (u32, u32) {
+        match self {
+            Self::Autoswitch { .. } => (
+                *socket::ACCOUNT_AUTOSWITCH_RANGE.start(),
+                *socket::ACCOUNT_AUTOSWITCH_RANGE.end(),
+            ),
+            Self::WheelSpeed => (*socket::WHEEL_SLIDER_RANGE.start(), *socket::WHEEL_SLIDER_RANGE.end()),
+            Self::CursorWidth => (*socket::CURSOR_WIDTH_RANGE.start(), *socket::CURSOR_WIDTH_RANGE.end()),
+        }
+    }
+
+    fn action(self, value: u32) -> SettingsAction {
+        match self {
+            Self::Autoswitch { .. } => SettingsAction::AccountAutoswitchPct(value),
+            Self::WheelSpeed => SettingsAction::WheelPixelGain(value),
+            Self::CursorWidth => SettingsAction::CursorThickness(value as u8),
+        }
+    }
+
+    fn unit(self) -> &'static str {
+        if self == Self::CursorWidth { "px" } else { "%" }
+    }
+
+    fn step(self) -> u32 {
+        if matches!(self, Self::Autoswitch { fine: false }) { 5 } else { 1 }
+    }
+
+    fn adjacent(self, value: u32, increase: bool) -> u32 {
+        let (min, max) = self.bounds();
+        let step = self.step();
+        let offset = value.saturating_sub(min);
+        if increase {
+            if value < min { min } else { (min + (offset / step + 1) * step).min(max) }
+        } else {
+            (min + offset.saturating_sub(1) / step * step).min(max)
+        }
+    }
+
+    fn value_at(self, rect: Rect, x: f32) -> u32 {
+        let (start, span) = range_track(rect);
+        let fraction = ((x - start) / span.max(1.0)).clamp(0.0, 1.0);
+        let (min, max) = self.bounds();
+        let step = self.step();
+        min + (fraction * ((max - min) / step) as f32).round() as u32 * step
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RangeDrag {
+    setting: RangeSetting,
+    rect: Rect,
+    initial: u32,
+    value: u32,
+}
+
+fn range_track(rect: Rect) -> (f32, f32) {
+    (rect.0 + 8.0, (rect.2 - 16.0).max(0.0))
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Target {
     ClearSearch,
@@ -623,6 +691,7 @@ pub(crate) enum Target {
     /// 펼친 선택 상자 바깥 — 누르면 닫기만 한다.
     DropdownDismiss,
     Setting(SettingsAction),
+    Range(RangeSetting, u32),
     Focus(SettingsInput),
     Paste(SettingsInput),
     AccountUsage(String),
@@ -640,6 +709,7 @@ pub(crate) struct Hit {
 
 pub(crate) fn same_keyboard_target(a: &Target, b: &Target) -> bool {
     match (a, b) {
+        (Target::Range(a, _), Target::Range(b, _)) => a == b,
         (Target::Setting(SettingsAction::AgentStatusline(a, _)), Target::Setting(SettingsAction::AgentStatusline(b, _))) => a == b,
         (Target::Setting(SettingsAction::AgentStatuslineCustom(_)), Target::Setting(SettingsAction::AgentStatuslineCustom(_))) => true,
         (Target::Setting(SettingsAction::CharacterPick(at, an, _)), Target::Setting(SettingsAction::CharacterPick(bt, bn, _))) => at == bt && an == bn,
@@ -648,9 +718,17 @@ pub(crate) fn same_keyboard_target(a: &Target, b: &Target) -> bool {
 }
 
 pub(crate) fn same_stepper_target(a: &Target, b: &Target) -> bool {
+    use crate::weather::model::Change;
+    use SettingsAction::*;
     match (a, b) {
-        (Target::Setting(SettingsAction::StatusBarH(_)), Target::Setting(SettingsAction::StatusBarH(_)))
-        | (Target::Setting(SettingsAction::AccountAutoswitchPct(_)), Target::Setting(SettingsAction::AccountAutoswitchPct(_))) => true,
+        (Target::Setting(StatusBarH(_)), Target::Setting(StatusBarH(_)))
+        | (Target::Setting(AutosaveDelay(_)), Target::Setting(AutosaveDelay(_)))
+        | (Target::Setting(MinContrast(_)), Target::Setting(MinContrast(_)))
+        | (Target::Setting(LidAwayMinutes(_)), Target::Setting(LidAwayMinutes(_)))
+        | (Target::Setting(DiskWarnGib(_)), Target::Setting(DiskWarnGib(_)))
+        | (Target::Setting(DiskBuildCapGib(_)), Target::Setting(DiskBuildCapGib(_)))
+        | (Target::Setting(Weather(Change::Amount(_))), Target::Setting(Weather(Change::Amount(_)))) => true,
+        (Target::Setting(Weather(Change::Status(a, _))), Target::Setting(Weather(Change::Status(b, _)))) => a == b,
         _ => false,
     }
 }
@@ -771,6 +849,7 @@ pub(crate) struct Snapshot {
     pub(crate) cat: SettingsCat,
     pub(crate) keyboard_focus: Option<Target>,
     pub(crate) keyboard_anchor: Option<Rect>,
+    pub(crate) range_drag: Option<RangeDrag>,
     pub(crate) cursor: (f32, f32),
     pub(crate) scroll: f32,
     pub(crate) navigation_scroll: f32,
@@ -1023,6 +1102,7 @@ impl App {
             cat: scene.category(),
             keyboard_focus: scene.keyboard_focus().cloned(),
             keyboard_anchor: scene.keyboard_anchor(),
+            range_drag: scene.range_drag,
             cursor: self.cursor_px,
             scroll: scene.scroll(),
             navigation_scroll: scene.navigation_scroll(),
@@ -1070,7 +1150,8 @@ impl App {
             tabs_on_top: self.tabs_on_top,
             pane_header_bar: crate::PANE_HEADER_BAR.load(std::sync::atomic::Ordering::Relaxed),
             cursor_shape: self.cursor_shape,
-            cursor_thickness: self.cursor_thickness,
+            cursor_thickness: scene.range_drag.filter(|drag| drag.setting == RangeSetting::CursorWidth)
+                .map_or(self.cursor_thickness, |drag| drag.value as f32),
             cursor_color,
             mouse_cursor: self.mouse_cursor.clone(),
             statusbar_order: self.set_statusbar.order.clone(),
@@ -1227,6 +1308,16 @@ impl App {
                 self.settings_scene.set_category(cat);
                 self.refresh_native_settings_media_cache();
             }
+            Some(Target::Range(setting, initial)) => {
+                self.native_settings_blur();
+                if let Some(hit) = hit {
+                    let rect = hit.layout_rect;
+                    self.settings_scene.range_drag = Some(RangeDrag {
+                        setting, rect, initial, value: setting.value_at(rect, x),
+                    });
+                    self.settings_scene.set_keyboard_focus(Some(Target::Range(setting, initial)));
+                }
+            }
             Some(Target::Setting(action)) => {
                 if let SettingsAction::PickerSV(field) | SettingsAction::PickerHue(field) = action {
                     if self.settings_input != Some(field) { self.native_settings_focus(field); }
@@ -1284,6 +1375,12 @@ impl App {
     }
 
     pub(crate) fn native_settings_drag_move(&mut self, x: f32, y: f32) -> bool {
+        if let Some(drag) = self.settings_scene.range_drag.as_mut() {
+            drag.value = drag.setting.value_at(drag.rect, x);
+            self.chrome_dirty = true;
+            if let Some(window) = &self.window { window.request_redraw(); }
+            return true;
+        }
         let Some((action, rect)) = self.settings_scene.picker_drag() else { return false };
         self.settings_scene.mark_field_dirty();
         self.picker_preview(&action, rect, (x, y));
@@ -1294,7 +1391,18 @@ impl App {
         true
     }
 
+    pub(crate) fn native_settings_finish_range(&mut self) -> bool {
+        let Some(drag) = self.settings_scene.range_drag.take() else { return false };
+        if drag.value != drag.initial {
+            self.native_settings_apply(drag.setting.action(drag.value));
+            self.settings_scene.set_keyboard_focus(Some(Target::Range(drag.setting, drag.value)));
+        }
+        self.chrome_dirty = true;
+        true
+    }
+
     pub(crate) fn native_settings_end_drag(&mut self) -> bool {
+        let was_range = self.settings_scene.range_drag.take().is_some();
         let ended = self.settings_scene.end_picker_drag();
         if ended {
             match self.settings_input {
@@ -1302,7 +1410,7 @@ impl App {
                 _ => {}
             }
         }
-        ended
+        ended || was_range
     }
 
     fn native_settings_apply(&mut self, action: SettingsAction) {
@@ -1830,6 +1938,11 @@ impl App {
             NamedKey::Escape => {
                 if repeat { return true; }
                 self.settings_scene.arm_activation_key(key);
+                if self.settings_scene.range_drag.take().is_some() {
+                    self.chrome_dirty = true;
+                    if let Some(window) = &self.window { window.request_redraw(); }
+                    return true;
+                }
                 if self.settings_scene.dropdown().is_some() {
                     self.settings_scene.close_dropdown();
                 } else if self.settings_input.is_some() {
@@ -1850,6 +1963,7 @@ impl App {
 
     fn native_settings_activate_focus(&mut self) {
         if let Some(hit) = self.settings_scene.keyboard_hit().cloned() {
+            if matches!(hit.target, Target::Range(..)) { return; }
             let dropdown = self.settings_scene.dropdown();
             self.native_settings_click(hit.rect.0 + hit.rect.2 / 2.0, hit.rect.1 + hit.rect.3 / 2.0);
             if self.settings_room_active() {
@@ -1900,6 +2014,30 @@ impl App {
             return true;
         }
         let modified = self.host_mod() || self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key();
+        if !modified && self.settings_input.is_none() && self.settings_scene.dropdown().is_none()
+            && self.settings_scene.range_drag.is_none()
+        {
+            if let Some(Target::Range(setting, value)) = self.settings_scene.keyboard_hit().map(|hit| hit.target.clone()) {
+                let (min, max) = setting.bounds();
+                let next = match event.logical_key {
+                    Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowDown) => setting.adjacent(value, false),
+                    Key::Named(NamedKey::ArrowRight | NamedKey::ArrowUp) => setting.adjacent(value, true),
+                    Key::Named(NamedKey::Home) => min,
+                    Key::Named(NamedKey::End) => max,
+                    _ => value,
+                };
+                if matches!(event.logical_key, Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight
+                    | NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::Home | NamedKey::End)) {
+                    if next != value {
+                        self.native_settings_apply(setting.action(next));
+                        self.settings_scene.set_keyboard_focus(Some(Target::Range(setting, next)));
+                    }
+                    self.chrome_dirty = true;
+                    if let Some(window) = &self.window { window.request_redraw(); }
+                    return true;
+                }
+            }
+        }
         if let Key::Named(key) = event.logical_key {
             if matches!(key, NamedKey::Tab | NamedKey::PageUp | NamedKey::PageDown | NamedKey::Enter | NamedKey::Space | NamedKey::Escape) {
                 if modified { return false; }
@@ -3217,38 +3355,14 @@ fn paint_general(
         "자주 바꾸지 않는 입력 감각만 모았습니다",
     );
     *y += 54.0;
-    let autosave = [("끔", 0), ("1초", 1000), ("3초", 3000), ("10초", 10000)];
-    let autosave_cells: Vec<(&str, bool, SettingsAction)> = autosave
-        .iter()
-        .map(|(label, ms)| {
-            (
-                *label,
-                s.autosave_ms == *ms,
-                SettingsAction::AutosaveDelay(*ms),
-            )
-        })
-        .collect();
-    seg_row(g, s, hits, x, y, w, "편집기 자동 저장", &autosave_cells);
-    let gain = (s.wheel_gain * 100.0).round() as u32;
-    seg_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "휠 스크롤 속도",
-        &[
-            ("차분하게", gain == 30, SettingsAction::WheelPixelGain(30)),
-            ("보통", gain == 60, SettingsAction::WheelPixelGain(60)),
-            ("빠르게", gain == 100, SettingsAction::WheelPixelGain(100)),
-            (
-                "아주 빠르게",
-                gain == 150,
-                SettingsAction::WheelPixelGain(150),
-            ),
-        ],
-    );
+    let autosave = [(0, "끔"), (1000, "1초"), (3000, "3초"), (10000, "10초")];
+    let autosave_label = autosave.iter().find(|(ms, _)| *ms == s.autosave_ms)
+        .map(|(_, label)| (*label).to_owned())
+        .unwrap_or_else(|| format!("{}ms", s.autosave_ms));
+    ordered_stepper_row(g, s, hits, x, y, w, "편집기 자동 저장", &autosave_label, s.autosave_ms,
+        autosave.into_iter().map(|(ms, _)| (ms, SettingsAction::AutosaveDelay(ms))));
+    range_row(g, s, hits, x, y, w, "휠 스크롤 속도", RangeSetting::WheelSpeed,
+        (s.wheel_gain * 100.0).round() as u32);
 }
 
 fn paint_appearance(
@@ -3387,17 +3501,12 @@ fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<H
     let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
         (preset_label(label), s.shape == *key, SettingsAction::Shape(key))).collect();
     seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
-    let contrast: Vec<(&str, bool, SettingsAction)> = theme::CONTRAST_PRESETS
-        .iter()
-        .map(|(label, value)| {
-            (
-                preset_label(label),
-                (s.min_contrast - *value).abs() < 0.01,
-                SettingsAction::MinContrast(label),
-            )
-        })
-        .collect();
-    seg_row(g, s, hits, x, y, w, "최소 대비", &contrast);
+    let contrasts = theme::CONTRAST_PRESETS;
+    let contrast_label = contrasts.iter().find(|(_, value)| *value == s.min_contrast)
+        .map(|(label, _)| preset_label(label).to_owned())
+        .unwrap_or_else(|| format!("{}:1", s.min_contrast));
+    ordered_stepper_row(g, s, hits, x, y, w, "최소 대비", &contrast_label, s.min_contrast,
+        contrasts.iter().map(|(label, value)| (*value, SettingsAction::MinContrast(label))));
 
     // 한 펼침 안에 열다섯 줄이 이름 없이 이어져 있었다 — 무엇을 바꾸는 줄인지 묶음 이름으로 가른다.
     // 터미널 글꼴은 설치 폴더의 얼굴 이백여 개를 칩으로 깔아 세 화면을 차지했고, 그 끝에
@@ -4187,23 +4296,6 @@ fn paint_cursor(
         );
     }
     *y += 84.0;
-    let thickness: Vec<(&str, bool, SettingsAction)> = [1u8, 2, 3, 4, 6]
-        .iter()
-        .map(|px| {
-            let label = match px {
-                1 => "1px",
-                2 => "2px",
-                3 => "3px",
-                4 => "4px",
-                _ => "6px",
-            };
-            (
-                label,
-                (s.cursor_thickness - *px as f32).abs() < 0.1,
-                SettingsAction::CursorThickness(*px),
-            )
-        })
-        .collect();
     if s.cursor_shape == cursor::CursorShape::Block {
         draw_text(
             g,
@@ -4216,7 +4308,8 @@ fn paint_cursor(
         );
         *y += 42.0;
     } else {
-        seg_row(g, s, hits, x, y, w, "선 굵기", &thickness);
+        range_row(g, s, hits, x, y, w, "선 굵기", RangeSetting::CursorWidth,
+            s.cursor_thickness.round() as u32);
     }
     *y += 12.0;
     seg_row(
@@ -4466,42 +4559,8 @@ fn autoswitch_rows(
         .map_or(s.account_autoswitch_pct, |h| h.autoswitch_pct)
         .round() as u32;
     if switch_on {
-        seg_row(
-            g,
-            s,
-            hits,
-            x,
-            y,
-            w,
-            "전환 기준",
-            &[
-                (
-                    "80%",
-                    switch_pct == 80,
-                    SettingsAction::AccountAutoswitchPct(80),
-                ),
-                (
-                    "85%",
-                    switch_pct == 85,
-                    SettingsAction::AccountAutoswitchPct(85),
-                ),
-                (
-                    "90%",
-                    switch_pct == 90,
-                    SettingsAction::AccountAutoswitchPct(90),
-                ),
-                (
-                    "95%",
-                    switch_pct == 95,
-                    SettingsAction::AccountAutoswitchPct(95),
-                ),
-                (
-                    "100%",
-                    switch_pct == 100,
-                    SettingsAction::AccountAutoswitchPct(100),
-                ),
-            ],
-        );
+        let fine = switch_home.is_none_or(|home| home.fine_threshold);
+        range_row(g, s, hits, x, y, w, "전환 기준", RangeSetting::Autoswitch { fine }, switch_pct);
         plain_hint(g, x, y, w, "지금 쓰는 계정이 기준에 닿으면 목록의 위에서부터 여유 있는 계정을 고릅니다.");
     }
 }
@@ -4668,8 +4727,8 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     use crate::weather::model::{self as wm, Change, Effect, Mood, RainAmount, WeatherTarget};
     let ws = &s.weather;
     let act = SettingsAction::Weather;
-    let amounts = |current: RainAmount, make: &dyn Fn(RainAmount) -> Change| -> Vec<(&'static str, bool, SettingsAction)> {
-        RainAmount::ALL.iter().map(|&a| (a.label(), current == a, act(make(a)))).collect()
+    let amounts = |make: &dyn Fn(RainAmount) -> Change| {
+        RainAmount::ALL.map(|amount| (amount.index(), act(make(amount))))
     };
 
     *y += 6.0;
@@ -4689,7 +4748,8 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     *y += 8.0;
     section_title(g, x, *y, "비", "");
     *y += 54.0;
-    seg_row(g, s, hits, x, y, w, "비 양", &amounts(ws.amount, &|a| Change::Amount(a)));
+    ordered_stepper_row(g, s, hits, x, y, w, "비 양", ws.amount.label(),
+        ws.amount.index(), amounts(&Change::Amount).into_iter());
     let dir = wm::quarters(ws.wind_dir);
     let dir_text = match dir {
         0 => crate::native_strings::text("없음").into_owned(),
@@ -4730,7 +4790,9 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         ws.by_status, act(Change::ByStatus(!ws.by_status)));
     if ws.by_status {
         for m in Mood::ALL {
-            seg_row(g, s, hits, x, y, w, m.label(), &amounts(m.get(ws), &|a| Change::Status(m, a)));
+            let amount = m.get(ws);
+            ordered_stepper_row(g, s, hits, x, y, w, m.label(), amount.label(),
+                amount.index(), amounts(&|a| Change::Status(m, a)).into_iter());
         }
     }
 
@@ -4755,13 +4817,8 @@ fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
     ]);
     if on {
         let cap = lid.minutes;
-        let minutes: Vec<String> = crate::lid_away::MINUTE_CHOICES.iter().map(|m| format!("{m}분")).collect();
-        let cells: Vec<(&str, bool, SettingsAction)> = crate::lid_away::MINUTE_CHOICES
-            .iter()
-            .zip(&minutes)
-            .map(|(m, text)| (text.as_str(), cap == *m, SettingsAction::LidAwayMinutes(*m)))
-            .collect();
-        seg_row(g, s, hits, x, y, w, "덮인 뒤 최대", &cells);
+        ordered_stepper_row(g, s, hits, x, y, w, "덮인 뒤 최대", &format!("{cap}분"), cap,
+            crate::lid_away::MINUTE_CHOICES.into_iter().map(|m| (m, SettingsAction::LidAwayMinutes(m))));
     }
     *y += 6.0;
     for line in wrap_words(g, crate::lid_away::note(on, lid.ready, &lid.status), w, 10.5) {
@@ -4804,26 +4861,18 @@ fn paint_disk_guard(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
     section_title(g, x, *y, "디스크 지키기", "");
     *y += 54.0;
     let disk = &s.disk;
-    let warn: Vec<String> = WARN_CHOICES_GIB.iter().map(|gb| format!("{gb}GB")).collect();
-    let warn_cells: Vec<(&str, bool, SettingsAction)> = WARN_CHOICES_GIB
-        .iter()
-        .zip(&warn)
-        .map(|(gb, text)| (text.as_str(), disk.warn_gib == *gb, SettingsAction::DiskWarnGib(*gb)))
-        .collect();
-    seg_row(g, s, hits, x, y, w, "남은 공간 경고", &warn_cells);
+    let warn = disk.warn_gib;
+    ordered_stepper_row(g, s, hits, x, y, w, "남은 공간 경고", &format!("{warn}GB"), warn,
+        WARN_CHOICES_GIB.into_iter().map(|gb| (gb, SettingsAction::DiskWarnGib(gb))));
     if cfg!(unix) {
         toggle_row_hint(g, s, hits, x, y, w, "빌드 산출물 자동 정리",
             "cargo target·flutter build·Xcode DerivedData 중 30분 넘게 안 쓰고 아무도 열지 않은 것만 지웁니다",
             disk.auto_prune, SettingsAction::DiskAutoPrune(!disk.auto_prune));
     }
     if cfg!(unix) && disk.auto_prune {
-        let cap: Vec<String> = CAP_CHOICES_GIB.iter().map(|gb| format!("{gb}GB")).collect();
-        let cap_cells: Vec<(&str, bool, SettingsAction)> = CAP_CHOICES_GIB
-            .iter()
-            .zip(&cap)
-            .map(|(gb, text)| (text.as_str(), disk.cap_gib == *gb, SettingsAction::DiskBuildCapGib(*gb)))
-            .collect();
-        seg_row(g, s, hits, x, y, w, "빌드 산출물 상한", &cap_cells);
+        let cap = disk.cap_gib;
+        ordered_stepper_row(g, s, hits, x, y, w, "빌드 산출물 상한", &format!("{cap}GB"), cap,
+            CAP_CHOICES_GIB.into_iter().map(|gb| (gb, SettingsAction::DiskBuildCapGib(gb))));
     }
     *y += 6.0;
     for line in wrap_words(g, &disk.note, w, 10.5) {
@@ -5774,6 +5823,7 @@ fn home_accounts_view() -> Option<HomeAccountsView> {
         accounts: Arc::new(rows),
         autoswitch: value.autoswitch,
         autoswitch_pct: value.autoswitch_pct,
+        fine_threshold: value.fine_threshold,
         login: value.login,
         error,
     })
@@ -6826,6 +6876,63 @@ fn paint_dropdown_popup(
     scroll_max
 }
 
+#[allow(clippy::too_many_arguments)]
+fn range_row(
+    g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32,
+    label: &str, setting: RangeSetting, saved_value: u32,
+) {
+    let value = s.range_drag.filter(|drag| drag.setting == setting).map_or(saved_value, |drag| drag.value);
+    let (min, max) = setting.bounds();
+    let control_width = (w * 0.52).clamp(100.0, 370.0).min(w.max(0.0));
+    let value_w = 54.0;
+    flat_row(g, x, *y, w, label, "", (w - control_width - 14.0).max(0.0));
+    let control_x = x + w - control_width;
+    let center = *y + ROW_H * 0.5;
+    let slider = (control_x, center - CTL_H * 0.5, (control_width - value_w).max(0.0), CTL_H);
+    let (start, span) = range_track(slider);
+    let fraction = (value.clamp(min, max) - min) as f32 / (max - min) as f32;
+    let position = start + span * fraction;
+    let accent = theme::accent();
+    round_rect(g, start, center - 2.5, span, 5.0, 2.5, theme::surface_active());
+    round_rect(g, start, center - 2.5, span * fraction, 5.0, 2.5, accent);
+    round_rect(g, position - 6.0, center - 6.0, 12.0, 12.0, 6.0, accent);
+    let shown = format!("{value}{}", setting.unit());
+    let label_rect = (x + w - value_w, center - CTL_H * 0.5, value_w, CTL_H);
+    g.centered_chrome_text(label_rect, &shown, gpu::DrawOpts {
+        font_size: 13.0, color: theme::text(), bold: true, italic: false,
+    });
+    if slider.2 >= 24.0 {
+        register_clipped(g, hits, Target::Range(setting, value), slider, HitCursor::Pointer);
+        g.hover_pointer |= contains(slider, s.cursor);
+    }
+    *y += ROW_H;
+}
+
+fn ordered_stepper_row<T: PartialOrd>(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    label: &str,
+    value_label: &str,
+    current: T,
+    choices: impl Iterator<Item = (T, SettingsAction)>,
+) {
+    let mut minus = None;
+    let mut plus = None;
+    for (value, action) in choices {
+        if value < current {
+            minus = Some(action);
+        } else if value > current {
+            plus = Some(action);
+            break;
+        }
+    }
+    stepper_row(g, s, hits, x, y, w, label, value_label, minus, plus);
+}
+
 fn stepper_row(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -6835,21 +6942,41 @@ fn stepper_row(
     w: f32,
     label: &str,
     value: &str,
-    minus: SettingsAction,
-    plus: SettingsAction,
+    minus: impl Into<Option<SettingsAction>>,
+    plus: impl Into<Option<SettingsAction>>,
 ) {
-    let bw=CTL_H;let vw=48.0;let control_w=bw*2.0+vw;
-    flat_row(g,x,*y,w,label,"",(w-control_w-12.0).max(0.0));
-    let boxr=(x+w-control_w,*y+(ROW_H-CTL_H)/2.0,control_w,CTL_H);
-    crate::native_controls::field(g,boxr,false);
-    for (rect,sign,action) in [((boxr.0,boxr.1,bw,CTL_H),"−",minus),((boxr.0+bw+vw,boxr.1,bw,CTL_H),"+",plus)] {
-        let hover=contains(rect,s.cursor);
-        if hover {round_rect(g,rect.0,rect.1,rect.2,rect.3,ctrl_radius(),theme::surface_hover());}
-        g.centered_chrome_text(rect,sign,gpu::DrawOpts{font_size:13.0,color:theme::text(),bold:false,italic:false});
-        register_clipped(g,hits,Target::Setting(action),rect,HitCursor::Pointer);g.hover_pointer|=hover;
+    let button_w = CTL_H;
+    let value = crate::native_strings::text(value);
+    let value_w = (w * 0.30).clamp(48.0, 90.0);
+    let control_w = button_w * 2.0 + value_w;
+    flat_row(g, x, *y, w, label, "", (w - control_w - 12.0).max(0.0));
+    let boxr = (x + w - control_w, *y + (ROW_H - CTL_H) / 2.0, control_w, CTL_H);
+    crate::native_controls::field(g, boxr, false);
+    for (offset, sign, action) in [
+        (0.0, "−", minus.into()),
+        (button_w + value_w, "+", plus.into()),
+    ] {
+        let rect = (boxr.0 + offset, boxr.1, button_w, CTL_H);
+        let color = if let Some(action) = action {
+            let hover = contains(rect, s.cursor);
+            if hover {
+                round_rect(g, rect.0, rect.1, rect.2, rect.3, ctrl_radius(), theme::surface_hover());
+            }
+            register_clipped(g, hits, Target::Setting(action), rect, HitCursor::Pointer);
+            g.hover_pointer |= hover;
+            theme::text()
+        } else {
+            theme::text_dim()
+        };
+        g.centered_chrome_text(rect, sign, gpu::DrawOpts {
+            font_size: 13.0, color, bold: false, italic: false,
+        });
     }
-    g.centered_chrome_text((boxr.0+bw,boxr.1,vw,CTL_H),value,gpu::DrawOpts{font_size:13.0,color:theme::text(),bold:false,italic:false});
-    *y+=ROW_H;
+    let value = fit(g, &value, value_w - 8.0, 13.0, false);
+    g.centered_chrome_text((boxr.0 + button_w, boxr.1, value_w, CTL_H), &value, gpu::DrawOpts {
+        font_size: 13.0, color: theme::text(), bold: false, italic: false,
+    });
+    *y += ROW_H;
 }
 
 fn text_field_bounds(x: f32, y: f32, w: f32, has_label: bool, multiline: bool) -> Rect {
@@ -7436,6 +7563,21 @@ mod navigation_layout_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threshold_slider_preserves_endpoints_and_older_host_increments() {
+        let fine = RangeSetting::Autoswitch { fine: true };
+        let legacy = RangeSetting::Autoswitch { fine: false };
+        let track = (10.0, 0.0, 216.0, CTL_H);
+        assert_eq!(fine.value_at(track, 0.0), 80);
+        assert_eq!(fine.value_at(track, 88.0), 87);
+        assert_eq!(fine.value_at(track, 260.0), 100);
+        assert_eq!(fine.adjacent(87, true), 88);
+        assert_eq!(legacy.value_at(track, 88.0), 85);
+        assert_eq!(legacy.adjacent(87, true), 90);
+        assert_eq!(legacy.adjacent(87, false), 85);
+        assert!(same_keyboard_target(&Target::Range(fine, 87), &Target::Range(fine, 88)));
+    }
 
     #[test]
     fn helper_text_keeps_words_together_when_they_fit_a_line() {

@@ -3,6 +3,7 @@ import {
   Button,
   MiniButton,
   Notice,
+  NumberSlider,
   Row,
   Section,
   Segmented,
@@ -131,9 +132,11 @@ function AccountCard({
 
 export function ClaudeTab({
   data,
+  fine,
   reload,
 }: {
   data: ClaudeValues;
+  fine?: boolean;
   reload: () => Promise<void>;
 }) {
   const t = useT();
@@ -309,11 +312,13 @@ export function ClaudeTab({
       </Row>
       {data.autoswitch && (
         <Row label={t.claude.switchAt} desc={[t.claude.switchAtHint]}>
-          <Segmented
-            value={String(data.autoswitch_pct)}
+          <NumberSlider
+            label={t.claude.switchAt}
+            value={data.autoswitch_pct}
+            unit="%"
             disabled={busy}
-            options={[80, 85, 90, 95].map((p) => ({ key: String(p), label: `${p}%` }))}
-            onPick={(key) => void run('autoswitch-pct', { id: key })}
+            values={fine ? Array.from({ length: 21 }, (_, i) => i + 80) : [80, 85, 90, 95, 100]}
+            onCommit={(pct) => run('autoswitch-pct', { id: String(pct) })}
           />
         </Row>
       )}
