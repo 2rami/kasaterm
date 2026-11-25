@@ -15,9 +15,8 @@ impl App {
     /// **핀을 세워서** 옮긴다. 안 세우면 claude 가 계속 쏘는 활동 제목이 다음 프레임에
     /// 그대로 덮어, 이름이 한 번 깜빡이고 사라진다.
     ///
-    /// ★ **사람이 정한 이름이 이긴다.** 지금 제목이 우리가 마지막에 심은 값과 다르면
-    /// 그 사이 누군가(`surface.rename`·파일 탭)가 직접 정한 것이라
-    /// 비켜선다. 처음 보는 pane 에 이미 핀이 서 있으면 그것도 남의 것이다.
+    /// ★ **세션 이름이 이긴다.** 에이전트 칸의 이름은 그 하네스의 세션 이름 하나다(2026-11-18). 칸에 앞서 꽂힌
+    /// 카사텀 제목(쪽지 `--title`·옛 판의 개명·복원)이 있어도 덮는다 — 남겨 두면 칸 머리와 입력칸 이름이 갈린다.
     ///
     /// 같은 꼬리에서 **ultracode 상태**도 함께 뽑는다(`ultra_verdict_in`). 두 사실이
     /// 같은 파일의 같은 512KB 에 있어서, 따로 읽으면 같은 바이트를 두 번 읽는다.
@@ -128,46 +127,26 @@ impl App {
             // 꼬리 밖으로 밀려 안 보이는 것은 「이름이 없어졌다」가 아니다 — 대화가
             // 길어지면 옛 스탬프는 512KB 밖으로 나간다. 심어 둔 이름을 걷지 않는다.
             let Some(name) = found else { continue };
-            let known = entry.title.clone();
             drop(seen);
-            if let Some(adopted) = self.adopt_scanned_title(&pane_id, name, known.as_deref()) {
-                session_titles()
-                    .lock()
-                    .unwrap()
-                    .entry(pane_id)
-                    .or_default()
-                    .title = Some(adopted);
-            }
+            self.adopt_scanned_title(&pane_id, name);
         }
         self.sync_codex_titles(&codex_panes);
     }
 
     /// 스캔이 찾은 이름을 pane 제목으로 얹는다. 하네스마다 이름이 적히는 자리는
-    /// 다르지만(claude 는 transcript, codex 는 상태 db) **얹는 규칙은 하나여야 한다**
-    /// — 갈리면 한쪽에서만 사람이 손수 붙인 이름이 덮인다.
-    ///
-    /// 사람이 붙인 이름은 지킨다: 핀이 섰는데 그 값이 우리가 심어 둔 것과 다르면 그건
-    /// 사람 손이다. 반환은 캐시에 적어 둘 이름이고, 지켜야 할 자리면 `None`.
-    pub(super) fn adopt_scanned_title(
-        &mut self,
-        pane_id: &str,
-        name: String,
-        known: Option<&str>,
-    ) -> Option<String> {
+    /// 다르지만(claude 는 transcript, codex 는 상태 db) **얹는 규칙은 하나여야 한다**.
+    /// 핀을 세워 claude 가 계속 쏘는 활동 제목(OSC)이 덮지 못하게 한다.
+    pub(super) fn adopt_scanned_title(&mut self, pane_id: &str, name: String) {
         {
             let mut ws = self.ws.lock().unwrap();
-            let pane = ws.panes.get_mut(pane_id)?;
+            let Some(pane) = ws.panes.get_mut(pane_id) else { return };
             if pane.title.as_deref() == Some(name.as_str()) {
-                return Some(name);
+                return;
             }
-            if pane.title_pinned && pane.title.as_deref() != known {
-                return None;
-            }
-            pane.title = Some(name.clone());
+            pane.title = Some(name);
             pane.title_pinned = true;
         }
         self.chrome_dirty = true;
-        Some(name)
     }
 
     /// codex 자리의 이름표. `/rename` 도 codex 가 스스로 짓는 제목도 상태 db 의
@@ -201,7 +180,7 @@ impl App {
         let names =
             crate::socket::codex_thread_names(&want.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>());
         for (pane_id, sid) in want {
-            let known = {
+            {
                 let mut seen = session_titles().lock().unwrap();
                 let entry = seen.entry(pane_id.clone()).or_default();
                 // pane 이 다른 세션을 물면 기준선을 새로 잡는다 — claude 경로와 같다.
@@ -212,19 +191,11 @@ impl App {
                     };
                 }
                 entry.mtime = mtime;
-                entry.title.clone()
-            };
+            }
             let Some(name) = names.get(&sid) else {
                 continue;
             };
-            if let Some(adopted) = self.adopt_scanned_title(&pane_id, name.clone(), known.as_deref()) {
-                session_titles()
-                    .lock()
-                    .unwrap()
-                    .entry(pane_id)
-                    .or_default()
-                    .title = Some(adopted);
-            }
+            self.adopt_scanned_title(&pane_id, name.clone());
         }
     }
 
@@ -279,8 +250,6 @@ impl App {
 pub(super) struct PaneTranscript {
     /// 이 값이 그대로면 파일을 다시 안 읽는다.
     pub(super) mtime: Option<std::time::SystemTime>,
-    /// 우리가 마지막으로 심은 제목 — 남이 바꿨는지 가르는 기준.
-    pub(super) title: Option<String>,
     /// 이 세션을 처음 봤을 때의 파일 크기. 그 앞의 effort 마커는 지난 실행 것이다.
     pub(super) baseline: Option<u64>,
     /// 기준선 이후 마지막 effort 마커. `None` = 이번 실행 구간엔 마커가 없다.

@@ -619,6 +619,7 @@ impl App {
         }
         // 제목은 Enter **앞에** 맡긴다 — Enter 가 닿자마자 claude 의 제출 훅이 가져가러 온다. 슬래시 명령(`/rename`)은
         // 제출 훅을 안 거쳐, 맡겨 두면 다음 프롬프트까지 남았다가 그 사이 사람이 바꾼 이름을 되돌린다.
+        // 칸 제목은 따로 꽂지 않는다. 훅이 넣은 세션 이름을 꼬리 스캔이 칸 머리로 옮긴다 — 따로 꽂으면 세션 이름과 갈린다.
         let surface = commit.record.address.surface_id.clone();
         if !commit.record.title.is_empty() && !commit.record.body.starts_with('/') {
             session_titles().lock().unwrap().insert(surface.clone(),(commit.record.title.clone(),Instant::now()));
@@ -631,11 +632,6 @@ impl App {
         let (state,reason) = if result.is_ok() { (State::Submitted,"paste and Enter writes succeeded; model read is unconfirmed") }
             else { (State::Uncertain,"Enter write unconfirmed; automatic retry prohibited") };
         finish(&commit.record,state,reason);
-        // 새 일이 닿은 순간 그 창의 「지금 일」이 바뀐다 — 사이드바·창 머리·관측이 모두 창 이름을 읽는다.
-        // claude 자기 세션 이름(`/resume`·agents 목록)은 그 글이 프롬프트로 제출될 때 훅이 맞춘다.
-        if state == State::Submitted && !commit.record.title.is_empty() {
-            let _ = self.proxy.send_event(UserEvent::SocketRename(surface,commit.record.title.clone()));
-        }
     }
 }
 

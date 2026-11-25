@@ -2577,15 +2577,15 @@ impl App {
     /// 띄운다. 종료(×) 버튼과 메뉴는 호버·우클릭에만 나타나 정적 캡처로는
     /// 존재 자체를 확인할 수 없다.
     /// `KASATERM_AUTOTITLESYNC_MS` — claude 안에서 친 `/rename` 이 pane 탭 이름까지
-    /// 닿는지, 그리고 **사람이 붙인 이름을 안 밀어내는지** 한 프레임에 잇달아 잰다.
+    /// 닿는지, 그리고 **앞서 꽂힌 카사텀 제목도 세션 이름이 덮는지** 한 프레임에 잇달아 잰다.
     ///
     /// 사람 손을 못 흉내내는 건 하나뿐이다 — claude 가 transcript 에 남기는
     /// `custom-title` 레코드. 그것만 가짜로 심고 나머지는 제품 경로를 그대로 태운다.
     /// 실제 claude 를 띄워 `/rename` 을 치는 검증은 대화 하나를 실제로 소모하고,
-    /// 정작 갈리는 자리(사람 개명과 겹칠 때)는 손으로 재현하기가 더 어렵다.
+    /// 정작 갈리는 자리(카사텀 제목과 겹칠 때)는 손으로 재현하기가 더 어렵다.
     ///
-    /// 네 걸음이 규칙 전부를 덮는다: 붙는가 · 갱신되는가 · 사람 것을 안 덮는가 ·
-    /// 그 뒤로도 안 덮는가.
+    /// 네 걸음이 규칙 전부를 덮는다: 붙는가 · 갱신되는가 · 꽂힌 카사텀 제목을 덮는가 ·
+    /// 그 뒤로도 따라가는가.
     pub(crate) fn run_pending_autotitlesync(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;
@@ -2609,12 +2609,11 @@ impl App {
         for (step, in_transcript, by_hand) in [
             ("① claude 가 개명", "지어준이름", None),
             ("② claude 가 또 개명", "두번째이름", None),
-            ("③ 사람이 개명", "두번째이름", Some("사람이붙인이름")),
+            ("③ 카사텀 제목이 꽂힘", "두번째이름", Some("쪽지제목")),
             ("④ 그 뒤 claude 가 또", "네번째이름", None),
         ] {
             if let Some(h) = by_hand {
-                // `surface.rename` 이 닿는 자리와 같은 두 칸 — 그 경로를 통째로
-                // 부르지 않는 건 소켓 왕복이 이 하네스의 관심사가 아니어서다.
+                // 옛 판의 쪽지 `--title` 이 꽂던 자리와 같은 두 칸.
                 let mut ws = self.ws.lock().unwrap();
                 if let Some(p) = ws.panes.get_mut(&pid) {
                     p.title = Some(h.to_string());
@@ -2640,7 +2639,7 @@ impl App {
                 "[autotitlesync] {step}  전사본={in_transcript:?} → 제목={title:?} 핀={pinned}"
             );
         }
-        // ⑤ 사람 흔적을 걷으면 다시 claude 쪽을 따라간다. 이 걸음을 마지막에 두는
+        // ⑤ 핀을 걷은 칸도 다시 claude 쪽을 따라간다. 이 걸음을 마지막에 두는
         // 이유는 캡처 때문이다 — `KASATERM_AUTOCAPTURE_MS` 를 뒤에 붙이면 그 이름이
         // **타이틀바에 실제로 그려진 화면**이 찍힌다. 위 네 줄은 값이 맞는지만
         // 말하고, 그 값이 사람 눈에 닿는지는 말해 주지 않는다.
@@ -2661,7 +2660,7 @@ impl App {
                 .and_then(|p| p.title.clone())
                 .unwrap_or_default();
             eprintln!(
-                "[autotitlesync] ⑤ 사람 이름을 걷고  전사본=\"다섯번째이름\" → 제목={title:?}"
+                "[autotitlesync] ⑤ 핀을 걷고  전사본=\"다섯번째이름\" → 제목={title:?}"
             );
         }
     }

@@ -4415,10 +4415,8 @@ impl Backend for PtyBackend {
     }
 
     fn tell_take(&self, surface_id: &str, via: &str) -> Result<Option<serde_json::Value>> {
+        // 도구 훅으로 건넨 쪽지는 프롬프트 제출이 아니라 세션 이름을 바꿀 길이 없다. 칸 제목만 꽂으면 세션 이름과 갈린다.
         let Some(record) = kasa_collab::tell_service::take_for_session(self, surface_id, via)? else { return Ok(None) };
-        if !record.title.is_empty() {
-            let _ = self.proxy.send_event(UserEvent::SocketRename(surface_id.to_owned(), record.title.clone()));
-        }
         kasa_collab::board_service::poke();
         Ok(Some(serde_json::json!({"message_id": record.message_id, "body": record.body})))
     }

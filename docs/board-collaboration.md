@@ -113,7 +113,9 @@ A pane title on an agent pane is that harness's own session name; kasaterm keeps
 pane `rename-window <pane> <title>` types `/rename <title>` through the safe `tell` path (only into an idle, empty
 prompt, so a busy pane gets it after its turn), and the pane title follows once Claude records the name. Codex's rename
 asks for the name in its own prompt, so kasaterm does not type it and a Codex pane refuses the rename; rename it in
-that pane.
+that pane. `tell --title` follows the same rule: a message submitted through the input box hands the title to Claude's
+prompt hook as the session name, and a message delivered through the tool hook mid-turn leaves the name unchanged.
+Neither pins a separate pane title. The pane title follows the session name even over a title pinned by an older build.
 
 `summon --machine` places the shell (`spawn`), types `cd <folder> && <boot>`
 (`send_text`), waits for the row with that `surface_key` to carry a session, then
