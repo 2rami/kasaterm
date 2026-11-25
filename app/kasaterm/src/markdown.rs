@@ -65,6 +65,25 @@ pub(crate) fn resolve_wiki_link(
     (path.is_file() && path.starts_with(&scope)).then_some((path,anchor))
 }
 
+/// 본문의 `[글](대상)` 이 가리키는 로컬 파일과 제목 조각. 상대 경로는 지금 문서의
+/// 폴더 기준이다. 조각을 먼저 떼고 디코딩해야 파일 이름의 `%23` 이 조각으로 읽히지
+/// 않는다. 웹·위키 주소와 다른 스킴은 여기서 다루지 않는다.
+pub(crate) fn resolve_doc_link(
+    current: &std::path::Path,
+    href: &str,
+) -> Option<(std::path::PathBuf, Option<String>)> {
+    if href.len() > 4096 { return None; }
+    let raw = href.strip_prefix("file://").unwrap_or(href);
+    let (target, anchor) = raw.split_once('#').map_or((raw, None), |(target, anchor)| (target, Some(anchor)));
+    let decode = |text: &str| crate::lsp::percent_decode(text).unwrap_or_else(|| text.to_string());
+    let anchor = anchor.map(decode).filter(|anchor| !anchor.is_empty());
+    let path = if target.is_empty() { current.to_path_buf() } else {
+        let target = std::path::PathBuf::from(decode(target));
+        if target.is_absolute() { target } else { current.parent()?.join(target) }
+    };
+    Some((path.canonicalize().ok()?, anchor))
+}
+
 /// Write a text file **atomically** — sibling temp file, fsync, rename.
 ///
 /// `fs::write` truncates the destination first, so anything that interrupts the
@@ -4069,6 +4088,24 @@ mod tests {
             std::os::unix::fs::symlink(base.join("outside.md"),root.join("leak.md")).unwrap();
             assert!(resolve_wiki_link(&current,Some(&root),"wiki:leak").is_none());
         }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn doc_links_resolve_relative_encoded_anchor_and_file_uri() {
+        let base = std::env::temp_dir().join(format!("kasaterm-doclink-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        let current = base.join("docs/index.md");
+        let target = base.join("다른 문서#1.md");
+        std::fs::write(&current,"# 제목").unwrap();
+        std::fs::write(&target,"## 둘째").unwrap();
+        let target = target.canonicalize().unwrap();
+        let encoded = "../%EB%8B%A4%EB%A5%B8%20%EB%AC%B8%EC%84%9C%231.md#%EB%91%98%EC%A7%B8";
+        assert_eq!(resolve_doc_link(&current,encoded),Some((target.clone(),Some("둘째".into()))));
+        assert_eq!(resolve_doc_link(&current,"../다른 문서%231.md"),Some((target.clone(),None)));
+        let current_real = current.canonicalize().unwrap();
+        assert_eq!(resolve_doc_link(&current,&format!("file://{}#제목",current_real.display())),Some((current_real.clone(),Some("제목".into()))));
+        assert_eq!(resolve_doc_link(&current,"#제목"),Some((current_real,Some("제목".into()))));
+        assert_eq!(resolve_doc_link(&current,"missing.md"),None);
         std::fs::remove_dir_all(base).unwrap();
     }
     fn task_pane(text: &str) -> MarkdownPane {

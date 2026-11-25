@@ -226,7 +226,7 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(percent_decode(raw)?))
 }
 
-fn percent_decode(raw: &str) -> Option<String> {
+pub(crate) fn percent_decode(raw: &str) -> Option<String> {
     let b = raw.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;

@@ -371,7 +371,8 @@ function command(name: string, payload?: any) {
       const slug = (text: string) => text.normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, '').trim().replace(/\s+/g, '-');
       const anchor = typeof payload?.anchor === 'string' ? payload.anchor.replace(/^#/, '') : undefined;
       const item = anchor === undefined ? headings()[payload?.index ?? 0] : headings().find(item => item.label === anchor || slug(item.label) === slug(anchor));
-      if (item) { editor.commands.setTextSelection(item.pos + 1); editor.commands.scrollIntoView(); closePanel(); }
+      // ProseMirror 는 포커스 없는 편집기에서 선택 스크롤을 건너뛴다. 다른 문서 링크로 막 연 편집기가 그렇다.
+      if (item) { editor.commands.setTextSelection(item.pos + 1); (editor.view.nodeDOM(item.pos) as HTMLElement | null)?.scrollIntoView({ block: 'start' }); closePanel(); }
       else if (anchor !== undefined) { live.textContent = '문서에서 해당 제목을 찾지 못했어요.'; live.classList.add('visible'); }
       break;
     }
@@ -406,7 +407,8 @@ window.kasatermEditor = {
           if (!slash.hidden) { if (event.key === 'Escape') { dismissTools(); return true; } if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); stepBlockMenu(event.key === 'ArrowDown' ? 1 : -1); updateMenus(); slash.querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest' }); return true; } if (event.key === 'Enter') { event.preventDefault(); runSlash(slashIndex); return true; } }
           return false;
         },
-        handleClick(_view, _pos, event) { if (ownGeneration !== generation) return false; const anchor = (event.target as HTMLElement).closest('a'); if (anchor && (event.metaKey || event.ctrlKey)) { const href = anchor.getAttribute('href') ?? ''; if (/^(https?:|mailto:|wiki:)/i.test(href)) send('open-link', false, { href }); event.preventDefault(); return true; } return false; },
+        // 뷰어로 여는 문서라 링크는 그냥 클릭으로 따라간다. Option·Shift 클릭은 링크 글자 안에 커서를 두는 편집 길로 남긴다.
+        handleClick(_view, _pos, event) { if (ownGeneration !== generation || event.altKey || event.shiftKey) return false; const href = (event.target as HTMLElement).closest('a')?.getAttribute('href'); if (!href) return false; send('open-link', false, { href }); event.preventDefault(); return true; },
       }, onUpdate: () => { if (ownGeneration !== generation) return; report(); updateMenus(); }, onSelectionUpdate: () => { if (ownGeneration === generation) updateMenus(); }, onFocus: () => { if (ownGeneration === generation) updateMenus(); },
     });
     editor.view.dom.addEventListener('blur', () => { if (ownGeneration === generation) sizedCaret.hide(); });

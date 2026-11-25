@@ -21,7 +21,7 @@ blockquote { margin:1.2em 0; padding:.2em 1em; border-inline-start:1px solid var
 code { font-family:ui-monospace,'SF Mono',monospace; font-size:.85em; background:var(--soft); padding:.15em .3em; border-radius:4px; }
 pre { background:var(--soft); padding:16px 20px; border-radius:6px; overflow:auto; line-height:1.65; white-space:pre; } pre code { padding:0; background:none; }
 pre[data-preserved-markdown] { white-space:pre-wrap; border:1px solid var(--line); background:transparent; }
-a { color:var(--accent); text-underline-offset:3px; } hr { border:0; border-top:1px solid var(--line); margin:2em 0; }
+a { color:var(--accent); text-underline-offset:3px; cursor:pointer; } hr { border:0; border-top:1px solid var(--line); margin:2em 0; }
 table { border-collapse:collapse; table-layout:fixed; width:100%; margin:1em 0; } th,td { border:1px solid var(--line); vertical-align:top; min-width:60px; padding:8px 12px; position:relative; } th { background:var(--soft); font-weight:600; } .selectedCell:after { content:''; position:absolute; inset:0; background:var(--selection); pointer-events:none; }
 ::selection { background:var(--selection); color:var(--selection-ink); }
 .document-find-match-current { background:var(--accent); color:var(--checkbox-ink); border-radius:2px; }

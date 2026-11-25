@@ -2071,7 +2071,26 @@ impl App {
                 } else { self.set_aux_status(owner,"위키 열기 실패: 연결된 문서를 찾지 못했어요".into()); }
                 return;
             }
-            if let Some(href) = value["href"].as_str().filter(|href| href.starts_with("https://") || href.starts_with("http://") || href.starts_with("mailto:")) { self.open_md_dest(href); }
+            let Some(href) = value["href"].as_str().filter(|href| !href.is_empty()) else { return };
+            if href.starts_with("https://") || href.starts_with("http://") || href.starts_with("mailto:") { self.open_md_dest(href); return; }
+            let current = std::path::PathBuf::from(&self.aux.windows[index].editor.doc.path);
+            let other_scheme = href.split_once(':').is_some_and(|(scheme, _)| scheme.len() > 1 && scheme != "file" && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')));
+            let Some((path, anchor)) = (!other_scheme).then(|| crate::markdown::resolve_doc_link(&current, href)).flatten() else {
+                self.set_aux_status(owner, format!("링크 열기 실패: 연결된 파일을 찾지 못했어요 ({href})"));
+                return;
+            };
+            if current.canonicalize().is_ok_and(|current| current == path) {
+                if let Some(anchor) = anchor { host.command("scrollToHeading", serde_json::json!({"anchor":anchor})); }
+                return;
+            }
+            let markdown = is_markdown_path(&path);
+            let relative = self.aux.vault.as_ref()
+                .filter(|_| self.aux.vault_owner == Some(owner))
+                .and_then(|vault| path.strip_prefix(&vault.root).ok())
+                .map(|path| path.to_string_lossy().to_string());
+            self.request_document_path(index, path, relative);
+            let generation = self.aux.windows[index].document_open_generation;
+            if markdown { self.aux.windows[index].wiki_anchor = anchor.map(|anchor| (generation, anchor)); }
             return;
         }
         if !matches!(kind, "change" | "save" | "flush") { return; }
