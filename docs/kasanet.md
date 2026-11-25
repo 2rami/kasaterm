@@ -17,7 +17,7 @@ STUN 판정으로는 두 기기 모두 목적지 무관 매핑 NAT 라 구멍 �
 ## 부품
 
 - `iroh` 1.x(MIT/Apache, MSRV 1.91) — 기기 주소 = 공개키(EndpointId), 구멍 뚫기·중계 폴백·QUIC 암호화를 한 번에.
-- 중계: **국내 자체 중계**(네이버 클라우드 서울, `relay-kr.debimarlene.com`)와 iroh 기본 공용 중계(n0)를 같이 둔다. 데이터는
+- 중계: **국내 자체 중계**(네이버 클라우드 서울, `relay-kr.kasa.page`)와 iroh 기본 공용 중계(n0)를 같이 둔다. 데이터는
   국내 중계로만 싣고 n0 는 구멍 뚫기 신호에만 쓴다. 내용은 종단 암호화라 중계는 메타데이터만 본다 — 아래 「국내 중계」.
   (Cloudflare 터널 너머 맥미니 중계는 이득이 없어 걷었다 — 아래 「자체 중계」.)
 
@@ -120,8 +120,8 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   끝까지 ssh 에 남았다.
 - **믿는 중계**: 데이터를 실어도 되는 중계는 `RelayTrust` 로 정한다. 기본은 국내 중계(`kasa_net::relay::KASA_RELAY`)이고
   `KASATERM_KASANET_TRUSTED_RELAYS`(쉼표로 URL, `off` 면 없음 — 예전과 같다)로 바꾼다. 그 중계로 가는 동안도 카사넷에 싣는다. 호스트·
-  포트로 맞추므로 끝 점(`host.`)·기본 포트 차이는 같게 본다. 직통↔믿는 중계는 한 QUIC 연결 안의 경로 바꿈이라 흐르던
-  연결을 끊지 않는다.
+  포트로 맞추므로 끝 점(`host.`)·기본 포트 차이는 같게 본다. 서울 중계는 옛 이름과 새 이름을 같은 중계로 신뢰한다.
+  직통↔믿는 중계는 한 QUIC 연결 안의 경로 바꿈이라 흐르던 연결을 끊지 않는다.
 - **상태**: `/machines` 기기 줄에 `path`(`kasanet`·`kasanet-relay`·`ssh`)와 `path_rtt_ms`(QUIC 경로 왕복). 앱 로그에
   길이 바뀔 때마다 `[kasanet] <base> (<id>) 직통 Nms / 자체 중계 Nms / 공용 중계만 / 끊김` 과 못 붙은 까닭.
 - **격리**: 격리 env(`KASATERM_SESSION_FILE`·`_SETTINGS_FILE`·`_COLLAB_ROOT`)가 걸리면 키 경로를 안 줘도 이번 실행 전용
@@ -332,8 +332,9 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - 서버: 네이버 클라우드 한국 VPC `kasanet`(10.0.0.0/16) · 공개 서브넷 `kasanet-pub`(10.0.1.0/24, KR-1) · Micro `mi1-g3`
   (vCPU 1, 1GB, Ubuntu 24.04, 기본 스토리지 10GB) `kasanet-relay-kr`, 공인 IP `211.233.212.132`. 요금: 서버는 2027-05 말까지
   무료(그 뒤 월 10,850원), 공인 IP 월 4,032원.
-- 주소 `https://relay-kr.debimarlene.com/` — Cloudflare DNS A 레코드, **프록시 끔(DNS only)**. 프록시를 켜면 UDP 7842 가 안
-  닿고 TLS 를 Cloudflare 가 끝내 ACME 가 실패한다.
+- 기본 주소는 `https://relay-kr.kasa.page/`다. 설치된 앱은 `https://relay-kr.debimarlene.com/`으로 계속 접속할 수 있다.
+  두 이름의 Cloudflare A 레코드는 `211.233.212.132`에 **프록시 끔(DNS only)**으로 둔다. 프록시를 켜면 UDP 7842와
+  ACME TLS-ALPN-01 챌린지가 중계에 닿지 않는다.
 - ACG `kasanet-relay`: 들어오는 것은 443/tcp(중계·ACME TLS-ALPN-01)·80/tcp(사로잡힌 포털 확인 `/generate_204`)·7842/udp(QUIC
   주소 찾기)·22/tcp 뿐. 나가는 것은 tcp/udp 전체(ACME·apt).
 - SSH: 서버 생성 때 Init Script `kasanet-relay-ssh` 가 사용자 `kasanet` 에 이 맥북 공개 키(`~/.ssh/kasanet_relay.pub`)만 넣고
@@ -341,11 +342,14 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   해독용)는 `~/.ssh/kasanet-relay.pem`(0600) — 쓰지 않지만 콘솔 접속 복구용으로 둔다.
 - 중계: `iroh-relay` 1.3.0(앱의 iroh 와 같은 판, 공식 릴리스 바이너리 — sha256 을 GitHub 자산 digest 와 맞춰 받는다),
   systemd `kasanet-relay`(사용자 `kasanet-relay`, `CAP_NET_BIND_SERVICE` 만), 설정 `/etc/kasanet-relay/relay.toml`, 인증서는
-  Let's Encrypt 를 중계가 직접(TLS-ALPN-01) 받아 `/var/lib/kasanet-relay/certs` 에 두고 스스로 갱신한다. QUIC 주소 찾기를 켠다 —
-  예전 터널 너머 중계는 이것이 없어 직통이 안 섰다. 서버 IPv6 가 꺼져 있어 `0.0.0.0` 으로만 묶는다(`[::]` 면 안 뜬다).
-  같은 날 관문도 이 서버로 옮겨 443 은 nginx 가 SNI 로 가른다 — 중계 https 는 `127.0.0.1:8443`, TLS 는 풀지 않고 넘기므로 중계의
-  ACME 도 그대로다(`docs/seoul-gateway.md`). 그 뒤로 잰 강제 중계 왕복 15ms 로 같다. 2026-10-08 부터 80 도 nginx 가 받는다 —
-  중계 http 는 `127.0.0.1:8480` 으로 물러나고, nginx 가 이 이름만 넘기고 나머지는 https 로 돌린다(`nginx-http.conf`).
+  `[tls].hostname`에 두 이름을 배열로 넣는다. 중계가 TLS-ALPN-01로 두 이름이 들어간 Let's Encrypt 인증서를 발급받아
+  `/var/lib/kasanet-relay/certs`에 두고 자동 갱신한다. HTTPS와 UDP 7842의 QUIC 주소 탐색에 같은 인증서를 쓴다.
+  서버 IPv6 가 꺼져 있어 QUIC은 `0.0.0.0`에 묶는다.
+  nginx는 443에서 두 이름을 SNI로 가려 `127.0.0.1:8442`를 거쳐 중계의 `127.0.0.1:8443`으로 TLS를 그대로 넘긴다
+  (`docs/seoul-gateway.md`). 80에서는 두 이름을 중계의 `127.0.0.1:8480`으로 넘겨 `/generate_204`에 응답하고,
+  나머지 호스트는 HTTPS로 돌린다(`nginx-http.conf`).
+- 새 데스크톱이 국내 중계를 홈 중계로 쓰면 `/version`의 `kasanet.relay`에는 옛 주소를, `kasanet.relay_preferred`에는
+  새 주소를 알린다. 설치된 앱은 기존 필드로 국내 중계를 쓰고, 새 앱은 두 주소를 신뢰하며 새 주소를 우선한다.
 - 운영은 `tools/kasanet-relay/relay.sh`(이 맥에서): `install`(바이너리·설정·systemd), `allow <id> <이름>`·`deny <id>`(허용 목록만
   고친다 — `access.py` 가 접속마다 읽어 중계를 다시 켜지 않는다), `ids`(이 맥·명부 기기·이 맥에 등록한 폰의 id), `status`.
 

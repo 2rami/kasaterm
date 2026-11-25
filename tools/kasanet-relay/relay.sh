@@ -13,7 +13,7 @@
 # 서버는 ssh 별칭 `kasanet-relay`(~/.ssh/config)로 부른다. KASANET_RELAY_SSH 로 바꾼다.
 set -euo pipefail
 
-HOST_NAME="relay-kr.debimarlene.com"
+HOST_NAME="relay-kr.kasa.page"
 VERSION="v1.3.0"
 ASSET="iroh-relay-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 SSH_TARGET="${KASANET_RELAY_SSH:-kasanet-relay}"

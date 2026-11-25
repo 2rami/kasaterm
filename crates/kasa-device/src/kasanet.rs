@@ -181,7 +181,7 @@ pub async fn start(mcp_port: u16) {
         router,
         allow,
         fwd: fwd_server,
-        trust: RelayTrust::new(own_relays.clone()),
+        trust: kasa_net::relay::relay_trust(&own_relays),
         mcp_port,
         handle: tokio::runtime::Handle::current(),
         links: Mutex::new(HashMap::new()),
@@ -325,11 +325,11 @@ pub fn info() -> Option<Value> {
     let addr = n.endpoint.addr();
     let mut v = serde_json::json!({
         "id": addr.id.to_string(),
-        "relay": addr.relay_urls().next().map(|u| u.to_string()),
         "addrs": addr.ip_addrs().map(|a| a.to_string()).collect::<Vec<_>>(),
         "port": n.mcp_port,
         "screen": SCREEN.get().is_some(),
     });
+    peer::publish_relay(&mut v, addr.relay_urls().next());
     if let Some(node) = SCREEN_NODE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         v["screen_node"] = node;
     }

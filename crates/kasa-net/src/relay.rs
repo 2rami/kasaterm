@@ -13,8 +13,11 @@ use std::time::Duration;
 
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher};
 
+use crate::RelayTrust;
+
 /// 네이버 클라우드 서울(KR-2) Micro 서버의 iroh-relay. 운영은 `tools/kasanet-relay/`.
-pub const KASA_RELAY: &str = "https://relay-kr.debimarlene.com/";
+pub const KASA_RELAY: &str = "https://relay-kr.kasa.page/";
+pub(crate) const LEGACY_KASA_RELAY: &str = "https://relay-kr.debimarlene.com/";
 /// 우리 중계 주소(쉼표로)를 바꾼다. 빈 값·`off` 면 우리 중계 없이 n0 만 — 이 중계를 넣기 전과 같다.
 pub const RELAYS_ENV: &str = "KASATERM_KASANET_TRUSTED_RELAYS";
 /// 거절당해 뺀 중계를 다시 넣어 보는 간격 — 허용 목록에 막 든 기기가 앱을 다시 켜지 않아도 옮겨 가게.
@@ -28,6 +31,17 @@ pub fn own_relays() -> Vec<RelayUrl> {
         Ok(v) => parse(&v),
         Err(_) => vec![RelayUrl::from_str(KASA_RELAY).expect("KASA_RELAY")],
     }
+}
+
+/// 배포된 기기가 옛 주소를 알리는 동안 두 이름의 국내 중계 경로에 데이터를 싣는다.
+pub fn relay_trust(own: &[RelayUrl]) -> RelayTrust {
+    let current = RelayUrl::from_str(KASA_RELAY).expect("KASA_RELAY");
+    let legacy = RelayUrl::from_str(LEGACY_KASA_RELAY).expect("LEGACY_KASA_RELAY");
+    let trust = RelayTrust::new(own.iter().cloned());
+    if trust.contains(&current) || trust.contains(&legacy) {
+        trust.set(own.iter().cloned().chain([current, legacy]));
+    }
+    trust
 }
 
 fn parse(v: &str) -> Vec<RelayUrl> {
@@ -128,6 +142,23 @@ mod tests {
             map.get(&two[0]).unwrap().quic.is_some(),
             "QUIC 주소 찾기를 켠다"
         );
+    }
+
+    #[test]
+    fn only_configured_domestic_relay_trusts_both_names() {
+        let current = RelayUrl::from_str(KASA_RELAY).unwrap();
+        let legacy = RelayUrl::from_str(LEGACY_KASA_RELAY).unwrap();
+        let other = RelayUrl::from_str("https://relay.example/").unwrap();
+        let changed_port = RelayUrl::from_str("https://relay-kr.kasa.page:8443/").unwrap();
+        for url in [&current, &legacy] {
+            let trust = relay_trust(std::slice::from_ref(url));
+            assert!(trust.contains(&current) && trust.contains(&legacy));
+            assert!(!trust.contains(&other) && !trust.contains(&changed_port));
+        }
+        for urls in [&[][..], &[other][..], &[changed_port][..]] {
+            let trust = relay_trust(urls);
+            assert!(!trust.contains(&current) && !trust.contains(&legacy));
+        }
     }
 
     #[derive(Debug)]

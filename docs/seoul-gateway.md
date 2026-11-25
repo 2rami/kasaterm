@@ -29,18 +29,18 @@ Nagle 이 프레임마다 상대의 지연 ACK(40ms)를 기다리게 해 요청 
 
 ```
 폰·데스크톱 ── 443 ─► nginx stream(SNI, TLS 안 풂)
-                       ├─ relay-kr.debimarlene.com ─► 127.0.0.1:8442(PROXY 벗김) ─► iroh-relay 127.0.0.1:8443
+                       ├─ relay-kr.kasa.page, relay-kr.debimarlene.com ─► 127.0.0.1:8442(PROXY 벗김) ─► iroh-relay 127.0.0.1:8443
                        └─ 그 밖 ─ PROXY ─► Caddy :9443(TLS, Let's Encrypt TLS-ALPN)
                                            ├─ kasaterm·gw-kr ─┬─ /relay/install/*(latest 빼고) ─► 127.0.0.1:18790 ┐
                                            │                  ├─ /lfs/* ─────────────────────────► 127.0.0.1:18794 ┤ ssh 역터널
                                            │                  └─ 나머지 ─► kasa-relay 127.0.0.1:8790             │ (미니가 건다)
                                            └─ 웹 주소(sites/web.caddy) ─► 역터널 18890·18891·18892 ─ 「웹 주소」
 맥미니: kasa-relay 설치 전용(8790) · mini_lfs(8794) ◄──────────────────────────────────────────────────────────┘
-      ── 80 ──► nginx http: relay-kr 만 iroh-relay 127.0.0.1:8480(사로잡힌 포털), 나머지 301 https
+      ── 80 ──► nginx http: relay-kr 두 이름은 iroh-relay 127.0.0.1:8480(사로잡힌 포털), 나머지 301 https
 ```
 
 - **80/tcp** 는 nginx(`nginx-http.conf`)가 받아 http → https 로 돌린다 — Cloudflare 가장자리가 하던 일. 중계의 사로잡힌 포털
-  확인(`/generate_204`)만 relay-kr 이름으로 iroh-relay(`127.0.0.1:8480`)에 넘긴다. Caddy 는 HTTP 챌린지를 끄고 TLS-ALPN 만 쓴다.
+  확인(`/generate_204`)은 relay-kr 두 이름에서 iroh-relay(`127.0.0.1:8480`)에 넘긴다. Caddy 는 HTTP 챌린지를 끄고 TLS-ALPN 만 쓴다.
 - **실제 접속자 주소**: nginx 가 Caddy 에 PROXY 프로토콜을 싣고, Caddy 가 관문에 `CF-Connecting-IP` 를 덮어써 넘긴다.
   관문은 루프백 상대면 그 머리를 접속자로 본다 — 로그인·OAuth·피드백 횟수 제한이 접속자마다 걸린다. 접속자가 보낸 값은 덮인다.
 - **미니 역터널** 미니 launchd `com.geono.kasa-seoul-tunnel`(`ssh -N -R 127.0.0.1:18790:… -R 127.0.0.1:18794:… -R 127.0.0.1:18722:127.0.0.1:22`).
@@ -269,14 +269,14 @@ DNS 는 같은 Cloudflare 계정에 A `211.233.212.132`(DNS only)로 걸었고, 
 |---|---|---|
 | kasaterm.debimarlene.com | kasaterm.kasa.page | `sites/kasaterm.caddy` 같은 사이트 |
 | gw-kr.debimarlene.com | gw-kr.kasa.page | `sites/gw-kr.caddy` 같은 사이트 |
+| relay-kr.debimarlene.com | relay-kr.kasa.page | nginx SNI → 8442, HTTP → 8480, iroh-relay가 두 이름을 한 인증서로 자동 갱신 |
 | face.debimarlene.com | face.kasa.page | nginx SNI → 19443(kasa-face-edge, 원본은 l2d-style-bench `studio/relay/deploy`) |
 | nacho·mm.debimarlene.com | nacho·mm.2rami.dev | `web.caddy` `tunneled_as` — Host 를 옛 이름으로 바꿔 미니 Caddy 로 |
 | kasabrowser-update-zmpf.debimarlene.com | update.kasa.page | `web.caddy` `tunneled_as` — 문지기 미리보기로 |
 | `<이름>-<4자>.debimarlene.com` | `<이름>-<4자>.2rami.dev` | `https://` 사이트 + 문지기가 앞 이름으로 둘 다 찾는다 |
 | geono.debimarlene.com | geono.2rami.dev | `web.caddy` 같은 사이트 — Host 를 그대로 넘겨 허브가 접속한 이름으로 패스키 RP ID 를 고른다(옛 이름에 등록한 패스키는 옛 이름에서만) |
 
-아직 옛 이름만: relay-kr(iroh-relay 가 자기 인증서를 받아 이름을 더하려면 relay.toml 손질),
-ssh 의 HostKeyAlias(DNS 를 안 본다 — 이름표일 뿐). 앱 기본 주소(카사텀 관문 · LFS · 폰 앱 webcredentials · 카사브라우저 업데이트)는 각 저장소에서 새 판으로.
+SSH의 `HostKeyAlias`는 기존 이름을 유지한다. 앱 기본 주소(카사텀 관문 · LFS · 폰 앱 webcredentials · 카사브라우저 업데이트)는 각 저장소에서 새 판으로.
 
 ### 계정 관문과 OAuth
 

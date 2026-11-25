@@ -122,7 +122,7 @@ fn start(path: &Path) -> i32 {
     *slot = Some(Node {
         rt,
         endpoint,
-        trust: RelayTrust::new(own_relays),
+        trust: relay::relay_trust(&own_relays),
         links: HashMap::new(),
         entrances: HashMap::new(),
     });
