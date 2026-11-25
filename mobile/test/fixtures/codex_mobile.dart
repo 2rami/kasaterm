@@ -57,6 +57,30 @@ const codexApprovalRows = [
   '  Press enter to confirm or esc to cancel',
 ];
 
+// Codex rust-v0.172.0: request_user_input_hidden_options_footer and
+// workspace_member_usage_limit_prompt rendering snapshots (trailing spaces omitted).
+const codexQuestionRows = [
+  '  Question 1/1 (1 unanswered)',
+  '  What would you like to do next?',
+  '',
+  '    2. Run tests      Pick a crate and run its tests.',
+  '    3. Review a diff  Summarize or review current changes.',
+  '  › 4. Refactor       Tighten structure and remove dead code.',
+  '',
+  '  option 4/5 | tab to add notes | enter to submit answer | esc to interrupt',
+];
+
+const codexLimitRows = [
+  '  Usage limit reached',
+  '  Request a limit increase from your owner to continue using codex. Request increase?',
+  '',
+  '',
+  '  1. Yes (y)',
+  '› 2. No (default) (n)',
+  '',
+  '  enter select · esc back',
+];
+
 List<String> codexTerminalRows(CodexScene scene) => switch (scene) {
   CodexScene.approval => codexApprovalRows,
   _ => [

@@ -1475,15 +1475,7 @@ impl App {
                     }
                     match t.term() {
                         Some(term) => {
-                            let signs = crate::agent_state::ScreenSigns {
-                                spinner: crate::screenread::find_claude_spinner(&term.cells).is_some(),
-                                approval: rows_show_approval_prompt(&term.cells).map(|p| match p {
-                                    ApprovalPrompt::Menu => "선택을 기다려요".to_string(),
-                                    ApprovalPrompt::YesNo => "y/n 답을 기다려요".to_string(),
-                                }),
-                                trouble: crate::screenread::find_connection_trouble(&term.cells),
-                            };
-                            screen.insert(key, signs);
+                            screen.insert(key, screen_signs(&term.cells));
                         }
                         None => {
                             screen.remove(&key);
@@ -5104,6 +5096,63 @@ pub(crate) fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<Appro
     None
 }
 
+fn screen_signs(cells: &[Vec<GridCell>]) -> crate::agent_state::ScreenSigns {
+    let prompt = rows_show_approval_prompt(cells);
+    crate::agent_state::ScreenSigns {
+        spinner: crate::screenread::find_claude_spinner(cells).is_some(),
+        approval: prompt.map(|p| match p {
+            ApprovalPrompt::Menu => "선택을 기다려요".to_string(),
+            ApprovalPrompt::YesNo => "y/n 답을 기다려요".to_string(),
+        }),
+        codex_overlay: codex_overlay(cells, prompt),
+        trouble: crate::screenread::find_connection_trouble(cells),
+    }
+}
+
+fn codex_overlay(cells: &[Vec<GridCell>], prompt: Option<ApprovalPrompt>) -> Option<crate::agent_state::CodexOverlay> {
+    use crate::agent_state::CodexOverlay;
+
+    let row_text = |row: &[GridCell]| -> String {
+        row.iter().filter(|cell| cell.ch != '\0').map(|cell| cell.ch).collect()
+    };
+    let last = cells.iter().rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
+    let footer = row_text(&cells[last]);
+    let footer = footer.trim();
+    // The header and footer identify Codex's live overlay even when its options
+    // use the same numbered rows as a tool approval.
+    if footer == "enter select · esc back" && prompt == Some(ApprovalPrompt::Menu) {
+        return cells[..last].iter().rev().take(13).find_map(|row| match row_text(row).trim() {
+            "Usage limit reached" => Some(CodexOverlay::UsageLimit("한도 소진")),
+            "You've reached your workspace credit limit" => Some(CodexOverlay::UsageLimit("잔액 부족")),
+            "Approaching rate limits" | "You’re no longer close to your usage limit." => Some(CodexOverlay::UsageNotice),
+            _ => None,
+        });
+    }
+    let submit_hint = |line: &str| line.contains(" to submit answer") || line.contains(" to submit all");
+    if (footer.ends_with(" to interrupt") || submit_hint(footer))
+        && cells[last.saturating_sub(3)..=last].iter().any(|row| submit_hint(&row_text(row)))
+    {
+        let header = cells[..last].iter().rev().take(60).any(|row| {
+            let line = row_text(row);
+            let Some(progress) = line.trim().strip_prefix("Question ").and_then(|s| s.split_whitespace().next()) else {
+                return false;
+            };
+            progress.split_once('/').is_some_and(|(from, total)| {
+                [from, total].into_iter().all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            })
+        });
+        if header {
+            return Some(CodexOverlay::Question);
+        }
+    }
+    if footer == "Press enter to confirm or esc to go back" && prompt == Some(ApprovalPrompt::Menu)
+        && cells[..last].iter().rev().take(13).any(|row| row_text(row).trim() == "Submit with unanswered questions?")
+    {
+        return Some(CodexOverlay::Question);
+    }
+    None
+}
+
 #[cfg(test)]
 mod working_scan_tests {
     use super::*;
@@ -5465,6 +5514,86 @@ mod working_scan_tests {
             assert_eq!(rows_show_approval_prompt(&cells), None, "{composer}");
         }
         assert_eq!(rows_show_approval_prompt(&[row("The old choice was › 1. Yes, proceed")]), None);
+    }
+
+    #[test]
+    fn codex_usage_limit_popup_uses_the_existing_stalled_state() {
+        use crate::agent_state::{AgentState, Evidence};
+        use crate::agent_transitions::{Transition, transitions};
+
+        // Codex rust-v0.172.0 workspace_member_usage_limit_prompt rendering snapshot.
+        let rows = [
+            "  Usage limit reached",
+            "  Request a limit increase from your owner to continue using codex. Request increase?",
+            "",
+            "",
+            "  1. Yes (y)",
+            "› 2. No (default) (n)",
+            "",
+            "  enter select · esc back",
+        ].map(row);
+        let mut evidence = Evidence {
+            harness: Some(kasa_pty::AgentKind::Codex),
+            transcript_present: true,
+            transcript_turn: Some(crate::transcript::TurnState::Working),
+            screen: Some(screen_signs(&rows)),
+            ..Default::default()
+        };
+        assert_eq!(rows_show_approval_prompt(&rows), Some(ApprovalPrompt::Menu));
+        let (state, _) = crate::agent_state::resolve(&evidence);
+        assert!(!state.needs_you());
+        assert_eq!(transitions(Some(&AgentState::Working), &state), vec![Transition::Error { label: "한도 소진".into() }]);
+
+        let mut restored = rows.to_vec();
+        restored.push(row("› Continue with another model"));
+        evidence.screen = Some(screen_signs(&restored));
+        assert_eq!(crate::agent_state::resolve(&evidence).0, AgentState::Working);
+
+        // Codex rust-v0.172.0 rate_limit_switch_prompt_popup rendering snapshot.
+        let warning = [
+            "  Approaching rate limits",
+            "  Switch to gpt-6-luna for lower credit usage?",
+            "",
+            "",
+            "› 1. Switch to gpt-6-luna                   Fast and affordable model for easier",
+            "                                            tasks.",
+            "  2. Keep current model",
+            "  3. Keep current model (never show again)  Hide future rate limit reminders",
+            "                                            about switching models",
+            "",
+            "  enter select · esc back",
+        ].map(row);
+        evidence.screen = Some(screen_signs(&warning));
+        assert_eq!(crate::agent_state::resolve(&evidence).0, AgentState::Working);
+    }
+
+    #[test]
+    fn codex_question_popup_uses_question_attention_without_the_rollout() {
+        use crate::agent_state::{AgentState, Evidence, WaitKind};
+
+        // Codex rust-v0.172.0 request_user_input_footer_wrap rendering snapshot.
+        let rows = [
+            "  Question 1/2 (2 unanswered)",
+            "  Choose an option.",
+            "",
+            "    1. Option 1  First choice.",
+            "  › 2. Option 2  Second choice.",
+            "    3. Option 3  Third choice.",
+            "",
+            "  tab to add notes | enter to submit answer",
+            "  ←/→ to navigate questions | esc to interrupt",
+        ].map(row);
+        let mut evidence = Evidence {
+            harness: Some(kasa_pty::AgentKind::Codex),
+            screen: Some(screen_signs(&rows)),
+            ..Default::default()
+        };
+        assert!(matches!(crate::agent_state::resolve(&evidence).0, AgentState::Waiting { kind: WaitKind::Question, .. }));
+
+        let mut answered = rows.to_vec();
+        answered.push(row("› Explain this codebase"));
+        evidence.screen = Some(screen_signs(&answered));
+        assert!(!crate::agent_state::resolve(&evidence).0.needs_you());
     }
 
     // compact 알림을 잡는가. 문구는 claude 번들 실측(`Compacting conversation`·

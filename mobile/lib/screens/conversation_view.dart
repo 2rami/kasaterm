@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -764,6 +765,7 @@ class _ConversationViewState extends State<ConversationView> {
   /// 커서·체크만 다른 같은 창 — 화살표가 먼저 닿고 Enter 가 아직인 사이의 화면이다.
   bool _sameWindow(PromptMenu a, PromptMenu b) => a.title == b.title &&
     a.currentTab == b.currentTab &&
+    (widget.pane.harness != 'codex' || listEquals(a.context, b.context)) &&
     a.options.length == b.options.length &&
     a.options.indexed.every((entry) =>
       entry.$2.index == b.options[entry.$1].index && entry.$2.label == b.options[entry.$1].label);
@@ -771,6 +773,7 @@ class _ConversationViewState extends State<ConversationView> {
   bool _sameMenu(PromptMenu a, PromptMenu b) => a.title == b.title &&
     a.options.length == b.options.length &&
     a.currentTab == b.currentTab &&
+    (widget.pane.harness != 'codex' || listEquals(a.context, b.context)) &&
     a.options.indexed.every((entry) {
       final other = b.options[entry.$1];
       final option = entry.$2;
@@ -799,7 +802,7 @@ class _ConversationViewState extends State<ConversationView> {
       final on = [for (final r in row) if (r.bg is! DefaultColor || r.flags & flagInverse != 0) r.text].join();
       if (on.trim().isNotEmpty) lit[i] = on;
     }
-    final menu = parsePromptMenu(lines, lit: lit);
+    final menu = parsePromptMenu(lines, lit: lit, codex: widget.pane.harness == 'codex');
     // 화면의 계획 상자는 창 높이에서 잘린다 — mod 가 알린 계획 원문이 더 길면 그것을 싣는다.
     final live = _liveNow;
     if (menu != null && live.live && live.permissions.isNotEmpty &&

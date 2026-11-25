@@ -185,6 +185,60 @@ void main() {
     },
   );
 
+  test('Codex question reads the live viewport and the hidden rows', () {
+    final menu = parsePromptMenu([
+      '› 1. An earlier choice',
+      ...codexQuestionRows,
+      ...List.filled(16, ''),
+    ], codex: true)!;
+    expect(menu.title, 'What would you like to do next?');
+    expect(menu.options.map((o) => o.label), ['Run tests', 'Review a diff', 'Refactor']);
+    expect(menu.options.first.note, 'Pick a crate and run its tests.');
+    expect(menu.cursor, 2);
+    expect(menuStep(menu, 0)?.moves, -2);
+    expect(menuReveal(menu, up: true), -3);
+    expect(menuReveal(menu, up: false), 1);
+    expect(parsePromptMenu([...codexQuestionRows, '› New draft'], codex: true), isNull);
+  });
+
+  testWidgets('Codex question uses the conversation card and sends two arrows then Enter', (tester) async {
+    viewport(tester, 390);
+    final server = fixtureServer(CodexScene.complete);
+    final pane = Pane.fromJson({...codexPaneJson(CodexScene.complete), 'status': 'waiting', 'kind': 'question'});
+    final session = CodexFixtureSession(server, pane, CodexScene.complete)
+      ..setRows(codexQuestionRows);
+    await tester.pumpWidget(host(server, session, Brightness.light));
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(find.text('What would you like to do next?'), findsOneWidget);
+    final choice = find.widgetWithText(OutlinedButton, '2. Run tests');
+    expect(tester.getSize(choice).height, greaterThanOrEqualTo(44));
+    await tester.tap(choice);
+    expect(session.sent, ['\x1b[A', '\x1b[A']);
+    await tester.pump(TermSession.enterGap);
+    expect(session.sent, ['\x1b[A', '\x1b[A', '\r']);
+    await tester.pumpWidget(const SizedBox());
+    server.close();
+  });
+
+  testWidgets('Codex limit uses the existing stalled status without an approval card', (tester) async {
+    viewport(tester, 390);
+    final server = fixtureServer(CodexScene.complete);
+    final pane = Pane.fromJson({...codexPaneJson(CodexScene.complete), 'error': '한도 소진'});
+    final session = CodexFixtureSession(server, pane, CodexScene.complete)
+      ..setRows(codexLimitRows);
+    await tester.pumpWidget(host(server, session, Brightness.light));
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(pane.needsYou, isFalse);
+    expect(pane.isStalled, isTrue);
+    expect(find.text('멈춤 · 한도 소진'), findsOneWidget);
+    expect(find.text('2. No (default) (n)'), findsNothing);
+    expect(session.sent, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+    server.close();
+  });
+
   test(
     'wide Korean cells and repository Codex footer format retain the provider icon',
     () {

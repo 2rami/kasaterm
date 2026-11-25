@@ -175,8 +175,16 @@ pub(crate) struct ScreenSigns {
     pub spinner: bool,
     /// 승인 위젯(`rows_show_approval_prompt`)이 떠 있다 — 라벨은 위젯 종류.
     pub approval: Option<String>,
+    pub codex_overlay: Option<CodexOverlay>,
     /// 끊김 문구(`find_connection_trouble`)가 화면 아래 몇 줄 안에 있다.
     pub trouble: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodexOverlay {
+    Question,
+    UsageLimit(&'static str),
+    UsageNotice,
 }
 
 /// 연결 mod 가 엔진 이벤트로 알린 것(`kasa_students::claude_mod::ModState` 에서 판정에 쓰는 몫).
@@ -424,22 +432,39 @@ pub(crate) fn resolve(e: &Evidence) -> (AgentState, &'static str) {
     if let Some(m) = &e.module {
         return resolve_module(e, m);
     }
+    let codex_overlay = if e.harness == Some(kasa_pty::AgentKind::Codex) {
+        e.screen.as_ref().and_then(|s| s.codex_overlay)
+    } else {
+        None
+    };
+    if let Some(CodexOverlay::UsageLimit(label)) = codex_overlay {
+        return (AgentState::Error { label: label.into() }, "codex usage limit");
+    }
     if let Some(question) = e.questions.iter().find(|q| q.blocking || turn_open(e).is_none()) {
         return (AgentState::Waiting { kind: WaitKind::Question, reason: question.prompt.clone() }, "transcript question");
     }
     // 화면이 살아 돈다(스피너 + 출력 박동) = 사람이 이미 답했다. 훅 attention 표식은 Stop·기록
     // 성장이 와야 풀리는데 그 사이 몇 초를 「대기」로 남기던 것을 화면이 먼저 푼다.
     let screen_running = e.screen.as_ref().is_some_and(|s| s.spinner) && e.heartbeat;
+    if codex_overlay == Some(CodexOverlay::Question) {
+        return (
+            AgentState::Waiting { kind: WaitKind::Question, reason: WaitKind::Question.default_reason().into() },
+            "screen question",
+        );
+    }
     if let Some((kind, reason, age)) = &e.attention {
         if matches!(kind, WaitKind::Permission | WaitKind::Question)
             && attention_live(e, *kind, *age)
             && !screen_running
+            && !(codex_overlay == Some(CodexOverlay::UsageNotice) && *kind == WaitKind::Permission)
         {
             let reason = if reason.trim().is_empty() { kind.default_reason().to_string() } else { reason.clone() };
             return (AgentState::Waiting { kind: *kind, reason }, "hook attention");
         }
     }
-    if let Some((reason, false)) = e.screen.as_ref().and_then(|s| s.approval.as_ref().map(|r| (r, s.spinner))) {
+    if let Some((reason, false)) = e.screen.as_ref().filter(|_| codex_overlay.is_none())
+        .and_then(|s| s.approval.as_ref().map(|r| (r, s.spinner)))
+    {
         // 승인 위젯이 떠 있으면 하네스가 무엇이든 사람 차례다. claude 는 보통 attention 훅이
         // 먼저 오지만, 훅이 안 걸린 세션(옛 --settings)이나 훅이 죽은 날엔 이게 유일한 눈이다
         // (2026-09-18 실측: 따옴표 버그로 턴 훅이 하루 동안 안 닿았다). 스피너가 같이 보이면

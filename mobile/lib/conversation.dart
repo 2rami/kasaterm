@@ -994,6 +994,15 @@ final _optionRe = RegExp(r'^\s*[│|]?\s*((?:[❯›●↑↓]\s*){0,2})(\d+)\.\
 final _submitRe = RegExp(r'^\s*([❯›]?)\s*Submit\s*$');
 final _checkboxRe = RegExp(r'^\[([ ✔✓xX×])\]\s+');
 final _inputLabels = {'Type something.', 'Type something', 'Tell Claude what to change'};
+final _codexQuestionHeader = RegExp(r'^Question \d+/\d+(?:\s|$)');
+final _codexSubmit = RegExp(r'\benter to submit (?:answer|all)\b');
+final _codexOptionCount = RegExp(r'\boption \d+/(\d+)\b');
+const _codexLimitHeaders = {
+  'Usage limit reached',
+  "You've reached your workspace credit limit",
+  'Approaching rate limits',
+  'You’re no longer close to your usage limit.',
+};
 
 /// `/model` 이 굴린 목록 끝에 다는 「… +2 models」 — 그쪽에 숨은 칸이 있다는 표식.
 final _moreRe = RegExp(r'^\s*…\s*\+\d+');
@@ -1016,14 +1025,25 @@ String _unframe(String line) =>
 
 /// A selected chevron distinguishes live choices from numbered response text. [lit] 은 줄 번호 → 그 줄에서
 /// 배경색이 칠해진 글(질문 탭의 지금 탭을 가르는 데만 쓴다).
-PromptMenu? parsePromptMenu(List<String> screen, {Map<int, String> lit = const {}}) {
+PromptMenu? parsePromptMenu(List<String> screen, {Map<int, String> lit = const {}, bool codex = false}) {
   // (선택지, 줄, 굴림 표식 ↑/↓/'', 이름 옆 칸)
   final opts = <(PromptOption, int, String, String)>[];
   // Match the native bottom-anchored approval scan, not old choices in history.
   final last = screen.lastIndexWhere((line) => line.trim().isNotEmpty);
   if (last < 0) return null;
   final lines = [for (final line in screen) _leftOfPreview(line)];
-  final start = _questionTop(screen, last) ?? (last - 13).clamp(0, last);
+  final bottom = (last - 13).clamp(0, last);
+  final ending = lines[last].trim();
+  final footer = codex && (ending.endsWith(' to interrupt') || _codexSubmit.hasMatch(ending))
+      ? lines.sublist((last - 3).clamp(0, last), last + 1).join(' ')
+      : '';
+  final question = _codexSubmit.hasMatch(footer)
+      ? lines.lastIndexWhere((line) => _codexQuestionHeader.hasMatch(line.trim()), last)
+      : -1;
+  final limit = codex && ending == 'enter select · esc back'
+      ? lines.lastIndexWhere((line) => _codexLimitHeaders.contains(line.trim()), last)
+      : -1;
+  final start = question >= 0 ? question + 1 : _questionTop(screen, last) ?? bottom;
   for (var i = start; i <= last; i++) {
     final m = _optionRe.firstMatch(lines[i]);
     if (m == null) {
@@ -1058,7 +1078,7 @@ PromptMenu? parsePromptMenu(List<String> screen, {Map<int, String> lit = const {
       side,
     ));
   }
-  if (opts.length < 2 || !opts.any((o) => o.$1.current)) return null;
+  if (opts.isEmpty || (opts.length < 2 && question < 0) || !opts.any((o) => o.$1.current)) return null;
   // 미리보기 질문 — 선택지 줄 오른쪽에 그림 상자가 섰다. 상자만 있는 줄(과 그 밑 메모 안내)은 메뉴의 일부가 아니고,
   // 선택지 설명은 왼쪽에 안 찍혀 이어지는 줄은 좁은 칸에 접힌 이름이다.
   final previewing = opts.any((o) => lines[o.$2] != screen[o.$2]);
@@ -1072,6 +1092,8 @@ PromptMenu? parsePromptMenu(List<String> screen, {Map<int, String> lit = const {
       RegExp(r'^\s*[│|]?\s*[❯›]').hasMatch(line) && !_optionRe.hasMatch(line))) {
     return null;
   }
+  // Codex's limit overlay has numbered rows too. Its status is shown by the existing stalled-pane UI.
+  if (limit >= bottom && limit < opts.last.$2) return null;
   // 흩어진 번호 줄은 메뉴가 아니다. 다만 AskUserQuestion 은 선택지마다 설명 줄이 딸려
   // 벌어지므로, 번호가 1부터 빈틈없이 이어지면 선택지당 서너 줄까지 봐준다. 창이 낮아 굴린 목록은
   // 앞이 숨어 2부터 서거나, 굴러가는 칸 밖에 남은 「Chat about this」 앞이 빈다. ↑·↓ 표식은 커서(❯)가
@@ -1082,13 +1104,14 @@ PromptMenu? parsePromptMenu(List<String> screen, {Map<int, String> lit = const {
   for (var k = 1; k < numbers.length && ordered; k++) {
     ordered = scrolled ? numbers[k] > numbers[k - 1] : numbers[k] == numbers[k - 1] + 1;
   }
+  if (question >= 0 && numbers.indexed.any((e) => e.$2 != numbers.first + e.$1)) return null;
   final spread = opts.last.$2 - opts.first.$2;
-  if (spread > (ordered ? opts.length * 4 : opts.length + 2)) return null;
+  if (question < 0 && spread > (ordered ? opts.length * 4 : opts.length + 2)) return null;
   final width = lines.fold<int>(0, (w, l) => _cells(l.trimRight()) > w ? _cells(l.trimRight()) : w);
   final first = opts.first.$2;
   var title = '';
   var titleAt = first;
-  for (var i = first - 1; i >= 0 && i >= first - 6; i--) {
+  for (var i = first - 1; i >= 0 && i >= first - 6 && question < 0; i--) {
     final t = _unframe(lines[i]);
     if (t.isEmpty || _isRule(t) || RegExp(r'^[─—\-╭╰╮╯>❯›●]').hasMatch(t)) continue;
     title = t;
@@ -1136,7 +1159,9 @@ PromptMenu? parsePromptMenu(List<String> screen, {Map<int, String> lit = const {
     var note = side;
     if (more.isNotEmpty) {
       // 이름이 줄 끝까지 찼으면 다음 줄은 접힌 이름의 나머지다(Claude 의 긴 「Yes, and …」).
-      if (previewing || _cells(lines[at].trimRight()) + 4 >= width) {
+      if (question >= 0 && side.isNotEmpty) {
+        note = [side, ...more].join(' ');
+      } else if (previewing || _cells(lines[at].trimRight()) + 4 >= width) {
         label = '$label ${more.join(' ')}';
       } else {
         note = more.join(' ');
@@ -1178,6 +1203,17 @@ PromptMenu? parsePromptMenu(List<String> screen, {Map<int, String> lit = const {
     ];
   }
   // 탭 창은 탭 줄 밑이 다 창 안이다 — 검토 창의 「● 질문」「→ 답」까지 싣는다.
+  if (question >= 0) {
+    final progress = lines[question].trim().split(' · ').first;
+    final count = int.tryParse(_codexOptionCount.firstMatch(footer)?[1] ?? '');
+    return PromptMenu(
+      lines.sublist(question + 1, first).map((line) => line.trim()).where((line) => line.isNotEmpty).join(' '),
+      options,
+      context: [progress],
+      hiddenAbove: hiddenAbove,
+      hiddenBelow: count != null && options.last.index < count ? options.last.row + 1 : hiddenBelow,
+    );
+  }
   final context = tabsAt >= 0
       ? [
           for (var i = tabsAt + 1; i < titleAt; i++)
