@@ -158,13 +158,17 @@ pub(crate) fn fixture(pane: &str) -> Option<PathBuf> {
     }
 }
 
-/// 줄 이름 — 이 기기 카드면 등록 때 이름, 아니면 종류와 차례.
-fn label(item: &Output, nth: usize) -> String {
-    match item.kind {
-        Kind::Image => format!("그림 {nth}"),
-        kind => kasa_socket::inline_media::metadata(&item.id)
-            .map(|m| m.name)
-            .unwrap_or_else(|_| format!("{} {nth}", if kind == Kind::Audio { "음성" } else { "영상" })),
+/// 줄 이름·종류·아이콘. 이 기기 카드면 등록 때 이름이고, 줄 수로만 가른 음성·영상도 등록 정보로 다시 본다 — 이
+/// 판이 모르는 종류는 「파일」이다. 다른 기기 카드는 종류와 차례.
+fn describe(item: &Output, nth: usize) -> (String, &'static str, &'static str) {
+    if item.kind == Kind::Image {
+        return (format!("그림 {nth}"), "그림", "image");
+    }
+    let (kind, icon) = if item.kind == Kind::Audio { ("음성", "play") } else { ("영상", "play") };
+    match kasa_socket::inline_media::metadata(&item.id) {
+        Ok(m) if !crate::inline_media::CardKind::of(&m.kind).playable() => (m.name, "파일", "file"),
+        Ok(m) => (m.name, kind, icon),
+        Err(_) => (format!("{kind} {nth}"), kind, icon),
     }
 }
 
@@ -252,7 +256,11 @@ impl crate::App {
             },
             Kind::Audio | Kind::Video => {
                 let reference = crate::inline_media::Reference { id: item.id.clone(), source: base };
-                self.media_preview.open_reference(owner, reference, &self.proxy);
+                if crate::inline_media::playable(&reference) {
+                    self.media_preview.open_reference(owner, reference, &self.proxy);
+                } else {
+                    self.set_toast("이 판에서 열 수 없는 종류예요 — 대화 속 카드의 저장으로 받아요".into());
+                }
             }
         }
         self.chrome_dirty = true;
@@ -326,17 +334,12 @@ pub(crate) fn draw(
                     g.rect(x, y, w, ROW_H, theme::surface());
                     g.hover_pointer = true;
                 }
-                let icon = if item.kind == Kind::Image { "image" } else { "play" };
+                let (name, kind, icon) = describe(item, total - i);
                 g.queue_icon(icon, x0, y + (ROW_H - 12.0) / 2.0, 12.0, theme::text_dim());
-                let kind = match item.kind {
-                    Kind::Image => "그림",
-                    Kind::Audio => "음성",
-                    Kind::Video => "영상",
-                };
                 let kind_w = g.measure_chrome_text(kind, 10.0, false);
                 g.draw_text(right - kind_w, y + 6.0, kind, gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false });
                 let tx = x0 + 18.0;
-                let text = fit_text(g, &label(item, total - i), (right - tx - kind_w - 8.0).max(0.0), 11.0, false);
+                let text = fit_text(g, &name, (right - tx - kind_w - 8.0).max(0.0), 11.0, false);
                 g.draw_text(tx, y + 5.0, &text, gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false });
                 if let Some(r) = g.clip_hit(rect) {
                     tips.push(("누르면 미리보기로 열어요".to_string(), r));

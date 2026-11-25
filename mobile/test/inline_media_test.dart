@@ -136,7 +136,10 @@ void main() {
       for (final bad in <Map<String, Object?>>[
         {...ok, 'id': _audio},
         {...ok, 'version': 2},
-        {...ok, 'kind': 'image'},
+        {...ok, 'kind': 'IMAGE'},
+        {...ok, 'kind': '../x'},
+        {...ok, 'kind': ''},
+        {...ok, 'kind': 7},
         {...ok, 'sha256': 'ABC'},
         {...ok, 'sha256': 'A' * 64},
         {...ok, 'size': 0},
@@ -145,6 +148,21 @@ void main() {
       ]) {
         expect(InlineMedia.fromJson(bad, id: _video), isNull, reason: '$bad');
       }
+    });
+
+    test('이 판이 모르는 종류는 파일 카드로 받는다', () {
+      final ok = _fixtures[_video]!.info;
+      final pdf = InlineMedia.fromJson(
+        {...ok, 'kind': 'pdf', 'duration_ms': null},
+        id: _video,
+      )!;
+      expect(pdf.kind, InlineMediaKind.file);
+      expect(pdf.caption, startsWith('파일 · '));
+      expect(
+        InlineMedia.fromJson(pdf.toJson(), id: _video)?.kind,
+        InlineMediaKind.file,
+        reason: '기억한 정보로 다시 서도 파일 카드다',
+      );
     });
 
     test('확장자는 등록소가 받는 것만, 아니면 mime 으로', () {

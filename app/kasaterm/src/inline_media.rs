@@ -137,6 +137,44 @@ pub(crate) fn intersection(a: Rect, b: Rect) -> Rect {
         (a.1 + a.3 - y).min(b.1 + b.3 - y).max(0.0),
     )
 }
+/// 카드가 무엇으로 서는가. 등록부의 `kind` 는 열린 낱말이라 이 판이 모르는 종류(새 판이 들인 것)는 파일 카드다 —
+/// 이름·크기·저장만 있고 누르면 아무것도 틀지 않는다. 종류를 들일 때는 여기에 더하고 그리기·누르기만 고친다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CardKind {
+    Audio,
+    Video,
+    File,
+}
+
+impl CardKind {
+    pub(crate) fn of(kind: &str) -> Self {
+        match kind {
+            "audio" => Self::Audio,
+            "video" => Self::Video,
+            _ => Self::File,
+        }
+    }
+
+    pub(crate) fn playable(self) -> bool {
+        matches!(self, Self::Audio | Self::Video)
+    }
+}
+
+/// 이 카드가 지금 아는 종류로 틀 수 있나. 정보를 아직 못 받았으면 참 — 누름은 재생기가 받아 기다린다.
+pub(crate) fn playable(reference: &Reference) -> bool {
+    !matches!(cache::get(reference), Ok(Some(asset)) if !CardKind::of(&asset.media.kind).playable())
+}
+
+pub(crate) fn size_text(bytes: u64) -> String {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    match mb {
+        _ if mb < 1.0 => format!("{}KB", bytes.div_ceil(1024)),
+        _ if mb < 10.0 => format!("{mb:.1}MB"),
+        _ if mb < 1024.0 => format!("{mb:.0}MB"),
+        _ => format!("{:.1}GB", mb / 1024.0),
+    }
+}
+
 pub(crate) fn time(seconds: f64) -> String {
     let s = if seconds.is_finite() {
         seconds.max(0.0) as u64
@@ -278,21 +316,34 @@ pub(crate) fn paint(
             }
         }
         let ready = matches!(asset, Ok(Some(_)));
+        let card = match &asset {
+            Ok(Some(asset)) => CardKind::of(&asset.media.kind),
+            _ => CardKind::Audio,
+        };
         let mut controls = Vec::new();
-        let toggle = crate::native_controls::icon_button(
-            g,
-            (x + 12.0, button_y, BUTTON, BUTTON),
-            cursor,
-            if live.is_some_and(|l| l.playing) { "pause" } else { "play" },
-            Default::default(),
-        );
-        controls.push((Control::Toggle, toggle));
+        if card.playable() {
+            let toggle = crate::native_controls::icon_button(
+                g,
+                (x + 12.0, button_y, BUTTON, BUTTON),
+                cursor,
+                if live.is_some_and(|l| l.playing) { "pause" } else { "play" },
+                Default::default(),
+            );
+            controls.push((Control::Toggle, toggle));
+        } else {
+            let style = crate::native_controls::Style { enabled: false, ..Default::default() };
+            crate::native_controls::icon_button(g, (x + 12.0, button_y, BUTTON, BUTTON), cursor, "file", style);
+        }
         let mut right = x + w - 12.0;
         let capacity = ((w - 12.0 - 52.0 - TEXT_MIN) / (BUTTON + GAP)).floor().clamp(0.0, 3.0) as usize;
         let mut wanted = Vec::new();
-        if capacity >= 2 { wanted.push((Control::Save, "download", ready && !saving(&reference))); }
-        if capacity >= 3 { wanted.push((Control::Expand, "maximize", true)); }
-        wanted.push((Control::Mute, if volume == 0.0 { "volume-x" } else { "volume-2" }, true));
+        if capacity >= 2 || (!card.playable() && capacity >= 1) {
+            wanted.push((Control::Save, "download", ready && !saving(&reference)));
+        }
+        if card.playable() {
+            if capacity >= 3 { wanted.push((Control::Expand, "maximize", true)); }
+            wanted.push((Control::Mute, if volume == 0.0 { "volume-x" } else { "volume-2" }, true));
+        }
         for (control, icon, enabled) in wanted {
             if right - BUTTON - GAP < x + 52.0 + TEXT_MIN {
                 break;
@@ -321,6 +372,10 @@ pub(crate) fn paint(
         }
         if volume_track.2 > 0.0 { controls.push((Control::Volume, volume_track)); }
         let (name, detail) = match &asset {
+            Ok(Some(asset)) if !card.playable() => (
+                asset.media.name.clone(),
+                format!("파일 · {}{}", size_text(asset.media.size), if saving(&reference) { " · 저장하는 중…" } else { "" }),
+            ),
             Ok(Some(asset)) => {
                 let detail = match live {
                     Some(l) => format!(

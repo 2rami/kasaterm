@@ -47,7 +47,8 @@ pub struct Probe {
 pub struct Media {
     pub version: u32,
     pub id: String,
-    /// `"audio"` | `"video"`
+    /// `"audio"` | `"video"` — 열린 낱말이다. 새 판이 종류를 더해도 표식·창구는 그대로고, 그 종류를 모르는 옛 판은
+    /// 이름·크기·저장만 있는 파일 카드로 보인다([`valid_kind`] 모양만 따진다).
     pub kind: String,
     pub name: String,
     pub mime: String,
@@ -148,6 +149,14 @@ pub fn stream_format(media: &Media) -> Option<(&'static str, &'static str)> {
         && media.size <= MAX_FILE_BYTES;
     let format = FORMATS.iter().find(|f| f.mime == media.mime && f.kind == media.kind)?;
     plausible.then_some((format.mime, format.exts[0]))
+}
+
+/// 받는 쪽이 카드 종류로 받아 줄 모양 — 소문자로 시작하는 16자 이하 `[a-z0-9-]`. 뜻은 모르더라도 화면·파일 이름에
+/// 실을 수 있는 글자만 남긴다.
+pub fn valid_kind(kind: &str) -> bool {
+    (1..=16).contains(&kind.len())
+        && kind.starts_with(|c: char| c.is_ascii_lowercase())
+        && kind.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn invalid_input(msg: &str) -> io::Error {

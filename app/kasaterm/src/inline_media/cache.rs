@@ -91,7 +91,7 @@ fn validate(m: &Media, id: &str) -> anyhow::Result<()> {
         "미디어 식별자가 달라요"
     );
     anyhow::ensure!(
-        matches!(m.kind.as_str(), "audio" | "video") && m.size > 0 && m.size <= 1024 * 1024 * 1024,
+        kasa_socket::inline_media::valid_kind(&m.kind) && m.size > 0 && m.size <= 1024 * 1024 * 1024,
         "지원하지 않는 미디어예요"
     );
     anyhow::ensure!(
@@ -181,5 +181,22 @@ mod tests {
         m.size = 7;
         m.sha256 = "../../secret".into();
         assert!(validate(&m, &m.id).is_err());
+    }
+    #[test]
+    fn kinds_this_build_does_not_know_still_load_as_file_cards() {
+        let mut m = media(b"fixture");
+        for kind in ["pdf", "web", "table-v2"] {
+            m.kind = kind.into();
+            assert!(validate(&m, &m.id).is_ok(), "{kind}");
+            assert_eq!(crate::inline_media::CardKind::of(kind), crate::inline_media::CardKind::File);
+        }
+        for kind in ["", "PDF", "../x", "a b", "0day", "seventeen-letters"] {
+            m.kind = kind.into();
+            assert!(validate(&m, &m.id).is_err(), "{kind}");
+        }
+        assert!(crate::inline_media::CardKind::of("video").playable());
+        assert_eq!(crate::inline_media::size_text(1), "1KB");
+        assert_eq!(crate::inline_media::size_text(3 * 1024 * 1024 + 300_000), "3.3MB");
+        assert_eq!(crate::inline_media::size_text(42 * 1024 * 1024), "42MB");
     }
 }

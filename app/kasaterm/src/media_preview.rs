@@ -443,6 +443,9 @@ impl State {
         self.open(id, reference, proxy);
     }
     fn open(&mut self, id: WindowId, reference: Reference, proxy: &EventLoopProxy<UserEvent>) {
+        if !crate::inline_media::playable(&reference) {
+            return;
+        }
         if self.inline.as_ref().is_some_and(|i| i.session.reference == reference && i.owner == id) {
             self.expand(id);
             return;
@@ -786,6 +789,12 @@ impl State {
                         hits.iter().find(|h| h.reference == p.hit.reference && contains(h.rect, point)).cloned()
                     });
                     if let Some(hit) = same.filter(|_| allow && !moved(p.point, point)) {
+                        if !crate::inline_media::playable(&hit.reference) {
+                            if hit.control(point) == Some(Control::Save) {
+                                self.save(hit.reference, proxy);
+                            }
+                            return Response::Consumed;
+                        }
                         let playing = self
                             .inline
                             .as_ref()

@@ -15,7 +15,8 @@ import 'server.dart';
 const inlineMediaChunk = 512 * 1024;
 const inlineMediaMaxSize = 1024 * 1024 * 1024;
 
-enum InlineMediaKind { audio, video }
+/// PC 등록부의 `kind` 는 열린 낱말이다 — 이 판이 모르는 종류(새 판이 들인 것)는 [file] 로 받아 이름·크기만 보인다.
+enum InlineMediaKind { audio, video, file }
 
 /// `GET term/inline-media?id=` 의 답 — PC 가 등록한 소리·영상 하나.
 @immutable
@@ -44,6 +45,7 @@ class InlineMedia {
   final bool poster;
 
   static final _hex64 = RegExp(r'^[0-9a-f]{64}$');
+  static final _kind = RegExp(r'^[a-z][a-z0-9-]{0,15}$');
 
   /// 답을 그대로 믿지 않는다 — 다른 id·크기 상한·해시 모양이 어긋나면 null.
   static InlineMedia? fromJson(Object? raw, {required String id}) {
@@ -51,6 +53,7 @@ class InlineMedia {
     final kind = switch (raw['kind']) {
       'audio' => InlineMediaKind.audio,
       'video' => InlineMediaKind.video,
+      final String other when _kind.hasMatch(other) => InlineMediaKind.file,
       _ => null,
     };
     final size = raw['size'];
@@ -101,7 +104,13 @@ class InlineMedia {
   /// 화면에 보일 이름 — 경로가 섞여 와도 마지막 조각만.
   String get title {
     final leaf = name.split(RegExp(r'[/\\]')).last.trim();
-    return leaf.isEmpty ? (isVideo ? '영상' : '소리') : leaf;
+    return leaf.isEmpty
+        ? switch (kind) {
+            InlineMediaKind.video => '영상',
+            InlineMediaKind.audio => '소리',
+            InlineMediaKind.file => '파일',
+          }
+        : leaf;
   }
 
   /// PC 등록소가 받는 확장자(`kasa_socket::inline_media`).
@@ -148,6 +157,7 @@ class InlineMedia {
 
   /// 카드 둘째 줄 — 「3:21 · 4.2MB」.
   String get caption => [
+    if (kind == InlineMediaKind.file) '파일',
     if (durationMs case final ms?) clockLabel(Duration(milliseconds: ms)),
     sizeLabel(size),
   ].join(' · ');
@@ -340,6 +350,12 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
   }
 
   void _open(InlineMedia media) {
+    if (media.kind == InlineMediaKind.file) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('이 앱 판에서는 열 수 없는 종류예요. 앱을 업데이트해 주세요')),
+      );
+      return;
+    }
     if (!mediaPlayable) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         const SnackBar(content: Text('이 화면에서는 재생할 수 없어요. 앱에서 열어 주세요')),
@@ -375,13 +391,21 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
       }
       final loaded = snap.data!;
       final media = loaded.media;
-      return media.isVideo
-          ? _VideoCard(
-              media: media,
-              poster: loaded.poster,
-              onTap: () => _open(media),
-            )
-          : _AudioCard(media: media, onTap: () => _open(media));
+      return switch (media.kind) {
+        InlineMediaKind.video => _VideoCard(
+          media: media,
+          poster: loaded.poster,
+          onTap: () => _open(media),
+        ),
+        InlineMediaKind.audio => _AudioCard(
+          media: media,
+          onTap: () => _open(media),
+        ),
+        InlineMediaKind.file => _AudioCard(
+          media: media,
+          onTap: () => _open(media),
+        ),
+      };
     },
   );
 }
@@ -415,7 +439,8 @@ class _AudioCard extends StatelessWidget {
     final scheme = theme.colorScheme;
     return Semantics(
       button: true,
-      label: '소리 ${media.title}, ${media.caption}',
+      label:
+          '${media.kind == InlineMediaKind.file ? '파일' : '소리'} ${media.title}, ${media.caption}',
       excludeSemantics: true,
       child: Material(
         color: scheme.onSurface.withValues(alpha: Look.mediaTint),
@@ -431,7 +456,13 @@ class _AudioCard extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: Look.mediaPad),
               child: Row(
                 children: [
-                  const _PlayDot(),
+                  if (media.kind == InlineMediaKind.file)
+                    Icon(
+                      Icons.insert_drive_file_outlined,
+                      color: scheme.onSurfaceVariant,
+                    )
+                  else
+                    const _PlayDot(),
                   const SizedBox(width: Look.fieldGap),
                   Expanded(
                     child: Padding(
