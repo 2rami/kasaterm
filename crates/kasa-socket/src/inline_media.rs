@@ -47,6 +47,17 @@ pub struct Probe {
     pub pages: Option<u32>,
 }
 
+/// 웹 카드 주소 상한. 원본 파일(`.url`)의 첫 줄이 주소다.
+pub const MAX_URL_CHARS: usize = 2048;
+
+/// 웹 카드로 받는 주소 — http(s) 이고 공백·제어 문자가 없다. 다른 기기가 보낸 정보도 이 모양만 연다.
+pub fn valid_web_url(url: &str) -> bool {
+    url.len() <= MAX_URL_CHARS
+        && (url.starts_with("https://") || url.starts_with("http://"))
+        && url.len() > "http://".len()
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Media {
     pub version: u32,
@@ -65,6 +76,9 @@ pub struct Media {
     /// PDF 쪽 수. 다른 종류는 비우고 쓰지도 않는다 — 옛 카드의 정보·id 가 그대로다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pages: Option<u32>,
+    /// 웹 카드가 여는 주소. 다른 종류는 비운다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +104,8 @@ struct IdInput<'a> {
     poster_sha256: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pages: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
 }
 
 struct Format {
@@ -112,6 +128,7 @@ const FORMATS: &[Format] = &[
     Format { exts: &["m4v"], kind: "video", mime: "video/x-m4v", sniff: sniff_ftyp },
     Format { exts: &["mov"], kind: "video", mime: "video/quicktime", sniff: sniff_mov },
     Format { exts: &["pdf"], kind: "pdf", mime: "application/pdf", sniff: sniff_pdf },
+    Format { exts: &["url"], kind: "web", mime: "text/uri-list", sniff: sniff_url },
 ];
 
 fn has_id3(h: &[u8]) -> bool {
@@ -140,6 +157,9 @@ fn sniff_aiff(h: &[u8]) -> bool {
 }
 fn sniff_caf(h: &[u8]) -> bool {
     h.starts_with(b"caff")
+}
+fn sniff_url(h: &[u8]) -> bool {
+    h.starts_with(b"https://") || h.starts_with(b"http://")
 }
 fn sniff_pdf(h: &[u8]) -> bool {
     h.starts_with(b"%PDF-")
@@ -351,6 +371,8 @@ impl Store {
             && format.is_some_and(|f| f.kind == m.kind && f.mime == m.mime)
             && m.poster == record.poster_sha256.is_some()
             && m.pages.is_some() == (m.kind == "pdf")
+            && m.url.is_some() == (m.kind == "web")
+            && m.url.as_deref().is_none_or(valid_web_url)
             && record.poster_sha256.as_deref().is_none_or(valid_sha)
             && m.size > 0
             && m.size <= MAX_FILE_BYTES
@@ -435,12 +457,30 @@ impl Store {
             None => None,
         };
 
+        // 웹 카드의 원본은 주소 한 줄짜리 `.url` 이다 — 복사해 확인한 사본에서 주소를 읽어 정보에 싣고, 이름에서
+        // 확장자를 뗀다(이름은 쪽 제목).
+        let mut name = display_name(path, &ext);
+        let url = if format.kind == "web" {
+            let mut text = String::new();
+            File::open(self.blob_path(&sha, &ext))?.take(MAX_URL_CHARS as u64 + 2).read_to_string(&mut text)
+                .map_err(|_| invalid_input("web card must hold a URL"))?;
+            let url = text.lines().next().unwrap_or("").trim().to_string();
+            if !valid_web_url(&url) {
+                return Err(invalid_input("web card needs an http(s) address"));
+            }
+            if let Some(title) = name.strip_suffix(".url").filter(|t| !t.trim().is_empty()) {
+                name = title.to_string();
+            }
+            Some(url)
+        } else {
+            None
+        };
         let mut record = Record {
             media: Media {
                 version: VERSION,
                 id: String::new(),
                 kind: format.kind.into(),
-                name: display_name(path, &ext),
+                name,
                 mime: format.mime.into(),
                 size,
                 sha256: sha,
@@ -449,6 +489,7 @@ impl Store {
                 height: probe.height,
                 poster: poster_sha256.is_some(),
                 pages: probe.pages,
+                url,
             },
             ext,
             poster_sha256,
@@ -592,6 +633,7 @@ fn record_id(record: &Record) -> String {
         ext: &record.ext,
         poster_sha256: record.poster_sha256.as_deref(),
         pages: m.pages,
+        url: m.url.as_deref(),
     };
     let bytes = serde_json::to_vec(&input).unwrap_or_default();
     let mut digest = Sha256::new();
@@ -606,7 +648,7 @@ fn validate_probe(kind: &str, probe: &Probe) -> io::Result<()> {
             return Err(invalid_input("duration out of range"));
         }
     }
-    let pictured = matches!(kind, "video" | "pdf");
+    let pictured = matches!(kind, "video" | "pdf" | "web");
     match (probe.width, probe.height) {
         (None, None) => {}
         (Some(w), Some(h)) if pictured && (1..=MAX_SIDE).contains(&w) && (1..=MAX_SIDE).contains(&h) => {}
@@ -620,7 +662,7 @@ fn validate_probe(kind: &str, probe: &Probe) -> io::Result<()> {
     }
     if let Some(png) = &probe.poster {
         if !pictured {
-            return Err(invalid_input("only video and PDF take a poster"));
+            return Err(invalid_input("only video, PDF and web cards take a poster"));
         }
         if png.len() > MAX_POSTER_BYTES {
             return Err(invalid_input("poster larger than 12 MiB"));
@@ -997,6 +1039,29 @@ mod tests {
     }
 
     #[test]
+    fn a_web_card_keeps_its_address_and_title_and_rejects_other_schemes() {
+        let dir = temp_root("web");
+        let store = Store::at(dir.join("store"));
+        let link = dir.join("랜딩 시안.url");
+        std::fs::write(&link, "https://preview.example.dev/landing?v=2\n").unwrap();
+        let media = store.register(&link, Probe::default()).unwrap();
+        assert_eq!(
+            (media.kind.as_str(), media.name.as_str(), media.url.as_deref()),
+            ("web", "랜딩 시안", Some("https://preview.example.dev/landing?v=2"))
+        );
+        assert_eq!(store.metadata(&media.id).unwrap(), media);
+        let poster = Probe { width: Some(320), height: Some(180), poster: Some(png(320, 180)), ..Default::default() };
+        assert!(store.register(&link, poster).unwrap().poster, "웹 카드는 대표 그림을 받는다");
+        for bad in ["file:///etc/passwd\n", "javascript:alert(1)\n", "https://a b\n"] {
+            let path = dir.join("bad.url");
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(store.register(&path, Probe::default()).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{bad}");
+        }
+        assert!(!valid_web_url("http://") && valid_web_url("http://localhost:3000/"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn registering_the_same_card_again_restarts_its_keep() {
         let dir = temp_root("retouch");
         let store = Store::at(dir.join("store"));
@@ -1360,6 +1425,7 @@ mod tests {
             height: None,
             poster: false,
             pages: None,
+            url: None,
         };
         assert_eq!(stream_format(&media), Some(("video/quicktime", "mov")));
         let broken = [

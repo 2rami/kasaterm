@@ -12,6 +12,8 @@ PDF도 같은 카드 길이다(`mediaopen --block FILE.pdf`, 종류 `pdf`, 12행
 
 PC PDF 카드는 첫 쪽·「PDF · N쪽 · 크기」·크게 보기·저장이다. 카드·왼쪽 단추·크게 보기를 누르면 이미지 미리보기가 쪽 넘김으로 열린다(`image_preview::open_document`) — 이전·다음 단추, ←·→·PageUp·PageDown, 상태 줄 「n / N쪽」. 쪽을 넘겨도 옮겨 둔 미리보기 창 자리는 그대로다. 폰은 첫 쪽 카드를 누르면 쪽 넘김 화면(`screens/pdf_pages.dart`)이 열리고 옆으로 밀어 넘기고 두 손가락으로 키운다. Info 「결과물」은 「PDF」로 적고 누르면 같은 쪽 넘김을 연다.
 
+웹 카드는 `mediaopen --block https://…`(종류 `web`)다. 등록 때 쪽을 한 번 받아(10초·2MiB) `og:title`·`<title>`을 이름으로, `og:image`(없으면 `twitter:image`)를 긴 변 1600px 대표 그림으로 싣는다(`inline_media/web.rs`). 원본 파일은 주소 한 줄짜리 `.url`이고, 등록부가 복사본에서 주소를 읽어 카드 정보 `url`(http·https, 2048자 이하)에 싣는다 — `url`도 웹 카드만 갖는다. 쪽을 못 받으면(꺼진 개발 서버 등) 호스트 이름으로 그림 없이 선다. 대표 그림이 있으면 12행, 없으면 4행 한 줄 카드다. 쪽 스크린샷은 뜨지 않는다 — 웹뷰로 그리려면 사람 화면에 웹 칸을 하나 띄워야 해서다. PC는 누르면 칸의 링크를 누른 것과 같은 길(`open_url_for_pane`)로 열고, 폰은 앱 안 브라우저(`LaunchMode.inAppBrowserView`)로 연다. 주소는 보는 기기에서 열리므로 원본 기기의 `localhost` 주소는 다른 기기에서 안 열린다.
+
 카드는 파일명·길이·영상 썸네일을 표시한다. 재생은 명시적 클릭 뒤 시작하고, 누른 카드 안에서 돈다(영상은 썸네일 자리에 프레임).
 카드의 크게 보기는 그 재생을 미리보기로 옮겨 이어 틀고, 저장은 원본 파일 전체를 다운로드 폴더에 받는다(`media_stream::Stream::save` —
 재생과 같은 조각 읽기·sha256 확인, 다른 기기 카드는 그 기기 인증으로). PC는 macOS AVFoundation·Windows Media Foundation 재생 엔진의 음성 시계와 영상 프레임을 사용하고 wgpu 텍스처를 갱신한다. 그 OS가 지원하는 코덱만 재생할 수 있다(Windows는 AIFF·CAF를 못 연다). 그 밖의 PC 플레이어는 지원하지 않는다는 오류를 반환한다. iOS는 네이티브 미디어 재생을 사용한다.

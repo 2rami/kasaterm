@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import 'inline_media_store.dart';
@@ -17,7 +18,7 @@ const inlineMediaChunk = 512 * 1024;
 const inlineMediaMaxSize = 1024 * 1024 * 1024;
 
 /// PC 등록부의 `kind` 는 열린 낱말이다 — 이 판이 모르는 종류(새 판이 들인 것)는 [file] 로 받아 이름·크기만 보인다.
-enum InlineMediaKind { audio, video, pdf, file }
+enum InlineMediaKind { audio, video, pdf, web, file }
 
 /// `GET term/inline-media?id=` 의 답 — PC 가 등록한 소리·영상 하나.
 @immutable
@@ -34,6 +35,7 @@ class InlineMedia {
     this.height,
     this.poster = false,
     this.pages,
+    this.url,
   });
   final String id;
   final InlineMediaKind kind;
@@ -49,8 +51,12 @@ class InlineMedia {
   /// PDF 쪽 수. 다른 종류는 null.
   final int? pages;
 
+  /// 웹 카드가 여는 주소(http·https). 다른 종류는 null.
+  final String? url;
+
   static final _hex64 = RegExp(r'^[0-9a-f]{64}$');
   static final _kind = RegExp(r'^[a-z][a-z0-9-]{0,15}$');
+  static final _webUrl = RegExp(r'^https?://\S{1,2040}$');
 
   /// 답을 그대로 믿지 않는다 — 다른 id·크기 상한·해시 모양이 어긋나면 null.
   static InlineMedia? fromJson(Object? raw, {required String id}) {
@@ -59,6 +65,7 @@ class InlineMedia {
       'audio' => InlineMediaKind.audio,
       'video' => InlineMediaKind.video,
       'pdf' => InlineMediaKind.pdf,
+      'web' => InlineMediaKind.web,
       final String other when _kind.hasMatch(other) => InlineMediaKind.file,
       _ => null,
     };
@@ -78,13 +85,20 @@ class InlineMedia {
     }
     int? positive(Object? v) => v is int && v > 0 ? v : null;
     final pages = positive(raw['pages']);
+    final url = switch (raw['url']) {
+      final String u when _webUrl.hasMatch(u) => u,
+      _ => null,
+    };
     return InlineMedia(
       id: id,
-      // 쪽 수 없는 PDF 는 쪽을 넘길 수 없다 — 파일 카드로 선다.
-      kind: kind == InlineMediaKind.pdf && pages == null
-          ? InlineMediaKind.file
-          : kind,
+      // 쪽 수 없는 PDF·주소 없는 웹 카드는 열 길이 없다 — 파일 카드로 선다.
+      kind: switch (kind) {
+        InlineMediaKind.pdf when pages == null => InlineMediaKind.file,
+        InlineMediaKind.web when url == null => InlineMediaKind.file,
+        _ => kind,
+      },
       pages: kind == InlineMediaKind.pdf ? pages : null,
+      url: kind == InlineMediaKind.web ? url : null,
       name: name,
       mime: mime,
       size: size,
@@ -109,6 +123,7 @@ class InlineMedia {
     'height': height,
     'poster': poster,
     'pages': ?pages,
+    'url': ?url,
   };
 
   bool get isVideo => kind == InlineMediaKind.video;
@@ -121,6 +136,7 @@ class InlineMedia {
             InlineMediaKind.video => '영상',
             InlineMediaKind.audio => '소리',
             InlineMediaKind.pdf => '문서',
+            InlineMediaKind.web => '웹',
             InlineMediaKind.file => '파일',
           }
         : leaf;
@@ -169,12 +185,14 @@ class InlineMedia {
   };
 
   /// 카드 둘째 줄 — 「3:21 · 4.2MB」.
-  String get caption => [
-    if (kind == InlineMediaKind.file) '파일',
-    if (pages case final n? when kind == InlineMediaKind.pdf) 'PDF · $n쪽',
-    if (durationMs case final ms?) clockLabel(Duration(milliseconds: ms)),
-    sizeLabel(size),
-  ].join(' · ');
+  String get caption => kind == InlineMediaKind.web
+      ? '웹 · ${(url ?? '').replaceFirst(RegExp(r'^https?://'), '')}'
+      : [
+          if (kind == InlineMediaKind.file) '파일',
+          if (pages case final n? when kind == InlineMediaKind.pdf) 'PDF · $n쪽',
+          if (durationMs case final ms?) clockLabel(Duration(milliseconds: ms)),
+          sizeLabel(size),
+        ].join(' · ');
 }
 
 String clockLabel(Duration d) {
@@ -364,6 +382,10 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
   }
 
   void _open(InlineMedia media) {
+    if (media.url case final url? when media.kind == InlineMediaKind.web) {
+      launchUrl(Uri.parse(url), mode: LaunchMode.inAppBrowserView);
+      return;
+    }
     if (media.kind == InlineMediaKind.pdf) {
       Navigator.of(context).push(
         PdfPagesScreen.route(
@@ -427,6 +449,16 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
           badge: Icons.menu_book_rounded,
           onTap: () => _open(media),
         ),
+        InlineMediaKind.web when loaded.poster != null => _VideoCard(
+          media: media,
+          poster: loaded.poster,
+          badge: Icons.open_in_new_rounded,
+          onTap: () => _open(media),
+        ),
+        InlineMediaKind.web => _AudioCard(
+          media: media,
+          onTap: () => _open(media),
+        ),
         InlineMediaKind.audio => _AudioCard(
           media: media,
           onTap: () => _open(media),
@@ -470,7 +502,11 @@ class _AudioCard extends StatelessWidget {
     return Semantics(
       button: true,
       label:
-          '${media.kind == InlineMediaKind.file ? '파일' : '소리'} ${media.title}, ${media.caption}',
+          '${switch (media.kind) {
+            InlineMediaKind.file => '파일',
+            InlineMediaKind.web => '웹',
+            _ => '소리',
+          }} ${media.title}, ${media.caption}',
       excludeSemantics: true,
       child: Material(
         color: scheme.onSurface.withValues(alpha: Look.mediaTint),
@@ -486,9 +522,12 @@ class _AudioCard extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: Look.mediaPad),
               child: Row(
                 children: [
-                  if (media.kind == InlineMediaKind.file)
+                  if (media.kind
+                      case InlineMediaKind.file || InlineMediaKind.web)
                     Icon(
-                      Icons.insert_drive_file_outlined,
+                      media.kind == InlineMediaKind.web
+                          ? Icons.public
+                          : Icons.insert_drive_file_outlined,
                       color: scheme.onSurfaceVariant,
                     )
                   else
@@ -586,7 +625,11 @@ class _VideoCard extends StatelessWidget {
         return Semantics(
           button: true,
           label:
-              '${media.kind == InlineMediaKind.pdf ? '문서' : '영상'} ${media.title}, ${media.caption}',
+              '${switch (media.kind) {
+                InlineMediaKind.pdf => '문서',
+                InlineMediaKind.web => '웹',
+                _ => '영상',
+              }} ${media.title}, ${media.caption}',
           excludeSemantics: true,
           child: SizedBox(
             width: width,

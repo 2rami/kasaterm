@@ -168,6 +168,7 @@ fn describe(item: &Output, nth: usize) -> (String, &'static str, &'static str) {
     match kasa_socket::inline_media::metadata(&item.id) {
         Ok(m) => match crate::inline_media::CardKind::of(&m.kind) {
             crate::inline_media::CardKind::Pdf => (m.name, "PDF", "file-text"),
+            crate::inline_media::CardKind::Web => (m.name, "웹", "globe"),
             crate::inline_media::CardKind::File => (m.name, "파일", "file"),
             _ => (m.name, kind, icon),
         },
@@ -261,6 +262,8 @@ impl crate::App {
                 let reference = crate::inline_media::Reference { id: item.id.clone(), source: base };
                 if crate::inline_media::card_kind(&reference) == Some(crate::inline_media::CardKind::Pdf) {
                     self.image_preview.open_document(owner, reference, &self.proxy);
+                } else if let Some(url) = crate::inline_media::web_url(&reference) {
+                    self.open_url_for_pane(&url, None);
                 } else if crate::inline_media::playable(&reference) {
                     self.media_preview.open_reference(owner, reference, &self.proxy);
                 } else {

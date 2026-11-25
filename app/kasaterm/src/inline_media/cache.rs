@@ -168,6 +168,7 @@ mod tests {
             height: Some(16),
             poster: false,
             pages: None,
+            url: None,
         }
     }
     #[test]
@@ -186,7 +187,7 @@ mod tests {
     #[test]
     fn kinds_this_build_does_not_know_still_load_as_file_cards() {
         let mut m = media(b"fixture");
-        for kind in ["archive", "web", "table-v2"] {
+        for kind in ["archive", "diff", "table-v2"] {
             m.kind = kind.into();
             assert!(validate(&m, &m.id).is_ok(), "{kind}");
             assert_eq!(crate::inline_media::CardKind::of(kind), crate::inline_media::CardKind::File);

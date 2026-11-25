@@ -1197,6 +1197,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_toast(msg.clone());
                 return;
             }
+            UserEvent::OpenWeb(url) => {
+                self.open_url_for_pane(url, None);
+                return;
+            }
             UserEvent::OpenDocument(owner, reference) => {
                 self.image_preview.open_document(*owner, reference.clone(), &self.proxy);
                 self.chrome_dirty = true;

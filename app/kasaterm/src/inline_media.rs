@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winit::event_loop::EventLoopProxy;
 pub(crate) mod cache;
+mod web;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -42,9 +43,21 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<bool> {
     let block = args.get(1).is_some_and(|a| a == "--block");
     anyhow::ensure!(
         args.len() == if block { 3 } else { 2 },
-        "usage: mediaopen [--block] FILE"
+        "usage: mediaopen [--block] FILE|URL"
     );
-    let path = std::path::Path::new(&args[if block { 2 } else { 1 }]);
+    let arg = &args[if block { 2 } else { 1 }];
+    let media = match arg.to_str().filter(|a| a.starts_with("http://") || a.starts_with("https://")) {
+        Some(url) => web::register(url)?,
+        None => register_file(std::path::Path::new(arg))?,
+    };
+    use std::io::Write;
+    std::io::stdout()
+        .lock()
+        .write_all(display_block(&media.id, media.kind != "audio" && (media.kind != "web" || media.poster)).as_bytes())?;
+    Ok(true)
+}
+
+fn register_file(path: &std::path::Path) -> anyhow::Result<kasa_socket::inline_media::Media> {
     // PDF 는 재생기가 아니라 쪽 그리기로 잰다 — 첫 쪽이 카드 그림이다.
     let probe = if kasa_http::pdf::is_pdf(path) {
         let pdf = kasa_http::pdf::probe(path)?;
@@ -65,12 +78,7 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<bool> {
             pages: None,
         }
     };
-    let media = kasa_socket::inline_media::register(path, probe)?;
-    use std::io::Write;
-    std::io::stdout()
-        .lock()
-        .write_all(display_block(&media.id, media.kind != "audio").as_bytes())?;
-    Ok(true)
+    Ok(kasa_socket::inline_media::register(path, probe)?)
 }
 pub(crate) fn compose(
     rows: &mut [Vec<GridCell>],
@@ -156,6 +164,8 @@ pub(crate) enum CardKind {
     Video,
     /// 첫 쪽이 카드 그림이고, 누르면 쪽 넘김 미리보기(`image_preview::open_document`).
     Pdf,
+    /// 쪽 제목·대표 그림. 누르면 링크를 누른 것과 같은 길로 연다(`open_url_for_pane`).
+    Web,
     File,
 }
 
@@ -165,6 +175,7 @@ impl CardKind {
             "audio" => Self::Audio,
             "video" => Self::Video,
             "pdf" => Self::Pdf,
+            "web" => Self::Web,
             _ => Self::File,
         }
     }
@@ -197,6 +208,22 @@ pub(crate) fn pdf_page(reference: &Reference, n: u32) -> anyhow::Result<Vec<u8>>
 /// 이 카드가 지금 아는 종류로 틀 수 있나. 정보를 아직 못 받았으면 참 — 누름은 재생기가 받아 기다린다.
 pub(crate) fn playable(reference: &Reference) -> bool {
     !matches!(cache::get(reference), Ok(Some(asset)) if !CardKind::of(&asset.media.kind).playable())
+}
+
+/// 카드 둘째 줄의 주소 — 스킴을 떼고 호스트·경로 앞부분만.
+pub(crate) fn web_host(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    rest.trim_end_matches('/').chars().take(80).collect()
+}
+
+/// 웹 카드가 열 주소. 받아 둔 정보가 아직 없거나 모양이 어긋나면 `None`.
+pub(crate) fn web_url(reference: &Reference) -> Option<String> {
+    match cache::get(reference) {
+        Ok(Some(asset)) if asset.media.kind == "web" => {
+            asset.media.url.clone().filter(|u| kasa_socket::inline_media::valid_web_url(u))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn size_text(bytes: u64) -> String {
@@ -355,9 +382,10 @@ pub(crate) fn paint(
             _ => CardKind::Audio,
         };
         let mut controls = Vec::new();
-        if card.playable() || card == CardKind::Pdf {
+        if card.playable() || matches!(card, CardKind::Pdf | CardKind::Web) {
             let icon = match card {
                 CardKind::Pdf => "file-text",
+                CardKind::Web => "globe",
                 _ if live.is_some_and(|l| l.playing) => "pause",
                 _ => "play",
             };
@@ -370,7 +398,7 @@ pub(crate) fn paint(
         let mut right = x + w - 12.0;
         let capacity = ((w - 12.0 - 52.0 - TEXT_MIN) / (BUTTON + GAP)).floor().clamp(0.0, 3.0) as usize;
         let mut wanted = Vec::new();
-        if capacity >= 2 || (!card.playable() && capacity >= 1) {
+        if card != CardKind::Web && (capacity >= 2 || (!card.playable() && capacity >= 1)) {
             wanted.push((Control::Save, "download", ready && !saving(&reference)));
         }
         if card == CardKind::Pdf && capacity >= 2 {
@@ -409,12 +437,13 @@ pub(crate) fn paint(
         if volume_track.2 > 0.0 { controls.push((Control::Volume, volume_track)); }
         let (name, detail) = match &asset {
             Ok(Some(asset)) if !card.playable() => {
-                let kind = match (card, asset.media.pages) {
-                    (CardKind::Pdf, Some(pages)) => format!("PDF · {pages}쪽"),
-                    _ => "파일".into(),
-                };
                 let busy = if saving(&reference) { " · 저장하는 중…" } else { "" };
-                (asset.media.name.clone(), format!("{kind} · {}{busy}", size_text(asset.media.size)))
+                let detail = match (card, asset.media.pages, asset.media.url.as_deref()) {
+                    (CardKind::Pdf, Some(pages), _) => format!("PDF · {pages}쪽 · {}{busy}", size_text(asset.media.size)),
+                    (CardKind::Web, _, Some(url)) => format!("웹 · {}", web_host(url)),
+                    _ => format!("파일 · {}{busy}", size_text(asset.media.size)),
+                };
+                (asset.media.name.clone(), detail)
             }
             Ok(Some(asset)) => {
                 let detail = match live {

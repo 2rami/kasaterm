@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' show max;
 import 'dart:typed_data';
@@ -19,6 +20,8 @@ import 'package:kasaterm_mobile/screens/controls.dart';
 import 'package:kasaterm_mobile/screens/media_player.dart';
 import 'package:kasaterm_mobile/screens/pdf_pages.dart';
 import 'package:kasaterm_mobile/server.dart';
+import 'package:url_launcher_platform_interface/link.dart';
+import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
 import 'fake_video_player.dart';
@@ -695,6 +698,51 @@ void main() {
       await tester.pumpAndSettle();
       return server;
     }
+
+    testWidgets('웹 카드는 제목·주소로 서고 누르면 앱 안 브라우저로 연다', (tester) async {
+      final launcher = _RecordingLauncher();
+      UrlLauncherPlatform.instance = launcher;
+      final info = {
+        ..._fixtures[_audio]!.info,
+        'kind': 'web',
+        'mime': 'text/uri-list',
+        'name': '카사텀 랜딩',
+        'duration_ms': null,
+        'poster': false,
+        'url': 'https://preview.example.dev/landing',
+      };
+      await pumpChat(
+        tester,
+        '봐 주세요.\n\n${mediaBlock(_audio, 4)}',
+        handler: (r) async => r.url.path.endsWith('/term/inline-media')
+            ? http.Response(
+                jsonEncode(info),
+                200,
+                headers: {'content-type': 'application/json'},
+              )
+            : _reply(r),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('카사텀 랜딩'), findsOneWidget);
+      expect(find.text('웹 · preview.example.dev/landing'), findsOneWidget);
+      await tester.tap(find.text('카사텀 랜딩'));
+      await tester.pump();
+      expect(launcher.launched, [
+        (
+          'https://preview.example.dev/landing',
+          PreferredLaunchMode.inAppBrowserView,
+        ),
+      ]);
+      final noUrl = InlineMedia.fromJson({
+        ...info,
+        'url': 'file:///etc/hosts',
+      }, id: _audio);
+      expect(
+        noUrl?.kind,
+        InlineMediaKind.file,
+        reason: '열 주소가 없는 웹 카드는 파일 카드다',
+      );
+    });
 
     testWidgets('블록은 정보·포스터만 받고 카드는 폭을 넘지 않는다', (tester) async {
       final calls = <Uri>[];
@@ -1442,4 +1490,17 @@ class _FakeLink implements MediaLink {
 
   @override
   Future<void> close() async => closed = true;
+}
+
+class _RecordingLauncher extends UrlLauncherPlatform {
+  final launched = <(String, PreferredLaunchMode)>[];
+
+  @override
+  LinkDelegate? get linkDelegate => null;
+
+  @override
+  Future<bool> launchUrl(String url, LaunchOptions options) async {
+    launched.add((url, options.mode));
+    return true;
+  }
 }

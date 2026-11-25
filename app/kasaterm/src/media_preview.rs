@@ -790,13 +790,17 @@ impl State {
                     });
                     if let Some(hit) = same.filter(|_| allow && !moved(p.point, point)) {
                         if !crate::inline_media::playable(&hit.reference) {
-                            let document = crate::inline_media::card_kind(&hit.reference) == Some(crate::inline_media::CardKind::Pdf);
+                            let kind = crate::inline_media::card_kind(&hit.reference);
                             match hit.control(point) {
                                 Some(Control::Save) => self.save(hit.reference, proxy),
-                                _ if document => {
+                                _ if kind == Some(crate::inline_media::CardKind::Pdf) => {
                                     let _ = proxy.send_event(UserEvent::OpenDocument(owner, hit.reference));
                                 }
-                                _ => {}
+                                _ => {
+                                    if let Some(url) = crate::inline_media::web_url(&hit.reference) {
+                                        let _ = proxy.send_event(UserEvent::OpenWeb(url));
+                                    }
+                                }
                             }
                             return Response::Consumed;
                         }

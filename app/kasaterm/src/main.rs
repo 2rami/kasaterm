@@ -4214,6 +4214,8 @@ enum UserEvent {
     SocketToast(String),
     /// PDF 카드를 눌렀다 — 쪽 넘김 미리보기는 `image_preview` 가 쥐어 카드 쪽(`media_preview`)이 직접 못 연다.
     OpenDocument(winit::window::WindowId, inline_media::Reference),
+    /// 웹 카드를 눌렀다 — 칸의 링크를 누른 것과 같은 길로 연다.
+    OpenWeb(String),
     AccountSyncResult(session::AccountSyncReport),
     PhoneLoginReady(settings::phone_login::Ready),
     /// A pane's claude is blocked on a permission / input prompt (its

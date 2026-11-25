@@ -586,6 +586,7 @@ mod tests {
             height: None,
             poster: false,
             pages: None,
+            url: None,
         }
     }
 
