@@ -185,6 +185,18 @@ impl CardKind {
     }
 }
 
+/// 가린 카드 띠의 아이콘과 둘째 줄.
+fn summary(media: &kasa_socket::inline_media::Media) -> (&'static str, String) {
+    let duration = media.duration_ms.map(|ms| format!(" · {}", time(ms as f64 / 1000.0))).unwrap_or_default();
+    match CardKind::of(&media.kind) {
+        CardKind::Audio => ("play", format!("음성{duration}")),
+        CardKind::Video => ("play", format!("영상{duration}")),
+        CardKind::Pdf => ("file-text", format!("PDF · {}쪽", media.pages.unwrap_or(0))),
+        CardKind::Web => ("globe", format!("웹 · {}", media.url.as_deref().map(web_host).unwrap_or_default())),
+        CardKind::File => ("file", format!("파일 · {}", size_text(media.size))),
+    }
+}
+
 /// 받아 둔 카드 정보로 본 종류. 아직 못 받았으면 `None`.
 pub(crate) fn card_kind(reference: &Reference) -> Option<CardKind> {
     match cache::get(reference) {
@@ -355,9 +367,30 @@ pub(crate) fn paint(
             continue;
         }
         let live = live.filter(|l| *l.reference == reference);
+        let asset = cache::get(&reference);
+        if !crate::card_eye::shown(&slot.key) {
+            // 가린 카드는 머리 띠 하나 — 누르면 `card_eye` 가 받아 보이게 한다. 눈 단추도 거기서 그린다.
+            let b = crate::card_eye::bar(slot);
+            g.push_clip(clip.0, clip.1, clip.2, clip.3);
+            crate::native_controls::panel(g, b, theme::surface());
+            let (icon, name, detail) = match &asset {
+                Ok(Some(asset)) => {
+                    let (icon, detail) = summary(&asset.media);
+                    (icon, asset.media.name.clone(), detail)
+                }
+                Ok(None) => ("file", "미디어 불러오는 중…".into(), String::new()),
+                Err(_) => ("file", "미디어를 불러오지 못했어요".into(), String::new()),
+            };
+            g.queue_icon(icon, b.0 + 14.0, b.1 + (b.3 - 16.0) / 2.0, 16.0, theme::text_dim());
+            let text_w = (b.2 - 40.0 - 44.0).max(0.0);
+            text(g, (b.0 + 40.0, b.1 + 3.0, text_w, 20.0), &name, false);
+            text(g, (b.0 + 40.0, b.1 + 22.0, text_w, 20.0), &format!("{detail} · 가려짐"), true);
+            g.pop_clip();
+            cards.push(Card { reference, rect: intersection(b, clip), controls: Vec::new(), track: (0.0, 0.0, 0.0, 0.0), volume_track: (0.0, 0.0, 0.0, 0.0) });
+            continue;
+        }
         g.push_clip(clip.0, clip.1, clip.2, clip.3);
         crate::native_controls::panel(g, (x, y, w, h), theme::surface());
-        let asset = cache::get(&reference);
         let line_y = (y + h - 52.0).max(y + 8.0);
         let button_y = line_y + 4.0;
         if h > 100.0 {
@@ -395,8 +428,10 @@ pub(crate) fn paint(
             let style = crate::native_controls::Style { enabled: false, ..Default::default() };
             crate::native_controls::icon_button(g, (x + 12.0, button_y, BUTTON, BUTTON), cursor, "file", style);
         }
-        let mut right = x + w - 12.0;
-        let capacity = ((w - 12.0 - 52.0 - TEXT_MIN) / (BUTTON + GAP)).floor().clamp(0.0, 3.0) as usize;
+        // 포스터 없는 낮은 카드는 눈 단추가 단추 줄 오른쪽 끝에 앉는다(`card_eye::eye`) — 그 자리를 비운다.
+        let eye_room = if h <= 100.0 { 36.0 } else { 0.0 };
+        let mut right = x + w - 12.0 - eye_room;
+        let capacity = ((w - 12.0 - eye_room - 52.0 - TEXT_MIN) / (BUTTON + GAP)).floor().clamp(0.0, 3.0) as usize;
         let mut wanted = Vec::new();
         if card != CardKind::Web && (capacity >= 2 || (!card.playable() && capacity >= 1)) {
             wanted.push((Control::Save, "download", ready && !saving(&reference)));

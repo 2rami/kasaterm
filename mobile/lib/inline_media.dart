@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
+import 'inline_card_visibility.dart';
 import 'inline_media_store.dart';
 import 'look.dart';
 import 'screens/media_player.dart';
@@ -437,39 +438,53 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
       }
       final loaded = snap.data!;
       final media = loaded.media;
-      return switch (media.kind) {
-        InlineMediaKind.video => _VideoCard(
-          media: media,
-          poster: loaded.poster,
-          onTap: () => _open(media),
-        ),
-        InlineMediaKind.pdf => _VideoCard(
-          media: media,
-          poster: loaded.poster,
-          badge: Icons.menu_book_rounded,
-          onTap: () => _open(media),
-        ),
-        InlineMediaKind.web when loaded.poster != null => _VideoCard(
-          media: media,
-          poster: loaded.poster,
-          badge: Icons.open_in_new_rounded,
-          onTap: () => _open(media),
-        ),
-        InlineMediaKind.web => _AudioCard(
-          media: media,
-          onTap: () => _open(media),
-        ),
-        InlineMediaKind.audio => _AudioCard(
-          media: media,
-          onTap: () => _open(media),
-        ),
-        InlineMediaKind.file => _AudioCard(
-          media: media,
-          onTap: () => _open(media),
-        ),
-      };
+      final key = 'km:${widget.machine ?? ''}:${widget.id}';
+      void flip() => InlineCardVisibility.toggle(key);
+      return ValueListenableBuilder<Set<String>>(
+        valueListenable: InlineCardVisibility.shown,
+        builder: (context, _, _) => InlineCardVisibility.isShown(key)
+            ? CardEye(onHide: flip, child: _card(loaded, media))
+            : HiddenCardBar(
+                icon: switch (media.kind) {
+                  InlineMediaKind.audio => Icons.music_note_outlined,
+                  InlineMediaKind.video => Icons.movie_outlined,
+                  InlineMediaKind.pdf => Icons.description_outlined,
+                  InlineMediaKind.web => Icons.public,
+                  InlineMediaKind.file => Icons.insert_drive_file_outlined,
+                },
+                title: media.title,
+                caption: '${media.caption} · 가려짐',
+                onShow: flip,
+              ),
+      );
     },
   );
+
+  Widget _card(_Loaded loaded, InlineMedia media) => switch (media.kind) {
+    InlineMediaKind.video => _VideoCard(
+      media: media,
+      poster: loaded.poster,
+      onTap: () => _open(media),
+    ),
+    InlineMediaKind.pdf => _VideoCard(
+      media: media,
+      poster: loaded.poster,
+      badge: Icons.menu_book_rounded,
+      onTap: () => _open(media),
+    ),
+    InlineMediaKind.web when loaded.poster != null => _VideoCard(
+      media: media,
+      poster: loaded.poster,
+      badge: Icons.open_in_new_rounded,
+      onTap: () => _open(media),
+    ),
+    InlineMediaKind.web => _AudioCard(media: media, onTap: () => _open(media)),
+    InlineMediaKind.audio => _AudioCard(
+      media: media,
+      onTap: () => _open(media),
+    ),
+    InlineMediaKind.file => _AudioCard(media: media, onTap: () => _open(media)),
+  };
 }
 
 /// 카드의 둘째 줄 — 「3:21 · 4.2MB」.

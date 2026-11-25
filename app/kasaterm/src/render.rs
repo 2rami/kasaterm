@@ -2531,7 +2531,9 @@ impl App {
                     && classroom_slots.contains(&(*x, *y, *w, *h)) { continue; }
                 g.rect(*x, *y, *w, *h, theme::pane_bg());
             }
-            paint_inline_images_below(g, &inline_slots);
+            // 가린 결과 그림은 칠하지도 돌리지도 않고, 미리보기로도 안 연다 — 자리엔 `card_eye` 의 띠가 선다.
+            let shown_images = crate::card_eye::visible_images(&inline_slots);
+            paint_inline_images_below(g, &shown_images);
             g.draw_cells(&slot_views);
             paint_status_model_icons(g, &status_model_icons);
             for (id, image, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {
@@ -2543,10 +2545,11 @@ impl App {
                 g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
             }
             crate::screen_stream::paint(g, &mut self.screen_views, &screen_slots, crate::screen_stream::Surface::Main, self.cursor_px);
-            paint_inline_images(g, &inline_slots);
-            crate::inline_result::verify_frame(g, &inline_slots);
-            self.image_preview.collect(preview_window_id, self.active_window, g, &inline_slots);
+            paint_inline_images(g, &shown_images);
+            crate::inline_result::verify_frame(g, &shown_images);
+            self.image_preview.collect(preview_window_id, self.active_window, g, &shown_images);
             self.media_preview.paint_cards(preview_window_id, self.active_window, g, &inline_slots, self.cursor_px);
+            crate::card_eye::paint(g, preview_window_id, &inline_slots, self.cursor_px);
             // 학생 도트 — Clawd 배너 자리. idle 4프레임을 캐릭터당 1회 일괄
             // 업로드해 모든 pane이 공유하고, 매 프레임 시간 기반으로 현재
             // 프레임만 queue한다(재렌더는 배너 애니 타이머가 깨워줌).

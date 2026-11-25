@@ -353,6 +353,10 @@ impl State {
     /// 영상은 카드가 화면을 벗어나면 멈춘다 — 안 보이는 그림을 돌릴 까닭이 없다. 음성은 계속 듣는다.
     pub fn paint_cards(&mut self, id: WindowId, context: usize, g: &mut gpu::GpuRenderer, slots: &[InlineSlot], cursor: Point) {
         self.forget_context(id, context);
+        // 도는 카드를 가리면 재생도 거둔다 — 안 보이는 영상이 소리만 내며 돌지 않게.
+        if self.inline.as_ref().is_some_and(|i| i.owner == id && !crate::card_eye::shown(&i.session.reference.key())) {
+            self.inline = None;
+        }
         let inline = self.inline.as_mut().filter(|i| i.owner == id);
         let live = inline.map(|i| {
             i.session.upload_frame(g);

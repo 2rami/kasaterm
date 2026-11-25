@@ -10,6 +10,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:kasaterm_mobile/inline_card_visibility.dart';
 import 'package:kasaterm_mobile/inline_media.dart';
 import 'package:kasaterm_mobile/inline_media_bridge_io.dart';
 import 'package:kasaterm_mobile/inline_media_store_io.dart';
@@ -614,7 +615,12 @@ void main() {
     late List<_FakeLink> links;
     Completer<void>? hold;
     String? failure;
+    tearDown(() {
+      InlineCardVisibility.showAll = false;
+      InlineCardVisibility.shown.value = const {};
+    });
     setUp(() {
+      InlineCardVisibility.showAll = true;
       platform = FakeVideoPlayer();
       VideoPlayerPlatform.instance = platform;
       store = MemoryMediaStore();
@@ -742,6 +748,20 @@ void main() {
         InlineMediaKind.file,
         reason: '열 주소가 없는 웹 카드는 파일 카드다',
       );
+    });
+
+    testWidgets('미디어 카드는 기본으로 가린 띠로 서고 누르면 카드가 펼쳐진다', (tester) async {
+      InlineCardVisibility.showAll = false;
+      await pumpChat(tester, '소리요.\n\n${mediaBlock(_audio, 4)}');
+      await tester.pumpAndSettle();
+      expect(find.text('tone.m4a'), findsOneWidget);
+      expect(find.textContaining('· 가려짐'), findsOneWidget);
+      expect(find.byIcon(Icons.visibility_off_outlined), findsOneWidget);
+      await tester.tap(find.text('tone.m4a'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('가려짐'), findsNothing);
+      expect(find.byIcon(Icons.visibility_outlined), findsOneWidget);
+      expect(opened, isEmpty, reason: '띠를 누르면 펼칠 뿐 틀지 않는다');
     });
 
     testWidgets('블록은 정보·포스터만 받고 카드는 폭을 넘지 않는다', (tester) async {

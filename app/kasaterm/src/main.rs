@@ -109,6 +109,7 @@ mod internal_room;
 mod shared_rooms;
 mod links;
 mod inline_image;
+mod card_eye;
 mod inline_media;
 mod media_preview;
 mod media_player;

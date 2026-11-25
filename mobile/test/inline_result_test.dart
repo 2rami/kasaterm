@@ -7,6 +7,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:kasaterm_mobile/inline_card_visibility.dart';
 import 'package:kasaterm_mobile/inline_result.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'inline_result_fonts.dart';
@@ -16,6 +17,11 @@ String block([String id = '0123456789abcdef']) =>
 
 void main() {
   setUpAll(loadInlineResultFonts);
+  setUp(() => InlineCardVisibility.showAll = true);
+  tearDown(() {
+    InlineCardVisibility.showAll = false;
+    InlineCardVisibility.shown.value = const {};
+  });
   test(
     'display blocks preserve surrounding markdown and validate every row',
     () {
@@ -191,4 +197,57 @@ void main() {
       },
     );
   }
+
+  testWidgets('그림 카드는 기본으로 가려 받지도 않고, 띠를 누르면 받아 보이고 눈으로 다시 가린다', (
+    tester,
+  ) async {
+    InlineCardVisibility.showAll = false;
+    final png = File('test/fixtures/inline-result.png').readAsBytesSync();
+    final calls = <Uri>[];
+    final server = Server(
+      Uri.parse('https://example.test/u/fixture/'),
+      client: MockClient((req) async {
+        calls.add(req.url);
+        return http.Response.bytes(
+          png,
+          200,
+          headers: {'content-type': 'image/png'},
+        );
+      }),
+    );
+    addTearDown(server.close);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InlineResultBody(
+            server: server,
+            text: block(),
+            style: MarkdownStyleSheet(),
+            onLink: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('가려짐'), findsOneWidget);
+    expect(find.byType(Image), findsNothing);
+    expect(calls, isEmpty, reason: '가린 그림은 받지 않는다');
+    await tester.tap(find.text('가려짐'));
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+    expect(find.byType(Image), findsOneWidget);
+    expect(calls, hasLength(1));
+    // 눈은 그림 크기에 붙는다 — 풀리기 전엔 그림 크기가 0이라 먼저 풀어 둔다.
+    final image = tester.widget<Image>(find.byType(Image));
+    await tester.runAsync(
+      () => precacheImage(image.image, tester.element(find.byType(Image))),
+    );
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.visibility_outlined));
+    await tester.pump();
+    expect(find.text('가려짐'), findsOneWidget);
+  });
 }

@@ -687,14 +687,16 @@ impl App {
                     default_fg: crate::cells::default_fg(),
                     source: None,
                 };
-                let images_only: Vec<_> = c.inline_slots.iter().filter(|s| !s.key.starts_with("media:")).cloned().collect();
+                let shown_images = crate::card_eye::visible_images(&c.inline_slots);
+                let images_only: Vec<_> = shown_images.iter().filter(|s| !s.key.starts_with("media:")).cloned().collect();
                 t.inline_images.prepare(&mut t.gpu, &images_only);
                 t.inline_anim.paint(&mut t.gpu, &images_only);
-                t.inline_images.queue_layer(&mut t.gpu, &c.inline_slots, true);
+                t.inline_images.queue_layer(&mut t.gpu, &shown_images, true);
                 t.gpu.draw_cells(&[slot]);
-                t.inline_images.queue_layer(&mut t.gpu, &c.inline_slots, false);
-                self.image_preview.collect(t.window.id(), 0, &t.gpu, &c.inline_slots);
+                t.inline_images.queue_layer(&mut t.gpu, &shown_images, false);
+                self.image_preview.collect(t.window.id(), 0, &t.gpu, &shown_images);
                 self.media_preview.paint_cards(t.window.id(), 0, &mut t.gpu, &c.inline_slots, t.cursor_px);
+                crate::card_eye::paint(&mut t.gpu, t.window.id(), &c.inline_slots, t.cursor_px);
                 crate::screenread::paint_status_model_icons(&mut t.gpu, &c.status_model_icons);
                 // 학생 스프라이트 — 메인 그리드와 같은 함수·같은 이미지 키.
                 let overlays = crate::screenread::StudentOverlays {
@@ -836,6 +838,11 @@ impl App {
         if let Some(t) = self.aux.terminals.get_mut(idx) {
             if let WindowEvent::CursorMoved { position, .. } = &event {
                 t.cursor_px = (position.x as f32 / t.gpu.scale(), position.y as f32 / t.gpu.scale());
+            }
+            let owner = t.window.id();
+            if !self.media_preview.owns(owner) && !self.image_preview.owns(owner) && crate::card_eye::event(owner, t.cursor_px, &event) {
+                t.redraw();
+                return;
             }
             match self.media_preview.event(t.window.id(), t.cursor_px, self.modifiers, &event, &self.proxy, !self.image_preview.owns(t.window.id())) {
                 crate::image_preview::Response::Consumed => {

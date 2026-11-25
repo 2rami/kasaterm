@@ -3418,6 +3418,8 @@ impl GpuRenderer {
             "chevron-up" => include_str!("../assets/icons/chevron-up.svg"),
             "check" => include_str!("../assets/icons/check.svg"),
             "file" => include_str!("../assets/icons/file.svg"),
+            "eye" => include_str!("../assets/icons/eye.svg"),
+            "eye-off" => include_str!("../assets/icons/eye-off.svg"),
             "file-code" => include_str!("../assets/icons/file-code.svg"),
             "image" => include_str!("../assets/icons/image.svg"),
             "users" => include_str!("../assets/icons/users.svg"),

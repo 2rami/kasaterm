@@ -3311,6 +3311,17 @@ impl ApplicationHandler<UserEvent> for App {
                 && self.file_tree.ctx_menu.is_none() && self.sidebar_menu.is_none()
                 && self.info.pane_menu.is_none()
                 && self.info.machine_menu.is_none() && !self.shell_picker.is_open();
+            if allow_image
+                && !self.media_preview.owns(id)
+                && !self.image_preview.owns(id)
+                && crate::card_eye::event(id, self.cursor_px, &event)
+            {
+                self.chrome_dirty = true;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                return;
+            }
             let media_was_open = self.media_preview.owns(id);
             match self.media_preview.event(id, self.cursor_px, self.modifiers, &event, &self.proxy, allow_image && !self.image_preview.owns(id)) {
                 crate::image_preview::Response::Consumed => {

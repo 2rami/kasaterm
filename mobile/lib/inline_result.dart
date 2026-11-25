@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import 'chat_markdown.dart';
+import 'inline_card_visibility.dart';
 import 'inline_media.dart';
 import 'server.dart';
 
@@ -143,7 +144,27 @@ class InlineResultBody extends StatelessWidget {
         else if (part.id case final String id)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
-            child: InlineResultImage(server: server, id: id, machine: machine),
+            child: ValueListenableBuilder<Set<String>>(
+              valueListenable: InlineCardVisibility.shown,
+              builder: (context, _, _) {
+                final key = 'ki:${machine ?? ''}:$id';
+                void flip() => InlineCardVisibility.toggle(key);
+                // 가린 그림은 받지도 않는다 — 눈을 눌러야 원본 기기에서 가져온다.
+                return InlineCardVisibility.isShown(key)
+                    ? InlineResultImage(
+                        server: server,
+                        id: id,
+                        machine: machine,
+                        onHide: flip,
+                      )
+                    : HiddenCardBar(
+                        icon: Icons.image_outlined,
+                        title: '그림',
+                        caption: '가려짐',
+                        onShow: flip,
+                      );
+              },
+            ),
           )
         else if (part.text!.trim().isNotEmpty)
           ChatMarkdownBody(
@@ -168,10 +189,14 @@ class InlineResultImage extends StatefulWidget {
     required this.server,
     required this.id,
     this.machine,
+    this.onHide,
   });
   final Server server;
   final String id;
   final String? machine;
+
+  /// 있으면 그림 오른쪽 위에 가리기 눈을 단다.
+  final VoidCallback? onHide;
   @override
   State<InlineResultImage> createState() => _InlineResultImageState();
 }
@@ -236,15 +261,19 @@ class _InlineResultImageState extends State<InlineResultImage> {
           ),
         );
       }
+      final image = Image.memory(
+        snapshot.data!,
+        fit: BoxFit.contain,
+        alignment: Alignment.centerLeft,
+        semanticLabel: '결과 이미지',
+        errorBuilder: (_, _, _) => _failed(),
+      );
       return ConstrainedBox(
         constraints: const BoxConstraints(maxHeight: 360),
-        child: Image.memory(
-          snapshot.data!,
-          fit: BoxFit.contain,
-          alignment: Alignment.centerLeft,
-          semanticLabel: '결과 이미지',
-          errorBuilder: (_, _, _) => _failed(),
-        ),
+        child: switch (widget.onHide) {
+          final hide? => CardEye(onHide: hide, child: image),
+          null => image,
+        },
       );
     },
   );

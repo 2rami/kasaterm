@@ -177,6 +177,7 @@
 - `mobile/lib/file_link.dart` — 대화·터미널 링크의 원본 기기 경로 해석과 파일 열기. `Server.resultFileBytes`가 인증된 파일을 받고 `ios/Runner/AppDelegate.swift`의 Quick Look 다리가 임시 미리보기를 연다.
 
 - `inline_result/remote.rs` — PC 미러 결과 이미지의 원본 기기 읽기·해시/치수 검증·로컬 캐시와 재시도. 렌더는 읽기를 예약하고 PNG가 준비되면 다시 그린다.
+- `card_eye.rs` — 결과 카드 가림(기본 가림)·눈 단추·가린 그림 띠·누름. 폰은 `mobile/lib/inline_card_visibility.dart`.
 - `inline_media/web.rs` — 웹 카드 등록: 쪽 제목·`og:image` 대표 그림을 받아 `.url` 원본으로 등록한다.
 - `kasa-http/src/pdf.rs` — PDF 카드의 쪽 그림(hayro, 순수 Rust). 등록 때 첫 쪽·쪽 수(`probe`), `/term/inline-media/page` 와 이 기기 카드 미리보기가 같이 쓰는 등록 PDF 쪽 그리기(`registered_page`). 폰 쪽 보기는 `mobile/lib/screens/pdf_pages.dart`.
 - `inline_result/load.rs` — `imgopen` 입력을 결과 그림으로: 비트맵·SVG 굽기·움직이는 그림 판별과 정지 그림 PNG의 `kasaterm-anim` 표식 쓰기·읽기. `inline_result/anim.rs` — 움직이는 결과 그림의 원본 받기(거울)·장 풀기와 메모리 상한, 창마다 텍스처 장 갈기(`Player`)와 이벤트 루프 만기.
