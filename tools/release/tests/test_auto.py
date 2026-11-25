@@ -94,6 +94,7 @@ class FakeEngine:
         self.tag_error = None
         self.orphan = None
         self.local_ready = True
+        self.verifying = False
         self.created = 0
         self.signature_ok = True
         self.revalidated = 0
@@ -136,6 +137,10 @@ class FakeEngine:
 
     def run_local(self, plan, _config):
         _, state = self.load_plan(plan["plan_id"])
+        if self.verifying:
+            state["stages"]["verify"] = {"status": "waiting", "detail": "macbook 에서 검사 중(일꾼 5) · 3분째"}
+            fastpatch.save_state(plan["plan_id"], state, self.plans)
+            return state
         for stage in ("verify", "build"):
             state["stages"][stage] = {"status": "done" if self.local_ready else "failed"}
         fastpatch.save_state(plan["plan_id"], state, self.plans)
@@ -408,6 +413,19 @@ class PolicyFixture(unittest.TestCase):
         self.assertEqual((second["state"], self.engine.load_plan(second["plan_id"])[0]["commit"]), ("done", B))
         self.assertEqual(auto.tick(self.root, self.engine)["state"], "idle")
         self.assertEqual(self.engine.calls, ["tag", "release", "feed"])
+
+    def test_a_plan_checking_on_another_machine_finishes_before_a_newer_ready_commit(self):
+        self.engine.verifying = True
+        first = auto.tick(self.root, self.engine)
+        self.assertEqual(first["state"], "waiting")
+        self.assertEqual(auto.load_ledger(self.root)["requests"][A]["reason"], "macbook 에서 검사 중(일꾼 5) · 3분째")
+        self.engine.head, self.engine.ready = B, [A, B]
+        second = auto.tick(self.root, self.engine)
+        self.assertEqual((second["state"], second["plan_id"]), ("waiting", first["plan_id"]))
+        self.engine.verifying = False
+        third = auto.tick(self.root, self.engine)
+        self.assertEqual((third["state"], third["request"]), ("done", A))
+        self.assertEqual(auto.tick(self.root, self.engine)["request"], B)
 
     def test_built_plan_ships_before_a_newer_ready_commit(self):
         self.engine.tag_error = "push 실패 — 원격은 그대로다"

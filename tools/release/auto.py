@@ -258,6 +258,12 @@ class Engine:
         return self.backend(plan, "dry", config).observe(plan)
 
 
+def checking(state):
+    """검사가 다른 기기에서 도는 중(verify_hosts). 미니에서만 검사하던 때는 tick 이 검사 내내 잠금을 쥐어 새 등록이 끼어들
+    틈이 없었다. 원격 검사 중에도 새 등록에 양보하면 등록이 잦은 날 검사가 끝나지 못하니, 끝날 때까지 기다린다."""
+    return (state.get("stages") or {}).get("verify", {}).get("status") == "waiting"
+
+
 def complete(state):
     return all(state.get("stages", {}).get(name, {}).get("status") == "done"
                for name in ("verify", "build", "tag", "release", "feed"))
@@ -403,7 +409,8 @@ def tick(state_dir, engine=None):
             if not facts.get("tag_parent"):
                 stale = policy.untagged_stale(plan, facts, engine.backend(plan, "dry", config))
                 # A built plan still ships even if newer work arrived; an unbuilt one (failed checks) yields to it.
-                if not stale and eligible and eligible[0] != request and not fastpatch.live_ready(plan, prior):
+                if (not stale and eligible and eligible[0] != request and not fastpatch.live_ready(plan, prior)
+                        and not checking(prior)):
                     stale = "a newer ready commit supersedes this unbuilt plan"
                 if stale:
                     entry.update(state="waiting_main", reason=stale, observed_main=head)
@@ -442,6 +449,10 @@ def tick(state_dir, engine=None):
             authorizer(plan, prior, engine.backend(plan, "dry", config), "tag")
             state = engine.run_local(plan, config)
             if not fastpatch.live_ready(plan, state):
+                if checking(state):
+                    entry.update(state="waiting", reason=state["stages"]["verify"].get("detail") or "verification is running")
+                    save()
+                    return {"state": "waiting", "request": request, "plan_id": plan["plan_id"]}
                 entry.update(state="blocked", reason="verification or build is not ready")
                 save()
                 return {"state": "blocked", "request": request, "plan_id": plan["plan_id"]}

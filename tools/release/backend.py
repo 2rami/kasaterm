@@ -19,7 +19,7 @@ from pathlib import Path
 import re
 import shutil
 
-from tools.release import deps, macsign
+from tools.release import deps, macsign, verify_hosts
 from tools.release.common import (CHANNEL_MANIFEST, Pending, Refused, channel_manifest, feed_fingerprint,
                                   feed_item, fetch_feed, sha256_bytes, sha256_file, validate_channel_manifest, version_tuple)
 
@@ -342,14 +342,21 @@ class RealBackend:
 
     # ── 단계 ──────────────────────────────────────────────────────────────
     def verify(self, plan, state):
+        cargo = self.tool("cargo")
+        jobs, placed = self.env()["CARGO_BUILD_JOBS"], None
+        if not self.dry:
+            placed = verify_hosts.place(self.runner, self.workdir, plan, cargo, TEST_PACKAGES,
+                                        fixed=verify_hosts.explicit_jobs(), timeout_ms=VERIFY_TIMEOUT * 1000)
+            if "done" in placed:
+                return placed["done"]
+            jobs = str(placed["jobs"])
         wt = self.worktree(plan)
         ran = []
-        cargo = self.tool("cargo")
         # Personal names and theme choices on a signing machine change the character and greeting fixtures.
         settings = self.workdir / "verify-settings.json"
         if not self.dry:
             settings.write_text("{}\n", encoding="utf-8")
-        test_env = {**self.env(), "KASATERM_SETTINGS_FILE": str(settings)}
+        test_env = {**self.env(), "KASATERM_SETTINGS_FILE": str(settings), "CARGO_BUILD_JOBS": jobs}
         for argv in TESTS:
             argv = [cargo, *argv[1:]]
             # 계획마다 새 워크트리라 워크스페이스 크레이트를 release 로 처음부터 다시 굽는다. 43~53분 걸리던 것이 미니가
@@ -360,7 +367,7 @@ class RealBackend:
                 raise Refused(f"검사 시간 초과: {' '.join(argv)}")
             if not r.ok:
                 raise Refused(f"검사 실패: {' '.join(argv)} — {r.tail(4)}")
-        return {"worktree": str(wt), "ran": ran, "dry": self.dry}
+        return {"worktree": str(wt), "ran": ran, "dry": self.dry, **({"place": placed["choice"]} if placed else {})}
 
     def build(self, plan, state):
         """태그 전 굽기 확인. 같은 커밋의 ready 판이 있으면 그 판의 서명·바이너리 해시를 다시 재고 갈음한다."""
