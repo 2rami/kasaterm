@@ -1,4 +1,4 @@
-//! The account uplink can operate the six RGB Control fan spots. Keep its local API and its other controls private.
+//! The account uplink can operate the six fan spots and the GPU lighting override. Keep its local API and its other controls private.
 use axum::{
     extract::Request,
     http::StatusCode,
@@ -68,6 +68,42 @@ fn fans(state: &Value) -> Option<Vec<Value>> {
     Some(result)
 }
 
+fn gpu_controller(state: &Value) -> bool {
+    state["synced"].as_array().is_some_and(|devices| {
+        devices.iter().any(|d| {
+            d.as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("Razer Chroma Addressable RGB Controller"))
+        })
+    })
+}
+
+fn gpu_light(state: &Value) -> Value {
+    let settings = &state["state"];
+    let asleep =
+        settings["off_with_monitor"] == true && state["monitor"]["ok"] == true && state["monitor"]["on"] == false;
+    // RGB Control exposes fan-zone samples, but has no optical readback from the card.
+    let mut sum = [0u32; 3];
+    let mut count = 0;
+    for zone in state["zones"].as_array().into_iter().flatten().take(8) {
+        if zone["dead"] == true {
+            continue;
+        }
+        if let Some(rgb) = hex(&zone["hex"]).and_then(|c| u32::from_str_radix(&c, 16).ok()) {
+            for (channel, shift) in sum.iter_mut().zip([16, 8, 0]) {
+                *channel += (rgb >> shift) & 255;
+            }
+            count += 1;
+        }
+    }
+    let sample = (count > 0).then(|| format!("{:02x}{:02x}{:02x}", sum[0] / count, sum[1] / count, sum[2] / count));
+    let effect = settings["mode"]
+        .as_str()
+        .filter(|s| s.len() <= 24 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)));
+    json!({"controller": gpu_controller(state), "sync": settings["sync_all"].as_bool(), "asleep": asleep,
+           "effect": effect, "fixed": hex(&state["parts"]["colors"]["gpu"]), "sample": sample,
+           "utilization": state["gpu"]["util"].as_u64().filter(|v| *v <= 100)})
+}
+
 fn fresh(v: &Value, key: &str) -> bool {
     v["ok"] == true && v[key].as_f64().is_some_and(|n| (0.0..15.0).contains(&n))
 }
@@ -113,12 +149,12 @@ async fn operation(client: &reqwest::Client, base: &str, req: Value) -> Result<V
                 .filter(|b| b.starts_with(&[0xff, 0xd8]))
                 .map(|b| STANDARD.encode(b));
             Ok(json!({"connected":state["connected"]==true,"fans":fans,"lcd":lcd,
-                "liquid":kr["liquid"].as_f64().filter(|_|current),"pump":kr["pump_rpm"].as_u64().filter(|_|current),"gpu":state["gpu"]["temp"].as_f64()}))
+                "liquid":kr["liquid"].as_f64().filter(|_|current),"pump":kr["pump_rpm"].as_u64().filter(|_|current),"gpu":state["gpu"]["temp"].as_f64(),"gpu_light":gpu_light(&state)}))
         }
         Some("color") => {
             let spot = req["spot"]
                 .as_str()
-                .filter(|s| SPOTS.contains(s))
+                .filter(|s| *s == "gpu" || SPOTS.contains(s))
                 .ok_or(StatusCode::BAD_REQUEST)?;
             let v = req.get("color").ok_or(StatusCode::BAD_REQUEST)?;
             let color = if v.is_null() {
@@ -131,7 +167,12 @@ async fn operation(client: &reqwest::Client, base: &str, req: Value) -> Result<V
                 )
             };
             let (state, _) = dashboard(client, base).await?;
-            if state["connected"] != true || port(&state["parts"]["map"][spot]).is_none() {
+            let available = if spot == "gpu" {
+                gpu_controller(&state)
+            } else {
+                port(&state["parts"]["map"][spot]).is_some()
+            };
+            if state["connected"] != true || !available {
                 return Err(StatusCode::CONFLICT);
             }
             let bytes = fetch(
@@ -197,18 +238,19 @@ mod tests {
     use axum::routing::{get, post};
 
     #[tokio::test]
-    async fn rgb_reads_and_writes_only_the_six_fan_protocol() {
-        let color = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    async fn rgb_reads_and_writes_only_mapped_lights() {
+        let color = std::sync::Arc::new(std::sync::Mutex::new(json!({})));
         let read = color.clone();
         let write = color.clone();
         let app=axum::Router::new().route("/api/state",get(move || {
             let fixed=read.lock().unwrap().clone();
-            async move {Json(json!({"connected":true,"parts":{"map":{"top1":"f00","top2":"f01","top3":"f02","left1":"f10","right1":"f20","right2":"f30"},"colors":{"top1":fixed}},
-                "fan_colors":{"top1":["112233","445566"]},"zones":[{"zone":6,"hex":"#aabbcc"}],"fans":{"ok":true,"age":1,"ports":[{"rpm":881}]},"private":"not exported"}))}
+            async move {Json(json!({"connected":true,"parts":{"map":{"top1":"f00","top2":"f01","top3":"f02","left1":"f10","right1":"f20","right2":"f30"},"colors":fixed},
+                "synced":["Razer Chroma Addressable RGB Controller"],"state":{"sync_all":true,"off_with_monitor":true,"mode":"ice"},"monitor":{"ok":true,"on":false},"fan_colors":{"top1":["112233","445566"]},"zones":[{"zone":6,"hex":"#aabbcc"}],"fans":{"ok":true,"age":1,"ports":[{"rpm":881}]},"private":"not exported"}))}
         })).route("/api/part",post(move |Json(v):Json<Value>| {
             let write=write.clone(); async move {
-                *write.lock().unwrap()=v["color"].as_str().map(str::to_owned);
-                Json(json!({"ok":true,"parts":{"colors":{"top1":v["color"]}}}))
+                let mut colors=write.lock().unwrap();
+                colors[v["part"].as_str().unwrap()] = v["color"].clone();
+                Json(json!({"ok":true,"parts":{"colors":*colors}}))
             }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -224,11 +266,22 @@ mod tests {
         assert_eq!(v["fans"][0]["rpm"], 881);
         assert_eq!(v["fans"][5]["inner"], "aabbcc");
         assert!(v.get("private").is_none());
-        for c in [json!("C0FFEE"), Value::Null] {
-            operation(&client, &base, json!({"op":"color","spot":"top1","color":c}))
-                .await
-                .unwrap();
-            assert_eq!(*color.lock().unwrap(), hex(&c));
+        assert_eq!(v["gpu_light"]["sample"], "aabbcc");
+        assert_eq!(v["gpu_light"]["asleep"], true);
+        assert!(!gpu_controller(&json!({"synced":["Logitech G560 Lightsync Speaker"]})));
+        for spot in ["top1", "gpu"] {
+            for c in [json!("C0FFEE"), Value::Null] {
+                operation(&client, &base, json!({"op":"color","spot":spot,"color":c}))
+                    .await
+                    .unwrap();
+                let got = operation(&client, &base, json!({"op":"snapshot"})).await.unwrap();
+                let stored = if spot == "gpu" {
+                    &got["gpu_light"]["fixed"]
+                } else {
+                    &got["fans"][0]["fixed"]
+                };
+                assert_eq!(*stored, json!(hex(&c)));
+            }
         }
         for req in [
             json!({"op":"color","spot":"ram","color":"ff0000"}),

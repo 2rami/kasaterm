@@ -542,7 +542,9 @@ Windows 는 책상 위 모니터와 책상 밑 타워, 맥미니는 왼벽 선�
 - Y60 조명은 Windows 카사텀의 `/version.kasadesk_rgb`를 확인한 뒤 계정 소유 기기의
   `POST /relay/account/m/~<id>/kasadesk/rgb`로 연결한다. 관문과 호스트 양쪽에 RGB 지원 판이 필요하다.
   관문은 현재 계정에 등록된 데스크톱의 직접 업링크에만 소유 권한을 싣는다. 호스트는 RGB Control의 루프백 대시보드에
-  여섯 팬의 배치 확인(`capability`), 색·냉각·LCD 조회(`snapshot`), 자리별 고정 색 지정·해제(`color`)만 전달한다.
+  여섯 팬의 배치 확인(`capability`), 색·냉각·LCD 조회(`snapshot`), 자리별 고정 색 지정·해제(`color`)만 전달한다. Razer Chroma Addressable RGB Controller가 감지되면
+  같은 요청의 `spot: "gpu"`로 그래픽카드의 고정 색을 지정·해제할 수 있다. `gpu_light`의 `sample`은 팬 효과의 대표색이고
+  `fixed`는 저장된 GPU 설정이다. 카드에서 빛을 측정한 값은 제공하지 않는다.
 - 허락: 기기마다 `POST …/kasanet/view {id}`(5분마다, 데스크톱 수명 15분). 데스크톱은 폰 등록과 같은 자격(관문을 거친 주인 주소, 카사넷·직접
   요청은 403)만 받아 빈 포트 돌리기 + 허용 목록에 넣고(`kasanet::allow_viewer`), 서비스에는 폰 줄(만료 있는 id)로 넘긴다. 폰 등록 길을
   빌리지 않는 까닭: 폰 앱 표식(`note_phone_app`)이 켜져 「폰 보여 주기」가 localhost 주소를 넘기는 길로 바뀐다.
