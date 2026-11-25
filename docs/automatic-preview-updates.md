@@ -20,7 +20,9 @@
 
 - 일꾼 수 = min(코어 − 5분 부하, 메모리 여유 ÷ 3GB, 8). 메모리 여유는 `kern.memorystatus_level`(Activity Monitor 의 메모리 여유)이다.
   스왑 사용량은 지난 흔적이라 보지 않는다.
-- 원격 후보는 `KASATERM_VERIFY_HOSTS`(쉼표·공백 목록, 비우면 원격 없음), 기본은 미니에서 맥북으로 가는 `macbook-hifumi` 다.
+- 원격 후보는 `KASATERM_VERIFY_HOSTS`(쉼표·공백 목록, 비우면 원격 없음), 기본은 미니 ssh 설정의 `macbook-hifumi`(회사 맥북, 미니로 오는 역터널)와
+  `homehub-wan`(모묘모 맥북, 서울 관문 역터널)이다. 모묘모 맥북은 미니 `homepc` 열쇠를 `restrict,from="127.0.0.1,::1"` 로만 받는다.
+  Windows 집 PC 는 맥 시험을 못 돌려 후보가 아니다. 후보끼리 일꾼 수가 같으면 목록 앞쪽이다.
   사람이 쓰는 기기라 코어 둘을 남기고, 전원에 꽂혀 있고 디스크 여유가 40GB 이상일 때만 맡기며, `nice 10` 으로 돌린다.
   controller 보다 일꾼이 많을 때만 원격을 고른다. controller 는 늘 1개 이상이고, `CARGO_BUILD_JOBS` 가 있으면 그 값으로 고정한다.
 - 원격은 그 기기의 `~/.local/share/kasaterm-verify` 에 전용 사본(`repo/`)과 이어 쓰는 `target/` 을 두고, 계획 커밋을 checkout 해

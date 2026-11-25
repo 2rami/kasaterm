@@ -18,7 +18,8 @@ import time
 
 from tools.release.common import Pending, Refused
 
-HOSTS = ("macbook-hifumi",)
+# 이 맥북(미니 → 맥북 역터널)과 모묘모 맥북(서울 관문 역터널, 미니 열쇠는 127.0.0.1 에서만·포워딩 없이 허락).
+HOSTS = ("macbook-hifumi", "homehub-wan")
 HOSTS_ENV = "KASATERM_VERIFY_HOSTS"
 REPO_URL = "https://github.com/2rami/kasaterm.git"
 SSH = ("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3")
