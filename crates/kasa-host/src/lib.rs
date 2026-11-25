@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 
 /// 롱폴 상한. 부르는 쪽의 HTTP 롱폴(25초)보다 길면 그쪽이 먼저 끊는다.
 const WAIT_MAX: f64 = 25.0;
+/// `history` 한 번에 내주는 스크롤백 줄 상한 — 기본 200, 손님이 더 달라고 해도 여기까지.
+const HISTORY_MAX: u64 = 2000;
 /// 붙여넣은 글이 앱(claude 입력칸)에 다 들어간 뒤 Enter 가 가야 한다 — 같은 쓰기에 실으면
 /// 붙여넣기 끝 표시 전에 Enter 를 받은 앱이 빈 입력을 보낸다.
 const SUBMIT_GAP: Duration = Duration::from_millis(150);
@@ -98,6 +100,16 @@ impl Host {
                 let s = self.get(p)?;
                 let lines = p.get("lines").and_then(Value::as_u64).unwrap_or(40) as usize;
                 Ok(json!({"text": s.pty.visible_text(lines)}))
+            }
+            "history" => {
+                // 살아 있는 화면 바로 위의 스크롤백 — 손님 앱이 작업 화면을 위로 올려 지난 출력을 본다.
+                // `screen` 과 같은 행 꼴(`wire::encode_row`)로, 위→아래 순.
+                let s = self.get(p)?;
+                let lines = p.get("lines").and_then(Value::as_u64).unwrap_or(200).min(HISTORY_MAX) as usize;
+                let mut rows = s.pty.rows_above_live(lines);
+                rows.reverse();
+                let rows: Vec<Value> = rows.iter().map(|r| kasa_screen::wire::encode_row(r)).collect();
+                Ok(json!({"rows": rows}))
             }
             "resize" => {
                 let s = self.get(p)?;

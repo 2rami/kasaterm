@@ -116,6 +116,23 @@ fn 화면은_grid_프레임이고_바뀌면_롱폴이_깬다() {
 }
 
 #[test]
+fn 화면_위로_밀린_줄은_history_로_위에서_아래_순으로_준다() {
+    let mut c = Client::new(&start());
+    // 기다릴 글은 명령줄에 안 보이는 것으로 — 친 명령이 화면에 먼저 뜬다
+    let id = c.spawn_sh(json!({"cmd": "i=1; while [ $i -le 60 ]; do echo line-$i; i=$((i+1)); done; echo end-$((40+2))"}));
+    c.wait_text(&id, "end-42");
+    let rows = c.call("history", json!({"id": id, "lines": 500}))["rows"].as_array().unwrap().clone();
+    let text: Vec<String> = rows.iter().map(|r| r.as_array().unwrap().iter()
+        .map(|run| run[0].as_str().unwrap_or_default().to_string()).collect::<String>().trim_end().to_string()).collect();
+    let first = text.iter().position(|t| t == "line-1").unwrap_or_else(|| panic!("line-1 이 스크롤백에 없다: {text:?}"));
+    let second = text.iter().position(|t| t == "line-2").expect("line-2 가 스크롤백에 없다");
+    assert!(first < second, "위에서 아래 순이 아니다: {text:?}");
+    assert!(!text.iter().any(|t| t == "end-42"), "살아 있는 화면 줄까지 들어왔다");
+    let few = c.call("history", json!({"id": id, "lines": 3}))["rows"].as_array().unwrap().len();
+    assert_eq!(few, 3);
+}
+
+#[test]
 fn 붙여넣기는_제출까지_키는_이름으로() {
     let mut c = Client::new(&start());
     let id = c.spawn_sh(json!({}));

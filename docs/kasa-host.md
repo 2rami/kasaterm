@@ -28,6 +28,7 @@ kasa-host --socket ~/.config/nacho/host.sock
 | `key` | `id` `name` | `{}` — `enter`·`tab`·`shift+tab`·`escape`·`backspace`·`delete`·`space`·방향·`home`·`end`·`pageup`·`pagedown`·`ctrl+<글자>`·한 글자 |
 | `screen` | `id` `since?` `wait?`(초, 25 상한) | `{hash, frame, title, alive, input_revision, input_busy}` — `frame` 은 본판 웹 터미널과 같은 grid 프레임(`kasa_screen::wire`). `since` 가 지금 해시면 바뀔 때까지 기다린다 |
 | `text` | `id` `lines?`(40) | `{text}` — 보이는 마지막 줄들, 줄 끝 공백 걷음 |
+| `history` | `id` `lines?`(200, 2000 상한) | `{rows}` — 살아 있는 화면 바로 위의 스크롤백, 위→아래 순. 행 꼴은 `screen` 프레임의 행과 같다(`wire::encode_row`). 손님 앱이 작업 화면을 위로 올려 지난 출력을 본다 |
 | `resize` | `id` `cols` `rows` | `{}` |
 | `rename` | `id` `name` | `{}` |
 | `close` | `id` | `{}` — 셸과 그 자식을 끝내고 목록에서 뺀다 |
