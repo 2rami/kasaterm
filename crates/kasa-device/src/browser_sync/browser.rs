@@ -3,7 +3,12 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Go 는 빈 목록을 `null` 로 보낸다(탭·북마크가 하나도 없는 브라우저) — 빈 것으로 받는다.
+fn or_empty<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
@@ -12,6 +17,10 @@ pub struct Status {
     pub collections: BTreeMap<String, String>,
     #[serde(default)]
     pub tabs_rev: String,
+    #[serde(default)]
+    pub settings_rev: String,
+    #[serde(default)]
+    pub rooms_rev: String,
 }
 
 /// 북마크 또는 폴더(`url` 이 빈 것) 하나. 브라우저의 로컬 id 그대로다.
@@ -24,7 +33,7 @@ pub struct Mark {
     pub url: String,
     #[serde(default)]
     pub added: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_empty")]
     pub children: Vec<Mark>,
 }
 
@@ -39,7 +48,7 @@ impl Mark {
 pub struct Collection {
     pub key: String,
     pub rev: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_empty")]
     pub marks: Vec<Mark>,
 }
 
@@ -65,7 +74,7 @@ pub struct Workspace {
     pub color: String,
     #[serde(default)]
     pub account: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_empty")]
     pub tabs: Vec<Tab>,
     #[serde(default)]
     pub dropped: usize,
@@ -73,12 +82,55 @@ pub struct Workspace {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Read {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_empty")]
     pub collections: Vec<Collection>,
     #[serde(default)]
     pub tabs_rev: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_empty")]
     pub tabs: Vec<Workspace>,
+    /// 기기끼리 나누는 설정(칸 → 값). 옛 브라우저는 없다.
+    #[serde(default)]
+    pub settings: Option<BTreeMap<String, serde_json::Value>>,
+    #[serde(default)]
+    pub settings_rev: String,
+    /// 사람의 방. 옛 브라우저는 없다.
+    #[serde(default)]
+    pub rooms: Option<Rooms>,
+}
+
+/// 사람의 방 하나 — 브라우저의 작업공간 id 그대로다.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Room {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub color: String,
+}
+
+/// 사람의 방, 순서대로. `mode` 가 `rooms` 일 때만 나눌 수 있다 — `accounts` 면 작업공간마다 계정 로그인이 따로라 `list` 가 비어 있다.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rooms {
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub rev: String,
+    #[serde(default, deserialize_with = "or_empty")]
+    pub list: Vec<Room>,
+}
+
+/// 브라우저에 하는 방 고치기 하나(`add`·`edit`·`remove`·`order`). 더하는 방의 id 는 이쪽이 정한다(동기화 id).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomOp {
+    pub op: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<String>,
 }
 
 /// 브라우저에 하는 북마크 고치기 하나. 더하는 항목의 id 는 이쪽이 정한다(동기화 id).
@@ -130,4 +182,19 @@ pub trait Browser {
     /// 관문에는 모음이 있는데 이 기기 브라우저에는 없는 계정마다 빈 계정 폴더를 만들게 한다. 만든 계정을 준다.
     /// 옛 브라우저는 모르는 명령이라 `Failed` 다.
     fn put_accounts(&self, accounts: &[String]) -> Result<Vec<String>, BrowserError>;
+    /// 다른 기기가 바꾼 설정 칸을 한꺼번에 넣는다. 새 rev 를 준다.
+    fn put_settings(&self, base_rev: &str, values: &BTreeMap<String, serde_json::Value>) -> Result<String, BrowserError>;
+    /// 방 고치기를 한 묶음으로 한다. 새 rev 를 준다.
+    fn apply_rooms(&self, base_rev: &str, ops: &[RoomOp]) -> Result<String, BrowserError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_lists_go_sends_as_null_read_as_empty() {
+        let read: Read = serde_json::from_str(r#"{"collections":[{"key":"default","rev":"e.0","marks":null}],"tabs":null,"tabs_rev":"x"}"#).unwrap();
+        assert!(read.tabs.is_empty() && read.collections[0].marks.is_empty());
+    }
 }

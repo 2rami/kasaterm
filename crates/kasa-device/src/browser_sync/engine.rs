@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use sha2::Digest as _;
 
-use super::browser::{Browser, BrowserError, Collection, Device, Mark, Op, Read};
+use super::browser::{Browser, BrowserError, Collection, Device, Mark, Op, Read, RoomOp};
 use super::order::{self, Sibling};
-use super::record::{MarkRecord, Stamp, TabsRecord};
-use super::state::{KnownMark, State};
+use super::record::{MarkRecord, RoomRecord, Setting, SettingsRecord, Stamp, TabsRecord};
+use super::state::{KnownMark, KnownRoom, KnownSetting, State};
 use super::tree;
 use crate::login_vault::crypto::VaultKey;
 use crate::login_vault::engine::{Remote, RemoteError};
@@ -25,6 +25,10 @@ const MARK_PAD: usize = 256;
 pub const MARK_MAX: usize = 6 * 1024;
 const TABS_PAD: usize = 4096;
 pub const TABS_MAX: usize = 64 * 1024;
+/// 설정은 기기마다 한 덩어리라 4KB 단위로, 방은 북마크처럼 채운다.
+const SETTINGS_PAD: usize = 4096;
+const SETTINGS_MAX: usize = 32 * 1024;
+const ROOM_MAX: usize = 4 * 1024;
 /// 탭은 바뀔 때마다가 아니라 이만큼 묶어서 올린다 — 관문이 활동을 덜 엿보게.
 const TABS_EVERY_MS: u64 = 30_000;
 /// 한 바퀴에 이만큼 또는 아는 북마크의 4분의 1 중 큰 쪽을 넘게 사라지면, 또는 모음의 살아 있는 것이 전부 사라지면
@@ -68,6 +72,8 @@ pub struct Counts {
     pub browser_away: bool,
     /// 관문에만 있던 계정이라 브라우저에 빈 계정 폴더를 만들게 한 수. 다음 바퀴의 처음 합류가 채운다.
     pub accounts_made: usize,
+    /// 이 기기의 작업공간이 계정마다 나뉘어 있거나 방이 하나도 없어 방을 맞추지 않았다.
+    pub rooms_paused: bool,
 }
 
 pub struct Engine<'a> {
@@ -95,6 +101,19 @@ fn tabs_name(device: &str) -> String {
     format!("tabs\n{device}")
 }
 
+fn settings_name(device: &str) -> String {
+    format!("settings\n{device}")
+}
+
+fn room_name(sync_id: &str) -> String {
+    format!("room\n{sync_id}")
+}
+
+/// 방 이름끼리 짝지을 때 — 띄어쓰기·대소문자만 다른 것은 같은 방이다.
+fn same_name(a: &str, b: &str) -> bool {
+    a.split_whitespace().collect::<String>().to_lowercase() == b.split_whitespace().collect::<String>().to_lowercase()
+}
+
 /// 브라우저가 더할 때 받는 id 꼴 — 남이 보낸 기록의 id 도 이것만 받는다.
 fn valid_sync_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -112,6 +131,15 @@ fn new_sync_id() -> String {
 enum Opened {
     Mark(MarkRecord),
     Tabs(TabsRecord),
+    Settings(SettingsRecord),
+    Room(RoomRecord),
+}
+
+/// 설정·방 기록은 `kind` 로 가른다 — 탭 기록과 칸이 겹쳐도 헷갈리지 않게.
+#[derive(serde::Deserialize)]
+struct Kind {
+    #[serde(default)]
+    kind: String,
 }
 
 /// 브라우저 트리의 한 자리.
@@ -143,6 +171,8 @@ struct Outgoing {
 enum Pending {
     Mark,
     Tabs { rev: String },
+    Settings { digest: String },
+    Room { sync_id: String },
 }
 
 /// 브라우저 트리를 흉내 내 최소한의 고치기를 만든다. `Tree.Move` 와 같이 옮길 자리는 옮기는 것을 뺀 순서다.
@@ -197,8 +227,29 @@ impl Engine<'_> {
                 return Some(Opened::Mark(r));
             }
         }
+        match serde_json::from_slice::<Kind>(&plain).map(|k| k.kind).unwrap_or_default().as_str() {
+            "settings" => {
+                let r = serde_json::from_slice::<SettingsRecord>(&plain).ok()?;
+                return (self.key.name_id(&settings_name(&r.device)) == item.id).then_some(Opened::Settings(r));
+            }
+            "room" => {
+                let mut r = serde_json::from_slice::<RoomRecord>(&plain).ok()?;
+                if !valid_sync_id(&r.sync_id) || self.key.name_id(&room_name(&r.sync_id)) != item.id {
+                    return None;
+                }
+                if !valid_pos(&r.pos) {
+                    r.pos.clear();
+                }
+                return Some(Opened::Room(r));
+            }
+            _ => {}
+        }
         let tabs = serde_json::from_slice::<TabsRecord>(&plain).ok()?;
         (self.key.name_id(&tabs_name(&tabs.device)) == item.id).then_some(Opened::Tabs(tabs))
+    }
+
+    fn value_mac(&self, value: &serde_json::Value) -> String {
+        self.key.value_mac(value.to_string().as_bytes())
     }
 
     fn seal(&self, id: &str, plain: &[u8], pad: usize, max: usize) -> anyhow::Result<String> {
@@ -227,6 +278,11 @@ impl Engine<'_> {
             for known in state.marks.values_mut() {
                 known.rev = 0;
             }
+            for known in state.rooms.values_mut() {
+                known.rev = 0;
+            }
+            state.settings_item_rev = 0;
+            state.settings_sent.clear();
             fetched = self.remote.fetch(0)?;
         }
         let relay_now = fetched.now_ms;
@@ -247,6 +303,8 @@ impl Engine<'_> {
         let mut counts = Counts { browser_away: away, ..Counts::default() };
         let mut marks: BTreeMap<String, BTreeMap<String, (RemoteItem, MarkRecord)>> = BTreeMap::new();
         let mut tabs: Vec<(RemoteItem, TabsRecord)> = Vec::new();
+        let mut settings: Vec<(RemoteItem, SettingsRecord)> = Vec::new();
+        let mut rooms: Vec<(RemoteItem, RoomRecord)> = Vec::new();
         let total = fetched.items.len();
         for item in fetched.items {
             match self.open(&item) {
@@ -254,6 +312,8 @@ impl Engine<'_> {
                     marks.entry(r.collection.clone()).or_default().insert(r.sync_id.clone(), (item, r));
                 }
                 Some(Opened::Tabs(t)) => tabs.push((item, t)),
+                Some(Opened::Settings(r)) => settings.push((item, r)),
+                Some(Opened::Room(r)) => rooms.push((item, r)),
                 None => counts.undecryptable += 1,
             }
         }
@@ -289,7 +349,22 @@ impl Engine<'_> {
                 }
             }
         }
-        self.tabs(state, &read, tabs, relay_now, &mut counts, &mut outgoing);
+        // 설정과 방은 받은 것을 상태에 모아 두므로, 미뤄도 관문 차례를 붙잡지 않는다.
+        for result in [
+            self.settings(state, &read, settings, relay_now, &mut counts, &mut outgoing),
+            self.rooms(state, &read, rooms, relay_now, &mut counts, &mut outgoing),
+        ] {
+            match result {
+                Ok(()) => {}
+                Err(BrowserError::Stale) => counts.stale += 1,
+                Err(BrowserError::NotRunning) => counts.browser_away = true,
+                Err(BrowserError::Failed(_)) => counts.failed += 1,
+            }
+        }
+        // 설정·방 항목을 모르는 옛 kasaterm 은 받은 것이 전부 안 풀리면 열쇠가 다르다고 멈춘다. 그런 바퀴가 없게 내 탭 항목을
+        // 함께 다시 올린다 — 그 기기가 풀 수 있는 것이 같은 차례에 하나는 있다.
+        let shared = outgoing.iter().any(|o| matches!(o.kind, Pending::Settings { .. } | Pending::Room { .. }));
+        self.tabs(state, &read, tabs, relay_now, &mut counts, &mut outgoing, shared);
         // 미룬 모음의 관문 항목은 다음 바퀴에 다시 받아야 하니 차례를 앞당기지 않는다.
         if complete {
             state.revision = fetched.revision;
@@ -611,7 +686,8 @@ impl Engine<'_> {
     }
 
     /// 내 탭을 묶어 올리고, 다른 기기의 탭이 바뀌었으면 브라우저에 넘긴다.
-    fn tabs(&self, state: &mut State, read: &Read, fetched: Vec<(RemoteItem, TabsRecord)>, relay_now: u64, counts: &mut Counts, outgoing: &mut Vec<Outgoing>) {
+    #[allow(clippy::too_many_arguments)]
+    fn tabs(&self, state: &mut State, read: &Read, fetched: Vec<(RemoteItem, TabsRecord)>, relay_now: u64, counts: &mut Counts, outgoing: &mut Vec<Outgoing>, again: bool) {
         let mine = self.key.name_id(&tabs_name(self.device));
         for (item, record) in fetched {
             if item.id == mine {
@@ -626,7 +702,8 @@ impl Engine<'_> {
         // 끄는 것은 묶지 않는다 — 끈 뒤 곧바로 둘 다 꺼져 바퀴가 멈추면 묘비가 영영 안 간다.
         let due = self.now_ms.saturating_sub(state.tabs_sent_ms) >= TABS_EVERY_MS || state.tabs_sent.is_empty() || !self.send_tabs;
         let wanted = if self.send_tabs { read.tabs_rev.clone() } else { "off".to_string() };
-        if wanted != state.tabs_sent && due && (self.send_tabs || state.tabs_item_rev > 0) {
+        let again = again && self.send_tabs && !read.tabs_rev.is_empty();
+        if (wanted != state.tabs_sent && due || again) && (self.send_tabs || state.tabs_item_rev > 0) {
             let mut record = TabsRecord {
                 device: self.device.into(),
                 name: self.device_name.into(),
@@ -670,6 +747,243 @@ impl Engine<'_> {
         }
     }
 
+    /// 설정: 기기마다의 항목에서 칸마다 나중 것을 고르고, 이 기기에서 바뀐 칸은 지금 판을 준다. 처음 붙는 기기는 계정에 이미 있는
+    /// 값을 따른다 — 제 값의 판을 0 으로 둔다. 브라우저에 넣은 뒤에만 상태를 고친다.
+    fn settings(
+        &self,
+        state: &mut State,
+        read: &Read,
+        fetched: Vec<(RemoteItem, SettingsRecord)>,
+        relay_now: u64,
+        counts: &mut Counts,
+        outgoing: &mut Vec<Outgoing>,
+    ) -> Result<(), BrowserError> {
+        let mine = self.key.name_id(&settings_name(self.device));
+        for (item, record) in fetched {
+            if item.id == mine {
+                state.settings_item_rev = item.rev;
+            }
+            if state.remote_settings.get(&item.id).is_none_or(|known| record.at >= known.at) {
+                state.remote_settings.insert(item.id, record);
+            }
+        }
+        let Some(local) = &read.settings else { return Ok(()) };
+        let mut best: BTreeMap<&str, &Setting> = BTreeMap::new();
+        for record in state.remote_settings.values() {
+            for (key, field) in &record.fields {
+                if best.get(key.as_str()).is_none_or(|b| field.stamp > b.stamp) {
+                    best.insert(key, field);
+                }
+            }
+        }
+        let first = state.settings.is_empty();
+        let stamp_now = |floor: u64| Stamp::new(stamp(self.now_ms, relay_now, floor), self.device);
+        let mut merged: BTreeMap<String, Setting> = BTreeMap::new();
+        for (key, value) in local {
+            let mac = self.value_mac(value);
+            let stamp = match state.settings.get(key) {
+                Some(known) if known.mac == mac => known.stamp.clone(),
+                Some(known) => stamp_now(known.stamp.at + 1),
+                None if first && best.contains_key(key.as_str()) => Stamp::default(),
+                None => stamp_now(0),
+            };
+            let mut chosen = Setting { value: value.clone(), stamp };
+            if let Some(theirs) = best.get(key.as_str()).filter(|theirs| theirs.stamp > chosen.stamp) {
+                chosen = (*theirs).clone();
+            }
+            merged.insert(key.clone(), chosen);
+        }
+        let changed: BTreeMap<String, serde_json::Value> =
+            merged.iter().filter(|(key, field)| local.get(*key) != Some(&field.value)).map(|(key, field)| (key.clone(), field.value.clone())).collect();
+        if !changed.is_empty() {
+            self.browser.put_settings(&read.settings_rev, &changed)?;
+            counts.applied += changed.len();
+        }
+        state.settings = merged.iter().map(|(key, field)| (key.clone(), KnownSetting { mac: self.value_mac(&field.value), stamp: field.stamp.clone() })).collect();
+        let digest: String = sha2::Sha256::digest(serde_json::to_vec(&merged).unwrap_or_default()).iter().take(12).map(|b| format!("{b:02x}")).collect();
+        if digest != state.settings_sent {
+            let record = SettingsRecord { kind: "settings".into(), device: self.device.into(), at: stamp(self.now_ms, relay_now, 0), fields: merged };
+            match serde_json::to_vec(&record).map_err(anyhow::Error::from).and_then(|plain| self.seal(&mine, &plain, SETTINGS_PAD, SETTINGS_MAX)) {
+                Ok(blob) => outgoing.push(Outgoing { id: mine, expected_rev: state.settings_item_rev, blob, kind: Pending::Settings { digest } }),
+                Err(_) => counts.too_large += 1,
+            }
+        }
+        Ok(())
+    }
+
+    /// 방: 북마크 모음 하나처럼 맞추되 폴더가 없다. 받은 방은 `room_inbox` 에 모았다가 맞출 수 있는 바퀴에 넣는다 — 작업공간이
+    /// 계정마다 나뉜 동안, 방이 하나도 없는 동안(에이전트 공간만 남긴 때), 사람이 그사이 고친 바퀴. 알던 방이 하나도 없으면
+    /// (처음, 또는 방을 다 닫았다 다시 만든 때) 이름이 같은 방끼리 짝짓고 나머지는 합친다 — 지우지 않는다. 마지막 방은 지우지 않는다.
+    fn rooms(
+        &self,
+        state: &mut State,
+        read: &Read,
+        fetched: Vec<(RemoteItem, RoomRecord)>,
+        relay_now: u64,
+        counts: &mut Counts,
+        outgoing: &mut Vec<Outgoing>,
+    ) -> Result<(), BrowserError> {
+        for (item, theirs) in fetched {
+            let merged = match state.room_inbox.get(&theirs.sync_id) {
+                Some((_, held)) => held.merge(&theirs),
+                None => theirs.clone(),
+            };
+            state.room_inbox.insert(theirs.sync_id.clone(), (item.rev, merged));
+        }
+        let Some(local) = &read.rooms else { return Ok(()) };
+        if local.mode != "rooms" || local.list.is_empty() {
+            counts.rooms_paused = true;
+            return Ok(());
+        }
+        let known = state.rooms.clone();
+        let inbox = state.room_inbox.clone();
+        let stamp_now = |floor: u64| Stamp::new(stamp(self.now_ms, relay_now, floor), self.device);
+        let mut sync_of: HashMap<String, String> = known
+            .values()
+            .filter(|k| local.list.iter().any(|l| l.id == k.local_id))
+            .map(|k| (k.local_id.clone(), k.record.sync_id.clone()))
+            .collect();
+        let rejoin = sync_of.is_empty();
+        // 처음 붙는 방은 그 기록을 그대로 받는다(관문이나 아는 것 가운데 이름이 같은 살아 있는 방).
+        let mut adopted: BTreeMap<String, RoomRecord> = BTreeMap::new();
+        if rejoin {
+            let mut candidates: BTreeMap<String, RoomRecord> = known.values().map(|k| (k.record.sync_id.clone(), k.record.clone())).collect();
+            for (sid, (_, theirs)) in &inbox {
+                let merged = candidates.get(sid).map_or_else(|| theirs.clone(), |mine| mine.merge(theirs));
+                candidates.insert(sid.clone(), merged);
+            }
+            for l in &local.list {
+                if let Some(r) = candidates.values().find(|r| r.alive() && same_name(&r.name, &l.name) && !adopted.contains_key(&r.sync_id)) {
+                    sync_of.insert(l.id.clone(), r.sync_id.clone());
+                    adopted.insert(r.sync_id.clone(), r.clone());
+                }
+            }
+        }
+        for l in &local.list {
+            let free = valid_sync_id(&l.id) && !known.contains_key(&l.id) && !inbox.contains_key(&l.id);
+            sync_of.entry(l.id.clone()).or_insert_with(|| if free { l.id.clone() } else { new_sync_id() });
+        }
+        let local_of_sync: HashMap<&str, &super::browser::Room> = local.list.iter().map(|l| (sync_of[&l.id].as_str(), l)).collect();
+
+        let mut records: BTreeMap<String, RoomRecord> = BTreeMap::new();
+        for l in &local.list {
+            let sid = sync_of[&l.id].clone();
+            let record = match (adopted.get(&sid), known.get(&sid)) {
+                (Some(theirs), _) => theirs.clone(),
+                (None, Some(k)) if !rejoin => {
+                    let mut r = k.record.clone();
+                    if r.name != l.name || r.color != l.color {
+                        r.name = l.name.clone();
+                        r.color = l.color.clone();
+                        r.content = stamp_now(k.record.content.at + 1);
+                    }
+                    if !r.alive() {
+                        // 묘비를 받은 뒤에도 남아 있다 — 지우지 못했거나 사람이 되살린 것이다.
+                        r.content = stamp_now(r.latest() + 1);
+                    }
+                    r
+                }
+                _ => RoomRecord {
+                    kind: "room".into(),
+                    sync_id: sid.clone(),
+                    name: l.name.clone(),
+                    color: l.color.clone(),
+                    content: stamp_now(0),
+                    ..Default::default()
+                },
+            };
+            records.insert(sid, record);
+        }
+        let ids: Vec<String> = local.list.iter().map(|l| sync_of[&l.id].clone()).collect();
+        let order: Vec<Sibling> = ids
+            .iter()
+            .map(|sid| {
+                let pos = match adopted.get(sid) {
+                    Some(r) => Some(r.pos.as_str()),
+                    None if !rejoin => known.get(sid).map(|k| k.record.pos.as_str()),
+                    None => None,
+                };
+                Sibling { id: sid, pos: pos.filter(|p| !p.is_empty()) }
+            })
+            .collect();
+        for (sid, (pos, moved)) in ids.iter().zip(order::place(&order)) {
+            if moved && !adopted.contains_key(sid) {
+                if let Some(r) = records.get_mut(sid) {
+                    r.pos = pos;
+                    r.place = stamp_now(known.get(sid).map_or(0, |k| k.record.place.at + 1));
+                }
+            }
+        }
+        for (sid, k) in &known {
+            if records.contains_key(sid) {
+                continue;
+            }
+            let mut r = k.record.clone();
+            // 다시 붙는 바퀴에 없는 것은 지운 것이 아니라 그동안 이 기기에 방이 없던 것이다 — 되살려 받는다.
+            if !rejoin && r.alive() {
+                r.deleted = Some(stamp_now(r.latest() + 1));
+            }
+            records.insert(sid.clone(), r);
+        }
+        for (sid, (_, theirs)) in &inbox {
+            let merged = records.get(sid).map_or_else(|| theirs.clone(), |mine| mine.merge(theirs));
+            records.insert(sid.clone(), merged);
+        }
+
+        let mut target: Vec<&RoomRecord> = records.values().filter(|r| r.alive()).collect();
+        target.sort_by(|a, b| (a.pos.as_str(), a.sync_id.as_str()).cmp(&(b.pos.as_str(), b.sync_id.as_str())));
+        if !target.is_empty() {
+            let mut ops = Vec::new();
+            let mut after: Vec<String> = Vec::new();
+            for r in &target {
+                if !local_of_sync.contains_key(r.sync_id.as_str()) {
+                    ops.push(RoomOp { op: "add".into(), id: r.sync_id.clone(), name: r.name.clone(), color: r.color.clone(), ..Default::default() });
+                }
+            }
+            for l in &local.list {
+                let r = &records[&sync_of[&l.id]];
+                if !r.alive() {
+                    ops.push(RoomOp { op: "remove".into(), id: l.id.clone(), ..Default::default() });
+                    continue;
+                }
+                after.push(l.id.clone());
+                if r.name != l.name || r.color != l.color {
+                    ops.push(RoomOp { op: "edit".into(), id: l.id.clone(), name: r.name.clone(), color: r.color.clone(), ..Default::default() });
+                }
+            }
+            after.extend(target.iter().filter(|r| !local_of_sync.contains_key(r.sync_id.as_str())).map(|r| r.sync_id.clone()));
+            let want: Vec<String> = target.iter().map(|r| local_of_sync.get(r.sync_id.as_str()).map_or_else(|| r.sync_id.clone(), |l| l.id.clone())).collect();
+            if want != after {
+                ops.push(RoomOp { op: "order".into(), ids: want, ..Default::default() });
+            }
+            if !ops.is_empty() {
+                self.browser.apply_rooms(&local.rev, &ops)?;
+                counts.applied += ops.len();
+            }
+        }
+
+        for (sid, r) in records {
+            let item_id = self.key.name_id(&room_name(&sid));
+            let previous = known.get(&sid);
+            let theirs = inbox.get(&sid);
+            let rev = theirs.map_or_else(|| previous.map_or(0, |k| k.rev), |(rev, _)| *rev);
+            let upload = match theirs {
+                Some((_, theirs)) => *theirs != r,
+                None => !previous.is_some_and(|k| !k.dirty && k.rev > 0 && k.record == r),
+            };
+            if upload {
+                match serde_json::to_vec(&r).map_err(anyhow::Error::from).and_then(|plain| self.seal(&item_id, &plain, MARK_PAD, ROOM_MAX)) {
+                    Ok(blob) => outgoing.push(Outgoing { id: item_id, expected_rev: rev, blob, kind: Pending::Room { sync_id: sid.clone() } }),
+                    Err(_) => counts.too_large += 1,
+                }
+            }
+            let local_id = local_of_sync.get(sid.as_str()).map_or_else(|| sid.clone(), |l| l.id.clone());
+            state.rooms.insert(sid, KnownRoom { local_id, rev, record: r, dirty: upload });
+        }
+        state.room_inbox.clear();
+        Ok(())
+    }
+
     fn upload(&self, state: &mut State, outgoing: Vec<Outgoing>, key_id: &str, counts: &mut Counts) -> Result<(), SyncError> {
         let mut chunks: Vec<&[Outgoing]> = Vec::new();
         let (mut start, mut bytes) = (0, 0);
@@ -704,6 +1018,16 @@ impl Engine<'_> {
                                 state.tabs_sent_ms = self.now_ms;
                                 counts.tabs_sent = true;
                             }
+                            Pending::Settings { digest } => {
+                                state.settings_item_rev = rev;
+                                state.settings_sent = digest.clone();
+                            }
+                            Pending::Room { sync_id } => {
+                                if let Some(k) = state.rooms.get_mut(sync_id) {
+                                    k.rev = rev;
+                                    k.dirty = false;
+                                }
+                            }
                         }
                     }
                     // 그사이 다른 기기가 썼다 — 다음 바퀴가 그것을 받아 다시 합친다(dirty 는 남는다). 관문에 없어졌으면(걷힘)
@@ -719,6 +1043,17 @@ impl Engine<'_> {
                             }
                             (Pending::Mark, Some(_)) => {}
                             (Pending::Tabs { .. }, current) => state.tabs_item_rev = current.map_or(0, |item| item.rev),
+                            // 내 설정 항목은 내 것이라 그 차례 위에 다음 바퀴에 다시 쓴다.
+                            (Pending::Settings { .. }, current) => {
+                                state.settings_item_rev = current.map_or(0, |item| item.rev);
+                                state.settings_sent.clear();
+                            }
+                            (Pending::Room { sync_id }, None) => {
+                                if let Some(k) = state.rooms.get_mut(sync_id) {
+                                    k.rev = 0;
+                                }
+                            }
+                            (Pending::Room { .. }, Some(_)) => {}
                         }
                     }
                 }
@@ -729,6 +1064,25 @@ impl Engine<'_> {
 
     /// 180일 지난 묘비를 관문에서 걷는다.
     fn sweep(&self, state: &mut State, key_id: &str) {
+        let old_room = |k: &KnownRoom| !k.record.alive() && k.record.latest().saturating_add(TOMBSTONE_KEEP_MS) < self.now_ms;
+        state.rooms.retain(|_, k| !(old_room(k) && k.rev == 0));
+        let rooms: Vec<Put> = state
+            .rooms
+            .values()
+            .filter(|k| old_room(k))
+            .map(|k| Put { id: self.key.name_id(&room_name(&k.record.sync_id)), expected_rev: k.rev, blob: None })
+            .take(MAX_PUT)
+            .collect();
+        if !rooms.is_empty() {
+            let sig = self.key.sign(&put_message(self.account, key_id, &rooms));
+            if let Ok(outcomes) = self.remote.put(key_id, &rooms, &sig) {
+                for outcome in outcomes {
+                    if let PutOutcome::Ok { id, .. } | PutOutcome::Conflict { id, current: None } = outcome {
+                        state.rooms.retain(|_, k| self.key.name_id(&room_name(&k.record.sync_id)) != id);
+                    }
+                }
+            }
+        }
         // 관문에 없는(rev 0) 오래된 묘비는 올릴 까닭이 없다 — 그냥 잊는다.
         state.marks.retain(|_, k| {
             let r = k.record(String::new(), String::new());

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::record::{MarkRecord, Stamp, TabsRecord};
+use super::record::{MarkRecord, RoomRecord, SettingsRecord, Stamp, TabsRecord};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownMark {
@@ -53,6 +53,23 @@ impl KnownMark {
     }
 }
 
+/// 설정 한 칸을 마지막으로 맞춘 모습 — 값은 지문만 둔다.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownSetting {
+    pub mac: String,
+    pub stamp: Stamp,
+}
+
+/// 방 하나를 마지막으로 맞춘 모습. `record` 는 그때 브라우저에 넣은 그대로다.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownRoom {
+    pub local_id: String,
+    pub rev: u64,
+    pub record: RoomRecord,
+    #[serde(default)]
+    pub dirty: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
     /// 이 상태를 만든 기기. 다른 기기에서 옮겨 온 상태면 버리고 처음부터 맞춘다.
@@ -88,6 +105,24 @@ pub struct State {
     /// 사람 확인을 기다리는 지우기(동기화 id). 「지우기 확인」은 이 목록만 지운다.
     #[serde(default)]
     pub pending_deletions: BTreeSet<String>,
+    /// 설정 칸 → 마지막으로 맞춘 값의 지문과 판.
+    #[serde(default)]
+    pub settings: BTreeMap<String, KnownSetting>,
+    /// 관문 항목 이름 → 기기마다의 설정(내 것도 든다). 관문은 바뀐 것만 주니 여기 모아 둔다.
+    #[serde(default)]
+    pub remote_settings: BTreeMap<String, SettingsRecord>,
+    #[serde(default)]
+    pub settings_item_rev: u64,
+    /// 마지막으로 올린 내 설정 항목의 지문.
+    #[serde(default)]
+    pub settings_sent: String,
+    /// 동기화 id → 아는 방.
+    #[serde(default)]
+    pub rooms: BTreeMap<String, KnownRoom>,
+    /// 받았지만 아직 브라우저에 맞추지 못한 방(동기화 id → 관문 차례, 기록). 계정 모드이거나 방이 없거나 사람이 그사이
+    /// 고쳐서 미룬 동안 쌓이고, 맞춘 바퀴에 비운다.
+    #[serde(default)]
+    pub room_inbox: BTreeMap<String, (u64, RoomRecord)>,
 }
 
 impl State {

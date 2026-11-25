@@ -42,7 +42,7 @@ pub fn display(vault: &Value, browser: &Value, now_ms: u64) -> Value {
             if held > 0 {
                 notes.push(format!("다른 기기에서 지운 비밀번호 {held}개를 이 기기 키체인이 못 지웠어요 — 비밀번호 목록에서 지워 주세요"));
             }
-            (if asks.is_empty() { "on" } else { "needs_you" }, "켜짐", "비밀번호·북마크·열린 탭을 이 계정의 기기끼리 맞추고 있어요".to_string())
+            (if asks.is_empty() { "on" } else { "needs_you" }, "켜짐", "비밀번호·북마크·설정·작업공간·열린 탭을 이 계정의 기기끼리 맞추고 있어요".to_string())
         }
         "clock_mismatch" => ("error", "멈췄어요", message.unwrap_or("기기 시계를 맞추면 다시 맞춰요").to_string()),
         "key_mismatch" => ("error", "열쇠가 맞지 않아요", message.unwrap_or("이 기기의 금고 열쇠가 계정 금고와 달라요").to_string()),
@@ -72,6 +72,18 @@ fn browser_rows(browser: &Value, rows: &mut Vec<Value>, asks: &mut Vec<Value>, n
         _ => message.unwrap_or("맞추지 못했어요").to_string(),
     };
     rows.push(row("북마크", &bookmarks));
+    if matches!(browser["state"].as_str(), Some("synced" | "deletions_pending" | "browser_closed")) {
+        rows.push(row("설정", "맞추는 중"));
+        let mut rooms = if browser["rooms_paused"] == true {
+            let mut paused = row("작업공간", "기다리는 중");
+            paused["detail"] = json!("작업공간이 계정마다 나뉘어 있거나 방이 하나도 없어요. 한 공간으로 합치거나 방을 만들면 맞춰요");
+            paused
+        } else {
+            row("작업공간", &format!("{}개", browser["rooms"].as_u64().unwrap_or(0)))
+        };
+        rooms["detail"] = rooms.get("detail").cloned().unwrap_or_else(|| json!("다운로드 폴더와 그림 배경은 기기마다 둬요"));
+        rows.push(rooms);
+    }
     let devices = browser["devices"].as_u64().unwrap_or(0);
     let mut tabs = row("열린 탭", &if devices > 0 { format!("다른 기기 {devices}대") } else { "보내는 중".to_string() });
     tabs["detail"] = json!("다른 기기의 탭은 방문 기록 패널에서 봐요");
@@ -103,7 +115,9 @@ mod tests {
         assert_eq!(state["at_ms"], 7);
         assert_eq!(state["rows"][0]["value"], "20개");
         assert_eq!(state["rows"][1]["value"], "128개");
-        assert_eq!(state["rows"][2]["value"], "다른 기기 1대");
+        assert_eq!(state["rows"][2]["value"], "맞추는 중");
+        assert_eq!(state["rows"][3]["value"], "0개");
+        assert_eq!(state["rows"][4]["value"], "다른 기기 1대");
         assert!(ids(&state).is_empty());
         assert!(state["note"].as_str().unwrap().contains("YGAG-9P8B-AVKM-HYVX"));
     }

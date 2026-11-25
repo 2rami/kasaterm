@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 
-use super::browser::{Browser, BrowserError, Collection, Device, Mark, Op, Read, Status, Tab, Workspace};
+use super::browser::{Browser, BrowserError, Collection, Device, Mark, Op, Read, Room, RoomOp, Rooms, Status, Tab, Workspace};
 use super::engine::{Counts, Engine, SyncError};
 use super::state::State;
 use crate::login_vault::crypto::VaultKey;
@@ -57,6 +57,15 @@ struct FakeBrowser {
     /// 이 브라우저의 모음 이름, 비면 `KEY`.
     key: RefCell<String>,
     accounts_asked: RefCell<Vec<Vec<String>>>,
+    /// 나누는 설정. 비어 있으면 옛 브라우저처럼 `settings` 를 안 준다.
+    settings: RefCell<std::collections::BTreeMap<String, serde_json::Value>>,
+    settings_rev: Cell<u64>,
+    /// 다음 put_settings 앞에 사람이 설정을 고친 척.
+    before_put: RefCell<Option<Box<dyn Fn(&mut std::collections::BTreeMap<String, serde_json::Value>)>>>,
+    /// 사람의 방, 순서대로. `accounts` 면 계정 모드다.
+    rooms: RefCell<Vec<Room>>,
+    rooms_rev: Cell<u64>,
+    accounts_mode: Cell<bool>,
 }
 
 fn locate<'a>(marks: &'a mut Vec<Mark>, id: &str) -> Option<(&'a mut Vec<Mark>, usize)> {
@@ -156,10 +165,18 @@ impl Browser for FakeBrowser {
             return Err(BrowserError::NotRunning);
         }
         let tabs = self.tabs.borrow().clone();
+        let settings = self.settings.borrow().clone();
         Ok(Read {
             collections: vec![Collection { key: self.key(), rev: self.rev(), marks: self.marks.borrow().clone() }],
             tabs_rev: format!("{:?}", tabs).len().to_string() + &tabs.iter().map(|w| w.tabs.len()).sum::<usize>().to_string(),
             tabs,
+            settings: (!settings.is_empty()).then_some(settings),
+            settings_rev: format!("s.{}", self.settings_rev.get()),
+            rooms: Some(Rooms {
+                mode: if self.accounts_mode.get() { "accounts".into() } else { "rooms".into() },
+                rev: format!("r.{}", self.rooms_rev.get()),
+                list: if self.accounts_mode.get() { Vec::new() } else { self.rooms.borrow().clone() },
+            }),
         })
     }
     fn apply(&self, collection: &str, base_rev: &str, ops: &[Op]) -> Result<String, BrowserError> {
@@ -185,6 +202,59 @@ impl Browser for FakeBrowser {
     fn put_tabs(&self, devices: &[Device]) -> Result<(), BrowserError> {
         *self.shown.borrow_mut() = devices.to_vec();
         Ok(())
+    }
+    fn put_settings(&self, base_rev: &str, values: &std::collections::BTreeMap<String, serde_json::Value>) -> Result<String, BrowserError> {
+        if let Some(edit) = self.before_put.borrow_mut().take() {
+            edit(&mut self.settings.borrow_mut());
+            self.settings_rev.set(self.settings_rev.get() + 1);
+        }
+        if base_rev != format!("s.{}", self.settings_rev.get()) {
+            return Err(BrowserError::Stale);
+        }
+        self.settings.borrow_mut().extend(values.clone());
+        self.settings_rev.set(self.settings_rev.get() + 1);
+        Ok(format!("s.{}", self.settings_rev.get()))
+    }
+    /// kasabrowser `state.ApplyRooms` 처럼 한 묶음을 통째로 하거나 안 한다. 마지막 방은 못 지운다.
+    fn apply_rooms(&self, base_rev: &str, ops: &[RoomOp]) -> Result<String, BrowserError> {
+        if self.accounts_mode.get() {
+            return Err(BrowserError::Failed("SYNC_MODE".into()));
+        }
+        if base_rev != format!("r.{}", self.rooms_rev.get()) {
+            return Err(BrowserError::Stale);
+        }
+        let mut next = self.rooms.borrow().clone();
+        for op in ops {
+            let at = next.iter().position(|r| r.id == op.id);
+            match (op.op.as_str(), at) {
+                ("add", None) => next.push(Room { id: op.id.clone(), name: op.name.clone(), color: op.color.clone() }),
+                ("edit", Some(i)) => {
+                    if !op.name.is_empty() {
+                        next[i].name = op.name.clone();
+                    }
+                    if !op.color.is_empty() {
+                        next[i].color = op.color.clone();
+                    }
+                }
+                ("remove", Some(i)) if next.len() > 1 => {
+                    next.remove(i);
+                }
+                ("order", _) => {
+                    let mut ordered = Vec::new();
+                    for id in &op.ids {
+                        ordered.push(next.iter().find(|r| &r.id == id).cloned().ok_or_else(|| BrowserError::Failed("order".into()))?);
+                    }
+                    if ordered.len() != next.len() {
+                        return Err(BrowserError::Failed("order".into()));
+                    }
+                    next = ordered;
+                }
+                _ => return Err(BrowserError::Failed(format!("room op {op:?}"))),
+            }
+        }
+        *self.rooms.borrow_mut() = next;
+        self.rooms_rev.set(self.rooms_rev.get() + 1);
+        Ok(format!("r.{}", self.rooms_rev.get()))
     }
 }
 
@@ -641,4 +711,198 @@ fn an_account_only_the_relay_has_gets_a_folder_in_this_browser() {
     c.round(&relay);
     d.round(&relay);
     assert!(d.browser.accounts_asked.borrow().is_empty(), "not an account name");
+}
+
+fn set(side: &Side, values: &[(&str, serde_json::Value)]) {
+    let mut settings = side.browser.settings.borrow_mut();
+    for (key, value) in values {
+        settings.insert((*key).into(), value.clone());
+    }
+    side.browser.settings_rev.set(side.browser.settings_rev.get() + 1);
+}
+
+fn setting(side: &Side, key: &str) -> serde_json::Value {
+    side.browser.settings.borrow().get(key).cloned().unwrap_or_default()
+}
+
+fn room(id: &str, name: &str) -> Room {
+    Room { id: id.into(), name: name.into(), color: "#4c6ef5".into() }
+}
+
+fn room_names(side: &Side) -> Vec<String> {
+    side.browser.rooms.borrow().iter().map(|r| r.name.clone()).collect()
+}
+
+/// 사람이 방을 바꾼다 — 저장 횟수가 오른다.
+fn edit_rooms(side: &Side, change: impl FnOnce(&mut Vec<Room>)) {
+    change(&mut side.browser.rooms.borrow_mut());
+    side.browser.rooms_rev.set(side.browser.rooms_rev.get() + 1);
+}
+
+#[test]
+fn a_new_device_takes_the_accounts_settings_and_both_keep_their_own_changes() {
+    let (mut a, mut b, relay) = pair();
+    set(&a, &[("theme", "dark".into()), ("sidebarWidth", 260.into()), ("home.greeting", "".into())]);
+    a.round(&relay);
+    set(&b, &[("theme", "light".into()), ("sidebarWidth", 300.into()), ("home.greeting", "".into())]);
+    b.round(&relay);
+    assert_eq!((setting(&b, "theme"), setting(&b, "sidebarWidth")), ("dark".into(), 260.into()), "처음 붙는 기기는 계정 값을 따른다");
+
+    // 두 기기가 서로 다른 칸을 같은 때 바꿔도 둘 다 남는다 — 기기마다 제 항목에 쓰기 때문이다.
+    set(&a, &[("theme", "light".into())]);
+    set(&b, &[("home.greeting", "안녕".into())]);
+    a.round(&relay);
+    b.round(&relay);
+    settle(&mut a, &mut b, &relay);
+    for side in [&a, &b] {
+        assert_eq!((setting(side, "theme"), setting(side, "home.greeting")), ("light".into(), "안녕".into()));
+    }
+    // 같은 칸이면 나중 것이 이긴다.
+    set(&b, &[("theme", "system".into())]);
+    b.round(&relay);
+    a.now = b.now + 60_000;
+    set(&a, &[("theme", "dark".into())]);
+    settle(&mut a, &mut b, &relay);
+    assert_eq!((setting(&a, "theme"), setting(&b, "theme")), ("dark".into(), "dark".into()));
+}
+
+#[test]
+fn an_edit_between_read_and_put_keeps_the_settings_for_the_next_round() {
+    let (mut a, mut b, relay) = pair();
+    set(&a, &[("theme", "dark".into()), ("home.greeting", "".into())]);
+    set(&b, &[("theme", "dark".into()), ("home.greeting", "".into())]);
+    settle(&mut a, &mut b, &relay);
+    set(&a, &[("theme", "light".into())]);
+    a.round(&relay);
+    // 엔진이 읽은 뒤 사람이 다른 칸을 고쳤다 — 그 바퀴의 넣기는 거절되고, 받은 설정은 버려지지 않는다.
+    let human = std::rc::Rc::new(std::cell::Cell::new(false));
+    let late = human.clone();
+    b.browser.before_put.replace(Some(Box::new(move |settings| {
+        settings.insert("home.greeting".into(), "사람".into());
+        late.set(true);
+    })));
+    assert_eq!(b.round(&relay).stale, 1);
+    assert!(human.get());
+    settle(&mut a, &mut b, &relay);
+    for side in [&a, &b] {
+        assert_eq!((setting(side, "theme"), setting(side, "home.greeting")), ("light".into(), "사람".into()));
+    }
+}
+
+#[test]
+fn rooms_match_by_name_then_follow_renames_orders_and_deletions() {
+    let (mut a, mut b, relay) = pair();
+    edit_rooms(&a, |r| *r = vec![room("wa1", "내 공간"), room("wa2", "공간 2")]);
+    a.round(&relay);
+    // 계정 모드 기기는 기다린다 — 받은 것은 쌓아 둔다.
+    b.browser.accounts_mode.set(true);
+    edit_rooms(&b, |r| *r = vec![room("wb1", "내 공간")]);
+    assert!(b.round(&relay).rooms_paused);
+    a.round(&relay);
+    b.browser.accounts_mode.set(false);
+    settle(&mut a, &mut b, &relay);
+    assert_eq!(room_names(&b), ["내 공간", "공간 2"], "이름이 같은 방은 짝짓고 나머지는 합친다");
+    assert_eq!(room_names(&a), ["내 공간", "공간 2"]);
+    assert_eq!(b.browser.rooms.borrow()[0].id, "wb1", "짝지은 방은 그 기기의 작업공간 그대로다");
+
+    edit_rooms(&a, |r| {
+        r[1].name = "업무".into();
+        r.swap(0, 1);
+    });
+    settle(&mut a, &mut b, &relay);
+    assert_eq!(room_names(&b), ["업무", "내 공간"]);
+
+    edit_rooms(&b, |r| {
+        r.remove(0);
+    });
+    settle(&mut a, &mut b, &relay);
+    assert_eq!(room_names(&a), ["내 공간"]);
+}
+
+#[test]
+fn a_device_without_rooms_waits_and_its_new_room_joins_the_rest() {
+    let (mut a, mut b, relay) = pair();
+    edit_rooms(&a, |r| *r = vec![room("wa1", "내 공간"), room("wa2", "공간 2")]);
+    edit_rooms(&b, |r| *r = vec![room("wb1", "내 공간")]);
+    settle(&mut a, &mut b, &relay);
+    assert_eq!(room_names(&b), ["내 공간", "공간 2"]);
+
+    // 에이전트 공간만 남기고 방을 다 닫았다 — 다른 기기의 방은 그대로, 이 기기에 되살리지도 않는다.
+    edit_rooms(&b, |r| r.clear());
+    assert!(b.round(&relay).rooms_paused);
+    settle(&mut a, &mut b, &relay);
+    assert!(room_names(&b).is_empty());
+    assert_eq!(room_names(&a), ["내 공간", "공간 2"]);
+
+    edit_rooms(&b, |r| *r = vec![room("wb9", "새 방")]);
+    settle(&mut a, &mut b, &relay);
+    let mut on_b = room_names(&b);
+    on_b.sort();
+    assert_eq!(on_b, ["공간 2", "내 공간", "새 방"], "다시 생긴 방은 지운 것으로 치지 않고 합친다");
+    assert_eq!(room_names(&a).len(), 3);
+}
+
+/// 설정·방 항목을 모르는 옛 kasaterm 이 받는 차례에도 풀리는 항목(탭)이 함께 있다 — 「안 풀림」으로 멈추지 않는다.
+#[test]
+fn every_round_sending_settings_or_rooms_sends_tabs_an_older_kasaterm_can_open() {
+    let (mut a, _, relay) = pair();
+    *a.browser.tabs.borrow_mut() = vec![Workspace { id: "w".into(), name: "내 공간".into(), tabs: vec![Tab { url: "https://kasa-test.example/".into(), ..Tab::default() }], ..Workspace::default() }];
+    a.round(&relay);
+    for theme in ["dark", "light"] {
+        let before = relay.store.fetch(ACCOUNT, 0, relay.now.get()).unwrap().revision;
+        set(&a, &[("theme", theme.into())]);
+        a.round(&relay);
+        let fetched = relay.store.fetch(ACCOUNT, before, relay.now.get()).unwrap();
+        let opened: Vec<bool> = fetched.items.iter().map(|item| serde_json::from_slice::<serde_json::Value>(&a.key.open_padded(ACCOUNT, &item.id, &item.blob, 256).unwrap()).unwrap()["kind"].is_null()).collect();
+        assert!(!opened.is_empty() && opened.iter().any(|old| *old), "옛 판이 푸는 항목이 같은 차례에 있다: {opened:?}");
+    }
+}
+
+/// 진짜 카사브라우저(격리 실행, `KASATERM_BROWSER_DATA_DIR`)를 한 기기로, 흉내 브라우저를 다른 기기로 맞춘다 — 설정·방의
+/// JSON 이 두 레포에서 같은지 본다. 처음 붙는 진짜 브라우저는 계정 값을 따르고, 방은 이름이 다르니 합쳐진다.
+#[test]
+#[ignore]
+fn a_real_browser_shares_settings_and_rooms() {
+    use super::bridge::{data_dir, Bridge};
+    let vault = VaultKey::generate().unwrap();
+    let relay = Relay::new();
+    let mut fake = Side::new("kasatest-fake", &vault);
+    set(&fake, &[("theme", "dark".into()), ("home.greeting", "kasatest".into())]);
+    edit_rooms(&fake, |r| *r = vec![room("kasatest-room", "kasatest 방")]);
+    fake.round(&relay);
+
+    let real = Bridge::new(data_dir().expect("KASATERM_BROWSER_DATA_DIR"));
+    let key = VaultKey::from_base64(&vault.to_base64()).unwrap().subkey("browser-sync");
+    let mut state = State::default();
+    let mut now = fake.now;
+    let mut round = |state: &mut State| {
+        now += 60_000;
+        relay.now.set(now);
+        let allowed = BTreeSet::new();
+        let engine = Engine {
+            account: ACCOUNT,
+            device: "kasatest-real",
+            device_name: "kasatest-real",
+            key: &key,
+            browser: &real,
+            remote: &relay,
+            now_ms: now,
+            allowed_deletions: &allowed,
+            sync_bookmarks: false,
+            send_tabs: false,
+        };
+        engine.round(state).unwrap()
+    };
+    round(&mut state);
+    let read = real.read().unwrap();
+    let settings = read.settings.expect("settings");
+    assert_eq!((settings["theme"].as_str(), settings["home.greeting"].as_str()), (Some("dark"), Some("kasatest")), "처음 붙는 기기는 계정 값을 따른다");
+    let rooms = read.rooms.expect("rooms");
+    assert_eq!(rooms.mode, "rooms");
+    assert!(rooms.list.iter().any(|r| r.id == "kasatest-room" && r.name == "kasatest 방"), "{rooms:?}");
+
+    fake.now = now;
+    fake.round(&relay);
+    let fake_rooms = room_names(&fake);
+    assert!(fake_rooms.len() > 1 && fake_rooms.contains(&"kasatest 방".to_string()), "{fake_rooms:?}");
 }

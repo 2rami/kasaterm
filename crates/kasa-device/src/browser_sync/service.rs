@@ -179,9 +179,12 @@ fn round() -> Duration {
                 _ if counts.browser_away => "browser_closed",
                 _ => "synced",
             };
+            let rooms = state.rooms.values().filter(|k| k.record.alive()).count();
             set_status(json!({
                 "state": phase,
                 "bookmarks": bookmarks,
+                "rooms": rooms,
+                "rooms_paused": counts.rooms_paused,
                 "devices": devices,
                 "deletions": counts.deletions_held,
                 "too_large": counts.too_large,

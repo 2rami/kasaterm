@@ -8,7 +8,7 @@ use std::time::Duration;
 use ring::hmac;
 use serde_json::{json, Value};
 
-use super::browser::{Browser, BrowserError, Device, Op, Read, Status};
+use super::browser::{Browser, BrowserError, Device, Op, Read, RoomOp, Status};
 
 const AGENT: &str = "kasaterm-sync";
 const WAIT: Duration = Duration::from_secs(50);
@@ -91,6 +91,16 @@ impl Browser for Bridge {
     fn put_accounts(&self, accounts: &[String]) -> Result<Vec<String>, BrowserError> {
         let result = self.call("sync.accounts.put", json!({"accounts": accounts}))?;
         Ok(result["made"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect())
+    }
+
+    fn put_settings(&self, base_rev: &str, values: &std::collections::BTreeMap<String, Value>) -> Result<String, BrowserError> {
+        let result = self.call("sync.settings.put", json!({"base_rev": base_rev, "values": values}))?;
+        Ok(result["rev"].as_str().unwrap_or_default().to_string())
+    }
+
+    fn apply_rooms(&self, base_rev: &str, ops: &[RoomOp]) -> Result<String, BrowserError> {
+        let result = self.call("sync.rooms.apply", json!({"base_rev": base_rev, "ops": ops}))?;
+        Ok(result["rev"].as_str().unwrap_or_default().to_string())
     }
 }
 
