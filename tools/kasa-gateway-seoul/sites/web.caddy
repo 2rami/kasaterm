@@ -22,8 +22,9 @@ https:// {
 	import tunneled 18891
 }
 
-# geono 허브 — 맥북 :4749(geono-hub scripts/serve-public.sh). 맥북 launchd com.geono.kasa-seoul-tunnel.
-geono.debimarlene.com {
+# geono 허브 — 미니 :4749(geono-hub scripts/serve-public.sh), 미니 웹 터널 com.geono.kasa-seoul-web-tunnel.
+# 새 이름도 Host 를 그대로 넘긴다 — 허브가 접속한 이름으로 패스키 RP ID 를 고른다.
+geono.debimarlene.com, geono.2rami.dev {
 	import tunneled 18892
 }
 

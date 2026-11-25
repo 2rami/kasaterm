@@ -273,8 +273,9 @@ DNS 는 같은 Cloudflare 계정에 A `211.233.212.132`(DNS only)로 걸었고, 
 | nacho·mm.debimarlene.com | nacho·mm.2rami.dev | `web.caddy` `tunneled_as` — Host 를 옛 이름으로 바꿔 미니 Caddy 로 |
 | kasabrowser-update-zmpf.debimarlene.com | update.kasa.page | `web.caddy` `tunneled_as` — 문지기 미리보기로 |
 | `<이름>-<4자>.debimarlene.com` | `<이름>-<4자>.2rami.dev` | `https://` 사이트 + 문지기가 앞 이름으로 둘 다 찾는다 |
+| geono.debimarlene.com | geono.2rami.dev | `web.caddy` 같은 사이트 — Host 를 그대로 넘겨 허브가 접속한 이름으로 패스키 RP ID 를 고른다(옛 이름에 등록한 패스키는 옛 이름에서만) |
 
-아직 옛 이름만: relay-kr(iroh-relay 가 자기 인증서를 받아 이름을 더하려면 relay.toml 손질), geono(로그인 · Access 묶임),
+아직 옛 이름만: relay-kr(iroh-relay 가 자기 인증서를 받아 이름을 더하려면 relay.toml 손질),
 ssh 의 HostKeyAlias(DNS 를 안 본다 — 이름표일 뿐). 앱 기본 주소(카사텀 관문 · LFS · 폰 앱 webcredentials · 카사브라우저 업데이트)는 각 저장소에서 새 판으로.
 
 ### 계정 관문과 OAuth
