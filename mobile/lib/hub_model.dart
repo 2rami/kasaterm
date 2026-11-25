@@ -323,6 +323,7 @@ class HubModel extends ChangeNotifier {
   /// 허브를 닫아 둔 사이 바뀐 것까지 울리면 「방금 바뀐 것」이라는 뜻이 사라진다.
   final Set<String> _seeded = {};
   final Set<String> _seenNotes = {};
+  final Set<String> _markingNotesRead = {};
   final Set<String> _notesPrimed = {};
   Map<String, bool> _lastNeeds = const {};
 
@@ -672,7 +673,7 @@ class HubModel extends ChangeNotifier {
     }
     _seenNotes.addAll(list.map((n) => n.key));
     _notesPrimed.add(key);
-    _notesBy[key] = list;
+    _notesBy[key] = _withNotesRead(list, _markingNotesRead);
     _compose();
   }
 
@@ -844,19 +845,36 @@ class HubModel extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  /// 종 목록을 열어 봤으면 전부 읽음 — 기계마다 따로 표시한다.
-  Future<void> markAllRead() async {
-    final machines = {
+  List<Note> _withNotesRead(List<Note> notes, Set<String> keys) {
+    if (keys.isEmpty) return notes;
+    return [
       for (final n in notes)
-        if (!n.read) n.machine,
-    };
-    for (final m in machines) {
-      try {
-        await server.markNotesRead(all: true, machine: m);
-      } catch (_) {}
+        if (!n.read && keys.contains(n.key)) n.copyWith(read: true) else n,
+    ];
+  }
+
+  /// 새 알림까지 읽지 않도록 누른 순간 목록에 있던 ID만 해당 기기에 보낸다.
+  Future<void> markAllRead(List<Note> shown) async {
+    final idsByMachine = <String?, List<int>>{};
+    final reading = <String>{};
+    for (final n in shown) {
+      if (!n.read && _markingNotesRead.add(n.key)) {
+        reading.add(n.key);
+        (idsByMachine[n.machine] ??= []).add(n.id);
+      }
     }
     _replies.clear();
-    _editNotes((l) => [for (final n in l) n.copyWith(read: true)]);
+    _editNotes((notes) => _withNotesRead(notes, reading));
+
+    // Polling can still return the old unread flags until these writes finish.
+    try {
+      await Future.wait([
+        for (final entry in idsByMachine.entries)
+          server.markNotesRead(ids: entry.value, machine: entry.key).catchError((Object _) {}),
+      ]);
+    } finally {
+      _markingNotesRead.removeAll(reading);
+    }
   }
 
   /// 하나만 읽음 — 눌러서 그 학생 화면으로 갔거나 페이지를 열었을 때.

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show mergeSort;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -54,10 +55,13 @@ class NotesSheet extends StatefulWidget {
   State<NotesSheet> createState() => _NotesSheetState();
 }
 
-class _NotesSheetState extends State<NotesSheet> {
-  /// 「모두 읽음」으로 떠나는 중인 쪽지 — 위에서부터 차례로 밀려 나간다.
-  final Set<String> _leaving = {};
-  bool _clearing = false;
+class _NotesSheetState extends State<NotesSheet>
+    with SingleTickerProviderStateMixin {
+  final _exiting = <String, ({NoteLine line, Interval interval})>{};
+  late final _exit = AnimationController(vsync: this)
+    ..addStatusListener((status) {
+      if (status == AnimationStatus.completed) setState(_exiting.clear);
+    });
 
   /// 답 칸을 연 쪽지 — 한 번에 하나라 자판이 비켜 줄 쪽지도 하나다.
   String? _replying;
@@ -71,6 +75,7 @@ class _NotesSheetState extends State<NotesSheet> {
     for (final d in _drafts.values) {
       d.dispose();
     }
+    _exit.dispose();
     _sheet.dispose();
     super.dispose();
   }
@@ -117,28 +122,118 @@ class _NotesSheetState extends State<NotesSheet> {
     }
   }
 
-  Future<void> _readAll(List<Note> notes) async {
-    if (_clearing || notes.isEmpty) return;
+  void _readAll(List<NoteLine> lines) {
+    if (_exiting.isNotEmpty || lines.isEmpty) return;
+    final animate = !MediaQuery.disableAnimationsOf(context);
+    final gap = math.min(70, 720 ~/ lines.length);
+    final total = (lines.length - 1) * gap + _NoteExit.milliseconds;
     setState(() {
-      _clearing = true;
       _replying = null;
+      if (!animate) return;
+      // The outgoing rows need their own snapshot once the model marks them read.
+      for (final (i, line) in lines.indexed) {
+        final start = i * gap;
+        _exiting[line.note.key] = (
+          line: line,
+          interval: Interval(start / total, (start + _NoteExit.milliseconds) / total),
+        );
+      }
     });
-    // 스무 장이 넘어도 전체가 1초 안에 끝나게 간격을 줄인다.
-    final gap = Duration(
-      milliseconds: math.max(24, math.min(70, 900 ~/ notes.length)),
-    );
-    for (final n in notes) {
-      if (!mounted) return;
-      setState(() => _leaving.add(n.key));
-      await Future<void>.delayed(gap);
+    if (animate) {
+      _exit.duration = Duration(milliseconds: total);
+      _exit.forward(from: 0);
     }
-    await Future<void>.delayed(_NoteExit.duration);
-    await widget.model.markAllRead();
-    if (!mounted) return;
-    setState(() {
-      _leaving.clear();
-      _clearing = false;
-    });
+    unawaited(widget.model.markAllRead([for (final line in lines) line.note]));
+  }
+
+  List<NoteLine> _visibleLines(HubModel model) {
+    final current = model.noteList;
+    if (_exiting.isEmpty) return current;
+    final lines = [
+      for (final line in current)
+        if (!_exiting.containsKey(line.note.key)) line,
+      for (final exit in _exiting.values) exit.line,
+    ];
+    mergeSort(lines, compare: (a, b) => b.note.when.compareTo(a.note.when));
+    return lines;
+  }
+
+  Widget _buildNote(
+    BuildContext context,
+    NoteLine line, {
+    required bool asking,
+    required bool divider,
+  }) {
+    final model = widget.model;
+    final n = line.note;
+    final p = model.paneOfNote(n);
+    final online = model.noteOnline(n);
+    void open(Pane p) {
+      model.markRead(n);
+      widget.onOpen(p);
+    }
+
+    return _NoteExit(
+      key: ValueKey(n.key),
+      animation: _exit,
+      interval: _exiting[n.key]?.interval,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // 밀기는 쪽지 줄에만 — 답 칸에서 글을 고르다 옆으로 끌어도 쪽지가 지워지지 않게.
+          Dismissible(
+            key: ValueKey('note-${n.key}'),
+            background: const _ReplyBackground(),
+            secondaryBackground: const _DeleteBackground(),
+            dismissThresholds: const {DismissDirection.startToEnd: 0.25},
+            confirmDismiss: (d) async {
+              if (d == DismissDirection.endToStart) return true;
+              _openReply(n);
+              return false;
+            },
+            onDismissed: (_) {
+              if (_exiting.containsKey(n.key)) {
+                setState(() => _exiting.remove(n.key));
+              }
+              unawaited(model.deleteNote(n));
+            },
+            child: _NoteRow(
+              note: n,
+              pane: p,
+              server: widget.server,
+              sent: line.sent,
+              before: line.before,
+              replying: _replying == n.key,
+              onReply: () => _toggleReply(n),
+              onOpen: open,
+              onDesk: p != null && online ? () => unawaited(_focusDesktop(n)) : null,
+            ),
+          ),
+          if (p != null && online && p.needsYou && asking)
+            _NoteAsks(
+              key: ValueKey('asks-${n.key}'),
+              session: () => widget.openSession(widget.server, p),
+              server: widget.server,
+              pane: p,
+              draft: _draft(n),
+              onTerminal: () {
+                Navigator.of(context).pop();
+                open(p);
+              },
+            ),
+          if (_replying == n.key)
+            _ReplyBox(
+              key: ValueKey('reply-${n.key}'),
+              blocked: noteReplyBlock(p, online: online),
+              draft: _draft(n),
+              sending: _sending.contains(n.key),
+              hint: '${n.character.isEmpty ? '학생' : n.character}에게 답',
+              onSend: () => unawaited(_send(n)),
+            ),
+          if (divider) const Divider(height: 1),
+        ],
+      ),
+    );
   }
 
   @override
@@ -157,7 +252,10 @@ class _NotesSheetState extends State<NotesSheet> {
         builder: (context, controller) => ListenableBuilder(
           listenable: model,
           builder: (context, _) {
-            final lines = model.noteList;
+            final lines = _visibleLines(model);
+            final indices = {
+              for (final (i, line) in lines.indexed) line.note.key: i,
+            };
             // 같은 칸의 쪽지가 여럿이면 고를 것은 맨 위(최근) 쪽지에만 — 같은 창이 여러 번 서지 않게.
             final asksAt = <String>{};
             final asking = <String>{};
@@ -176,92 +274,49 @@ class _NotesSheetState extends State<NotesSheet> {
                       const Spacer(),
                       if (lines.isNotEmpty)
                         TextButton(
-                          onPressed: _clearing ? null : () => _readAll([for (final l in lines) l.note]),
+                          onPressed: _exiting.isNotEmpty ? null : () => _readAll(lines),
                           child: const Text('모두 읽음'),
                         ),
                     ],
                   ),
                 ),
                 Expanded(
-                  child: lines.isEmpty
-                      ? Center(
-                          child: Text(
-                            '안 읽은 쪽지가 없다',
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
+                  child: CustomScrollView(
+                    controller: controller,
+                    semanticChildCount: lines.length,
+                    // The same scroll position drives sheet dragging even after the last row leaves.
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    slivers: [
+                      if (lines.isEmpty)
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: Center(
+                            child: Text(
+                              '안 읽은 쪽지가 없다',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
                             ),
                           ),
                         )
-                      : ListView.separated(
-                          controller: controller,
-                          itemCount: lines.length,
-                          separatorBuilder: (_, _) => const Divider(height: 1),
-                          itemBuilder: (context, i) {
-                            final line = lines[i];
-                            final n = line.note;
-                            final p = model.paneOfNote(n);
-                            final online = model.noteOnline(n);
-                            void open(Pane p) {
-                              model.markRead(n);
-                              widget.onOpen(p);
-                            }
-
-                            return _NoteExit(
-                              leaving: _leaving.contains(n.key),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  // 밀기는 쪽지 줄에만 — 답 칸에서 글을 고르다 옆으로 끌어도 쪽지가 지워지지 않게.
-                                  Dismissible(
-                                    key: ValueKey('note-${n.key}'),
-                                    background: const _ReplyBackground(),
-                                    secondaryBackground: const _DeleteBackground(),
-                                    dismissThresholds: const {DismissDirection.startToEnd: 0.25},
-                                    // 오른쪽 밀기는 답 칸만 열고 쪽지는 제자리로 돌아온다.
-                                    confirmDismiss: (d) async {
-                                      if (d == DismissDirection.endToStart) return true;
-                                      _openReply(n);
-                                      return false;
-                                    },
-                                    onDismissed: (_) => model.deleteNote(n),
-                                    child: _NoteRow(
-                                      note: n,
-                                      pane: p,
-                                      server: widget.server,
-                                      sent: line.sent,
-                                      before: line.before,
-                                      replying: _replying == n.key,
-                                      onReply: () => _toggleReply(n),
-                                      onOpen: open,
-                                      onDesk: p != null && online ? () => unawaited(_focusDesktop(n)) : null,
-                                    ),
-                                  ),
-                                  if (p != null && online && p.needsYou && asking.contains(n.key))
-                                    _NoteAsks(
-                                      key: ValueKey('asks-${n.key}'),
-                                      session: () => widget.openSession(widget.server, p),
-                                      server: widget.server,
-                                      pane: p,
-                                      draft: _draft(n),
-                                      onTerminal: () {
-                                        Navigator.of(context).pop();
-                                        open(p);
-                                      },
-                                    ),
-                                  if (_replying == n.key)
-                                    _ReplyBox(
-                                      key: ValueKey('reply-${n.key}'),
-                                      blocked: noteReplyBlock(p, online: online),
-                                      draft: _draft(n),
-                                      sending: _sending.contains(n.key),
-                                      hint: '${n.character.isEmpty ? '학생' : n.character}에게 답',
-                                      onSend: () => unawaited(_send(n)),
-                                    ),
-                                ],
-                              ),
-                            );
-                          },
+                      else
+                        SliverSafeArea(
+                          left: false,
+                          right: false,
+                          sliver: SliverList.builder(
+                            itemCount: lines.length,
+                            findChildIndexCallback: (key) =>
+                                indices[(key as ValueKey<String>).value],
+                            itemBuilder: (context, i) => _buildNote(
+                              context,
+                              lines[i],
+                              asking: asking.contains(lines[i].note.key),
+                              divider: i + 1 < lines.length,
+                            ),
+                          ),
                         ),
+                    ],
+                  ),
                 ),
               ],
             );
@@ -390,27 +445,42 @@ class _ReplyBoxState extends State<_ReplyBox> {
   }
 }
 
-/// 「모두 읽음」의 퇴장 — 오른쪽으로 미끄러지며 옅어진다. 자리는 목록이 갱신될 때
-/// 한꺼번에 접힌다(한 장씩 접으면 아래 줄이 계속 튀어 오른다).
 class _NoteExit extends StatelessWidget {
-  const _NoteExit({required this.leaving, required this.child});
+  const _NoteExit({
+    required super.key,
+    required this.animation,
+    required this.interval,
+    required this.child,
+  });
 
-  static const duration = Duration(milliseconds: 280);
+  static const milliseconds = 280;
 
-  final bool leaving;
+  final Animation<double> animation;
+  final Interval? interval;
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => AnimatedSlide(
-    offset: leaving ? const Offset(1.1, 0) : Offset.zero,
-    duration: duration,
-    curve: Curves.easeInCubic,
-    child: AnimatedOpacity(
-      opacity: leaving ? 0 : 1,
-      duration: duration,
-      curve: Curves.easeIn,
-      child: IgnorePointer(ignoring: leaving, child: child),
-    ),
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: animation,
+    child: child,
+    builder: (context, child) {
+      final progress = interval?.transform(animation.value) ?? 0.0;
+      if (progress == 1.0) return const SizedBox.shrink();
+      return ClipRect(
+        clipBehavior: progress > 0 ? Clip.hardEdge : Clip.none,
+        child: Align(
+          alignment: Alignment.topCenter,
+          heightFactor: 1 - Curves.easeInOutCubic.transform(progress),
+          child: FractionalTranslation(
+            translation: Offset(1.1 * Curves.easeInCubic.transform(progress), 0),
+            child: Opacity(
+              opacity: 1 - Curves.easeIn.transform(progress),
+              child: IgnorePointer(ignoring: interval != null, child: child),
+            ),
+          ),
+        ),
+      );
+    },
   );
 }
 

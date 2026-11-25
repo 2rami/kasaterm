@@ -151,6 +151,51 @@ void main() {
     });
   });
 
+  testWidgets('모두 읽음이 진행될 때 아래쪽 쪽지가 빈자리로 올라온다', (tester) async {
+    final rig = _Rig();
+    final model = _model(rig.server, [
+      for (var id = 14; id >= 1; id--) _note(id, summary: '쪽지 $id'),
+    ], []);
+    await _show(tester, model, rig.server);
+
+    final list = find.byType(CustomScrollView);
+    final lower = find.text('쪽지 8', skipOffstage: false);
+    expect(tester.getTopLeft(lower).dy, greaterThan(tester.getBottomLeft(list).dy));
+    await tester.tap(find.text('모두 읽음'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 340));
+    expect(tester.getTopLeft(lower).dy, lessThan(tester.getBottomLeft(list).dy));
+    expect(find.text('안 읽은 쪽지가 없다'), findsNothing);
+    await tester.pumpAndSettle();
+    expect(find.text('안 읽은 쪽지가 없다'), findsOneWidget);
+  });
+
+  testWidgets('모두 읽음을 시작하고 시트를 내려도 그때 보인 ID만 읽는다', (tester) async {
+    final rig = _Rig();
+    final model = _model(rig.server, [_note(1)], []);
+    await _show(tester, model, rig.server);
+
+    await tester.tap(find.text('모두 읽음'));
+    await tester.pump();
+    final incoming = _note(2, summary: '새 쪽지');
+    model.notes = [incoming, ...model.notes];
+    await model.setView(model.view);
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(CustomScrollView)),
+    );
+    await gesture.moveBy(const Offset(0, 20));
+    await gesture.moveBy(const Offset(0, 340));
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(NotesSheet), findsNothing);
+    expect(model.noteList.map((line) => line.note.id), [2]);
+    final reads = rig.requests.where((r) => r.$1.endsWith('term/notes/read'));
+    expect(reads.map((r) => r.$2), [{'ids': [1], 'all': false}]);
+  });
+
   testWidgets('오른쪽으로 밀면 답 칸이 열리고, 보내면 그 쪽지에 「보냈어요」와 글이 남는다', (tester) async {
     final rig = _Rig();
     final model = _model(rig.server, [_note(3)], [_pane('%3')]);
