@@ -9,6 +9,7 @@ import 'package:video_player/video_player.dart';
 import 'inline_media_store.dart';
 import 'look.dart';
 import 'screens/media_player.dart';
+import 'screens/pdf_pages.dart';
 import 'server.dart';
 
 /// 재생 중 원본 기기에 한 번에 묻는 구간. 크면 첫 화면·탐색이 늦고, 작으면 관문 왕복이 늘어 끊긴다.
@@ -16,7 +17,7 @@ const inlineMediaChunk = 512 * 1024;
 const inlineMediaMaxSize = 1024 * 1024 * 1024;
 
 /// PC 등록부의 `kind` 는 열린 낱말이다 — 이 판이 모르는 종류(새 판이 들인 것)는 [file] 로 받아 이름·크기만 보인다.
-enum InlineMediaKind { audio, video, file }
+enum InlineMediaKind { audio, video, pdf, file }
 
 /// `GET term/inline-media?id=` 의 답 — PC 가 등록한 소리·영상 하나.
 @immutable
@@ -32,6 +33,7 @@ class InlineMedia {
     this.width,
     this.height,
     this.poster = false,
+    this.pages,
   });
   final String id;
   final InlineMediaKind kind;
@@ -44,6 +46,9 @@ class InlineMedia {
   final int? height;
   final bool poster;
 
+  /// PDF 쪽 수. 다른 종류는 null.
+  final int? pages;
+
   static final _hex64 = RegExp(r'^[0-9a-f]{64}$');
   static final _kind = RegExp(r'^[a-z][a-z0-9-]{0,15}$');
 
@@ -53,6 +58,7 @@ class InlineMedia {
     final kind = switch (raw['kind']) {
       'audio' => InlineMediaKind.audio,
       'video' => InlineMediaKind.video,
+      'pdf' => InlineMediaKind.pdf,
       final String other when _kind.hasMatch(other) => InlineMediaKind.file,
       _ => null,
     };
@@ -71,9 +77,14 @@ class InlineMedia {
       return null;
     }
     int? positive(Object? v) => v is int && v > 0 ? v : null;
+    final pages = positive(raw['pages']);
     return InlineMedia(
       id: id,
-      kind: kind,
+      // 쪽 수 없는 PDF 는 쪽을 넘길 수 없다 — 파일 카드로 선다.
+      kind: kind == InlineMediaKind.pdf && pages == null
+          ? InlineMediaKind.file
+          : kind,
+      pages: kind == InlineMediaKind.pdf ? pages : null,
       name: name,
       mime: mime,
       size: size,
@@ -97,6 +108,7 @@ class InlineMedia {
     'width': width,
     'height': height,
     'poster': poster,
+    'pages': ?pages,
   };
 
   bool get isVideo => kind == InlineMediaKind.video;
@@ -108,6 +120,7 @@ class InlineMedia {
         ? switch (kind) {
             InlineMediaKind.video => '영상',
             InlineMediaKind.audio => '소리',
+            InlineMediaKind.pdf => '문서',
             InlineMediaKind.file => '파일',
           }
         : leaf;
@@ -158,6 +171,7 @@ class InlineMedia {
   /// 카드 둘째 줄 — 「3:21 · 4.2MB」.
   String get caption => [
     if (kind == InlineMediaKind.file) '파일',
+    if (pages case final n? when kind == InlineMediaKind.pdf) 'PDF · $n쪽',
     if (durationMs case final ms?) clockLabel(Duration(milliseconds: ms)),
     sizeLabel(size),
   ].join(' · ');
@@ -350,6 +364,16 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
   }
 
   void _open(InlineMedia media) {
+    if (media.kind == InlineMediaKind.pdf) {
+      Navigator.of(context).push(
+        PdfPagesScreen.route(
+          server: widget.server,
+          media: media,
+          machine: widget.machine,
+        ),
+      );
+      return;
+    }
     if (media.kind == InlineMediaKind.file) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         const SnackBar(content: Text('이 앱 판에서는 열 수 없는 종류예요. 앱을 업데이트해 주세요')),
@@ -395,6 +419,12 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
         InlineMediaKind.video => _VideoCard(
           media: media,
           poster: loaded.poster,
+          onTap: () => _open(media),
+        ),
+        InlineMediaKind.pdf => _VideoCard(
+          media: media,
+          poster: loaded.poster,
+          badge: Icons.menu_book_rounded,
           onTap: () => _open(media),
         ),
         InlineMediaKind.audio => _AudioCard(
@@ -529,10 +559,14 @@ class _VideoCard extends StatelessWidget {
     required this.media,
     required this.poster,
     required this.onTap,
+    this.badge = Icons.play_arrow_rounded,
   });
   final InlineMedia media;
   final Uint8List? poster;
   final VoidCallback onTap;
+
+  /// 포스터 가운데 원 — 영상은 재생, PDF 는 쪽 보기.
+  final IconData badge;
 
   @override
   Widget build(BuildContext context) {
@@ -551,7 +585,8 @@ class _VideoCard extends StatelessWidget {
         final dpr = MediaQuery.devicePixelRatioOf(context);
         return Semantics(
           button: true,
-          label: '영상 ${media.title}, ${media.caption}',
+          label:
+              '${media.kind == InlineMediaKind.pdf ? '문서' : '영상'} ${media.title}, ${media.caption}',
           excludeSemantics: true,
           child: SizedBox(
             width: width,
@@ -590,8 +625,8 @@ class _VideoCard extends StatelessWidget {
                                   color: Colors.black.withValues(alpha: 0.55),
                                   shape: BoxShape.circle,
                                 ),
-                                child: const Icon(
-                                  Icons.play_arrow_rounded,
+                                child: Icon(
+                                  badge,
                                   size: Look.mediaPlayIcon,
                                   color: Colors.white,
                                 ),

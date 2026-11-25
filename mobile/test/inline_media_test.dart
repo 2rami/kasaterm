@@ -17,6 +17,7 @@ import 'package:kasaterm_mobile/look.dart';
 import 'package:kasaterm_mobile/main.dart' show buildTheme;
 import 'package:kasaterm_mobile/screens/controls.dart';
 import 'package:kasaterm_mobile/screens/media_player.dart';
+import 'package:kasaterm_mobile/screens/pdf_pages.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
@@ -152,10 +153,11 @@ void main() {
 
     test('이 판이 모르는 종류는 파일 카드로 받는다', () {
       final ok = _fixtures[_video]!.info;
-      final pdf = InlineMedia.fromJson(
-        {...ok, 'kind': 'pdf', 'duration_ms': null},
-        id: _video,
-      )!;
+      final pdf = InlineMedia.fromJson({
+        ...ok,
+        'kind': 'pdf',
+        'duration_ms': null,
+      }, id: _video)!;
       expect(pdf.kind, InlineMediaKind.file);
       expect(pdf.caption, startsWith('파일 · '));
       expect(
@@ -163,6 +165,67 @@ void main() {
         InlineMediaKind.file,
         reason: '기억한 정보로 다시 서도 파일 카드다',
       );
+    });
+
+    test('PDF 카드는 쪽 수가 있어야 서고, 없으면 파일 카드다', () {
+      final ok = _fixtures[_video]!.info;
+      final pdf = InlineMedia.fromJson({
+        ...ok,
+        'kind': 'pdf',
+        'pages': 3,
+        'duration_ms': null,
+      }, id: _video)!;
+      expect(pdf.kind, InlineMediaKind.pdf);
+      expect(pdf.caption, startsWith('PDF · 3쪽 · '));
+      expect(InlineMedia.fromJson(pdf.toJson(), id: _video)?.pages, 3);
+      expect(
+        InlineMedia.fromJson({...ok, 'kind': 'pdf'}, id: _video)?.kind,
+        InlineMediaKind.file,
+      );
+    });
+
+    testWidgets('PDF 쪽 보기는 PC 가 그린 쪽을 받아 밀어 넘긴다', (tester) async {
+      final png = File('test/fixtures/inline-result.png').readAsBytesSync();
+      final asked = <String>[];
+      final server = Server(
+        Uri.parse('https://example.test/u/fixture/'),
+        client: MockClient((req) async {
+          expect(req.url.path, endsWith('/~src/term/inline-media/page'));
+          asked.add(req.url.queryParameters['n']!);
+          return http.Response.bytes(
+            png,
+            200,
+            headers: {'content-type': 'image/png'},
+          );
+        }),
+      );
+      addTearDown(server.close);
+      final media = InlineMedia.fromJson({
+        ..._fixtures[_video]!.info,
+        'kind': 'pdf',
+        'pages': 3,
+        'duration_ms': null,
+      }, id: _video)!;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PdfPagesScreen(server: server, media: media, machine: '~src'),
+        ),
+      );
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+      expect(find.text('1 / 3쪽'), findsOneWidget);
+      expect(find.byType(InteractiveViewer), findsOneWidget);
+      await tester.drag(find.byType(PageView), const Offset(-500, 0));
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+      expect(find.text('2 / 3쪽'), findsOneWidget);
+      expect(asked.toSet(), containsAll(['1', '2']));
+      expect(tester.takeException(), isNull);
     });
 
     test('확장자는 등록소가 받는 것만, 아니면 mime 으로', () {

@@ -3,6 +3,8 @@
 //!
 //! - `GET /term/inline-media?id=` — 카드 정보 JSON
 //! - `GET /term/inline-media/poster?id=` — 영상 첫 장면 PNG
+//! - `GET /term/inline-media/page?id=&n=&edge=` — PDF 카드의 `n`(1부터) 쪽 PNG(긴 변 `edge`, 최대 1600). 다른 기기는
+//!   PDF 를 풀지 않고 이것만 받는다
 //! - `GET /term/inline-media/file?id=&offset=&len=` — 원본 조각. 등록 sha256 과 같다고 확인된 사본에서만 내준다
 //!   (`Store::read_chunk`) — 받는 쪽이 파일 전체를 모으지 않고 구간만 재생해도 원본 내용을 믿을 수 있게
 
@@ -25,6 +27,7 @@ fn routes_with(stores: Stores) -> axum::Router {
         .route("/term/inline-media", get(metadata_handler))
         .route("/term/inline-media/poster", get(poster_handler))
         .route("/term/inline-media/file", get(file_handler))
+        .route("/term/inline-media/page", get(page_handler))
         .with_state(stores)
 }
 
@@ -67,6 +70,33 @@ async fn metadata_handler(
     };
     match blocking(move || stores().metadata(&id)).await {
         Ok(media) => ([(header::CACHE_CONTROL, IMMUTABLE)], Json(media)).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+async fn page_handler(
+    State(stores): State<Stores>,
+    Query(params): Query<HashMap<String, String>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    if let Some(denied) = guest_denied(&req) {
+        return denied;
+    }
+    let Some(id) = checked_id(&params) else {
+        return bad_id();
+    };
+    let Some(n) = params.get("n").and_then(|n| n.parse::<u32>().ok()).filter(|n| *n >= 1) else {
+        return (StatusCode::BAD_REQUEST, "invalid page").into_response();
+    };
+    let edge = params.get("edge").and_then(|e| e.parse::<u32>().ok()).unwrap_or(crate::pdf::EDGE).clamp(200, crate::pdf::EDGE);
+    // 쪽 하나가 수십 MB 를 잠깐 쓴다 — 넘기기를 몰아쳐도 둘씩만 그린다.
+    static RENDERING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let Ok(_permit) = RENDERING.acquire().await else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
+    };
+    let rendered = blocking(move || crate::pdf::registered_page(&stores(), &id, n, edge)).await;
+    match rendered {
+        Ok(png) => ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, IMMUTABLE)], png).into_response(),
         Err(resp) => resp,
     }
 }
@@ -237,7 +267,7 @@ mod tests {
         let fx = Fixture::new("large");
         let src = fx.dir.join("big clip.mp4");
         let source_sha = write_large_mp4(&src);
-        let probe = Probe { duration_ms: Some(42_000), width: Some(1920), height: Some(1080), poster: Some(png(1600, 900)) };
+        let probe = Probe { duration_ms: Some(42_000), width: Some(1920), height: Some(1080), poster: Some(png(1600, 900)), pages: None };
         let media = fx.store.register(&src, probe).unwrap();
         assert!(media.size > 32 * 1024 * 1024);
         let app = fx.app();
@@ -334,6 +364,34 @@ mod tests {
 
     /// 원본 사본을 같은 길이로 바꿔 쓰거나 다른 파일로 바꿔 끼우면 크기·기록은 그대로라도 조각을 내주지 않는다.
     #[cfg(unix)]
+    #[tokio::test]
+    async fn pdf_pages_are_drawn_on_request_for_owners_only() {
+        let fx = Fixture::new("pdf");
+        let src = fx.dir.join("deck.pdf");
+        std::fs::write(&src, crate::pdf::tests::fixture(&[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0)])).unwrap();
+        let p = crate::pdf::probe(&src).unwrap();
+        let probe = Probe { width: Some(p.width), height: Some(p.height), poster: Some(p.poster), pages: Some(p.pages), ..Default::default() };
+        let media = fx.store.register(&src, probe).unwrap();
+        assert_eq!((media.kind.as_str(), media.pages), ("pdf", Some(2)));
+        let app = fx.app();
+        let page = |n: &str| format!("/term/inline-media/page?id={}&n={n}&edge=400", media.id);
+        let (status, headers, body) = call(&app, &page("2"), Caller::Owner).await;
+        assert_eq!((status, headers[header::CONTENT_TYPE].to_str().unwrap()), (StatusCode::OK, "image/png"));
+        let png = image::load_from_memory(&body).unwrap().to_rgba8();
+        assert_eq!((png.dimensions(), png.get_pixel(200, 100).0), ((400, 200), [0, 0, 255, 255]));
+        for n in ["0", "3", "x"] {
+            assert_eq!(call(&app, &page(n), Caller::Owner).await.0, StatusCode::BAD_REQUEST, "{n}");
+        }
+        assert_eq!(call(&app, &page("1"), Caller::Guest).await.0, StatusCode::FORBIDDEN);
+        let clip = fx.dir.join("clip.wav");
+        let mut wav = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        wav.extend([0u8; 64]);
+        std::fs::write(&clip, &wav).unwrap();
+        let audio = fx.store.register(&clip, Probe::default()).unwrap();
+        let uri = format!("/term/inline-media/page?id={}&n=1", audio.id);
+        assert_eq!(call(&app, &uri, Caller::Owner).await.0, StatusCode::BAD_REQUEST, "PDF 가 아닌 카드엔 쪽이 없다");
+    }
+
     #[tokio::test]
     async fn originals_rewritten_or_swapped_with_the_same_length_are_not_served() {
         use std::io::Write;

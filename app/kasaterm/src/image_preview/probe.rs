@@ -348,6 +348,8 @@ fn center(r: Rect) -> Point {
 }
 fn label(a: Action) -> &'static str {
     match a {
+        Action::Prev => "previous_page",
+        Action::Next => "next_page",
         Action::In => "zoom_in",
         Action::Out => "zoom_out",
         Action::Fit => "fit",

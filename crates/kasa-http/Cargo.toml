@@ -23,6 +23,8 @@ kasa-screen = { workspace = true }
 kasa-socket = { workspace = true, default-features = true }
 kasa-students = { workspace = true }
 kasa-wire = { workspace = true }
+hayro.workspace = true
+image.workspace = true
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

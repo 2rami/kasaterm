@@ -1197,6 +1197,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_toast(msg.clone());
                 return;
             }
+            UserEvent::OpenDocument(owner, reference) => {
+                self.image_preview.open_document(*owner, reference.clone(), &self.proxy);
+                self.chrome_dirty = true;
+                self.aux_request_redraws();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
             UserEvent::AccountSyncResult(report) => {
                 self.apply_account_sync_report(report);
                 return;

@@ -45,20 +45,31 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<bool> {
         "usage: mediaopen [--block] FILE"
     );
     let path = std::path::Path::new(&args[if block { 2 } else { 1 }]);
-    let probe = crate::media_player::probe(path).map_err(anyhow::Error::msg)?;
-    let media = kasa_socket::inline_media::register(
-        path,
+    // PDF 는 재생기가 아니라 쪽 그리기로 잰다 — 첫 쪽이 카드 그림이다.
+    let probe = if kasa_http::pdf::is_pdf(path) {
+        let pdf = kasa_http::pdf::probe(path)?;
+        kasa_socket::inline_media::Probe {
+            duration_ms: None,
+            width: Some(pdf.width),
+            height: Some(pdf.height),
+            poster: Some(pdf.poster),
+            pages: Some(pdf.pages),
+        }
+    } else {
+        let probe = crate::media_player::probe(path).map_err(anyhow::Error::msg)?;
         kasa_socket::inline_media::Probe {
             duration_ms: probe.duration_ms,
             width: probe.width,
             height: probe.height,
             poster: probe.poster,
-        },
-    )?;
+            pages: None,
+        }
+    };
+    let media = kasa_socket::inline_media::register(path, probe)?;
     use std::io::Write;
     std::io::stdout()
         .lock()
-        .write_all(display_block(&media.id, media.kind == "video").as_bytes())?;
+        .write_all(display_block(&media.id, media.kind != "audio").as_bytes())?;
     Ok(true)
 }
 pub(crate) fn compose(
@@ -143,6 +154,8 @@ pub(crate) fn intersection(a: Rect, b: Rect) -> Rect {
 pub(crate) enum CardKind {
     Audio,
     Video,
+    /// 첫 쪽이 카드 그림이고, 누르면 쪽 넘김 미리보기(`image_preview::open_document`).
+    Pdf,
     File,
 }
 
@@ -151,12 +164,33 @@ impl CardKind {
         match kind {
             "audio" => Self::Audio,
             "video" => Self::Video,
+            "pdf" => Self::Pdf,
             _ => Self::File,
         }
     }
 
     pub(crate) fn playable(self) -> bool {
         matches!(self, Self::Audio | Self::Video)
+    }
+}
+
+/// 받아 둔 카드 정보로 본 종류. 아직 못 받았으면 `None`.
+pub(crate) fn card_kind(reference: &Reference) -> Option<CardKind> {
+    match cache::get(reference) {
+        Ok(Some(asset)) => Some(CardKind::of(&asset.media.kind)),
+        _ => None,
+    }
+}
+
+/// PDF 카드의 `n`(1부터) 쪽 PNG. 다른 기기 카드는 그 기기가 그린 쪽을 받는다 — 이 기기는 원본을 받지 않는다.
+pub(crate) fn pdf_page(reference: &Reference, n: u32) -> anyhow::Result<Vec<u8>> {
+    match &reference.source {
+        Some(base) => kasa_remote::remote::remote_get_bytes_bounded(
+            base,
+            &format!("/term/inline-media/page?id={}&n={n}", reference.id),
+            kasa_socket::inline_media::MAX_POSTER_BYTES,
+        ),
+        None => Ok(kasa_http::pdf::registered_page(&kasa_socket::inline_media::store(), &reference.id, n, kasa_http::pdf::EDGE)?),
     }
 }
 
@@ -321,14 +355,13 @@ pub(crate) fn paint(
             _ => CardKind::Audio,
         };
         let mut controls = Vec::new();
-        if card.playable() {
-            let toggle = crate::native_controls::icon_button(
-                g,
-                (x + 12.0, button_y, BUTTON, BUTTON),
-                cursor,
-                if live.is_some_and(|l| l.playing) { "pause" } else { "play" },
-                Default::default(),
-            );
+        if card.playable() || card == CardKind::Pdf {
+            let icon = match card {
+                CardKind::Pdf => "file-text",
+                _ if live.is_some_and(|l| l.playing) => "pause",
+                _ => "play",
+            };
+            let toggle = crate::native_controls::icon_button(g, (x + 12.0, button_y, BUTTON, BUTTON), cursor, icon, Default::default());
             controls.push((Control::Toggle, toggle));
         } else {
             let style = crate::native_controls::Style { enabled: false, ..Default::default() };
@@ -339,6 +372,9 @@ pub(crate) fn paint(
         let mut wanted = Vec::new();
         if capacity >= 2 || (!card.playable() && capacity >= 1) {
             wanted.push((Control::Save, "download", ready && !saving(&reference)));
+        }
+        if card == CardKind::Pdf && capacity >= 2 {
+            wanted.push((Control::Expand, "maximize", ready));
         }
         if card.playable() {
             if capacity >= 3 { wanted.push((Control::Expand, "maximize", true)); }
@@ -372,10 +408,14 @@ pub(crate) fn paint(
         }
         if volume_track.2 > 0.0 { controls.push((Control::Volume, volume_track)); }
         let (name, detail) = match &asset {
-            Ok(Some(asset)) if !card.playable() => (
-                asset.media.name.clone(),
-                format!("파일 · {}{}", size_text(asset.media.size), if saving(&reference) { " · 저장하는 중…" } else { "" }),
-            ),
+            Ok(Some(asset)) if !card.playable() => {
+                let kind = match (card, asset.media.pages) {
+                    (CardKind::Pdf, Some(pages)) => format!("PDF · {pages}쪽"),
+                    _ => "파일".into(),
+                };
+                let busy = if saving(&reference) { " · 저장하는 중…" } else { "" };
+                (asset.media.name.clone(), format!("{kind} · {}{busy}", size_text(asset.media.size)))
+            }
             Ok(Some(asset)) => {
                 let detail = match live {
                     Some(l) => format!(

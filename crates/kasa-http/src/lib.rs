@@ -6,6 +6,7 @@ mod collab_env;
 mod collab_contract_tests;
 mod register;
 pub mod pane_info;
+pub mod pdf;
 pub use http::{spawn_http_server, spawn_http_server_opts, push_viewer_control};
 pub use collab_env::install_collab_env;
 pub use register::unregister_clients;

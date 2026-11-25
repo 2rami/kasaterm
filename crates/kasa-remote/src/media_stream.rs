@@ -585,6 +585,7 @@ mod tests {
             width: None,
             height: None,
             poster: false,
+            pages: None,
         }
     }
 

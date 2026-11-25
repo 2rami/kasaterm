@@ -859,6 +859,13 @@ class Server {
         const Duration(seconds: 15),
       )).bodyBytes;
 
+  /// PDF 카드의 [n](1부터) 쪽 PNG — PC 가 그려 준다. 폰은 PDF 를 풀지 않는다.
+  Future<Uint8List> inlineMediaPage(String id, int n, {String? machine}) async =>
+      (await _inlineMedia(
+        uri('term/inline-media/page', query: {'id': id, 'n': '$n'}, machine: machine),
+        const Duration(seconds: 30),
+      )).bodyBytes;
+
   /// 파일의 [offset] 부터 [length] 바이트. 한 번에 다 받지 않고 조각으로 — 큰 영상을 메모리에 통째로
   /// 올리지 않는다. [abort] 가 끝나면 받던 요청을 끊는다(카드의 「취소」).
   Future<Uint8List> inlineMediaChunk(

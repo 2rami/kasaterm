@@ -790,8 +790,13 @@ impl State {
                     });
                     if let Some(hit) = same.filter(|_| allow && !moved(p.point, point)) {
                         if !crate::inline_media::playable(&hit.reference) {
-                            if hit.control(point) == Some(Control::Save) {
-                                self.save(hit.reference, proxy);
+                            let document = crate::inline_media::card_kind(&hit.reference) == Some(crate::inline_media::CardKind::Pdf);
+                            match hit.control(point) {
+                                Some(Control::Save) => self.save(hit.reference, proxy),
+                                _ if document => {
+                                    let _ = proxy.send_event(UserEvent::OpenDocument(owner, hit.reference));
+                                }
+                                _ => {}
                             }
                             return Response::Consumed;
                         }

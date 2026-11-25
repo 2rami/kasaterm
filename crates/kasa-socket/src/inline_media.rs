@@ -25,6 +25,8 @@ pub const MAX_POSTER_SIDE: u32 = 1600;
 pub const MAX_CHUNK: usize = 8 << 20;
 pub const CLIENT_CHUNK: usize = 4 << 20;
 const MAX_SIDE: u32 = 16384;
+/// PDF 쪽 수 상한 — 그보다 긴 문서는 카드로 받지 않는다.
+pub const MAX_PAGES: u32 = 10_000;
 const MAX_DURATION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_NAME_CHARS: usize = 200;
 const MAX_META_BYTES: u64 = 64 * 1024;
@@ -39,8 +41,10 @@ pub struct Probe {
     pub duration_ms: Option<u64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// PNG. 영상만 받는다.
+    /// PNG. 영상(첫 장면)·PDF(첫 쪽)만 받는다.
     pub poster: Option<Vec<u8>>,
+    /// PDF 쪽 수. PDF 만 받는다.
+    pub pages: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +62,9 @@ pub struct Media {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub poster: bool,
+    /// PDF 쪽 수. 다른 종류는 비우고 쓰지도 않는다 — 옛 카드의 정보·id 가 그대로다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +88,8 @@ struct IdInput<'a> {
     height: Option<u32>,
     ext: &'a str,
     poster_sha256: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pages: Option<u32>,
 }
 
 struct Format {
@@ -102,6 +111,7 @@ const FORMATS: &[Format] = &[
     Format { exts: &["mp4"], kind: "video", mime: "video/mp4", sniff: sniff_ftyp },
     Format { exts: &["m4v"], kind: "video", mime: "video/x-m4v", sniff: sniff_ftyp },
     Format { exts: &["mov"], kind: "video", mime: "video/quicktime", sniff: sniff_mov },
+    Format { exts: &["pdf"], kind: "pdf", mime: "application/pdf", sniff: sniff_pdf },
 ];
 
 fn has_id3(h: &[u8]) -> bool {
@@ -130,6 +140,9 @@ fn sniff_aiff(h: &[u8]) -> bool {
 }
 fn sniff_caf(h: &[u8]) -> bool {
     h.starts_with(b"caff")
+}
+fn sniff_pdf(h: &[u8]) -> bool {
+    h.starts_with(b"%PDF-")
 }
 fn sniff_flac(h: &[u8]) -> bool {
     h.starts_with(b"fLaC") || has_id3(h)
@@ -337,6 +350,7 @@ impl Store {
             && valid_sha(&m.sha256)
             && format.is_some_and(|f| f.kind == m.kind && f.mime == m.mime)
             && m.poster == record.poster_sha256.is_some()
+            && m.pages.is_some() == (m.kind == "pdf")
             && record.poster_sha256.as_deref().is_none_or(valid_sha)
             && m.size > 0
             && m.size <= MAX_FILE_BYTES
@@ -434,6 +448,7 @@ impl Store {
                 width: probe.width,
                 height: probe.height,
                 poster: poster_sha256.is_some(),
+                pages: probe.pages,
             },
             ext,
             poster_sha256,
@@ -576,6 +591,7 @@ fn record_id(record: &Record) -> String {
         height: m.height,
         ext: &record.ext,
         poster_sha256: record.poster_sha256.as_deref(),
+        pages: m.pages,
     };
     let bytes = serde_json::to_vec(&input).unwrap_or_default();
     let mut digest = Sha256::new();
@@ -590,14 +606,21 @@ fn validate_probe(kind: &str, probe: &Probe) -> io::Result<()> {
             return Err(invalid_input("duration out of range"));
         }
     }
+    let pictured = matches!(kind, "video" | "pdf");
     match (probe.width, probe.height) {
         (None, None) => {}
-        (Some(w), Some(h)) if kind == "video" && (1..=MAX_SIDE).contains(&w) && (1..=MAX_SIDE).contains(&h) => {}
+        (Some(w), Some(h)) if pictured && (1..=MAX_SIDE).contains(&w) && (1..=MAX_SIDE).contains(&h) => {}
         _ => return Err(invalid_input("invalid media dimensions")),
     }
+    match (kind, probe.pages) {
+        ("pdf", Some(n)) if (1..=MAX_PAGES).contains(&n) && probe.poster.is_some() && probe.duration_ms.is_none() => {}
+        ("pdf", _) => return Err(invalid_input("a PDF needs its page count and first page")),
+        (_, Some(_)) => return Err(invalid_input("only a PDF has pages")),
+        _ => {}
+    }
     if let Some(png) = &probe.poster {
-        if kind != "video" {
-            return Err(invalid_input("only video takes a poster"));
+        if !pictured {
+            return Err(invalid_input("only video and PDF take a poster"));
         }
         if png.len() > MAX_POSTER_BYTES {
             return Err(invalid_input("poster larger than 12 MiB"));
@@ -916,7 +939,7 @@ mod tests {
     }
 
     fn video_probe() -> Probe {
-        Probe { duration_ms: Some(1500), width: Some(640), height: Some(360), poster: Some(png(320, 180)) }
+        Probe { duration_ms: Some(1500), width: Some(640), height: Some(360), poster: Some(png(320, 180)), pages: None }
     }
 
     fn age(path: &Path, days: u64) {
@@ -947,6 +970,30 @@ mod tests {
         age(&poster, 31);
         assert_eq!(store.prune(KEEP), 3, "카드·원본·포스터");
         assert!(!blob.exists() && !poster.exists());
+    }
+
+    #[test]
+    fn a_pdf_needs_its_pages_and_first_page_and_other_kinds_take_none() {
+        let dir = temp_root("pdf");
+        let store = Store::at(dir.join("store"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("deck.pdf");
+        std::fs::write(&doc, b"%PDF-1.4\nfixture").unwrap();
+        let probe = Probe { width: Some(320), height: Some(180), poster: Some(png(320, 180)), pages: Some(3), ..Default::default() };
+        for bad in [Probe { pages: None, ..probe.clone() }, Probe { poster: None, ..probe.clone() }, Probe { pages: Some(0), ..probe.clone() }] {
+            assert_eq!(store.register(&doc, bad).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        }
+        let media = store.register(&doc, probe.clone()).unwrap();
+        assert_eq!((media.kind.as_str(), media.mime.as_str(), media.pages, media.poster), ("pdf", "application/pdf", Some(3), true));
+        assert_eq!(store.metadata(&media.id).unwrap(), media);
+        let json = serde_json::to_value(&media).unwrap();
+        assert_eq!(json["pages"], 3);
+        let clip = dir.join("a.wav");
+        std::fs::write(&clip, b"RIFF\0\0\0\0WAVEfmt ").unwrap();
+        assert_eq!(store.register(&clip, Probe { pages: Some(1), ..Default::default() }).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        let audio = store.register(&clip, Probe::default()).unwrap();
+        assert!(serde_json::to_value(&audio).unwrap().get("pages").is_none(), "음성·영상 정보는 옛 모양 그대로");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1312,6 +1359,7 @@ mod tests {
             width: None,
             height: None,
             poster: false,
+            pages: None,
         };
         assert_eq!(stream_format(&media), Some(("video/quicktime", "mov")));
         let broken = [

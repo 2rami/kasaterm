@@ -33,6 +33,8 @@ struct Pixels {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
+    Prev,
+    Next,
     Out,
     In,
     Fit,
@@ -41,10 +43,22 @@ enum Action {
     Save,
     Close,
 }
+/// 쪽 넘김으로 보는 PDF 카드. 쪽마다 그림 한 장을 새로 받는다(이 기기 카드는 여기서 그리고, 다른 기기 카드는 그
+/// 기기가 그린 PNG 를 받는다).
+struct Document {
+    reference: crate::inline_media::Reference,
+    page: u32,
+    pages: u32,
+}
+enum Source {
+    Path(String),
+    Page(crate::inline_media::Reference, u32),
+}
 struct Preview {
     frame: crate::preview_frame::Frame,
     owner: WindowId,
     path: String,
+    document: Option<Document>,
     /// 움직이는 결과 그림이면 지금 텍스처에 올린 장.
     anim_frame: Option<usize>,
     context: usize,
@@ -186,11 +200,19 @@ impl State {
     pub(crate) fn open_path(&mut self, owner: WindowId, path: String, proxy: &EventLoopProxy<UserEvent>) {
         self.open(owner, path, proxy);
     }
+    /// PDF 카드를 쪽 넘김으로 연다. 카드 정보(쪽 수)를 아직 못 받았으면 열지 않는다 — 카드가 서야 누를 수 있다.
+    pub(crate) fn open_document(&mut self, owner: WindowId, reference: crate::inline_media::Reference, proxy: &EventLoopProxy<UserEvent>) {
+        let Ok(Some(asset)) = crate::inline_media::cache::get(&reference) else { return };
+        let Some(pages) = asset.media.pages.filter(|n| *n > 0) else { return };
+        let source = Source::Page(reference.clone(), 1);
+        self.open_source(owner, source, Some(Document { reference, page: 1, pages }), proxy);
+    }
     fn open(&mut self, owner: WindowId, path: String, proxy: &EventLoopProxy<UserEvent>) {
-        self.next_generation += 1;
+        self.open_source(owner, Source::Path(path), None, proxy);
+    }
+    fn spawn_load(source: Source, proxy: &EventLoopProxy<UserEvent>) -> Arc<Mutex<Option<Result<Arc<Pixels>, String>>>> {
         let result = Arc::new(Mutex::new(None));
         let worker_result = result.clone();
-        let worker_path = path.clone();
         let proxy = proxy.clone();
         std::thread::spawn(move || {
             if crate::verification_run() {
@@ -201,17 +223,30 @@ impl State {
                     std::thread::sleep(std::time::Duration::from_millis(delay.min(10000)));
                 }
             }
-            let loaded = load(&worker_path)
-                .map(Arc::new)
-                .map_err(|e| format!("그림을 열지 못했어요: {e}"));
+            let loaded = match source {
+                Source::Path(path) => load(&path),
+                Source::Page(reference, n) => crate::inline_media::pdf_page(&reference, n).and_then(from_encoded),
+            }
+            .map(Arc::new)
+            .map_err(|e| format!("그림을 열지 못했어요: {e}"));
             *worker_result.lock().unwrap() = Some(loaded);
             let _ = proxy.send_event(UserEvent::Redraw);
         });
+        result
+    }
+    fn open_source(&mut self, owner: WindowId, source: Source, document: Option<Document>, proxy: &EventLoopProxy<UserEvent>) {
+        self.next_generation += 1;
+        let path = match &source {
+            Source::Path(path) => path.clone(),
+            Source::Page(..) => String::new(),
+        };
+        let result = Self::spawn_load(source, proxy);
         self.focused = Some(owner);
         self.preview = Some(Preview {
             frame: Default::default(),
             owner,
             path,
+            document,
             anim_frame: None,
             context: self.hits.get(&owner).map_or(0, |h| h.0),
             generation: self.next_generation,
@@ -329,6 +364,8 @@ impl State {
                     if event.state.is_pressed() {
                         match &event.logical_key {
                             Key::Named(NamedKey::Escape) => action = Some(Action::Close),
+                            Key::Named(NamedKey::ArrowLeft | NamedKey::PageUp) if p.document.is_some() => action = Some(Action::Prev),
+                            Key::Named(NamedKey::ArrowRight | NamedKey::PageDown) if p.document.is_some() => action = Some(Action::Next),
                             Key::Named(NamedKey::Tab) => {
                                 if !p.actions.is_empty() {
                                     p.focus = (p.focus
@@ -462,6 +499,24 @@ impl State {
         };
         let center = (p.area.0 + p.area.2 * 0.5, p.area.1 + p.area.3 * 0.5);
         match action {
+            Action::Prev | Action::Next => {
+                let Some(doc) = p.document.as_mut() else { return };
+                let page = if action == Action::Prev { doc.page.saturating_sub(1).max(1) } else { (doc.page + 1).min(doc.pages) };
+                if page == doc.page {
+                    return;
+                }
+                doc.page = page;
+                let source = Source::Page(doc.reference.clone(), page);
+                // 같은 창 자리·크기에서 쪽만 바꾼다 — 새 미리보기를 열면 옮겨 둔 창이 처음 자리로 튄다.
+                self.next_generation += 1;
+                p.generation = self.next_generation;
+                p.result = Self::spawn_load(source, proxy);
+                p.pixels = None;
+                p.anim_frame = None;
+                p.status = "쪽을 불러오는 중…".into();
+                p.zoom = 1.0;
+                p.pan = (0.0, 0.0);
+            }
             Action::In => p.zoom_by(1.25, center),
             Action::Out => p.zoom_by(0.8, center),
             Action::Fit => {
@@ -545,7 +600,7 @@ impl State {
         g.draw_text_clipped(
             x,
             y + 8.0,
-            "이미지 미리보기",
+            if p.document.is_some() { "PDF 미리보기" } else { "이미지 미리보기" },
             gpu::DrawOpts {
                 font_size: 15.0,
                 color: theme::text(),
@@ -557,39 +612,39 @@ impl State {
         );
         y += 40.0;
         let mut bx = x;
-        for (action, label) in [
+        let turns: &[(Action, &str)] = if p.document.is_some() { &[(Action::Prev, "이전"), (Action::Next, "다음")] } else { &[] };
+        for &(action, label) in turns.iter().chain([
             (Action::Out, "−"),
             (Action::In, "+"),
             (Action::Fit, "맞춤"),
             (Action::Actual, "100%"),
             (Action::Copy, "복사"),
             (Action::Save, "저장"),
-        ] {
+        ].iter()) {
             let width = crate::native_controls::button_width(g, label, 32.0, false)
                 .min((right - x).max(0.0));
             if bx > x && bx + width > right {
                 bx = x;
                 y += 40.0;
             }
-            let enabled = action == Action::Close
-                || p.pixels.is_some()
-                    && (!p.busy || !matches!(action, Action::Copy | Action::Save));
+            let enabled = match (action, &p.document) {
+                (Action::Prev, Some(doc)) => doc.page > 1,
+                (Action::Next, Some(doc)) => doc.page < doc.pages,
+                _ => action == Action::Close
+                    || p.pixels.is_some() && (!p.busy || !matches!(action, Action::Copy | Action::Save)),
+            };
             let style = crate::native_controls::Style {
                 enabled,
                 ..Default::default()
             };
-            let rect = if matches!(action, Action::Out | Action::In) {
-                crate::native_controls::icon_button(
-                    g,
-                    (bx, y, width, 32.0),
-                    cursor,
-                    if action == Action::Out {
-                        "minus"
-                    } else {
-                        "plus"
-                    },
-                    style,
-                )
+            let rect = if matches!(action, Action::Out | Action::In | Action::Prev | Action::Next) {
+                let icon = match action {
+                    Action::Out => "minus",
+                    Action::In => "plus",
+                    Action::Prev => "chevron-left",
+                    _ => "chevron-right",
+                };
+                crate::native_controls::icon_button(g, (bx, y, width, 32.0), cursor, icon, style)
             } else {
                 crate::native_controls::text_button(g, (bx, y, width, 32.0), cursor, label, style)
             };
@@ -613,8 +668,9 @@ impl State {
             } else {
                 format!("{} · ", p.status)
             };
+            let page = p.document.as_ref().map(|d| format!("{} / {}쪽 · ", d.page, d.pages)).unwrap_or_default();
             format!(
-                "{operation}{dimensions} · {:.0}%",
+                "{page}{operation}{dimensions} · {:.0}%",
                 fit(p.area, (i.width, i.height), p.scale) * p.zoom * 100.0
             )
         } else {
@@ -718,6 +774,9 @@ fn load(path: &str) -> anyhow::Result<Pixels> {
     std::fs::File::open(path)?
         .take(64 * 1024 * 1024 + 1)
         .read_to_end(&mut encoded)?;
+    from_encoded(encoded)
+}
+fn from_encoded(encoded: Vec<u8>) -> anyhow::Result<Pixels> {
     anyhow::ensure!(encoded.len() <= 64 * 1024 * 1024, "이미지가 64MiB를 넘어요");
     let (image, format) = decode(&encoded)?;
     let received = (image.width(), image.height());

@@ -166,8 +166,11 @@ fn describe(item: &Output, nth: usize) -> (String, &'static str, &'static str) {
     }
     let (kind, icon) = if item.kind == Kind::Audio { ("음성", "play") } else { ("영상", "play") };
     match kasa_socket::inline_media::metadata(&item.id) {
-        Ok(m) if !crate::inline_media::CardKind::of(&m.kind).playable() => (m.name, "파일", "file"),
-        Ok(m) => (m.name, kind, icon),
+        Ok(m) => match crate::inline_media::CardKind::of(&m.kind) {
+            crate::inline_media::CardKind::Pdf => (m.name, "PDF", "file-text"),
+            crate::inline_media::CardKind::File => (m.name, "파일", "file"),
+            _ => (m.name, kind, icon),
+        },
         Err(_) => (format!("{kind} {nth}"), kind, icon),
     }
 }
@@ -256,7 +259,9 @@ impl crate::App {
             },
             Kind::Audio | Kind::Video => {
                 let reference = crate::inline_media::Reference { id: item.id.clone(), source: base };
-                if crate::inline_media::playable(&reference) {
+                if crate::inline_media::card_kind(&reference) == Some(crate::inline_media::CardKind::Pdf) {
+                    self.image_preview.open_document(owner, reference, &self.proxy);
+                } else if crate::inline_media::playable(&reference) {
                     self.media_preview.open_reference(owner, reference, &self.proxy);
                 } else {
                     self.set_toast("이 판에서 열 수 없는 종류예요 — 대화 속 카드의 저장으로 받아요".into());

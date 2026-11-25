@@ -167,6 +167,7 @@ mod tests {
             width: Some(16),
             height: Some(16),
             poster: false,
+            pages: None,
         }
     }
     #[test]
@@ -185,7 +186,7 @@ mod tests {
     #[test]
     fn kinds_this_build_does_not_know_still_load_as_file_cards() {
         let mut m = media(b"fixture");
-        for kind in ["pdf", "web", "table-v2"] {
+        for kind in ["archive", "web", "table-v2"] {
             m.kind = kind.into();
             assert!(validate(&m, &m.id).is_ok(), "{kind}");
             assert_eq!(crate::inline_media::CardKind::of(kind), crate::inline_media::CardKind::File);
@@ -195,6 +196,8 @@ mod tests {
             assert!(validate(&m, &m.id).is_err(), "{kind}");
         }
         assert!(crate::inline_media::CardKind::of("video").playable());
+        assert_eq!(crate::inline_media::CardKind::of("pdf"), crate::inline_media::CardKind::Pdf);
+        assert!(!crate::inline_media::CardKind::Pdf.playable(), "PDF 는 재생기가 아니라 쪽 넘김으로 연다");
         assert_eq!(crate::inline_media::size_text(1), "1KB");
         assert_eq!(crate::inline_media::size_text(3 * 1024 * 1024 + 300_000), "3.3MB");
         assert_eq!(crate::inline_media::size_text(42 * 1024 * 1024), "42MB");
