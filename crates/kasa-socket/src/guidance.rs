@@ -15,7 +15,7 @@ pub const TOPICS: &[Topic] = &[
     Topic { name: "collab", file: "collab.md", summary: "학생에게 일 맡기기·보고·쪽지 전달", text: include_str!("../../../skills/kasapane/collab.md") },
     Topic { name: "panes", file: "references/panes.md", summary: "칸·방 조회, 만들기, 이름·배치·닫기", text: include_str!("../../../skills/kasapane/references/panes.md") },
     Topic { name: "jobs", file: "references/jobs.md", summary: "빌드·검사·서버 등 긴 잡 실행", text: include_str!("../../../skills/kasapane/references/jobs.md") },
-    Topic { name: "media", file: "references/media.md", summary: "완성한 이미지·음성·영상 전달", text: include_str!("../../../skills/kasapane/references/media.md") },
+    Topic { name: "media", file: "references/media.md", summary: "완성한 그림·음성·영상·PDF·웹 카드 전달", text: include_str!("../../../skills/kasapane/references/media.md") },
     Topic { name: "transfer", file: "references/transfer.md", summary: "다른 기기로 세션 옮기기", text: include_str!("../../../skills/kasapane/references/transfer.md") },
     Topic { name: "develop", file: "references/develop.md", summary: "카사텀 자체의 코드·화면 수정", text: include_str!("../../../skills/kasapane/references/develop.md") },
 ];
@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn the_skill_description_carries_the_standing_rules() {
         let description = super::SKILL.lines().find_map(|l| l.strip_prefix("description: ")).unwrap();
-        for rule in ["kasaterm-cli done", "⟦폰⟧", "kasaterm-cli tell 이름@기기", "imgopen --block", "mediaopen --block"] {
+        for rule in ["kasaterm-cli done", "⟦폰⟧", "kasaterm-cli tell 이름@기기", "imgopen --block", "mediaopen --block", "PDF"] {
             assert!(description.contains(rule), "{rule}");
         }
         assert!(description.len() <= 1024, "{}", description.len());
