@@ -44,6 +44,9 @@ enum Action {
 struct Preview {
     frame: crate::preview_frame::Frame,
     owner: WindowId,
+    path: String,
+    /// 움직이는 결과 그림이면 지금 텍스처에 올린 장.
+    anim_frame: Option<usize>,
     context: usize,
     generation: u64,
     pixels: Option<Arc<Pixels>>,
@@ -208,6 +211,8 @@ impl State {
         self.preview = Some(Preview {
             frame: Default::default(),
             owner,
+            path,
+            anim_frame: None,
             context: self.hits.get(&owner).map_or(0, |h| h.0),
             generation: self.next_generation,
             pixels: None,
@@ -646,6 +651,17 @@ impl State {
             if !g.has_image(&key) {
                 g.drop_images_with_prefix(key_prefix);
                 g.upload_image(&key, &image.rgba, image.width, image.height);
+                p.anim_frame = None;
+            }
+            // 칸에서 돌던 결과 그림은 크게 봐도 돈다. 줄여 푼 장은 원본 크기 미리보기에 작게 그려져 정지 그림으로 둔다.
+            if let Some(frames) = crate::inline_result::anim::frames_for_path(&p.path)
+                .filter(|f| f.full && (f.w, f.h) == (image.width, image.height))
+            {
+                let index = crate::inline_result::anim::frame_now(&frames);
+                if p.anim_frame != Some(index) {
+                    g.update_image(&key, frames.rgba(index), frames.w, frames.h);
+                    p.anim_frame = Some(index);
+                }
             }
             p.clamp();
             g.push_clip(p.area.0, p.area.1, p.area.2, p.area.3);

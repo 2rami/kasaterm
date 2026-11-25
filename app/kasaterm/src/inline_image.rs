@@ -89,22 +89,23 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<bool> {
         "이미지 파일을 찾을 수 없습니다: {}",
         path.display()
     );
-    let (w, h) = image::image_dimensions(path)?;
-    anyhow::ensure!(
-        w > 0 && h > 0 && u64::from(w) * u64::from(h) <= 64_000_000,
-        "이미지가 너무 큽니다"
-    );
+    let loaded = crate::inline_result::load::load(path)?;
+    if loaded.anim_dropped {
+        eprintln!("imgopen: 움직이는 그림이 16MiB를 넘어 첫 장만 띄웁니다");
+    }
+    let (w, h) = (loaded.image.width(), loaded.image.height());
     // Windows 칸 출력은 ConPTY 를 지난다. 동봉 OpenConsole 칸은 kitty 를 그대로 넘겨 맥과 같이 그린다. 시스템
     // ConPTY 는 kitty 그림(APC)을 걸러 내고, OSC 1337 은 지나가도 글보다 먼저·나중에 와서 엉뚱한 줄에 앉는다
     // (2026-10-23 실측) — 그때만 글 줄로 지나가는 표시 줄을 내고 앱이 그 줄을 그림으로 그린다.
     let console = cfg!(windows)
         && stdout.is_terminal()
         && std::env::var_os("KASATERM_KITTY_IMAGES").is_none_or(|v| v != "1");
-    if explicit_block || !stdout.is_terminal() || console {
-        let decoded = image::open(path)?;
-        let id = crate::inline_result::register(&decoded)?;
+    // 움직이는 그림은 kitty 로 내면 첫 장에 멈춘다 — 표시 줄로 내야 앱이 돌린다.
+    let lines_only = (console || loaded.anim.is_some()) && !explicit_block && stdout.is_terminal();
+    if explicit_block || !stdout.is_terminal() || lines_only {
+        let id = crate::inline_result::register(&loaded.image, loaded.anim.as_deref())?;
         let block = crate::inline_result::display_block(&id, w, h);
-        let shown = match console && !explicit_block {
+        let shown = match lines_only {
             true => block.lines().filter(|l| l.starts_with("[[ki:")).map(|l| format!("{l}\r\n")).collect(),
             false => block,
         };
@@ -112,7 +113,7 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<bool> {
         return Ok(true);
     }
     let (width, height, cols, rows) = display_size(w, h, terminal_geometry());
-    let decoded = image::open(path)?.thumbnail(width, height);
+    let decoded = loaded.image.thumbnail(width, height);
     let mut png = std::io::Cursor::new(Vec::new());
     decoded.write_to(&mut png, image::ImageFormat::Png)?;
     emit_png(&mut stdout.lock(), png.get_ref(), cols, rows)?;

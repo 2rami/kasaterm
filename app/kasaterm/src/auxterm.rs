@@ -46,6 +46,7 @@ pub(crate) struct AuxTerminal {
     pub(crate) home_window: usize,
     gpu: gpu::GpuRenderer,
     inline_images: kasa_gridview::images::InlineImages,
+    inline_anim: crate::inline_result::anim::Player,
     dirty: bool,
     cursor_px: (f32, f32),
     focused: bool,
@@ -396,6 +397,7 @@ impl App {
             home_window,
             gpu,
             inline_images: Default::default(),
+            inline_anim: Default::default(),
             dirty: true,
             cursor_px: (0.0, 0.0),
             focused: wants_focus,
@@ -687,6 +689,7 @@ impl App {
                 };
                 let images_only: Vec<_> = c.inline_slots.iter().filter(|s| !s.key.starts_with("media:")).cloned().collect();
                 t.inline_images.prepare(&mut t.gpu, &images_only);
+                t.inline_anim.paint(&mut t.gpu, &images_only);
                 t.inline_images.queue_layer(&mut t.gpu, &c.inline_slots, true);
                 t.gpu.draw_cells(&[slot]);
                 t.inline_images.queue_layer(&mut t.gpu, &c.inline_slots, false);

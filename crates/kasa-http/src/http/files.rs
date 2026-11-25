@@ -98,6 +98,32 @@ async fn inline_result_handler(
     }
 }
 
+/// `GET /term/inline-result/anim?id=ID` — 결과 그림의 움직이는 원본. 정지 그림과 같은 권한이고, 받는 쪽이
+/// 정지 그림 PNG 에 적힌 SHA-256 으로 확인한다.
+async fn inline_result_anim_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    if let Some(denied) = super::auth::guest_denied(&req) {
+        return denied;
+    }
+    let id = params.get("id").map(String::as_str).unwrap_or("");
+    if !kasa_socket::inline_results::valid_id(id) {
+        return (StatusCode::BAD_REQUEST, "invalid image id").into_response();
+    }
+    match kasa_socket::inline_results::read_anim(id) {
+        Ok((bytes, mime)) => (
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, "private, max-age=31536000, immutable"),
+            ],
+            bytes,
+        ).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "animation unavailable").into_response(),
+    }
+}
+
 /// `GET /sent-images?surface=<id>&n=N` — 그 방의 sent-images.jsonl 에서 이 pane 이
 /// SendUserFile 로 보낸 이미지 경로 최근 N 개(auto-imgopen 훅이 기록). BA GUI 대화창
 /// 인라인 이미지 소스. transcript 엔 경로가 안 남아(input:{}) 훅 기록이 유일.
@@ -351,6 +377,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let paste_image_backend = backend.clone();
     axum::Router::new()
         .route("/term/inline-result", get(inline_result_handler))
+        .route("/term/inline-result/anim", get(inline_result_anim_handler))
         .route(
             "/open-image",
             get(move |q: Query<std::collections::HashMap<String, String>>| {
@@ -431,5 +458,7 @@ mod inline_result_tests {
         assert_eq!(inline_result_handler(params(), request(false)).await.status(), StatusCode::FORBIDDEN);
         assert_eq!(inline_result_handler(params(), request(true)).await.status(), StatusCode::BAD_REQUEST);
         assert_eq!(inline_result_handler(Query(Default::default()), request(true)).await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(inline_result_anim_handler(params(), request(false)).await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(inline_result_anim_handler(params(), request(true)).await.status(), StatusCode::BAD_REQUEST);
     }
 }

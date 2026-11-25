@@ -1,4 +1,7 @@
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -111,4 +114,81 @@ void main() {
       );
     },
   );
+
+  test('the animation mark is read from the still image head only', () {
+    final marked = File(
+      'test/fixtures/inline-result-marked.png',
+    ).readAsBytesSync();
+    final gif = File('test/fixtures/inline-result-anim.gif').readAsBytesSync();
+    expect(inlineAnimMark(marked), sha256.convert(gif).toString());
+    expect(
+      inlineAnimMark(File('test/fixtures/inline-result.png').readAsBytesSync()),
+      isNull,
+    );
+    expect(inlineAnimMark(gif), isNull);
+    expect(inlineAnimMark(Uint8List.fromList(marked.sublist(0, 40))), isNull);
+  });
+
+  for (final served in ['match', 'tampered', 'missing']) {
+    testWidgets(
+      'a marked image plays its original only when it matches ($served)',
+      (tester) async {
+        final marked = File(
+          'test/fixtures/inline-result-marked.png',
+        ).readAsBytesSync();
+        final gif = File(
+          'test/fixtures/inline-result-anim.gif',
+        ).readAsBytesSync();
+        final calls = <String>[];
+        final server = Server(
+          Uri.parse('https://example.test/u/fixture/'),
+          client: MockClient((req) async {
+            calls.add(req.url.path);
+            if (!req.url.path.endsWith('/anim')) {
+              return http.Response.bytes(
+                marked,
+                200,
+                headers: {'content-type': 'image/png'},
+              );
+            }
+            return switch (served) {
+              'match' => http.Response.bytes(
+                gif,
+                200,
+                headers: {'content-type': 'image/gif'},
+              ),
+              'tampered' => http.Response.bytes(
+                [...gif]..[gif.length - 2] ^= 1,
+                200,
+              ),
+              _ => http.Response('animation unavailable', 404),
+            };
+          }),
+        );
+        addTearDown(server.close);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: InlineResultImage(
+                server: server,
+                id: '7aeaa8e78c63c877',
+                machine: '~source',
+              ),
+            ),
+          ),
+        );
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pump();
+        final image = tester.widget<Image>(find.byType(Image));
+        final bytes = (image.image as MemoryImage).bytes;
+        expect(calls.map((c) => c.substring(c.indexOf('~source/'))), [
+          '~source/term/inline-result',
+          '~source/term/inline-result/anim',
+        ]);
+        expect(bytes, served == 'match' ? gif : marked);
+      },
+    );
+  }
 }

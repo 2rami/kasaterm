@@ -1,3 +1,5 @@
+pub(crate) mod anim;
+pub(crate) mod load;
 mod remote;
 
 use crate::GridCell;
@@ -7,12 +9,12 @@ use std::path::{Path, PathBuf};
 
 use kasa_socket::inline_results::{root, valid_id};
 
-pub(crate) fn register(image: &image::DynamicImage) -> anyhow::Result<String> {
+pub(crate) fn register(image: &image::DynamicImage, anim: Option<&[u8]>) -> anyhow::Result<String> {
     let root = root().ok_or_else(|| anyhow::anyhow!("이미지 저장 위치를 찾을 수 없습니다"))?;
-    register_in(&root, image)
+    register_in(&root, image, anim)
 }
 
-fn register_in(root: &Path, image: &image::DynamicImage) -> anyhow::Result<String> {
+fn register_in(root: &Path, image: &image::DynamicImage, anim: Option<&[u8]>) -> anyhow::Result<String> {
     let preview = if image.width() > 1600 || image.height() > 1600 {
         image.thumbnail(1600, 1600)
     } else {
@@ -20,21 +22,34 @@ fn register_in(root: &Path, image: &image::DynamicImage) -> anyhow::Result<Strin
     };
     let mut png = std::io::Cursor::new(Vec::new());
     preview.write_to(&mut png, image::ImageFormat::Png)?;
-    let bytes = png.into_inner();
+    let bytes = match anim {
+        Some(anim) => load::with_mark(png.get_ref(), &format!("{:x}", Sha256::digest(anim)))?,
+        None => png.into_inner(),
+    };
     let id = format!("{:x}", Sha256::digest(&bytes))[..16].to_string();
     std::fs::create_dir_all(root)?;
-    let path = root.join(format!("{id}.png"));
+    // 원본을 먼저 둔다 — 정지 그림이 먼저 보이면 그 사이 받으러 온 쪽이 원본 없음으로 기억한다.
+    if let Some(anim) = anim {
+        place(root, &format!("{id}.anim"), anim)?;
+    }
+    place(root, &format!("{id}.png"), &bytes)?;
+    Ok(id)
+}
+
+/// 내용 주소 파일이라 이미 있으면 같은 바이트다 — 보관 기간만 오늘부터 다시 센다.
+fn place(root: &Path, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    let path = root.join(name);
     if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
         kasa_socket::inline_results::touch(&path);
-    } else {
-        let temp = root.join(format!("{}.part", uuid::Uuid::new_v4()));
-        std::fs::write(&temp, bytes)?;
-        if let Err(error) = std::fs::rename(&temp, &path) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(error.into());
-        }
+        return Ok(());
     }
-    Ok(id)
+    let temp = root.join(format!("{}.part", uuid::Uuid::new_v4()));
+    std::fs::write(&temp, bytes)?;
+    if let Err(error) = std::fs::rename(&temp, &path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 pub(crate) fn display_block(id: &str, width: u32, height: u32) -> String {
@@ -225,9 +240,12 @@ pub(crate) fn compose(
 ) -> Vec<InlineSlot> {
     compose_with(rows, origin, cell, cols, |id| {
         let asset = asset_path(id);
-        if asset.is_none() {
-            if let Some(base) = source {
-                remote::request(base, id, proxy.clone());
+        match &asset {
+            Some((path, ..)) => anim::want(id, path, source, proxy),
+            None => {
+                if let Some(base) = source {
+                    remote::request(base, id, proxy.clone());
+                }
             }
         }
         asset
@@ -397,8 +415,8 @@ mod tests {
     fn cache_is_content_addressed_and_survives_the_source_path() {
         let dir = std::env::temp_dir().join(format!("inline-result-test-{}", uuid::Uuid::new_v4()));
         let image = image::DynamicImage::new_rgb8(64, 32);
-        let a = register_in(&dir, &image).unwrap();
-        let b = register_in(&dir, &image).unwrap();
+        let a = register_in(&dir, &image, None).unwrap();
+        let b = register_in(&dir, &image, None).unwrap();
         assert_eq!(a, b);
         assert!(valid_id(&a));
         assert_eq!(

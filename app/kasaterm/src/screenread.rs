@@ -2721,12 +2721,15 @@ pub(crate) fn find_image_refs(rows: &[Vec<GridCell>]) -> Vec<ImageRef> {
 /// 박스가 이미 맞아 이 손질이 필요 없다.
 static INLINE_UPLOADED: std::sync::OnceLock<std::sync::Mutex<kasa_gridview::images::InlineImages>> =
     std::sync::OnceLock::new();
+/// 메인 창 렌더러가 올려 둔 움직이는 결과 그림의 장 — 위 텍스처 캐시와 같은 수명이다.
+static INLINE_ANIM: std::sync::OnceLock<std::sync::Mutex<crate::inline_result::anim::Player>> = std::sync::OnceLock::new();
 
 /// 칸 글자 전에 부른다 — 이번 프레임 그림을 올리고 kitty `z<0` 그림(글자 아래)을 그린다.
 pub(crate) fn paint_inline_images_below(g: &mut kasa_gridview::GridRenderer, slots: &[kasa_gridview::images::InlineSlot]) {
     let mut images = INLINE_UPLOADED.get_or_init(Default::default).lock().unwrap();
     let images_only: Vec<_> = slots.iter().filter(|s| !s.key.starts_with("media:")).cloned().collect();
     images.prepare(g, &images_only);
+    INLINE_ANIM.get_or_init(Default::default).lock().unwrap().paint(g, &images_only);
     images.queue_layer(g, slots, true);
 }
 

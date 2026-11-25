@@ -7711,6 +7711,8 @@ impl ApplicationHandler<UserEvent> for App {
                 .chain(self.remote_completion_deadline())
                 .chain(self.update_deadline())
                 .chain(web_visual_deadline)
+                // 칸 안 움직이는 그림의 다음 장 — 보이는 것이 없으면 만기도 없다.
+                .chain(crate::inline_result::anim::due())
                 // 조용한 셸에서도 이사·복원 명령이 제때 발사되어야 한다. 이 만기를
                 // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.
                 .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
@@ -7739,11 +7741,13 @@ impl ApplicationHandler<UserEvent> for App {
         // so the cursor block toggles its phase. Other wake causes
         // (input, redraw, init) drive their own redraws.
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            // 보기 전용도 먼저 비운다 — 지난 만기가 남으면 대기 만기가 늘 과거라 루프가 헛돈다.
+            let anim_due = crate::inline_result::anim::take_due(Instant::now());
             if self.viewer_only {
                 self.aux_request_redraws();
                 return;
             }
-            if self.settings_media_animating() || self.media_preview.active() {
+            if self.settings_media_animating() || self.media_preview.active() || anim_due {
                 self.chrome_dirty = true;
             }
             if let Some(w) = &self.window {
