@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
@@ -360,9 +361,18 @@ void main() {
     expect(opened, [Uri.parse('$origin/relay/oauth/authorize/req-1')]);
   });
 
+  test('iOS 자동 채우기에 공식 관문 두 주소를 등록한다', () {
+    final entitlements = File('ios/Runner/Runner.entitlements').readAsStringSync();
+    final domains = ['kasaterm.debimarlene.com', Uri.parse(defaultGateway).host];
+    for (final domain in domains) {
+      expect(entitlements, contains('<string>webcredentials:$domain</string>'));
+    }
+  });
+
   test('공식 관문 두 주소에서 저장한 기기와 승인 경로를 다시 쓴다', () async {
     final former = Uri.parse('https://kasaterm.debimarlene.com');
-    final gateway = Uri.parse('https://kasaterm.kasa.page');
+    final gateway = Uri.parse(defaultGateway);
+    expect(gateway.host, 'kasaterm.kasa.page');
     final saved = AccountSession(origin: former, account: 'fixture', deviceId: 'd', token: 'kdt_x');
     final current = AccountSession(origin: gateway, account: 'fixture', deviceId: 'd', token: 'kdt_x');
     expect(saved.scope, current.scope);
