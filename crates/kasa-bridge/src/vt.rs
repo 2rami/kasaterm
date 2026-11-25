@@ -30,5 +30,6 @@ pub(crate) fn vt_cell(c: &vt100::Cell) -> Cell {
         wrapped: false,
         // Legacy vt100 cells do not expose leading-wide padding metadata.
         leading_wide_spacer: false,
+        link: None,
     }
 }

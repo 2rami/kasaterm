@@ -40,6 +40,10 @@ pub struct Cell {
     /// occupies screen space but is not a space from the terminal's text.
     #[serde(default)]
     pub leading_wide_spacer: bool,
+    /// OSC 8 하이퍼링크 대상. 하네스가 경로를 숨기고 이름만 보여 주는 링크는 글자만으로 찾을 수 없다.
+    /// 원격 거울은 ANSI 로 다시 그려 받으므로 직렬화에 싣지 않는다.
+    #[serde(skip)]
+    pub link: Option<std::sync::Arc<str>>,
 }
 
 impl Cell {
@@ -56,6 +60,7 @@ impl Cell {
             hidden: false,
             wrapped: false,
             leading_wide_spacer: false,
+            link: None,
         }
     }
 }
@@ -239,6 +244,7 @@ impl Cell {
             && !self.italic
             && !self.hidden
             && !self.underline
+            && self.link.is_none()
             && !self.inverse
     }
 }
@@ -348,6 +354,8 @@ pub fn row_ansi(cells: &[Cell]) -> Option<String> {
     }
     let mut out = String::new();
     let mut style: Option<String> = None;
+    // 거울이 다시 그린 화면에서도 하네스가 숨긴 링크 대상을 열 수 있어야 한다.
+    let mut link: Option<std::sync::Arc<str>> = None;
     // 와이드 글자가 먹은 뒷칸을 건너뛰기 위한 표시.
     let mut spacer = false;
     for cell in &cells[..end] {
@@ -367,10 +375,17 @@ pub fn row_ansi(cells: &[Cell]) -> Option<String> {
             out.push_str(&sgr);
             style = Some(sgr);
         }
+        if cell.link != link {
+            out.push_str(&format!("\x1b]8;;{}\x1b\\", cell.link.as_deref().unwrap_or_default()));
+            link = cell.link.clone();
+        }
         // A spacer following a wide glyph was already skipped above. A lone
         // blank sentinel still occupies a column, especially on full-width rows.
         out.push(if cell.ch == '\0' { ' ' } else { cell.ch });
         spacer = UnicodeWidthChar::width(cell.ch).unwrap_or(1) > 1;
+    }
+    if link.is_some() {
+        out.push_str("\x1b]8;;\x1b\\");
     }
     out.push_str("\x1b[0m");
     Some(out)

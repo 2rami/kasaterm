@@ -459,6 +459,7 @@ fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
         leading_wide_spacer: cell
             .flags
             .contains(alacritty_terminal::term::cell::Flags::LEADING_WIDE_CHAR_SPACER),
+        link: cell.hyperlink().map(|link| link.uri().into()),
     }
 }
 
@@ -548,6 +549,27 @@ mod raw_snapshot_wrap_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn osc8_target_reaches_every_cell_of_the_name_and_survives_mirror_replay() {
+        let target = "file:///tmp/review/mobile.jpg";
+        let mut source = parser(12, 3);
+        feed(&mut source, format!("앞 \x1b]8;;{target}\x1b\\모바일 화면\x1b]8;;\x1b\\ 끝").as_bytes());
+        let title = Arc::new(Mutex::new(None));
+        let links = |frame: &ScreenUpdate| -> Vec<(u16, usize, Option<String>)> {
+            frame.dirty.iter().flat_map(|(row, cells)| {
+                cells.iter().enumerate().map(move |(col, cell)| (*row, col, cell.link.as_deref().map(str::to_string)))
+            }).filter(|(_, _, link)| link.is_some()).collect()
+        };
+        let frame = snapshot(&mut source, 12, 3, "%osc8", &title, true);
+        let linked = links(&frame);
+        let cols: Vec<_> = linked.iter().map(|(row, col, _)| (*row, *col)).collect();
+        assert_eq!(cols, vec![(0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8), (0, 9), (0, 10), (0, 11), (1, 0), (1, 1)]);
+        assert!(linked.iter().all(|(_, _, link)| link.as_deref() == Some(target)));
+        let mut replay = parser(12, 3);
+        feed(&mut replay, &raw_screen_ansi(&frame));
+        assert_eq!(links(&snapshot(&mut replay, 12, 3, "%osc8", &title, true)), linked);
     }
 
     #[test]

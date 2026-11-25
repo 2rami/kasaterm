@@ -242,6 +242,9 @@ impl App {
 /// 화면 폭이 아주 좁아도 긴 주소가 드는 만큼.
 fn link_in<'a>(pid: &str, view: impl Fn(usize) -> Option<&'a Vec<GridCell>>, col: u16, row: u16) -> Option<(String, Vec<LinkSpan>, String)> {
     let row = row as usize;
+    if let Some((spans, target)) = hyperlink_in(&view, col, row) {
+        return Some((pid.to_string(), spans, target));
+    }
     let mut start = row;
     while start > 0 && row - start < 16 {
         match (view(start - 1), view(start)) {
@@ -268,6 +271,34 @@ fn link_in<'a>(pid: &str, view: impl Fn(usize) -> Option<&'a Vec<GridCell>>, col
                 .collect();
             (pid.to_string(), spans, url)
         })
+}
+
+/// OSC 8 링크는 보이는 글자가 이름뿐이라 글자 스캔으로는 대상을 알 수 없다. 하네스가 이름을 줄바꿈해
+/// 다음 행 들여쓰기 뒤에 이어 쓰므로, 같은 대상을 단 칸이 있는 이웃 행까지 한 링크로 묶는다.
+fn hyperlink_in<'a>(view: &impl Fn(usize) -> Option<&'a Vec<GridCell>>, col: u16, row: usize) -> Option<(Vec<LinkSpan>, String)> {
+    let target = view(row)?.get(col as usize)?.link.clone()?;
+    let spans_in = |r: usize| -> Vec<LinkSpan> {
+        let mut spans: Vec<LinkSpan> = Vec::new();
+        for (c, cell) in view(r).into_iter().flatten().enumerate() {
+            if cell.link.as_deref() != Some(&*target) {
+                continue;
+            }
+            match spans.last_mut() {
+                Some(span) if span.col_end as usize == c => span.col_end += 1,
+                _ => spans.push(LinkSpan { row: r as u16, col_start: c as u16, col_end: c as u16 + 1 }),
+            }
+        }
+        spans
+    };
+    let mut first = row;
+    while first > 0 && row - first < 16 && !spans_in(first - 1).is_empty() {
+        first -= 1;
+    }
+    let mut last = row;
+    while last - first < 32 && !spans_in(last + 1).is_empty() {
+        last += 1;
+    }
+    Some(((first..=last).flat_map(spans_in).collect(), target.to_string()))
 }
 
 #[cfg(test)]
@@ -746,6 +777,26 @@ mod tests {
                 )]
             );
         }
+    }
+
+    #[test]
+    fn osc8_link_name_opens_its_hidden_target_across_a_wrapped_label() {
+        let target: std::sync::Arc<str> = "file:///tmp/review/mobile.jpg".into();
+        let linked = |text: &str, from: usize| {
+            let mut cells = row(text);
+            for cell in &mut cells[from..] {
+                cell.link = Some(target.clone());
+            }
+            cells
+        };
+        let rows = vec![row("앞 문단"), linked("검증했어요. 모바", 12), linked("  일 화면 보기", 2), row("")];
+        let (pid, spans, url) = link_in("%3", |r| rows.get(r), 6, 2).expect("hyperlink");
+        assert_eq!((pid.as_str(), url.as_str()), ("%3", "file:///tmp/review/mobile.jpg"));
+        let spans: Vec<_> = spans.iter().map(|s| (s.row, s.col_start, s.col_end)).collect();
+        assert_eq!(spans, vec![(1, 12, 16), (2, 2, 14)]);
+        assert_eq!(link_in("%3", |r| rows.get(r), 13, 1).map(|(_, _, url)| url), Some(url));
+        assert!(link_in("%3", |r| rows.get(r), 0, 2).is_none(), "들여쓰기는 링크가 아니다");
+        assert!(link_in("%3", |r| rows.get(r), 2, 1).is_none(), "같은 행의 앞 문장은 링크가 아니다");
     }
 
     #[test]
