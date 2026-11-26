@@ -10,10 +10,13 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+
+RESTART_PATIENCE = 20.0
 
 
 def fresh_conversation(harness, args):
@@ -46,6 +49,41 @@ def session_id(harness, args, anchor):
     return ""
 
 
+def app_port():
+    socket = os.environ.get("KASATERM_SOCKET_PATH", "")
+    portfile = Path((socket[:-5] if socket.endswith(".sock") else socket) + ".mcp_port")
+    port = portfile.read_text().strip() if socket and portfile.is_file() else os.environ.get("KASASPACE_MCP_PORT", "")
+    if not port.isdigit():
+        raise ValueError("pane app port unavailable")
+    return int(port)
+
+
+def ask_app(query, patience=RESTART_PATIENCE):
+    # 앱이 재시작하는 순간에 실행이 겹치면 옛 앱이 요청을 읽기 전에 닫혀 연결이 끊긴다(ECONNRESET)
+    # 또는 거절된다. 새 앱이 뜰 시간을 주고, 포트가 바뀌었을 수 있어 매번 다시 읽는다.
+    # 앱이 요청을 처리했다면 대화 번호(sid)에 이름이 묶여 있어 다시 물어도 같은 이름이 온다.
+    deadline = time.monotonic() + patience
+    delay = 0.25
+    while True:
+        request = urllib.request.Request(f"http://127.0.0.1:{app_port()}/agent-identity?{query}", data=b"", method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            # 앱은 거절 이유를 본문에 싣는다. 상태 줄만 남기면 「HTTP Error 400」 말고는 단서가 없다.
+            try:
+                body = json.loads(error.read() or b"{}")
+            except ValueError:
+                body = {}
+            reason = body.get("error", "") if isinstance(body, dict) else ""
+            raise ValueError(f"앱이 거절함: {reason}" if reason else str(error)) from None
+        except (ConnectionError, urllib.error.URLError) as error:
+            if not isinstance(getattr(error, "reason", error), ConnectionError) or time.monotonic() + delay > deadline:
+                raise
+        time.sleep(delay)
+        delay = min(delay * 2, 2.0)
+
+
 def main():
     harness, shim, anchor, *args = sys.argv[1:]
     pane = os.environ.get("KASATERM_PANE_ID", "")
@@ -54,29 +92,13 @@ def main():
     shim = Path(shim)
     override = shim / f"repersona-{pane}.character"
     requested = override.read_text().strip() if override.is_file() else ""
-    socket = os.environ.get("KASATERM_SOCKET_PATH", "")
-    portfile = Path((socket[:-5] if socket.endswith(".sock") else socket) + ".mcp_port")
-    port = portfile.read_text().strip() if socket and portfile.is_file() else os.environ.get("KASASPACE_MCP_PORT", "")
-    if not port.isdigit():
-        raise ValueError("pane app port unavailable")
     fresh = fresh_conversation(harness, args)
     sid = session_id(harness, args, str(uuid.uuid4()) if fresh else anchor)
     # resumed: 이 기기가 그 대화의 학생을 모르면 앱이 다른 기기에 묻는다 — 새 대화는 물을 것이 없다.
     query = urllib.parse.urlencode({"surface": pane, "sid": sid, "character": requested,
                                    "resumed": "" if fresh else "1",
                                    "pid": os.environ.get("KASATERM_LAUNCH_PID", str(os.getppid()))})
-    request = urllib.request.Request(f"http://127.0.0.1:{int(port)}/agent-identity?{query}", data=b"", method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            identity = json.load(response)
-    except urllib.error.HTTPError as error:
-        # 앱은 거절 이유를 본문에 싣는다. 상태 줄만 남기면 「HTTP Error 400」 말고는 단서가 없다.
-        try:
-            body = json.loads(error.read() or b"{}")
-        except ValueError:
-            body = {}
-        reason = body.get("error", "") if isinstance(body, dict) else ""
-        raise ValueError(f"앱이 거절함: {reason}" if reason else str(error)) from None
+    identity = ask_app(query)
     if not all(isinstance(identity.get(key), str) for key in ("character", "persona", "slug")) or not identity["character"]:
         raise ValueError("incomplete launch identity")
     destination = Path(tempfile.mkdtemp(prefix="agent-identity-", dir=shim))

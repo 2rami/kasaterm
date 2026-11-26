@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
 import threading
@@ -85,6 +86,43 @@ class IdentityTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
             self.assertIn("실행을 멈췄어요", result.stderr)
+
+    def test_launch_during_app_restart_waits_for_the_new_app(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps({"character": "코가라시", "persona": "", "slug": "kogarashi"}).encode())
+            def log_message(self, *args):
+                pass
+        new_app = HTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=new_app.serve_forever, daemon=True)
+        worker.start()
+        old_app = socket.socket()
+        old_app.bind(("127.0.0.1", 0))
+        old_app.listen(1)
+        try:
+            with tempfile.TemporaryDirectory(prefix="kasaterm-identity-restart-") as tmp:
+                root = Path(tmp)
+                portfile = root / "socket.mcp_port"
+                portfile.write_text(str(old_app.getsockname()[1]))
+                def quit_old_app():
+                    # Closing without reading the request is what a quitting app does: the pane sees ECONNRESET.
+                    conn, _ = old_app.accept()
+                    conn.close()
+                    old_app.close()
+                    portfile.write_text(str(new_app.server_port))
+                threading.Thread(target=quit_old_app, daemon=True).start()
+                env = dict(os.environ, KASATERM_PANE_ID="%test", KASATERM_SOCKET_PATH=str(root / "socket.sock"))
+                result = subprocess.run(["python3", "-X", "utf8", str(SCRIPT), "claude", str(root), "anchor"],
+                                        env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((Path(result.stdout.strip()) / "character").read_text(encoding="utf-8"), "코가라시")
+        finally:
+            old_app.close()
+            new_app.shutdown()
+            worker.join()
+            new_app.server_close()
 
     def test_refused_identity_shows_the_app_reason(self):
         class Handler(BaseHTTPRequestHandler):
