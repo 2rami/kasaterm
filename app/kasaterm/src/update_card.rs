@@ -24,6 +24,8 @@ pub(crate) enum Stage {
     Preparing { version: String, progress: f64 },
     /// 받아서 확인을 마쳤다. 다시 켜면 바뀐다.
     Ready { version: String },
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    RestartPending { version: String },
     Installing { version: String },
     /// 사람이 누른 확인의 답.
     Latest,
@@ -143,6 +145,16 @@ pub(crate) fn content(stage: &Stage, interrupts: Option<&str>, later_installs: b
                 warn: interrupts.is_some(),
             }
         }
+        Stage::RestartPending { version } => Content {
+            title: format!("새 판 v{version} 다시 켜기 대기 중"),
+            body: vec![match interrupts {
+                Some(what) => format!("지금 다시 켜면 끊겨요 · {what}"),
+                None => "앱이 종료되면 업데이트를 마쳐요.".into(),
+            }],
+            progress: None,
+            buttons: vec![("닫기", Action::Close), (if interrupts.is_some() { "그래도 다시 켜기" } else { "다시 켜기 재시도" }, Action::Relaunch)],
+            warn: interrupts.is_some(),
+        },
         Stage::Installing { version } => plain(
             format!("새 판 v{version} 설치하는 중"),
             vec!["곧 다시 켜져요.".into()],

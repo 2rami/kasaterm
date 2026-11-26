@@ -14,7 +14,7 @@
 //! 창이 미뤄져 앱 안에 있는 사람에겐 끝내 안 뜨기도 했다(2026-10-02 리그 재현) — 카드는 늘 그 자리에 선다.
 
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -41,10 +41,17 @@ const STAGE_INSTALLING: isize = 2;
 
 static OWNER: AtomicBool = AtomicBool::new(false);
 
+#[derive(Default)]
+struct RelaunchAttempt {
+    retry: Option<block2::RcBlock<dyn Fn()>>,
+    marker: Option<PathBuf>,
+}
+
 thread_local! {
     // Sparkle 의 드라이버 호출은 주 스레드에서 오고, 답(블록)은 사람이 카드를 누를 때 주 스레드에서 부른다.
     static CHOICE: RefCell<Option<block2::RcBlock<dyn Fn(isize)>>> = const { RefCell::new(None) };
     static CANCEL: RefCell<Option<block2::RcBlock<dyn Fn()>>> = const { RefCell::new(None) };
+    static RELAUNCH: RefCell<Option<RelaunchAttempt>> = const { RefCell::new(None) };
     /// 받는 판 — 진행 단계마다 같은 번호를 쓴다.
     static VERSION: RefCell<String> = const { RefCell::new(String::new()) };
     static GOT: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
@@ -66,7 +73,11 @@ pub(crate) fn owns_installation() -> bool { OWNER.load(Ordering::Acquire) }
 pub(crate) fn respond(action: Action) {
     let choice = |value: isize| CHOICE.with(|slot| slot.borrow_mut().take()).map(|reply| reply.call((value,))).is_some();
     let answered = match action {
-        Action::Download | Action::Relaunch => choice(CHOICE_INSTALL),
+        Action::Download => choice(CHOICE_INSTALL),
+        Action::Relaunch => {
+            request_relaunch();
+            return;
+        }
         Action::Skip => choice(CHOICE_SKIP),
         Action::Later => choice(CHOICE_DISMISS),
         Action::Cancel => CANCEL.with(|slot| slot.borrow_mut().take()).map(|cancel| cancel.call(())).is_some(),
@@ -74,6 +85,45 @@ pub(crate) fn respond(action: Action) {
     };
     if !answered || matches!(action, Action::Skip | Action::Later | Action::Cancel) {
         update_card::post(None);
+    }
+}
+
+fn request_relaunch() {
+    let retry = RELAUNCH.with(|slot| {
+        let attempt = slot.borrow();
+        let attempt = attempt.as_ref()?;
+        Some((attempt.retry.clone()?, attempt.marker.clone()))
+    });
+    if let Some((retry, marker)) = retry {
+        if let Some(path) = marker {
+            let _ = std::fs::write(path, "");
+        }
+        retry.call(());
+    } else if let Some(reply) = CHOICE.with(|slot| slot.borrow_mut().take()) {
+        RELAUNCH.with(|slot| { slot.borrow_mut().get_or_insert_with(RelaunchAttempt::default); });
+        reply.call((CHOICE_INSTALL,));
+    }
+}
+
+fn clear_relaunch_attempt() -> bool {
+    let Some(attempt) = RELAUNCH.with(|slot| slot.borrow_mut().take()) else { return false };
+    if let Some(path) = attempt.marker {
+        let _ = std::fs::remove_file(path);
+    }
+    true
+}
+
+fn clear_responses() {
+    CHOICE.with(|slot| slot.borrow_mut().take());
+    CANCEL.with(|slot| slot.borrow_mut().take());
+}
+
+fn interrupted_relaunch(error: Option<&NSError>) {
+    if clear_relaunch_attempt() {
+        clear_responses();
+        let message = error.map(error_text).unwrap_or_else(|| "다시 켜기가 중단됐어요. 업데이트를 다시 확인해 주세요.".into());
+        eprintln!("[sparkle] relaunch interrupted: {message}");
+        update_card::post(Some(Stage::Failed { message }));
     }
 }
 
@@ -214,6 +264,19 @@ define_class!(
         fn feed_url(&self, _updater: &AnyObject) -> Option<Retained<NSString>> {
             self.ivars().feed.clone()
         }
+
+        #[unsafe(method(updaterWillRelaunchApplication:))]
+        fn will_relaunch(&self, _updater: &AnyObject) {
+            let marker = crate::update_notice::mark_relaunch();
+            RELAUNCH.with(|slot| slot.borrow_mut().get_or_insert_with(RelaunchAttempt::default).marker = marker);
+            eprintln!("[sparkle] requesting relaunch for {}", version());
+        }
+
+        #[unsafe(method(updater:didFinishUpdateCycleForUpdateCheck:error:))]
+        fn cycle_finished(&self, _updater: &AnyObject, _check: isize, error: Option<&NSError>) {
+            // Sparkle can finish a cycle without asking the user driver to display an error.
+            interrupted_relaunch(error);
+        }
     }
 );
 
@@ -273,13 +336,15 @@ define_class!(
         #[unsafe(method(showUpdateFoundWithAppcastItem:state:reply:))]
         fn found(&self, item: &AnyObject, state: &AnyObject, reply: &block2::DynBlock<dyn Fn(isize)>) {
             let (version, stage) = unsafe { (item_version(item), update_stage(state)) };
+            if stage == STAGE_INSTALLING {
+                eprintln!("[sparkle] staged update {version} is waiting for a relaunch choice");
+            }
             VERSION.with(|v| *v.borrow_mut() = version.clone());
             CANCEL.with(|slot| slot.borrow_mut().take());
             CHOICE.with(|slot| *slot.borrow_mut() = Some(reply.copy()));
             update_card::post(Some(match stage {
-                // 「나중에」로 미뤄 둔 받은 판 — 다시 받지 않고 다시 켤지만 묻는다.
-                STAGE_DOWNLOADED => Stage::Ready { version },
-                STAGE_INSTALLING => Stage::Installing { version },
+                // A resumed installer still needs the reply before it can request app termination.
+                STAGE_DOWNLOADED | STAGE_INSTALLING => Stage::Ready { version },
                 _ => Stage::Found { version, note: None },
             }));
         }
@@ -299,9 +364,11 @@ define_class!(
 
         #[unsafe(method(showUpdaterError:acknowledgement:))]
         fn failed(&self, error: &NSError, ack: &block2::DynBlock<dyn Fn()>) {
-            CANCEL.with(|slot| slot.borrow_mut().take());
-            CHOICE.with(|slot| slot.borrow_mut().take());
-            update_card::post(Some(Stage::Failed { message: error_text(error) }));
+            clear_responses();
+            clear_relaunch_attempt();
+            let message = error_text(error);
+            eprintln!("[sparkle] update failed: {message} ({})", error.code());
+            update_card::post(Some(Stage::Failed { message }));
             ack.call(());
         }
 
@@ -342,23 +409,40 @@ define_class!(
         }
 
         #[unsafe(method(showInstallingUpdateWithApplicationTerminated:retryTerminatingApplication:))]
-        fn installing(&self, _terminated: Bool, _retry: &block2::DynBlock<dyn Fn()>) {
-            update_card::post(Some(Stage::Installing { version: version() }));
+        fn installing(&self, terminated: Bool, retry: &block2::DynBlock<dyn Fn()>) {
+            clear_responses();
+            let terminated = terminated.as_bool();
+            RELAUNCH.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                slot.get_or_insert_with(RelaunchAttempt::default).retry = (!terminated).then(|| retry.copy());
+            });
+            update_card::post(Some(if terminated {
+                Stage::Installing { version: version() }
+            } else {
+                // A delayed or denied quit need not produce any further Sparkle callback.
+                Stage::RestartPending { version: version() }
+            }));
         }
 
         #[unsafe(method(showUpdateInstalledAndRelaunched:acknowledgement:))]
         fn installed(&self, _relaunched: Bool, ack: &block2::DynBlock<dyn Fn()>) {
+            clear_relaunch_attempt();
             update_card::post(Some(Stage::Installed { version: crate::version::CURRENT.to_string() }));
             ack.call(());
         }
 
         #[unsafe(method(showUpdateInFocus))]
-        fn in_focus(&self) {}
+        fn in_focus(&self) {
+            let waiting = RELAUNCH.with(|slot| slot.borrow().as_ref().is_some_and(|attempt| attempt.retry.is_some()));
+            if waiting && update_card::current().is_none() {
+                update_card::post(Some(Stage::RestartPending { version: version() }));
+            }
+        }
 
         #[unsafe(method(dismissUpdateInstallation))]
         fn dismiss(&self) {
-            CHOICE.with(|slot| slot.borrow_mut().take());
-            CANCEL.with(|slot| slot.borrow_mut().take());
+            clear_responses();
+            interrupted_relaunch(None);
             // 알리기만 하는 카드(최신·실패·바뀜)는 제 시간에 걷힌다 — 세션이 끝났다고 바로 지우지 않는다.
             if !matches!(update_card::current(), Some(Stage::Latest | Stage::Failed { .. } | Stage::Installed { .. })) {
                 update_card::post(None);
@@ -494,6 +578,8 @@ pub(crate) fn check_for_updates(updater: &Updater) {
 mod tests {
     use super::*;
 
+    static CARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn development_and_verification_instances_never_start_sparkle() {
         let home = Path::new("/Users/test");
@@ -529,6 +615,7 @@ mod tests {
     /// Sparkle 이 부르는 차례 그대로 — 찾음 → 받기 → 진행 → 준비 → 다시 켜기. 답은 카드의 단추가 부를 때만 간다.
     #[test]
     fn the_card_answers_sparkle_only_when_a_person_presses() {
+        let _card = CARD_TEST.lock().unwrap();
         let driver = UserDriver::new();
         let dummy = NSObject::new();
         let answered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -561,6 +648,71 @@ mod tests {
         assert_eq!(answered.lock().unwrap().len(), 2, "한 번 답한 블록은 다시 안 부른다");
 
         let _: () = unsafe { msg_send![&*driver, dismissUpdateInstallation] };
+        update_card::post(None);
+    }
+
+    #[test]
+    fn a_resumed_installer_can_relaunch_retry_and_report_an_abort() {
+        define_class!(
+            #[unsafe(super(NSObject))]
+            #[name = "KasatermTestResumedUpdate"]
+            struct ResumedUpdate;
+
+            impl ResumedUpdate {
+                #[unsafe(method(stage))]
+                fn stage(&self) -> isize { STAGE_INSTALLING }
+            }
+        );
+
+        let _card = CARD_TEST.lock().unwrap();
+        let driver = UserDriver::new();
+        let delegate = UpdateDelegate::new(None);
+        let dummy = NSObject::new();
+        let state: Retained<ResumedUpdate> = unsafe { msg_send![ResumedUpdate::alloc(), init] };
+        let choice = std::rc::Rc::new(Cell::new(None));
+        let seen = choice.clone();
+        let reply = block2::RcBlock::new(move |answer: isize| seen.set(Some(answer)));
+        unsafe {
+            let _: () = msg_send![&*driver, showUpdateFoundWithAppcastItem: &*dummy, state: &*state, reply: &*reply];
+        }
+        assert!(matches!(update_card::current(), Some(Stage::Ready { .. })));
+        assert_eq!(choice.get(), None);
+        respond(Action::Relaunch);
+        assert_eq!(choice.get(), Some(CHOICE_INSTALL));
+
+        let retries = std::rc::Rc::new(Cell::new(0));
+        let seen = retries.clone();
+        let retry = block2::RcBlock::new(move || seen.set(seen.get() + 1));
+        unsafe {
+            let _: () = msg_send![&*driver, showInstallingUpdateWithApplicationTerminated: Bool::NO, retryTerminatingApplication: &*retry];
+        }
+        let pending = update_card::current().unwrap();
+        assert!(matches!(pending, Stage::RestartPending { .. }));
+        let content = update_card::content(&pending, None, true, true);
+        assert_eq!(content.progress, None);
+        assert_eq!(update_card::rig_choice(&content, None), Some(Action::Relaunch));
+
+        update_card::post(None);
+        let _: () = unsafe { msg_send![&*driver, showUpdateInFocus] };
+        assert_eq!(update_card::current(), Some(pending));
+        assert_eq!(retries.get(), 0);
+        respond(Action::Relaunch);
+        assert_eq!(retries.get(), 1);
+        let _: () = unsafe { msg_send![&*driver, dismissUpdateInstallation] };
+        assert!(matches!(update_card::current(), Some(Stage::Failed { .. })));
+        respond(Action::Relaunch);
+        assert_eq!(retries.get(), 1);
+
+        // Completion can arrive without a user-driver error callback.
+        let _: () = unsafe { msg_send![&*driver, showInstallingUpdateWithApplicationTerminated: Bool::YES, retryTerminatingApplication: &*retry] };
+        assert!(matches!(update_card::current(), Some(Stage::Installing { .. })));
+        let error = unsafe { NSError::errorWithDomain_code_userInfo(&NSString::from_str("SparkleTest"), 1, None) };
+        let message = error_text(&error);
+        unsafe {
+            let _: () = msg_send![&*delegate, updater: &*dummy, didFinishUpdateCycleForUpdateCheck: 0isize, error: &*error];
+        }
+        let _: () = unsafe { msg_send![&*driver, dismissUpdateInstallation] };
+        assert_eq!(update_card::current(), Some(Stage::Failed { message }));
         update_card::post(None);
     }
 

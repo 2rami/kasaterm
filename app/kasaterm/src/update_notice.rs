@@ -38,10 +38,10 @@ fn relaunch_marker() -> Option<std::path::PathBuf> {
 /// 표식이 이만큼 지났으면 새 판 다시 켜기가 아니라 나중에 사람이 켠 것이다.
 const RELAUNCH_MARKER_FRESH: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-pub(crate) fn mark_relaunch() {
-    if let Some(path) = relaunch_marker() {
-        let _ = std::fs::write(path, "");
-    }
+pub(crate) fn mark_relaunch() -> Option<std::path::PathBuf> {
+    let path = relaunch_marker()?;
+    std::fs::write(&path, "").ok()?;
+    Some(path)
 }
 
 /// 이번 실행이 새 판 다시 켜기인가. 표식은 한 번 보면 걷는다.
@@ -103,7 +103,7 @@ impl App {
                 self.rig_update_shot();
             }
         }
-        if matches!(stage, Some(Stage::Ready { .. }))
+        if matches!(stage, Some(Stage::Ready { .. } | Stage::RestartPending { .. }))
             && self.update_card.interrupts_at.is_none_or(|at| now.duration_since(at) >= INTERRUPTS_EVERY)
         {
             let what = self.update_interrupts_now();
@@ -163,9 +163,6 @@ impl App {
     /// 카드의 단추.
     pub(crate) fn update_card_act(&mut self, action: Action) {
         self.chrome_dirty = true;
-        if action == Action::Relaunch {
-            mark_relaunch();
-        }
         match action {
             Action::Close => {
                 crate::update_card::post(None);
@@ -182,6 +179,9 @@ impl App {
         if self.sparkle_updater.is_some() {
             crate::macos_sparkle::respond(action);
             return;
+        }
+        if action == Action::Relaunch {
+            let _ = mark_relaunch();
         }
         if crate::win_update::available() {
             crate::win_update::respond(action, &self.proxy);
