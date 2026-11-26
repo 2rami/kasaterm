@@ -614,14 +614,14 @@ if [ -n "$KASATERM_VIA_BACKEND" ] && [ "$KASATERM_LAUNCH_OWNER" = "$SELF_DIR:$KA
   IDENTITY="$KASATERM_IDENTITY_DIR"
 else
   if [ ! -r "$SELF_DIR/agent-identity.py" ]; then
-    echo "kasaterm: 학생 실행 도우미 파일이 없어요: $SELF_DIR/agent-identity.py. 카사텀 실행 파일 복구가 필요해요." >&2
+    echo "kasaterm: 캐릭터 실행 도우미 파일이 없어요: $SELF_DIR/agent-identity.py. 카사텀 실행 파일 복구가 필요해요." >&2
     exit 1
   fi
   IDENTITY=$(KASATERM_LAUNCH_PID=$LAUNCH_PID python3 -X utf8 "$SELF_DIR/agent-identity.py" HARNESS "$SELF_DIR" "ANCHOR" "$@") || {
     # 도우미는 실패를 스스로 알리고 1 로 끝난다. 다른 코드는 python3 자체가 못 돈 것이다 — Windows 는
     # 127(없음)이나 49(MS Store 스텁)라 스텁 안내만 남고 왜 칸이 안 뜨는지 안 보였다. 실행은 그대로 막는다.
     RC=$?
-    [ "$RC" -ne 1 ] && echo "kasaterm: 학생 지침을 맞추려면 Python 3 이 필요한데 python3 을 실행하지 못했어요(종료 코드 $RC). Python 3 을 설치하고 kasaterm 을 다시 켜 주세요." >&2
+    [ "$RC" -ne 1 ] && echo "kasaterm: 캐릭터 지침을 맞추려면 Python 3 이 필요한데 python3 을 실행하지 못했어요(종료 코드 $RC). Python 3 을 설치하고 kasaterm 을 다시 켜 주세요." >&2
     exit 1
   }
 fi
@@ -816,7 +816,7 @@ mod tests {
         let stderr = String::from_utf8_lossy(&run.stderr);
         assert_eq!(run.status.code(), Some(1));
         assert!(run.stdout.is_empty());
-        assert!(stderr.contains("학생 실행 도우미 파일이 없어요"), "{stderr}");
+        assert!(stderr.contains("캐릭터 실행 도우미 파일이 없어요"), "{stderr}");
         assert!(!stderr.contains("Python 3"), "{stderr}");
         std::fs::remove_dir_all(dir).unwrap();
     }

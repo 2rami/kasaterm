@@ -122,7 +122,7 @@ impl Refusal {
             Self::CapabilityMissing { have, need } => format!("이 기기 앱엔 재시작 창구가 없다(판 {have} < {need}) — 새 판 설치 뒤 한 번은 사람이 재시작"),
             Self::NotInstalledApp { running } => format!("설치본으로 도는 앱이 아니다({running}) — 개발 실행은 재시작하지 않는다"),
             Self::BusyStudents { panes } => format!(
-                "일하는 중이거나 사람 답을 기다리는 학생 {}명: {}",
+                "일하는 중이거나 사람 답을 기다리는 캐릭터 {}명: {}",
                 panes.len(),
                 panes.iter().map(|p| format!("{} {} {}", p.surface, p.character, p.state)).collect::<Vec<_>>().join(", ")
             ),

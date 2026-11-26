@@ -205,7 +205,7 @@ impl App {
             crate::chrome::notify_desktop(
                 "비밀 승인 폰을 믿어요",
                 &format!(
-                    "{} — 학생의 {} 비밀 요청은 이제 이 폰에서 Face ID 로 허락해요",
+                    "{} — 캐릭터의 {} 비밀 요청은 이제 이 폰에서 Face ID 로 허락해요",
                     key["label"].as_str().unwrap_or("폰"),
                     STORE.1
                 ),
@@ -313,7 +313,7 @@ fn trust_info(key: &serde_json::Value) -> String {
     let label = key["label"].as_str().unwrap_or("폰");
     let fingerprint = key["fingerprint"].as_str().unwrap_or("");
     format!(
-        "{label}\n지문  {fingerprint}\n\n폰 설정 → 계정 → Face ID 승인 열쇠에 같은 지문이 보이는지 맞춰 보세요. 믿으면 학생의 {} 비밀 요청을 이 폰이 Face ID 로 한 번씩 허락할 수 있어요.",
+        "{label}\n지문  {fingerprint}\n\n폰 설정 → 계정 → Face ID 승인 열쇠에 같은 지문이 보이는지 맞춰 보세요. 믿으면 캐릭터의 {} 비밀 요청을 이 폰이 Face ID 로 한 번씩 허락할 수 있어요.",
         STORE.1
     )
 }
@@ -559,7 +559,7 @@ pub(crate) fn paint_phones(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Ve
     section_title(g, x, *y, "폰", "");
     *y += 54.0;
     if !v.signed_in {
-        plain_hint(g, x, y, w, &format!("KASA 계정에 로그인하면 학생이 {} {}의 비밀을 쓸 때 폰 Face ID 로 허락할 수 있어요.", STORE.0, STORE.1));
+        plain_hint(g, x, y, w, &format!("KASA 계정에 로그인하면 캐릭터가 {} {}의 비밀을 쓸 때 폰 Face ID 로 허락할 수 있어요.", STORE.0, STORE.1));
         return;
     }
     let width = |g: &mut gpu::GpuRenderer, label: &str| crate::native_controls::button_width(g, label, CTL_H, true);

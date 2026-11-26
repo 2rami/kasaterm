@@ -12,7 +12,7 @@ pub struct Topic {
 }
 
 pub const TOPICS: &[Topic] = &[
-    Topic { name: "collab", file: "collab.md", summary: "학생에게 일 맡기기·보고·쪽지 전달", text: include_str!("../../../skills/kasapane/collab.md") },
+    Topic { name: "collab", file: "collab.md", summary: "캐릭터에게 일 맡기기·보고·쪽지 전달", text: include_str!("../../../skills/kasapane/collab.md") },
     Topic { name: "panes", file: "references/panes.md", summary: "칸·방 조회, 만들기, 이름·배치·닫기", text: include_str!("../../../skills/kasapane/references/panes.md") },
     Topic { name: "jobs", file: "references/jobs.md", summary: "빌드·검사·서버 등 긴 잡 실행", text: include_str!("../../../skills/kasapane/references/jobs.md") },
     Topic { name: "media", file: "references/media.md", summary: "완성한 그림·음성·영상·PDF·웹 카드 전달", text: include_str!("../../../skills/kasapane/references/media.md") },

@@ -3710,7 +3710,7 @@ fn statusbar_widget_label(id: &str) -> &'static str {
         "codex" => "Codex 사용량",
         "ports" => "열린 포트",
         "clipboard" => "클립보드",
-        "notes" => "학생 쪽지",
+        "notes" => "캐릭터 쪽지",
         "resources" => "기기 상태",
         "sleep" => "덮어도 마저 하기",
         "tunnel" => "모바일 연결",
@@ -4763,9 +4763,9 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         act(Change::Rewet(wm::REWET_STEPS[(at + 1).min(wm::REWET_STEPS.len() - 1)])));
 
     *y += 8.0;
-    section_title(g, x, *y, "학생 상태", "");
+    section_title(g, x, *y, "캐릭터 상태", "");
     *y += 54.0;
-    toggle_row_hint(g, s, hits, x, y, w, "학생 상태 날씨", "학생이 하는 일에 따라 그 창의 비 양을 바꿉니다",
+    toggle_row_hint(g, s, hits, x, y, w, "캐릭터 상태 날씨", "캐릭터가 하는 일에 따라 그 창의 비 양을 바꿉니다",
         ws.by_status, act(Change::ByStatus(!ws.by_status)));
     if ws.by_status {
         for m in Mood::ALL {

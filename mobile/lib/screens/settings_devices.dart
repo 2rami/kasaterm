@@ -74,7 +74,7 @@ class DeviceSettingsScreen extends StatelessWidget {
     tone: tone,
     icon: Icons.fingerprint_rounded,
     title: '비밀 승인',
-    subtitle: '학생이 맥 키체인 비밀을 쓸 때 Face ID 로 허락',
+    subtitle: '캐릭터가 맥 키체인 비밀을 쓸 때 Face ID 로 허락',
     chevron: true,
     onTap: () => _push(context, ApprovalKeyScreen(api: api, server: server)),
   );
@@ -85,7 +85,7 @@ class DeviceSettingsScreen extends StatelessWidget {
       tone: tone,
       icon: Icons.public_outlined,
       title: '브라우저 기기',
-      subtitle: '학생이 보여 주려 여는 페이지가 갈 곳',
+      subtitle: '캐릭터가 보여 주려 여는 페이지가 갈 곳',
       chevron: true,
       onTap: () => showBrowserDeviceSheet(context, server: server),
     ),

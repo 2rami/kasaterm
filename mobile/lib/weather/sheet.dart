@@ -193,7 +193,7 @@ class WeatherSettingsList extends StatelessWidget {
             text: rewetLabel(s.rewetSecs),
             onChanged: (v, commit) => weather.set(s.copyWith(rewetSecs: _rewet[v.round()]), commit: commit),
           ),
-          _Title('학생 상태 날씨'),
+          _Title('캐릭터 상태 날씨'),
           SwitchListTile(
             title: const Text('상태마다 비 양'),
             subtitle: const Text('비 양만 바꾸고 「어디에」는 그대로 따른다'),

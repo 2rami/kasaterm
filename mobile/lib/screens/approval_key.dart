@@ -255,10 +255,10 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
                       const SizedBox(height: Look.groupTitleGap),
                       Text(
                         ready
-                            ? '학생이 맥 키체인의 비밀을 쓰려 하면 이 폰에 요청이 와요. 내용을 보고 Face ID 로 허락하면 그 한 번만 꺼내요.'
+                            ? '캐릭터가 맥 키체인의 비밀을 쓰려 하면 이 폰에 요청이 와요. 내용을 보고 Face ID 로 허락하면 그 한 번만 꺼내요.'
                             : linked
                                 ? '이 폰은 이어졌어요. 맥의 KASA 를 키체인 판으로 업데이트하면 끝나요.'
-                                : '학생이 맥 키체인의 비밀을 쓸 때 이 폰 Face ID 로 한 번씩 허락해요. 한 번 누르면 맥까지 이어져요.',
+                                : '캐릭터가 맥 키체인의 비밀을 쓸 때 이 폰 Face ID 로 한 번씩 허락해요. 한 번 누르면 맥까지 이어져요.',
                         style: dim,
                       ),
                       if (!linked) ...[

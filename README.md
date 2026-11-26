@@ -7,7 +7,7 @@
 **Rust로 바닥부터 만든 크로스플랫폼 GPU 터미널.**
 
 셀 렌더러 · 한글 IME · PTY를 기성 라이브러리 없이 자체 crate로 구현했고,<br/>
-그 위에 **여러 Claude를 학생처럼 거느리는 GUI**를 얹었다.
+그 위에 **여러 Claude를 캐릭터처럼 거느리는 GUI**를 얹었다.
 
 [데모](#데모) · [강점](#강점--전부-자체-구현했다) · [crate](#재사용-가능한-crate) · [기계를 가로지른다](#기계를-가로지른다) · [설치](#설치--실행) · [단축키](#단축키) · [구조](#구조)
 
@@ -76,8 +76,8 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 | **`kasa-device`** | 기기 계정·명부·업링크·폰 입구 | 기기 클라이언트와 kasa-device |
 | **`kasa-identity`** | OAuth·권한 연결·봉인 자격 | 관문과 기기의 공통 인증 |
 | **`kasa-remote`** | 원격 칸·포트·화면·레포 전송 | 기기 간 연결 |
-| **`kasa-students`** | 학생 호출·팀·예약·작업 | 하네스 운영 |
-| **`kasa-characters`** | 캐릭터 자산·페르소나 | 학생 표시·설정 |
+| **`kasa-students`** | 캐릭터 호출·팀·예약·작업 | 하네스 운영 |
+| **`kasa-characters`** | 캐릭터 자산·페르소나 | 캐릭터 표시·설정 |
 | **`kasa-git`** | Git 작업·상태·파일 감시 | Git 판과 API |
 | **`kasa-wire`** | 화면 전송 형식·레이아웃·변경 피드 | 화면 전송 계약 |
 | **`kasa-backend`** | 창 없는 Backend 구현 | 호스트와 통합 시험 |
@@ -90,7 +90,7 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 
 ## 그 위 — 여러 Claude를 거느린다
 
-엔진이 안정될수록 그 위에 쌓는 게 본 게임이다. pane마다 Claude Code를 띄우고, 각 학생(pane)이 무슨 작업을 하는지 KASA 작업 공간로 한눈에 본다.
+엔진이 안정될수록 그 위에 쌓는 게 본 게임이다. pane마다 Claude Code를 띄우고, 각 캐릭터(pane)가 무슨 작업을 하는지 KASA 작업 공간로 한눈에 본다.
 
 
 
@@ -128,7 +128,7 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 
 ## 기계를 가로지른다
 
-pane이 한 대의 컴퓨터에 묶여 있지 않다. 노트북에서 띄운 학생을 데스크톱·서버로 옮기고, 그 화면은 원래 창에 그대로 남기고, 폰에서 같은 pane을 이어서 본다.
+pane이 한 대의 컴퓨터에 묶여 있지 않다. 노트북에서 띄운 캐릭터를 데스크톱·서버로 옮기고, 그 화면은 원래 창에 그대로 남기고, 폰에서 같은 pane을 이어서 본다.
 
 CLI에서는 `kasaterm-cli machines`로 도착 기기 이름을 확인하고 `kasaterm-cli machines move %3 맥미니`로 옮긴다. 내 칸은 `%3`을 생략하고, 이쪽 거울을 데려올 때는 `machines move %3 local`을 쓴다. [세션 이동 절차](docs/session-transfer.md)와 `kasaterm-cli machines move --help`에 경로 지정·예약·실패 확인 예시가 있다.
 
@@ -137,9 +137,9 @@ CLI에서는 `kasaterm-cli machines`로 도착 기기 이름을 확인하고 `ka
 | **이사(machines move)** | 도는 claude·codex 세션을 다른 기계로 통째로 옮긴다. 대화·모델·작업 경로가 따라가고, 커밋 안 한 변경과 안 올린 커밋까지 떠서 도착지에 재현한다 |
 | **거울 pane** | 옮긴 뒤에도 원래 창에 그 화면이 남는다. 거울 창을 줄여도 원본 기계의 화면 크기는 안 변한다 — 글자만 작아진다 |
 | **세션 소통** | 기계들이 중계소에 스스로 등록한다. 다른 기계에서 도는 세션이 내 목록에 뜨고, 메시지 한 통이면 거기까지 배달된다. 기계가 죽으면 1분 안에 목록에서 빠진다 |
-| **폰 웹터미널** | 앱이 켜지면 관문에 붙어 자기 주소를 하나 받는다. 폰에서 그 주소를 열면 방·학생 목록이 나오고, 고르면 그 pane이 그대로 뜬다. 끊기면 화면이 보일 때 저절로 재접속 |
+| **폰 웹터미널** | 앱이 켜지면 관문에 붙어 자기 주소를 하나 받는다. 폰에서 그 주소를 열면 방·캐릭터 목록이 나오고, 고르면 그 pane이 그대로 뜬다. 끊기면 화면이 보일 때 저절로 재접속 |
 
-기계를 명부에 적어 두면 **원격 탭**에서 방별로 학생을 보고, 학생 줄을 누르면 그 화면이 포커스된 pane의 탭으로 열리고(거울), 기계 하나의 학생 전부를 방 단위로 거울로 펼치고, 「화면 보기」로 그 기계의 화면공유를 연다. Info 탭 「다른 기계」 줄이 그 기계의 학생 수·기다림·거울 수를 요약한다. 원격 pane은 몸통에 색 리본이 붙어 헤더를 안 봐도 갈린다.
+기계를 명부에 적어 두면 **원격 탭**에서 방별로 캐릭터를 보고, 캐릭터 줄을 누르면 그 화면이 포커스된 pane의 탭으로 열리고(거울), 기계 하나의 캐릭터 전부를 방 단위로 거울로 펼치고, 「화면 보기」로 그 기계의 화면공유를 연다. Info 탭 「다른 기계」 줄이 그 기계의 캐릭터 수·기다림·거울 수를 요약한다. 원격 pane은 몸통에 색 리본이 붙어 헤더를 안 봐도 갈린다.
 
 ---
 
@@ -168,7 +168,7 @@ cargo run -p kasaterm
 cargo run --release -p kasaterm
 ```
 
-macOS `.app`은 `scripts/build-app.sh`, Windows `.msi`와 portable ZIP은 `scripts/windows/package.ps1`로 빌드한다. Windows 패키징은 완성된 MSI를 다시 추출해 앱·CLI·대화 UI·학생 로스터·협업 훅의 누락까지 검사한다. 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)를 바로 쓸 수 있다.
+macOS `.app`은 `scripts/build-app.sh`, Windows `.msi`와 portable ZIP은 `scripts/windows/package.ps1`로 빌드한다. Windows 패키징은 완성된 MSI를 다시 추출해 앱·CLI·대화 UI·캐릭터 로스터·협업 훅의 누락까지 검사한다. 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)를 바로 쓸 수 있다.
 
 <details>
 <summary><b>예전 <code>tmuxify</code> 폴더를 쓰고 있다면 (펼치기)</b></summary>
@@ -197,7 +197,7 @@ cd /path/to/parent
 
 ### Claude Code 플러그인 (kasapane 스킬)
 
-칸 조작·학생 협업·긴 잡·미디어 전달·이사·카사텀 개발 중 필요한 주제만 읽는 스킬이다:
+칸 조작·캐릭터 협업·긴 잡·미디어 전달·이사·카사텀 개발 중 필요한 주제만 읽는 스킬이다:
 
 ```bash
 claude plugin marketplace add 2rami/kasaterm

@@ -388,7 +388,7 @@ impl App {
                     if let Some(previous) = previous {
                         self.repersona_pane(&p.pane, &previous);
                     }
-                    format!("{} · 다시 띄우지 못해 학생을 바꾸지 않았어요", p.pane)
+                    format!("{} · 다시 띄우지 못해 캐릭터를 바꾸지 않았어요", p.pane)
                 }
             }),
         };
@@ -762,12 +762,12 @@ pub(crate) fn character_swap_confirm_text(to: &str, resumable: bool) -> (String,
     let lines = if resumable {
         vec![
             "다시 띄우면 말투까지 바뀝니다 — 나눈 대화는 이어서 띄우니 그대로예요.".to_string(),
-            "이름·얼굴·말투를 함께 바꿉니다. 취소하면 지금 학생을 그대로 유지해요.".to_string(),
+            "이름·얼굴·말투를 함께 바꿉니다. 취소하면 지금 캐릭터를 그대로 유지해요.".to_string(),
         ]
     } else {
         vec![
             "이어붙일 대화가 없어, 다시 띄우면 지금 내용이 사라집니다.".to_string(),
-            "취소하면 지금 학생과 대화를 그대로 유지해요.".to_string(),
+            "취소하면 지금 캐릭터와 대화를 그대로 유지해요.".to_string(),
         ]
     };
     (title, lines)

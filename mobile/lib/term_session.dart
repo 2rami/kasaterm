@@ -224,7 +224,7 @@ class TermSession extends ChangeNotifier {
       case 'gone':
         // 세션이 진짜 끝났다 — 유실과 달리 다시 붙을 곳이 없다.
         state = TermState.gone;
-        note = '이 학생의 화면이 끝났다';
+        note = '이 캐릭터의 화면이 끝났다';
         _closeChannel();
       default:
         return;

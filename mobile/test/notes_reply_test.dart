@@ -147,7 +147,7 @@ void main() {
       expect(noteReplyBlock(student, online: true), isNull);
       expect(noteReplyBlock(student, online: false), '기기가 끊겨 답할 수 없어요');
       expect(noteReplyBlock(null, online: true), '칸이 닫혀 답할 수 없어요');
-      expect(noteReplyBlock(_pane('%3', harness: '', name: ''), online: true), '학생이 나가 셸만 남았어요');
+      expect(noteReplyBlock(_pane('%3', harness: '', name: ''), online: true), '캐릭터가 나가 셸만 남았어요');
     });
   });
 

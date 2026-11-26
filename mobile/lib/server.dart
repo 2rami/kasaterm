@@ -1739,7 +1739,7 @@ class Server {
     if (result is! Map || result['ok'] != true) {
       // Server errors can include local paths/tunnel credentials: show a safe
       // actionable message rather than reflecting arbitrary response text.
-      throw const ServerException('사진을 붙이지 못했어요. 연결과 학생 입력창을 확인해 주세요.');
+      throw const ServerException('사진을 붙이지 못했어요. 연결과 캐릭터 입력창을 확인해 주세요.');
     }
   }
 

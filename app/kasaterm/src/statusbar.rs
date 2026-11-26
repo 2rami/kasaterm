@@ -761,7 +761,7 @@ fn paint_chrome_popover(
     g.draw_text(x + 40.0, y + 14.0, "브라우저 기기", gpu::DrawOpts {
         font_size: 12.0, color: theme::text(), bold: true, italic: false,
     });
-    g.draw_text(x + 15.0, y + 36.0, "학생이 보여 줄 페이지를 열 기기를 골라줘.", gpu::DrawOpts {
+    g.draw_text(x + 15.0, y + 36.0, "캐릭터가 보여 줄 페이지를 열 기기를 골라줘.", gpu::DrawOpts {
         font_size: 10.0, color: theme::text_dim(), bold: false, italic: false,
     });
     g.push_clip(x, top, w, inner);

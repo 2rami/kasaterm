@@ -1095,7 +1095,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
                 .find(|p| row_address(p, "surface_id") == surface && !row_address(p, "session_id").is_empty()));
             if let Some(row) = row { break row; }
             if started.elapsed() > std::time::Duration::from_secs(SUMMON_BOOT_SECS) {
-                return Err(anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 학생이 안 떴어요 — `kasaterm-cli peek {surface}` 로 화면을 보세요(창은 그대로 뒀어요)"));
+                return Err(anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 캐릭터가 안 떴어요 — `kasaterm-cli peek {surface}` 로 화면을 보세요(창은 그대로 뒀어요)"));
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
         };
@@ -1131,10 +1131,10 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
             }
             let why = told.error.map(|e| e.message).unwrap_or_default();
             if timed_out || !tell_target_booting(&why) {
-                return Err(anyhow!("{surface} 에 학생은 떴는데 지시를 못 넣었어요: {why}"));
+                return Err(anyhow!("{surface} 에 캐릭터는 떴는데 지시를 못 넣었어요: {why}"));
             }
         } else if timed_out {
-            return Err(anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 학생이 안 떴어요 — `kasaterm-cli peek {surface}` 로 화면을 보세요(창은 그대로 뒀어요)"));
+            return Err(anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 캐릭터가 안 떴어요 — `kasaterm-cli peek {surface}` 로 화면을 보세요(창은 그대로 뒀어요)"));
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     };
@@ -1161,9 +1161,9 @@ fn run_summon_placed(socket_path: &str, spot: SummonSpot, name: Option<String>, 
         .ok_or_else(|| anyhow!("새 칸 주소를 못 받았어요"))?;
     if let Some(room) = &spot.new_room {
         let renamed = roundtrip(socket_path, &act(json!("summon"), "rename_room", json!({ "address": placed, "title": room })))
-            .with_context(|| format!("새 방 이름의 반영 여부를 확인하지 못했어요. 학생 실행 전 빈 칸 주소 {placed}를 확인하세요"))?;
+            .with_context(|| format!("새 방 이름의 반영 여부를 확인하지 못했어요. 캐릭터 실행 전 빈 칸 주소 {placed}를 확인하세요"))?;
         if !renamed.ok {
-            return Err(anyhow!("새 방 이름을 붙이지 못해 학생 실행을 멈췄어요. 빈 칸 주소 {placed}: {}",
+            return Err(anyhow!("새 방 이름을 붙이지 못해 캐릭터 실행을 멈췄어요. 빈 칸 주소 {placed}: {}",
                 renamed.error.map(|e| e.message).unwrap_or_default()));
         }
     }
@@ -1187,7 +1187,7 @@ fn run_summon_placed(socket_path: &str, spot: SummonSpot, name: Option<String>, 
         row_address(p, "machine_id") == machine && row_address(p, "surface_key") == key && !row_address(p, "session_id").is_empty()));
     let started = std::time::Instant::now();
     let timed_out = || started.elapsed() > std::time::Duration::from_secs(SUMMON_BOOT_SECS);
-    let not_up = || anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 학생이 안 떴어요 — `kasaterm-cli peek --address '{placed}'` 로 화면을 보세요(창은 그대로 뒀어요)");
+    let not_up = || anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 캐릭터가 안 떴어요 — `kasaterm-cli peek --address '{placed}'` 로 화면을 보세요(창은 그대로 뒀어요)");
     let (row, receipt) = if first_prompt {
         let row = loop {
             if let Some(row) = booted() { break row; }
@@ -1211,7 +1211,7 @@ fn run_summon_placed(socket_path: &str, spot: SummonSpot, name: Option<String>, 
                 }
                 let why = told.error.map(|e| e.message).unwrap_or_default();
                 if timed_out() || !tell_target_booting(&why) {
-                    return Err(anyhow!("{surface} 에 학생은 떴는데 지시를 못 넣었어요: {why}"));
+                    return Err(anyhow!("{surface} 에 캐릭터는 떴는데 지시를 못 넣었어요: {why}"));
                 }
             } else if timed_out() {
                 return Err(not_up());
@@ -1372,7 +1372,7 @@ fn run_wait(socket_path: &str, args: &[String]) -> Result<i32> {
         }
     }
     if targets.is_empty() {
-        return Err(anyhow!("board --wait 는 기다릴 학생이 필요해요 — kasaterm-cli board --wait 미도리"));
+        return Err(anyhow!("board --wait 는 기다릴 캐릭터가 필요해요 — kasaterm-cli board --wait 미도리"));
     }
     let local = targets.iter().all(|t| !t.contains('@'));
     let rows = snapshot_rows(socket_path, local)?;
@@ -2026,9 +2026,9 @@ fn draw_boxes(rects: &[(String, u16, u16, u16, u16)]) -> String {
 // 전체 도움말과 `<명령> --help` 가 같은 줄을 쓴다.
 const HELP_GROUPS: &[(&str, &[&str])] = &[
     ("보기 — 누가 무엇을 하나, 어디 있나", &[
-        "where [찾을 말] [--json] [--machine 기계]  방마다 칸 배치도 + 칸·탭 목록. 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다",
+        "where [찾을 말] [--json] [--machine 기계]  방마다 칸 배치도 + 칸·탭 목록. 캐릭터 이름·%N·제목·웹 주소·문서 경로로 찾는다",
         "                                          「방 N」= 사이드바 ⌘N(--json 의 room_number). window 는 0부터 센 인덱스라 다를 수 있다",
-        "board [--all|--local]                     학생 상태. 연락 주소(address)는 --all 에서. 방 번호는 room_number(⌘N)",
+        "board [--all|--local]                     캐릭터 상태. 연락 주소(address)는 --all 에서. 방 번호는 room_number(⌘N)",
         "board --wait <이름|%N>… [--since ms|영수증] [--timeout 초]   done 보고까지 기다린다(0 성공·1 실패·3 시간초과·4 사라짐)",
         "board-watch --all --json [--since CURSOR] 바뀐 것만 흘려보낸다(Monitor 용)",
         "peek [%N | %N@기계 | 이름@기계 | --address JSON] [줄수]   pane 화면 글자(다른 기기 칸은 카사넷으로)",
@@ -2036,14 +2036,14 @@ const HELP_GROUPS: &[(&str, &[&str])] = &[
         "transcript [%N | %N@기계 | --address JSON] [N]   claude 최근 대화 N 턴(다른 기기 칸은 카사넷으로)",
         "activity [%N | --address JSON] [N]        실제로 한 도구·인자·결과(시간순)",
     ]),
-    ("학생·협업", &[
+    ("캐릭터·협업", &[
         "tell <이름|이름@기계|%N|--address JSON> [--title \"지금 일\"] <글|--stdin>   안전 전달, 영수증 ID 를 준다. 새 일이면 --title",
         "tell --status ID                          전달 영수증 조회",
         "tell --raw [%N|%N@기계|--address JSON] [--enter] [--stdin|--] <글> · tell --key [같은 대상] <enter|tab|escape|up|ctrl+x|alt+b|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
         "                                          --raw 는 글만 넣는다. 셸 명령을 돌리려면 --enter(글 뒤에 Enter)",
-        "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
-        "summon [--machine 기계] --beside 칸 [--tab] [--cwd 폴더] [--json] …   지정한 작업방에 학생(답: 그 칸 주소)",
-        "summon [--machine 기계] --new-room '작업방 이름' [--cwd 폴더] …   새 작업방의 첫 학생(--name 은 학생의 작업명)",
+        "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   캐릭터를 옆에 세우고 브리프까지",
+        "summon [--machine 기계] --beside 칸 [--tab] [--cwd 폴더] [--json] …   지정한 작업방에 캐릭터(답: 그 칸 주소)",
+        "summon [--machine 기계] --new-room '작업방 이름' [--cwd 폴더] …   새 작업방의 첫 캐릭터(--name 은 캐릭터의 작업명)",
         "done <succeeded|failed|blocked|needs_restart|needs_approval> [요약]   내 일 보고 — 판에 실리고 부른 창 입력으로 간다",
         "sessions [N]                              최근 claude·codex 세션 목록",
     ]),
@@ -2106,7 +2106,7 @@ const HELP_GROUPS: &[(&str, &[&str])] = &[
 ];
 
 fn print_help() {
-    eprintln!("kasaterm-cli — 카사텀 조작 CLI. 대상은 %N(칸 번호)이나 학생 이름.\n");
+    eprintln!("kasaterm-cli — 카사텀 조작 CLI. 대상은 %N(칸 번호)이나 캐릭터 이름.\n");
     let topics: Vec<&str> = crate::guidance::TOPICS.iter().map(|t| t.name).collect();
     eprintln!("지침 — 필요할 때 주제 하나만(앱 없이 읽는다)");
     eprintln!("  guide [{}]   무인자면 주제 목록\n", topics.join("|"));
@@ -3558,7 +3558,7 @@ fn render_restart_plan(plan: &crate::app_restart::Plan) -> String {
         out.push_str(&format!("{}. {}{}\n", n + 1, name, if target.controller { " · 조종 기기" } else { "" }));
         if let Some(f) = &target.facts {
             out.push_str(&format!(
-                "   pid {} · 빌드 {} · 이어지는 학생 대화 {} · 새 셸로만 오는 창 {} · 등록 서버 {} · 펫 {}\n",
+                "   pid {} · 빌드 {} · 이어지는 캐릭터 대화 {} · 새 셸로만 오는 창 {} · 등록 서버 {} · 펫 {}\n",
                 f.pid, f.binary.build, f.restorable_sessions, f.plain_shells, f.registered_servers,
                 match f.pet_alive { Some(true) => "켜짐", Some(false) => "꺼짐", None => "모름" },
             ));

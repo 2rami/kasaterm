@@ -197,7 +197,7 @@ pub fn status() -> String {
         "sudoers 규칙: {}\n감시 LaunchAgent: {}\n지금 잠자기 막음: {}",
         if sudo_ready() { "있음" } else { "없음 — kasaterm-cli lid-away install" },
         if watchdog { "있음" } else { "없음" },
-        if armed { "켜짐(학생이 일하는 중)" } else { "꺼짐" },
+        if armed { "켜짐(캐릭터가 일하는 중)" } else { "꺼짐" },
     )
 }
 

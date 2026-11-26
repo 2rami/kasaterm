@@ -84,7 +84,7 @@ class Approval {
   String get secretTitle => '${tool.isEmpty ? '비밀' : tool} 승인 요청';
 
   String get signReason {
-    final who = student.isEmpty ? '학생' : student;
+    final who = student.isEmpty ? '캐릭터' : student;
     final first = refs.isEmpty ? '' : refs.first;
     final more = refs.length > 1 ? ' 외 ${refs.length - 1}개' : '';
     return '$who · $first$more 읽기를 이번 한 번 허락';

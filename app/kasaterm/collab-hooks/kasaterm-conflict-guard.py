@@ -337,7 +337,7 @@ def held_reason(fp, claim, pane_info):
     me = os.path.realpath(__file__)
     return (
         f"{who}이 '{os.path.basename(fp)}'을(를) 고친 뒤 아직 커밋하지 않아 잡고 있어요"
-        f"({mins}분 전부터){doing}. 커밋하거나 되돌리기 전까지 다른 학생은 이 파일을 못 고쳐요. "
+        f"({mins}분 전부터){doing}. 커밋하거나 되돌리기 전까지 다른 캐릭터는 이 파일을 못 고쳐요. "
         + COORD
         + f"상대에게 커밋을 부탁하거나, 넘겨받아야 하면 상대 pane 에서 `python3 \"{me}\" release \"{fp}\"` "
         "로 놓아 달라고 하세요. 독립 작업은 다른 파일부터 하세요."

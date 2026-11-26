@@ -80,7 +80,7 @@ class CharacterPicksStore extends ChangeNotifier {
     try {
       final (choices, snapshot) = await (_settle(server.characterChoices()), _settle(client.readSyncWith(_keys))).wait;
       if (choices.$2 != null) {
-        error = '데스크톱에서 학생 목록을 못 받았어요. 데스크톱이 꺼졌거나 옛 판이에요.';
+        error = '데스크톱에서 캐릭터 목록을 못 받았어요. 데스크톱이 꺼졌거나 옛 판이에요.';
       } else if (snapshot.$2 != null) {
         error = snapshot.$2 is AccountException ? (snapshot.$2 as AccountException).message : '계정 설정을 받지 못했어요.';
       } else {
@@ -264,7 +264,7 @@ class CharacterPicksStore extends ChangeNotifier {
   }
 
   String _saveError(AccountException e) => e.status == 400
-      ? '관문이 학생 명단을 받지 않았어요. 관문을 새 판으로 올려야 해요.'
+      ? '관문이 캐릭터 명단을 받지 않았어요. 관문을 새 판으로 올려야 해요.'
       : '계정에 저장하지 못했어요. ${e.message}';
 
   Future<Uint8List> face(String slug, String themeId) =>
@@ -358,7 +358,7 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
 
   Widget _body() {
     if (store.loading && store.themes.isEmpty) {
-      return const Center(child: TwinsLoading(label: '학생 목록을 받는 중', size: Look.twinsSmall));
+      return const Center(child: TwinsLoading(label: '캐릭터 목록을 받는 중', size: Look.twinsSmall));
     }
     if (store.error != null) {
       return Center(
@@ -393,7 +393,7 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
               key: const Key('pick-theme'),
               tone: 1,
               icon: Icons.style_outlined,
-              title: '학생 테마',
+              title: '캐릭터 테마',
               subtitle: '${_themeLabel(store.activeTheme)} · 그림과 말투 한 벌',
               chevron: true,
               onTap: _chooseTheme,
@@ -408,7 +408,7 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
                 SettingsRow(
                   icon: Icons.cloud_outlined,
                   title: key,
-                  subtitle: '${names.join(' · ')}\n다른 기기에서 고른 학생이라 그대로 둬요',
+                  subtitle: '${names.join(' · ')}\n다른 기기에서 고른 캐릭터라 그대로 둬요',
                 ),
             ],
           ),
@@ -416,8 +416,8 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
         Padding(
           padding: const EdgeInsets.fromLTRB(4, Look.groupGap, 4, 0),
           child: Text(
-            '계정에 저장해 모든 기기가 같은 명단을 써요. 이미 떠 있는 창의 학생은 그대로예요.'
-            '${store.machine == null ? '' : ' 학생 목록과 얼굴은 ${machineName(store.machine!, local: true)} 것이에요.'}',
+            '계정에 저장해 모든 기기가 같은 명단을 써요. 이미 떠 있는 창의 캐릭터는 그대로예요.'
+            '${store.machine == null ? '' : ' 캐릭터 목록과 얼굴은 ${machineName(store.machine!, local: true)} 것이에요.'}',
             style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
         ),
@@ -430,7 +430,7 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
 
   String _orderText() {
     final order = store.order;
-    if (order.isEmpty) return '고른 학생이 없어 「${_themeLabel(store.activeTheme)}」 전원이 차례로 나와요';
+    if (order.isEmpty) return '고른 캐릭터가 없어 「${_themeLabel(store.activeTheme)}」 전원이 차례로 나와요';
     const shown = 6;
     final names = [for (final (_, n) in order.take(shown)) n].join(' → ');
     return order.length > shown ? '$names 외 ${order.length - shown}명' : names;
@@ -753,7 +753,7 @@ class _ThemeSheet extends StatelessWidget {
           shrinkWrap: true,
           padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.pagePad),
           children: [
-            Text('학생 테마', style: theme.textTheme.titleMedium),
+            Text('캐릭터 테마', style: theme.textTheme.titleMedium),
             const SizedBox(height: Look.rowGap),
             Text(
               '새로 여는 창부터 그림과 말투가 이 테마로 바뀌어요. 모든 기기에 같이 저장돼요.',
@@ -781,7 +781,7 @@ class _ThemeSheet extends StatelessWidget {
                               Text(t.label, style: theme.textTheme.titleSmall, overflow: TextOverflow.ellipsis),
                               const SizedBox(height: Look.rowGap),
                               Text(
-                                '학생 ${t.count}명',
+                                '캐릭터 ${t.count}명',
                                 style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
                               ),
                             ],

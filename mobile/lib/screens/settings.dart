@@ -408,7 +408,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           tone: tone,
           icon: Icons.groups_2_outlined,
           title: '캐릭터',
-          subtitle: '학생 테마와 새 창에 나올 학생 · 모든 기기 같이',
+          subtitle: '캐릭터 테마와 새 창에 나올 캐릭터 · 모든 기기 같이',
         ),
     ];
   }

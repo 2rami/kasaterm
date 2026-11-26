@@ -1008,7 +1008,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
         !pane.isShell &&
         !pane.isWebShell,
     disabledReason: pane.isShell || pane.isWebShell
-        ? '학생이 도는 창에서만 사진을 붙일 수 있어요. 셸에서는 먼저 claude 를 띄워 주세요.'
+        ? '캐릭터가 도는 창에서만 사진을 붙일 수 있어요. 셸에서는 먼저 claude 를 띄워 주세요.'
         : s.state == TermState.connected
         ? '보내는 중이에요. 잠시 뒤 다시 눌러 주세요.'
         : '연결이 끊겨 사진을 붙일 수 없어요. 다시 연결되면 켜져요.',

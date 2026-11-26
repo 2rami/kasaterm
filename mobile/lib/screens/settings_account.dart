@@ -133,7 +133,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                   tone: 1,
                   icon: Icons.merge_type_rounded,
                   title: 'PR 승인 · 연결 끊기',
-                  subtitle: '연결된 GitHub · 학생·나쵸가 낸 PR 을 보고 올려요',
+                  subtitle: '연결된 GitHub · 캐릭터·나쵸가 낸 PR 을 보고 올려요',
                   chevron: true,
                   onTap: () => Navigator.of(
                     context,

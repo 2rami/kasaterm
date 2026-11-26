@@ -1524,7 +1524,7 @@ fn claude_boot_into_running_pane(
     let who = row.harness.as_deref().unwrap_or("에이전트");
     Some(format!(
         "{target} 에는 이미 {who} 가 돌고 있다 — 부팅 커맨드를 보내면 그 입력창에 \
-         텍스트로 박힌다. 새 학생을 띄우려면 빈 pane 을 먼저 만들고, \
+         텍스트로 박힌다. 새 캐릭터를 띄우려면 빈 pane 을 먼저 만들고, \
          이 pane 에 지시할 거라면 {how}."
     ))
 }

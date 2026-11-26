@@ -52,7 +52,7 @@ Future<void> openFrozenPane(
     final saved = await repository.openPane(pane);
     if (!context.mounted) return;
     if (saved == null) {
-      tell('이 학생의 저장한 대화가 아직 없어요. 기기가 다시 붙으면 열 수 있어요.');
+      tell('이 캐릭터의 저장한 대화가 아직 없어요. 기기가 다시 붙으면 열 수 있어요.');
       return;
     }
     await Navigator.of(context).push(
@@ -119,7 +119,7 @@ class OfflineBand extends StatelessWidget {
                           Text(head, style: theme.textTheme.titleSmall),
                           const SizedBox(height: Look.rowGap),
                           Text(
-                            '마지막으로 본 화면이에요 · 학생을 누르면 저장한 대화',
+                            '마지막으로 본 화면이에요 · 캐릭터를 누르면 저장한 대화',
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: scheme.onSurfaceVariant,
                             ),

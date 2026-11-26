@@ -785,7 +785,7 @@ fn opaque(value: &str) -> bool {
 
 /// 새 요청 알림. 잠금 화면에도 뜨니 비밀은 이미 가린 첫 줄만, 160자까지.
 fn push_new(v: &Value) -> Value {
-    let student = v["student"].as_str().filter(|s| !s.is_empty()).unwrap_or("학생");
+    let student = v["student"].as_str().filter(|s| !s.is_empty()).unwrap_or("캐릭터");
     let machine = v["machine"].as_str().unwrap_or("");
     let tool = v["tool"].as_str().unwrap_or("");
     let first = v["fields"][0]["text"].as_str().unwrap_or("");
@@ -805,7 +805,7 @@ fn push_new(v: &Value) -> Value {
 
 /// 다른 곳에서 닫힌 요청 — 같은 알림 자리를 조용히 갈아 끼운다(소리·배너 없음).
 fn push_closed(v: &Value) -> Value {
-    let student = v["student"].as_str().filter(|s| !s.is_empty()).unwrap_or("학생");
+    let student = v["student"].as_str().filter(|s| !s.is_empty()).unwrap_or("캐릭터");
     let tool = v["tool"].as_str().unwrap_or("");
     let by = v["by"]["label"].as_str().unwrap_or("");
     let what = match v["state"].as_str().unwrap_or("") {

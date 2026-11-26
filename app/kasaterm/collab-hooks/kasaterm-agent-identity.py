@@ -132,5 +132,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(f"kasaterm: 학생 지침을 맞추지 못해 실행을 멈췄어요 ({error}).", file=sys.stderr)
+        print(f"kasaterm: 캐릭터 지침을 맞추지 못해 실행을 멈췄어요 ({error}).", file=sys.stderr)
         sys.exit(1)

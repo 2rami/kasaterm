@@ -521,7 +521,7 @@ pub fn send_detached(alert: Alert) {
 /// 관문이 받는 이름 그대로다(관문은 모르는 종류를 거절한다).
 pub fn page_shown_blocking(character: &str, pane: &str, url: &str) {
     let alert = Alert {
-        title: if character.is_empty() { "학생" } else { character }.to_string(),
+        title: if character.is_empty() { "캐릭터" } else { character }.to_string(),
         body: "선생님, 이 페이지 봐 주세요.".to_string(),
         machine: None,
         pane: pane.to_string(),

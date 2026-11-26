@@ -227,7 +227,7 @@ class _NotesSheetState extends State<NotesSheet>
               blocked: noteReplyBlock(p, online: online),
               draft: _draft(n),
               sending: _sending.contains(n.key),
-              hint: '${n.character.isEmpty ? '학생' : n.character}에게 답',
+              hint: '${n.character.isEmpty ? '캐릭터' : n.character}에게 답',
               onSend: () => unawaited(_send(n)),
             ),
           if (divider) const Divider(height: 1),
@@ -270,7 +270,7 @@ class _NotesSheetState extends State<NotesSheet>
                   padding: const EdgeInsets.fromLTRB(20, 0, 12, 4),
                   child: Row(
                     children: [
-                      Text('학생 쪽지', style: theme.textTheme.titleMedium),
+                      Text('캐릭터 쪽지', style: theme.textTheme.titleMedium),
                       const Spacer(),
                       if (lines.isNotEmpty)
                         TextButton(
@@ -332,7 +332,7 @@ String? noteReplyBlock(Pane? p, {required bool online}) {
   if (!online) return '기기가 끊겨 답할 수 없어요';
   if (p == null) return '칸이 닫혀 답할 수 없어요';
   // 학생이 나가고 셸만 남은 칸에 글을 넣으면 명령으로 돈다.
-  if (p.isShell) return '학생이 나가 셸만 남았어요';
+  if (p.isShell) return '캐릭터가 나가 셸만 남았어요';
   return null;
 }
 

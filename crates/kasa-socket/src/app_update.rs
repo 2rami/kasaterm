@@ -1427,7 +1427,7 @@ fn run_one(
         }
         match armed_at {
             None if now_ms().saturating_sub(started) > policy.wait_cap_ms => {
-                return fail("30분 안에 적용하지 못했다(바쁜 학생·미저장 편집기) — 새 rollout 으로".into());
+                return fail("30분 안에 적용하지 못했다(바쁜 캐릭터·미저장 편집기) — 새 rollout 으로".into());
             }
             Some(at) if now_ms().saturating_sub(at) > policy.boot_cap_ms => {
                 return fail("제한 시간 안에 새 판이 도착하지 않았다 — 사람 확인 필요".into());

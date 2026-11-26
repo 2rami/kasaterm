@@ -159,7 +159,7 @@ impl RestoreEntry {
         match self.stage {
             RestoreStage::Pane => "pane을 복원하는 중…".into(),
             RestoreStage::Web => "웹 화면을 불러오는 중…".into(),
-            RestoreStage::Agent => format!("{} 불러오는 중…", object_name(self.character.as_deref().unwrap_or("학생"))),
+            RestoreStage::Agent => format!("{} 불러오는 중…", object_name(self.character.as_deref().unwrap_or("캐릭터"))),
             RestoreStage::RemoteConnection => format!("{} 연결하는 중…", object_name(self.remote_label.as_deref().unwrap_or("원격 기기"))),
             RestoreStage::RemoteScreen => format!("{}의 화면을 불러오는 중…", self.remote_label.as_deref().unwrap_or("원격 기기")),
             RestoreStage::Missing => "창을 못 찾았어요 — 조금 더 기다려요".into(),
@@ -961,7 +961,7 @@ mod tests {
         progress.track("%agent", &serde_json::json!({"was_agent": "claude", "character": "azusa-p1-xyz"}));
         progress.entries.get_mut("%1").unwrap().ready = true;
         progress.entries.get_mut("%agent").unwrap().update_local(true, false, false);
-        assert_eq!(progress.status_line(), "학생을 불러오는 중…");
+        assert_eq!(progress.status_line(), "캐릭터를 불러오는 중…");
     }
 
     #[test]

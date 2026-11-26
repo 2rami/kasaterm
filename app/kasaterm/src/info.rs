@@ -2573,7 +2573,7 @@ fn draw_pane_menu(
     match &menu.page {
         P::Root => {
             if menu.surface.is_some() {
-                items.push((M::Themes, MenuRow::new("학생 바꾸기  ›").bold()));
+                items.push((M::Themes, MenuRow::new("캐릭터 바꾸기  ›").bold()));
                 if let Some(name) = &menu.remote {
                     items.push((M::Bring, MenuRow::new(format!("데려오기 ← {name}")).sep().icon("server")));
                 } else {

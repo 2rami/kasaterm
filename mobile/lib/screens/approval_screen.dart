@@ -163,7 +163,7 @@ class _Body extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              a.student.isEmpty ? '학생' : a.student,
+                              a.student.isEmpty ? '캐릭터' : a.student,
                               key: const Key('approval-student'),
                               style: theme.textTheme.titleMedium?.copyWith(
                                 fontSize: Look.title,
@@ -455,7 +455,7 @@ class ApprovalBanner extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                '${a.student.isEmpty ? '학생' : a.student} · ${a.isSecret ? a.secretTitle : '승인 요청'}',
+                                '${a.student.isEmpty ? '캐릭터' : a.student} · ${a.isSecret ? a.secretTitle : '승인 요청'}',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(fontSize: Look.body, fontWeight: FontWeight.w600),

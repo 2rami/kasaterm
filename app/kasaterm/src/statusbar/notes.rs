@@ -165,7 +165,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, sb: &mut state::StatusbarState, cu
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
     panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
-    text(g, x + 14.0, y + 13.0, "학생 쪽지", 12.5, theme::text(), true);
+    text(g, x + 14.0, y + 13.0, "캐릭터 쪽지", 12.5, theme::text(), true);
     if !rows.is_empty() {
         let label = "모두 읽음";
         let bw = crate::native_controls::button_width(g, label, 28.0, false);
@@ -211,7 +211,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, sb: &mut state::StatusbarState, cu
             text(g, right - ww, oy + 12.0, &when, 10.0, theme::text_mute(), false);
             ww
         };
-        let who = if note.character.is_empty() { "학생" } else { note.character.as_str() };
+        let who = if note.character.is_empty() { "캐릭터" } else { note.character.as_str() };
         let room = (right - side - 12.0 - kind_w - 6.0 - tx).max(0.0);
         let who = crate::info::fit_text(g, who, room, 12.0, true);
         text(g, tx, oy + 10.0, &who, 12.0, theme::text(), true);

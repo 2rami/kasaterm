@@ -122,7 +122,7 @@ void main() {
 
   testWidgets('live hub app bar keeps only notes, view and settings', (tester) async {
     await pumpHub(tester, HubFixture());
-    expect(find.byTooltip('학생 쪽지'), findsOneWidget);
+    expect(find.byTooltip('캐릭터 쪽지'), findsOneWidget);
     expect(find.byTooltip('설정'), findsOneWidget);
     expect(find.byTooltip('저장한 대화'), findsNothing);
     expect(find.byTooltip('클립보드'), findsNothing);

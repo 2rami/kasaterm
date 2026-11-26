@@ -50,7 +50,7 @@ class _MobileTabsState extends State<MobileTabs> {
         NavigationDestination(
           icon: Icon(Icons.people_outline),
           selectedIcon: Icon(Icons.people),
-          label: '학생',
+          label: '캐릭터',
         ),
         NavigationDestination(
           icon: Icon(Icons.folder_copy_outlined),

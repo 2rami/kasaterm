@@ -188,8 +188,8 @@ pub(crate) fn glance() -> Glance {
 pub(crate) fn status_line() -> Option<&'static str> {
     STATE.with(|s| match s.borrow().phase {
         Phase::Idle => None,
-        Phase::Armed { .. } => Some("학생이 일하는 중이라 잠자기를 막아 두었어요"),
-        Phase::Away { .. } => Some("덮인 채 학생이 하던 일을 마치는 중이에요"),
+        Phase::Armed { .. } => Some("캐릭터가 일하는 중이라 잠자기를 막아 두었어요"),
+        Phase::Away { .. } => Some("덮인 채 캐릭터가 하던 일을 마치는 중이에요"),
         Phase::Disarming { .. } => Some("잠자기 막음을 해제하는 중이에요"),
         Phase::Sleeping { .. } => Some("덮개를 열 때까지 잠자기를 유지해요"),
     })
@@ -204,7 +204,7 @@ pub(crate) fn note(on: bool, ready: Option<bool>, status: &str) -> &str {
         None => "잠자기를 막을 허락이 있는지 확인하는 중입니다",
         Some(false) => "처음 한 번 터미널에서 kasaterm-cli lid-away install 을 실행해 주세요 — 잠자기를 막고 푸는 pmset 명령만 비밀번호 없이 허락합니다. 이 계정의 다른 프로그램도 그 명령을 쓸 수 있게 됩니다",
         Some(true) if !status.is_empty() => status,
-        Some(true) => "학생이 일하는 동안 잠자기를 막고, 덮으면 일이 끝나 1분 넘게 쉴 때 잠듭니다. 덮인 뒤 최대 시간이 차도 잠듭니다. 학생은 다른 기기로 옮기지 않습니다",
+        Some(true) => "캐릭터가 일하는 동안 잠자기를 막고, 덮으면 일이 끝나 1분 넘게 쉴 때 잠듭니다. 덮인 뒤 최대 시간이 차도 잠듭니다. 캐릭터는 다른 기기로 옮기지 않습니다",
     }
 }
 

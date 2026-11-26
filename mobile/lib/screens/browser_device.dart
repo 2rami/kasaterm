@@ -147,7 +147,7 @@ class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
             ),
             const SizedBox(height: 4),
             Text(
-              '학생이 보여 주려 여는 페이지가 갈 곳.',
+              '캐릭터가 보여 주려 여는 페이지가 갈 곳.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),

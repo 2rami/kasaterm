@@ -281,7 +281,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
               // 종 = 사람에게 간 알림(고를 것·끝냄)의 기록. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
               // 전엔 기다리는 학생 수만 세고 눌러도 아무것도 없었다).
               IconButton(
-                tooltip: '학생 쪽지',
+                tooltip: '캐릭터 쪽지',
                 onPressed: () => NotesSheet.show(
                   context,
                   model: _model,
@@ -365,7 +365,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
       children.add(
         const Padding(
           padding: EdgeInsets.only(top: Look.groupGap * 2),
-          child: TwinsLoading(label: '학생 목록을 받는 중', size: Look.twinsSmall),
+          child: TwinsLoading(label: '캐릭터 목록을 받는 중', size: Look.twinsSmall),
         ),
       );
     }
@@ -399,7 +399,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
       if (s.online && s.rooms.isEmpty) {
         children.add(
           TwinsNotice(
-            text: '아직 학생이 없어요',
+            text: '아직 캐릭터가 없어요',
             action: FilledButton.icon(
               onPressed: () => _newRoom(s),
               icon: const Icon(Icons.add, size: Look.iconSize),
@@ -772,7 +772,7 @@ class _SectionHeader extends StatelessWidget {
                               ]
                               else
                                 TextSpan(
-                                  text: '${root ? '기준 기기' : '연결됨'} · 학생 $count',
+                                  text: '${root ? '기준 기기' : '연결됨'} · 캐릭터 $count',
                                 ),
                             ],
                           ),

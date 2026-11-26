@@ -123,13 +123,13 @@ def steps(plan, osname, art, team, facts):
         return [f"받기: {name} → %LOCALAPPDATA%\\kasaterm\\updates\\ — 공식 피드(appcast-win.xml)·공식 릴리스만, https, 크기 상한",
                 f"확인: {digest} · EdDSA(설치본 Sparkle 공개키) — MSI 는 코드 서명이 없어 이 둘로만 믿는다",
                 "준비: 확인한 msi 를 받은 자리에 둔다(설치본 안 건드림)",
-                "적용: 바쁜 학생·미저장 편집기가 없을 때 앱이 스스로 끄고 도우미가 해시를 다시 잰 뒤 msiexec /passive — 그 PC 에서 사람이 관리자 확인(UAC)을 누른다(10분 상한, 넘기면 msiexec 를 두고 실패)",
+                "적용: 바쁜 캐릭터·미저장 편집기가 없을 때 앱이 스스로 끄고 도우미가 해시를 다시 잰 뒤 msiexec /passive — 그 PC 에서 사람이 관리자 확인(UAC)을 누른다(10분 상한, 넘기면 msiexec 를 두고 실패)",
                 "재기동: 도우미가 다시 띄운다 — MSI 가 실패하면 이전 판이 그대로라 그 판을 다시 띄움(강제 종료 없음). 새 판이 안 뜨면 되돌리지 못한다",
                 f"검증: 부팅 표식의 빌드가 {target} — 아니면 실패로 적는다"]
     return [f"받기: {name} → ~/Library/Caches/kasaterm/updates/ — 공식 피드·공식 릴리스만, https, 크기 상한",
             f"확인: {digest} · EdDSA(설치본 Sparkle 공개키) · dmg 읽기 전용 · codesign --verify --deep --strict · 팀 {team or '미확인'} 과 같음 · 공증 · 판 번호",
             f"준비: 확인한 번들을 {Path(facts.get('app_path') or '~/Applications/kasaterm.app').with_name('.kasaterm.app.next')} 에(설치본 안 건드림)",
-            "적용: 바쁜 학생·미저장 편집기가 없을 때 앱이 스스로 끄고 도우미가 갈아 끼운다 — 이전 판은 .kasaterm.app.previous",
+            "적용: 바쁜 캐릭터·미저장 편집기가 없을 때 앱이 스스로 끄고 도우미가 갈아 끼운다 — 이전 판은 .kasaterm.app.previous",
             "재기동: 도우미가 다시 띄운다 — 새 판이 부팅 표식 없이 꺼지면 이전 판을 되돌려 다시 띄움(강제 종료 없음)",
             f"검증: 부팅 표식의 빌드가 {target} — 아니면 실패로 적는다"]
 

@@ -1296,7 +1296,7 @@ impl Backend for PtyBackend {
         // Windows canonicalize 의 `\\?\` 꼴로 셸을 띄우면 claude 가 그 글자로 대화 폴더 이름을 지어 옮겨 온 대화를 못 찾는다.
         request.cwd = kasa_socket::shell_line::plain_path(&path.canonicalize()?.to_string_lossy());
         if request.character.as_ref().is_some_and(|name| name.is_empty() || name.chars().count() > 120 || name.chars().any(char::is_control)) {
-            anyhow::bail!("학생 이름을 확인해 주세요");
+            anyhow::bail!("캐릭터 이름을 확인해 주세요");
         }
         let machine = crate::transfer_endpoints::machine_context()?.clone();
         let (tx, rx) = std::sync::mpsc::channel();

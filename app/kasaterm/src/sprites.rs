@@ -334,7 +334,7 @@ pub(crate) fn write_sprite_readme(dir: &std::path::Path) -> std::io::Result<()> 
     std::fs::write(p, SPRITE_README)
 }
 
-pub(crate) const SPRITE_README: &str = r#"# 학생 그림 폴더
+pub(crate) const SPRITE_README: &str = r#"# 캐릭터 그림 폴더
 
 이 폴더에 그림을 넣으면 앱에 들어 있는 기본 도트를 대체한다. 파일이 없는 자리는
 기본 도트가 그대로 보이므로, 한 명만 바꾸거나 한 모션만 바꿔도 된다.
@@ -351,7 +351,7 @@ pub(crate) const SPRITE_README: &str = r#"# 학생 그림 폴더
 | `gif/` | 사이드바 카드의 대기 애니메이션(움직이는 얼굴) | `<이름>.gif` (1장) |
 
 `<이름>` 은 로스터의 영문 슬러그다(`mika`, `arona`, `yuuka` …). 설정의 로스터
-화면에서 각 학생의 슬러그를 볼 수 있다.
+화면에서 각 캐릭터의 슬러그를 볼 수 있다.
 
 ## 규격
 
