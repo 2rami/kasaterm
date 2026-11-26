@@ -91,6 +91,17 @@ mod retired_roster_tests {
     use super::*;
 
     #[test]
+    fn an_old_binding_does_not_revive_as_another_themes_namesake() {
+        let kasa = serde_json::json!({"members": [{"name": "코가라시", "slug": "kogarashi"}]});
+        let vocaloid = serde_json::json!({"members": [{"name": "이로하", "slug": "iroha"}]});
+        assert!(retired_slug("이로하").is_some(), "fixture must use a retired name");
+        assert!(!current_name("이로하", Some(&kasa)));
+        assert!(!current_name("이로하", None));
+        assert!(current_name("이로하", Some(&vocaloid)), "a namesake the user put in the roster keeps its sessions");
+        assert!(current_name("코가라시", Some(&kasa)));
+    }
+
+    #[test]
     fn retired_override_cannot_hide_the_kasa_roster() {
         let dir = std::env::temp_dir().join(format!("kasaterm-retired-roster-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
@@ -2740,7 +2751,14 @@ fn write_manual_picks(path: &Path, list: &[String]) -> std::io::Result<()> {
 /// 필터가 걸리는 자리(복원의 저장된 학생, shim 의 정체성 교정)는 전부 sid 를 들고
 /// 있으므로, 명단만 보는 `is_assignable` 대신 이걸 부른다.
 pub fn is_assignable_for(sid: &str, name: &str) -> bool {
-    !retired_character(name) && (is_assignable(name) || is_manual_pick(sid))
+    current_name(name, roster_in_use().as_ref()) && (is_assignable(name) || is_manual_pick(sid))
+}
+
+/// 세션 묶음에는 이름만 남는다. 은퇴한 이름이 설치된 다른 테마에도 있으면(이로하·리오·이치카·
+/// 하루카·유카리) 옛 대화가 켠 적 없는 테마의 그 사람으로 되살아났다 — 은퇴한 이름은 지금 쓰는
+/// 명부에 있을 때만 그 사람으로 본다.
+fn current_name(name: &str, in_use: Option<&Value>) -> bool {
+    retired_slug(name).is_none() || in_use.is_some_and(|chars| find_character(chars, name).is_some())
 }
 
 /// 손으로 고른 자리는 **명단을 바꿔도 지킨다** — 2026-08-26 지시.
