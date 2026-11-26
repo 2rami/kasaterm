@@ -4597,24 +4597,28 @@ impl SettingsCat {
         Self::Feedback,
     ];
 
-    /// 옆 목록에 실제로 서는 칸 — `Theme` 은 「캐릭터」 밑으로 들어가 목록에서 빠졌다
-    /// (2026-09-10 목업 IA: 셸+커서→터미널, 테마+캐릭터→캐릭터). 페이지 자체는
-    /// 캐릭터 페이지의 「테마 관리」로 연다. 웹 대조는 그대로 `ALL` 이다.
-    /// 묶음(화면·에이전트·앱)과 그 안의 순서는 자주 여는 것이 위다 — 시스템 테마를
-    /// 찾는 사람이 캐릭터 칸부터 지나야 했다(2026-10-07). 묶음 머리는 `native_settings::NAV_GROUPS`.
-    /// `Shell` 은 글꼴·커서가 「외형」으로 간 뒤 셸 하나만 남아 「앱 일반」에 합쳤다(2026-10-07 승인) —
-    /// 값은 딥링크·웹 키로 남고, 열면 「앱 일반」이 선다(`SettingsScene::set_category`).
-    pub(crate) const NAV: [SettingsCat; 9] = [
+    /// 하위 페이지의 기존 키는 검색과 바로가기가 계속 사용한다.
+    pub(crate) const NAV: [SettingsCat; 7] = [
         Self::Appearance,
-        Self::Statusbar,
-        Self::Weather,
-        Self::Accounts,
         Self::Claude,
         Self::Students,
-        Self::General,
+        Self::Accounts,
         Self::Machines,
+        Self::General,
         Self::Feedback,
     ];
+
+    pub(crate) const APPEARANCE_SECTIONS: [SettingsCat; 2] = [Self::Weather, Self::Statusbar];
+
+    pub(crate) fn navigation_parent(self) -> Self {
+        if Self::APPEARANCE_SECTIONS.contains(&self) {
+            Self::Appearance
+        } else if self == Self::Theme {
+            Self::Students
+        } else {
+            self
+        }
+    }
 
     /// 옆 목록에 실제로 서는 칸 — lite 는 「색만」이라 모양 하나뿐이다.
     pub(crate) fn nav() -> &'static [SettingsCat] {

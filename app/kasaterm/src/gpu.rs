@@ -105,6 +105,8 @@ pub struct GpuRenderer {
     /// 이번 장에 얹을 날씨 — 앱이 `render` 직전에 넣는다.
     pub(crate) weather_frame: Option<crate::weather::gpu::Frame>,
     /// 이번 장에 그린 조작 단추(`native_controls`) — 날씨의 단추 물방울 자리.
+    pub(crate) custom_indicators: bool,
+    pub(crate) remote_indicators: Vec<crate::weather::indicator::RemoteIndicator>,
     pub(crate) weather_spots: Vec<crate::weather::sim::ButtonSpot>,
     /// Logical-px rects of link spans drawn in the most recent markdown
     /// frame: (x, y, w, h, dest). main.rs hit-tests a click against these to
@@ -360,6 +362,8 @@ impl GpuRenderer {
             hover_pointer: false,
             weather: None,
             weather_frame: None,
+            custom_indicators: false,
+            remote_indicators: Vec::new(),
             weather_spots: Vec::new(),
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
@@ -3391,7 +3395,21 @@ impl GpuRenderer {
         Some(match name {
             "play" => include_str!("../assets/icons/play.svg"),
             "pause" => include_str!("../assets/icons/pause.svg"),
-            "umbrella" => include_str!("../assets/icons/umbrella.svg"),
+            "umbrella" => include_str!("../../../mobile/assets/icons/settings/appearance.svg"),
+            "settings-weather" => include_str!("../../../mobile/assets/icons/settings/weather.svg"),
+            "settings-account" => include_str!("../../../mobile/assets/icons/settings/account.svg"),
+            "settings-agents" => include_str!("../../../mobile/assets/icons/settings/agents.svg"),
+            "settings-characters" => include_str!("../../../mobile/assets/icons/settings/characters.svg"),
+            "settings-devices" => include_str!("../../../mobile/assets/icons/settings/devices.svg"),
+            "settings-general" => include_str!("../../../mobile/assets/icons/settings/general.svg"),
+            "settings-feedback" => include_str!("../../../mobile/assets/icons/settings/feedback.svg"),
+            "settings-statusbar" => include_str!("../../../mobile/assets/icons/settings/statusbar.svg"),
+            "settings-themes" => include_str!("../../../mobile/assets/icons/settings/themes.svg"),
+            "weather-cloud" => include_str!("../assets/icons/weather-cloud.svg"),
+            "weather-sun" => include_str!("../assets/icons/weather-sun.svg"),
+            "weather-wind" => include_str!("../assets/icons/weather-wind.svg"),
+            "weather-snow" => include_str!("../assets/icons/weather-snow.svg"),
+            "weather-storm" => include_str!("../assets/icons/weather-storm.svg"),
             "moon" => include_str!("../assets/icons/moon.svg"),
             "folder" => include_str!("../assets/icons/folder.svg"),
             "square" => include_str!("../assets/icons/square.svg"),

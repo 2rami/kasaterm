@@ -10,8 +10,9 @@ import 'controls.dart';
 import 'desktop_tools.dart';
 import 'dev_server.dart';
 import 'device_names.dart';
+import 'settings_glyph.dart';
 
-/// 설정 「앱」 → 「연결 기기」 — 데스크톱 설정 「연결 기기」의 차례(기기 → 폰 → 브라우저)를 따른다.
+/// 설정 「계정·기기」 → 「연결 기기」 — 데스크톱 설정 「연결 기기」의 차례(기기 → 폰 → 브라우저)를 따른다.
 /// 폰에만 있는 줄(기기별 PC 기능·개발 서버)도 가장 가까운 이 페이지에 둔다.
 class DeviceSettingsScreen extends StatelessWidget {
   const DeviceSettingsScreen({super.key, required this.server, this.api});
@@ -36,6 +37,11 @@ class DeviceSettingsScreen extends StatelessWidget {
         body: ListView(
           padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap * 2),
           children: [
+            SettingsOverview(
+              art: const SettingsMark(SettingsGlyph.devices, size: 36),
+              title: api == null ? '주소로 연결' : '계정으로 연결',
+              detail: api == null ? server.root.host : null,
+            ),
             for (final (i, (title, rows)) in groups.indexed) SettingsGroup(title: title, children: rows(i)),
           ],
         ),

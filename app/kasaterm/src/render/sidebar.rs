@@ -35,6 +35,7 @@ pub(super) struct Rooms<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) struct Panes<'a> {
+    pub custom_indicators: bool,
     pub rows: &'a [(usize, String, Rect)],
     pub row_info: &'a [SidebarRowInfo],
     pub mini: &'a [(usize, String, Rect)],
@@ -626,7 +627,7 @@ pub(super) fn paint_layouts(
             }
             progress_bar(g, bx, by, bw, info.compact_pct);
         }
-        if signal.is_none() {
+        if signal.is_none() && !p.custom_indicators {
             activity_mark(g, (mx, my, mw, mh), 2.0, info.busy, info.bg_active, cur, if cur { 1.5 } else { 0.0 });
         }
         // 탭이 여럿인 pane 은 칸 바닥 왼쪽에 **점 줄** — 몇째 탭이 앞에
@@ -765,7 +766,7 @@ pub(super) fn paint_layouts(
             let by = my + mh - MINI_BAR_H - MINI_BAR_PAD;
             progress_bar(g, mx + 2.0, by, mw - 4.0, info.compact_pct);
         }
-        if signal.is_none() {
+        if signal.is_none() && !p.custom_indicators {
             activity_mark(g, (mx, my, mw, mh), 2.0, info.busy, info.bg_active, false, 0.0);
         }
         if mw >= 22.0 {
@@ -791,6 +792,7 @@ pub(super) fn paint_rows(g: &mut gpu::GpuRenderer, s: &Strip, p: &Panes<'_>) {
             let hover = sb_cursor.0 >= rx && sb_cursor.0 <= rx + rw
                 && sb_cursor.1 >= ry && sb_cursor.1 <= ry + rh;
             crate::sidebar_pulse::paint_row(g, *r, &crate::sidebar_pulse::RowPaint {
+                custom_indicators: p.custom_indicators,
                 student: &info.student,
                 detail: info.stashed.then_some(info.retention_label.unwrap_or("보관됨")),
                 icon: info.icon,

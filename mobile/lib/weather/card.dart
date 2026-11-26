@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -6,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
+import '../server.dart';
 import '../status_style.dart';
 import 'model.dart';
 import 'rain.dart';
@@ -21,18 +23,138 @@ Mood weatherMood(PaneMood m) => switch (m) {
   _ => Mood.resting,
 };
 
+IndicatorPhase? paneIndicatorPhase(Pane p) {
+  if (p.closed || p.offline) return null;
+  if (p.needsYou) return p.kind == 'permission' ? IndicatorPhase.permission : IndicatorPhase.question;
+  if (p.isCompacting) return IndicatorPhase.compacting;
+  if (p.isBusy) return IndicatorPhase.working;
+  if (p.isStalled || p.status == 'error' || p.status == 'failed') return IndicatorPhase.error;
+  if (p.bgActive || p.hasRunningSubagents) return IndicatorPhase.background;
+  if (p.reportedFailure) return IndicatorPhase.error;
+  if (p.status == 'done' || p.status == 'succeeded') return IndicatorPhase.done;
+  return p.status == 'idle' || p.kind == 'idle' ? IndicatorPhase.idle : null;
+}
+
+class WorkWeather extends StatefulWidget {
+  const WorkWeather({
+    super.key,
+    required this.id,
+    required this.phase,
+    this.doneUntilMs,
+    required this.radius,
+    required this.builder,
+  });
+
+  final String id;
+  final IndicatorPhase? phase;
+  final int? doneUntilMs;
+  final BorderRadius radius;
+  final Widget Function(bool replacesOutline) builder;
+
+  @override
+  State<WorkWeather> createState() => _WorkWeatherState();
+}
+
+class _WorkWeatherState extends State<WorkWeather> implements WorkWeatherPlace {
+  WeatherSceneState? _scene;
+  final _boxKey = GlobalKey();
+
+  @override
+  String get placeId => widget.id;
+
+  @override
+  BorderRadius get corners => widget.radius;
+
+  @override
+  StateIndicator get indicator {
+    var phase = widget.phase;
+    if (phase == IndicatorPhase.idle && (widget.doneUntilMs ?? _observedDoneUntil) > DateTime.now().millisecondsSinceEpoch) {
+      phase = IndicatorPhase.done;
+    }
+    return phase == null ? const StateIndicator() : weather.settings.value.indicator(phase);
+  }
+
+  @override
+  RainAmount get amount => indicator.weather == null ? RainAmount.none : weather.settings.value.amount;
+
+  int _observedDoneUntil = 0;
+  Timer? _expiry;
+  void _scheduleExpiry() {
+    _expiry?.cancel();
+    final left = (widget.doneUntilMs ?? _observedDoneUntil) - DateTime.now().millisecondsSinceEpoch;
+    if (left <= 0 || widget.phase != IndicatorPhase.idle) return;
+    _expiry = Timer(Duration(milliseconds: left), () {
+      if (mounted) { setState(() {}); _scene?.workChanged(); }
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleExpiry();
+  }
+
+  @override
+  Rect? rectIn(RenderBox scene) {
+    final box = _boxKey.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero, ancestor: scene) & box.size;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final scene = WeatherScene.maybeOf(context);
+    if (identical(scene, _scene)) return;
+    _scene?.unregisterWork(this);
+    _scene = scene?..registerWork(this);
+  }
+
+  @override
+  void didUpdateWidget(WorkWeather oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.phase != widget.phase || oldWidget.doneUntilMs != widget.doneUntilMs || oldWidget.id != widget.id) {
+      if (oldWidget.phase != widget.phase || oldWidget.id != widget.id) {
+        final finished = oldWidget.id == widget.id && widget.phase == IndicatorPhase.idle &&
+            (oldWidget.phase == IndicatorPhase.working || oldWidget.phase == IndicatorPhase.compacting);
+        _observedDoneUntil = finished ? DateTime.now().millisecondsSinceEpoch + 6000 : 0;
+      }
+      _scheduleExpiry();
+      _scene?.workChanged();
+    }
+  }
+
+  @override
+  void dispose() {
+    _expiry?.cancel();
+    _scene?.unregisterWork(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: weather.changes,
+    builder: (context, _) {
+      final replaces = _scene != null && weather.settings.value.style == RainStyle.showers &&
+          weatherVerdictOf(context).active;
+      return KeyedSubtree(key: _boxKey, child: widget.builder(replaces));
+    },
+  );
+}
+
 /// 제 유리를 가진 카드(허브 방·작업 줄). 날씨가 꺼져 있으면 [child] 그대로다 — 틱·그림·셰이더 없음.
 ///
 /// 켜져 있으면 이 카드에 오는 비 양(설정·초점·카드별 덮어쓰기·학생 상태)만큼 유리에 물이 맺혀
 /// 흐르고 아래 테두리에 고인다. 김은 비를 맞기 시작한 뒤 「젖는 시간」에 걸쳐 낀다. 만지면 이 카드가
 /// 초점이 된다. 길게 누르면 「이 카드 날씨」.
 class WeatherCard extends StatefulWidget {
-  const WeatherCard({super.key, required this.id, this.mood, required this.child});
+  const WeatherCard({super.key, required this.id, this.mood, this.preview = false, required this.child});
 
   final String id;
 
   /// 학생 상태 날씨가 켜져 있을 때 비 양을 고르는 기분. 모르면 null(전역 비 양).
   final Mood? mood;
+  final bool preview;
   final Widget child;
 
   @override
@@ -60,10 +182,14 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
   DateTime _rainFrom = DateTime.now();
   ({bool active, bool moving}) _v = (active: false, moving: false);
   RainAmount _amount = RainAmount.none;
+  bool _liquid = true;
   bool _dark = true;
 
   @override
   RainAmount get amount => _amount;
+
+  @override
+  String get placeId => widget.id;
 
   @override
   Rect? rectIn(RenderBox scene) {
@@ -114,14 +240,19 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
     if (!mounted) return;
     final v = weatherVerdictOf(context);
     final s = weather.settings.value;
+    final picked = widget.preview && s.target == WeatherTarget.pickedOnly;
+    final override = widget.preview ? (picked ? CardWeather.picked : CardWeather.follow) : weather.cardOf(widget.id);
+    final focused = widget.preview ? s.target != WeatherTarget.unfocusedOnly : weather.focused.value == widget.id;
     final amount = v.active
-        ? cardAmount(s, weather.cardOf(widget.id), focused: weather.focused.value == widget.id, mood: widget.mood)
+        ? cardAmount(s, override, focused: focused, mood: widget.mood)
         : RainAmount.none;
-    final changed = v.active != _v.active || amount != _amount || v.moving != _v.moving;
+    final liquid = s.style == RainStyle.liquid;
+    final changed = liquid != _liquid || v.active != _v.active || amount != _amount || v.moving != _v.moving;
     _v = v;
+    _liquid = liquid;
     if (_amount == RainAmount.none && amount != RainAmount.none) _rainFrom = DateTime.now();
     _amount = amount;
-    if (v.active && _glass == null) {
+    if (liquid && v.active && _glass == null) {
       _loadShared().then((_) async {
         final rain = (await RainPainter.program()).fragmentShader();
         if (!mounted) return;
@@ -132,17 +263,19 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
         _sync();
       });
     }
-    final wet = v.active && _glass != null && (amount != RainAmount.none || !_sim.settled);
+    final wet = _wet;
     if (wet && !_ticker.isActive) {
       _last = Duration.zero;
       _ticker.start();
     } else if (!wet && _ticker.isActive) {
       _ticker.stop();
     }
-    if (changed) setState(() {});
+    if (changed) {
+      setState(() {});
+    }
   }
 
-  bool get _wet => _v.active && _glass != null && (_amount != RainAmount.none || !_sim.settled);
+  bool get _wet => _liquid && _v.active && _glass != null && (_amount != RainAmount.none || !_sim.settled);
 
   void _tick(Duration now) {
     _acc += _last == Duration.zero ? 1 / 30 : (now - _last).inMicroseconds / 1e6;
@@ -237,9 +370,9 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
   }
 
   void _onDown(PointerDownEvent e) {
-    if (!_v.active) return;
-    weather.focus(widget.id);
-    if (weather.settings.value.has(Effect.ripples)) _sim.ripple(e.localPosition);
+    if (!_v.active || !_liquid) return;
+    if (!widget.preview) weather.focus(widget.id);
+    if (_liquid && weather.settings.value.has(Effect.ripples)) _sim.ripple(e.localPosition);
     _sync();
   }
 
@@ -256,7 +389,7 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
       behavior: HitTestBehavior.translucent,
       onPointerDown: _onDown,
       child: GestureDetector(
-        onLongPress: () => showCardWeatherSheet(context, widget.id),
+        onLongPress: _liquid ? () => showCardWeatherSheet(context, widget.id) : null,
         child: Stack(
           key: _boxKey,
           children: [

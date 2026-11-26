@@ -3,6 +3,76 @@
 /// 만지거나 스크롤한 카드. 값 이름은 계정 동기화(`weather` 키)의 JSON 그대로다.
 library;
 
+enum WeatherCondition {
+  rain('빗줄기와 물보라', 0, 0),
+  drizzle('이슬비', 0, 1),
+  heavyRain('폭우', 0, 2),
+  sunShowers('여우비', 0, 3),
+  freezingDrizzle('어는 이슬비', 0, 4),
+  freezingRain('어는 비', 0, 5),
+  nightDrizzle('밤 이슬비', 0, 6),
+  clear('맑음', 1, 0),
+  mostlyClear('대체로 맑음', 1, 1),
+  partlyCloudy('구름 조금', 1, 2),
+  mostlyCloudy('구름 많음', 1, 3),
+  cloudy('흐림', 1, 4),
+  clearNight('맑은 밤', 1, 5),
+  mostlyClearNight('대체로 맑은 밤', 1, 6),
+  partlyCloudyNight('구름 낀 밤', 1, 7),
+  sunrise('일출', 1, 8),
+  sunset('일몰', 1, 9),
+  foggy('안개', 2, 0),
+  haze('연무', 2, 1),
+  smoky('연기', 2, 2),
+  blowingDust('먼지바람', 2, 3),
+  breezy('산들바람', 3, 0),
+  windy('강풍', 3, 1),
+  flurries('날리는 눈', 4, 0),
+  snow('눈', 4, 1),
+  heavySnow('폭설', 4, 2),
+  sunFlurries('햇눈', 4, 3),
+  blowingSnow('날림눈', 4, 4),
+  blizzard('눈보라', 4, 5),
+  sleet('얼음싸라기', 4, 6),
+  wintryMix('진눈깨비', 4, 7),
+  hail('우박', 4, 8),
+  isolatedThunderstorms('국지성 뇌우', 5, 0),
+  scatteredThunderstorms('산발적 뇌우', 5, 1),
+  thunderstorms('뇌우', 5, 2),
+  strongStorms('강한 뇌우', 5, 3),
+  hot('폭염', 6, 0),
+  frigid('혹한', 6, 1),
+  tropicalStorm('열대 폭풍', 7, 0),
+  hurricane('허리케인', 7, 1),
+  tornado('토네이도', 7, 2);
+
+  const WeatherCondition(this.label, this.material, this.variant);
+  final String label;
+  final int material, variant;
+}
+
+enum IndicatorPhase {
+  working('작업 중'), background('백그라운드'), compacting('컨텍스트 압축'), permission('승인 대기'),
+  question('답변 대기'), done('완료'), idle('쉬는 중'), error('오류');
+
+  const IndicatorPhase(this.label);
+  final String label;
+}
+
+class StateIndicator {
+  const StateIndicator({this.weather, this.edges = 0});
+  final WeatherCondition? weather;
+  final int edges;
+  Map<String, Object?> toJson() => {'weather': weather?.name, 'edges': edges};
+
+  static StateIndicator parse(Map value) => StateIndicator(
+    weather: WeatherCondition.values.where((c) => c.name == value['weather']).firstOrNull,
+    edges: value['edges'] is int ? (value['edges'] as int) & 15 : 0,
+  );
+}
+
+enum RainStyle { liquid, showers }
+
 enum RainAmount {
   none('없음'),
   drizzle('이슬비'),
@@ -55,6 +125,10 @@ enum Mood {
 class WeatherSettings {
   const WeatherSettings({
     this.enabled = false,
+    this.style = RainStyle.liquid,
+    this.condition = WeatherCondition.rain,
+    this.indicators = const {},
+    this.beads = true,
     this.amount = RainAmount.drizzle,
     this.windDir = 0,
     this.windStrength = 0,
@@ -69,6 +143,10 @@ class WeatherSettings {
   });
 
   final bool enabled;
+  final RainStyle style;
+  final WeatherCondition condition;
+  final Map<IndicatorPhase, StateIndicator> indicators;
+  final bool beads;
   final RainAmount amount;
 
   /// −1(왼쪽) ~ 1(오른쪽).
@@ -92,6 +170,12 @@ class WeatherSettings {
   bool has(Effect e) => effects.contains(e);
 
   /// 바람 한 값(−1~1): 방향 × 세기.
+  StateIndicator indicator(IndicatorPhase phase) => indicators[phase] ?? switch (phase) {
+    IndicatorPhase.working || IndicatorPhase.compacting => StateIndicator(weather: condition),
+    IndicatorPhase.background => const StateIndicator(edges: 15),
+    _ => const StateIndicator(),
+  };
+
   double get wind => windDir.clamp(-1.0, 1.0) * windStrength.clamp(0.0, 1.0);
 
   RainAmount moodAmount(Mood m) => switch (m) {
@@ -102,6 +186,10 @@ class WeatherSettings {
 
   WeatherSettings copyWith({
     bool? enabled,
+    RainStyle? style,
+    WeatherCondition? condition,
+    Map<IndicatorPhase, StateIndicator>? indicators,
+    bool? beads,
     RainAmount? amount,
     double? windDir,
     double? windStrength,
@@ -115,6 +203,10 @@ class WeatherSettings {
     bool? ignoreOs,
   }) => WeatherSettings(
     enabled: enabled ?? this.enabled,
+    style: style ?? this.style,
+    condition: condition ?? this.condition,
+    indicators: indicators ?? this.indicators,
+    beads: beads ?? this.beads,
     amount: amount ?? this.amount,
     windDir: windDir ?? this.windDir,
     windStrength: windStrength ?? this.windStrength,
@@ -139,6 +231,10 @@ class WeatherSettings {
 
   Map<String, Object?> toJson() => {
     'enabled': enabled,
+    if (style != RainStyle.liquid) 'style': style.name,
+    if (condition != WeatherCondition.rain) 'condition': condition.name,
+    if (!beads) 'beads': false,
+    if (indicators.isNotEmpty) 'indicators': {for (final phase in IndicatorPhase.values) if (indicators.containsKey(phase)) phase.name: indicators[phase]!.toJson()},
     'amount': amount.name,
     'wind_dir': windDir,
     'wind_strength': windStrength,
@@ -161,6 +257,12 @@ class WeatherSettings {
     final fx = raw['effects'];
     return WeatherSettings(
       enabled: raw['enabled'] == true,
+      beads: raw['beads'] != false,
+      indicators: {for (final phase in IndicatorPhase.values)
+        if (raw['indicators'] case final Map rules)
+          if (rules[phase.name] case final Map rule) phase: StateIndicator.parse(rule)},
+      condition: WeatherCondition.values.firstWhere((c) => c.name == raw['condition'], orElse: () => WeatherCondition.rain),
+      style: raw['style'] == 'showers' ? RainStyle.showers : RainStyle.liquid,
       amount: RainAmount.parse(raw['amount'], d.amount),
       windDir: ranged(raw['wind_dir'], -1, 1, 0),
       windStrength: ranged(raw['wind_strength'], 0, 1, 0),
@@ -267,7 +369,7 @@ class OsMotion {
 /// 판정: [active] 가 거짓이면 날씨를 통째로 건너뛴다(비용 0), [moving] 이 거짓이면 맺힌 것만 남는다.
 ({bool active, bool moving}) verdict(WeatherSettings s, OsMotion os) {
   final osBlocks = !s.ignoreOs && os.reduceTransparency;
-  final active = s.enabled && !osBlocks && s.effects.isNotEmpty;
+  final active = s.enabled && !osBlocks && (s.style == RainStyle.showers || s.effects.isNotEmpty);
   return (active: active, moving: active && (s.ignoreOs || !os.reduceMotion));
 }
 

@@ -26,6 +26,7 @@ import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
 import '../theme_prefs.dart';
+import '../weather/card.dart';
 import '../weather/scene.dart';
 import 'conversation_view.dart';
 import 'pane_info_sheet.dart';
@@ -303,6 +304,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
       a.status == b.status &&
       a.kind == b.kind &&
       a.idleSecs == b.idleSecs &&
+      a.doneUntilMs == b.doneUntilMs && a.reportedFailure == b.reportedFailure && a.error == b.error && a.bgActive == b.bgActive &&
+      a.hasRunningSubagents == b.hasRunningSubagents &&
       a.doing == b.doing &&
       a.compactPct == b.compactPct &&
       a.session == b.session &&
@@ -825,81 +828,90 @@ class _TerminalScreenState extends State<TerminalScreen> {
             child: Column(
               children: [
                 Expanded(
-                  child: NotificationListener<ScrollNotification>(
-                    onNotification: _onPageScroll,
-                    child: RawGestureDetector(
-                      behavior: HitTestBehavior.translucent,
-                      gestures: _swipeGestures,
-                      child: PageView(
-                        controller: _pages,
-                        physics: const NeverScrollableScrollPhysics(),
-                        children: [
-                          // 좌우 숨 — 글자가 화면 끝에 닿으면 답답하고, 0열에 잉크가 있는 글자가
-                          // 잘려 보인다. 학생색 테는 화면 가장자리의 _StudentFrame 이 두른다.
-                          _page(
-                            0,
-                            chat ? 1 : 0,
-                            Padding(
-                              padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-                              child: SelectionArea(
-                                key: _selection,
-                                focusNode: _selectionFocus,
-                                contextMenuBuilder: gridSelectionMenu,
-                                // 고르기 영역의 가로 끌기(마우스 고르기용)보다 먼저 밀기를 판정한다 —
-                                // 안쪽에 한 벌 더 둔다. 어느 쪽이 이겨도 같은 쪽 넘김이다.
-                                child: _selectable(_termGeometry, _termGeometryBox, RawGestureDetector(
-                                  behavior: HitTestBehavior.translucent,
-                                  gestures: _swipeGestures,
-                                  child: _view(s),
-                                )),
-                              ),
-                            ),
-                          ),
-                          if (blocks)
-                            _page(
-                              1,
-                              chat ? 1 : 0,
-                              ShellBlocksView(
-                                server: widget.server,
-                                pane: pane,
-                                session: s,
-                                onTerminal: _showTerminal,
-                                onCommand: _runCommand,
-                                onDraft: _draftCommand,
-                                bottomTick: _bottomTick,
-                                active: _paging || chat,
-                              ),
-                            ),
-                          if (canChat)
-                            _page(
-                              1,
-                              chat ? 1 : 0,
-                              WeatherScene(
-                                child: SelectionArea(
-                                  key: _chatSelection,
-                                  focusNode: _chatSelectionFocus,
-                                  contextMenuBuilder: _chatSelectionMenu,
-                                  child: _selectable(_chatGeometry, _chatGeometryBox, RawGestureDetector(
-                                    behavior: HitTestBehavior.translucent,
-                                    gestures: _swipeGestures,
-                                    child: ConversationView(
-                                      server: widget.server,
-                                      conversation: _conversation,
-                                      jump: _jump,
-                                      pane: pane,
-                                      session: s,
-                                      accent: accent,
-                                      senderAccents: s.tokens?.characterAccents ?? const {},
-                                      onTerminal: _showTerminal,
-                                      bottomTick: _bottomTick,
-                                      active: _paging || chat,
-                                      draft: _chatInput,
-                                    ),
-                                  )),
+                  child: WeatherScene(
+                    workOnly: true,
+                    child: WorkWeather(
+                      id: pane.viewKey,
+                      phase: s.state == TermState.gone ? null : paneIndicatorPhase(pane),
+                      doneUntilMs: pane.doneUntilMs,
+                      radius: BorderRadius.zero,
+                      builder: (_) => NotificationListener<ScrollNotification>(
+                        onNotification: _onPageScroll,
+                        child: RawGestureDetector(
+                          behavior: HitTestBehavior.translucent,
+                          gestures: _swipeGestures,
+                          child: PageView(
+                            controller: _pages,
+                            physics: const NeverScrollableScrollPhysics(),
+                            children: [
+                              // 좌우 숨 — 글자가 화면 끝에 닿으면 답답하고, 0열에 잉크가 있는 글자가
+                              // 잘려 보인다. 학생색 테는 화면 가장자리의 _StudentFrame 이 두른다.
+                              _page(
+                                0,
+                                chat ? 1 : 0,
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                                  child: SelectionArea(
+                                    key: _selection,
+                                    focusNode: _selectionFocus,
+                                    contextMenuBuilder: gridSelectionMenu,
+                                    // 고르기 영역의 가로 끌기(마우스 고르기용)보다 먼저 밀기를 판정한다 —
+                                    // 안쪽에 한 벌 더 둔다. 어느 쪽이 이겨도 같은 쪽 넘김이다.
+                                    child: _selectable(_termGeometry, _termGeometryBox, RawGestureDetector(
+                                      behavior: HitTestBehavior.translucent,
+                                      gestures: _swipeGestures,
+                                      child: _view(s),
+                                    )),
+                                  ),
                                 ),
                               ),
-                            ),
-                        ],
+                              if (blocks)
+                                _page(
+                                  1,
+                                  chat ? 1 : 0,
+                                  ShellBlocksView(
+                                    server: widget.server,
+                                    pane: pane,
+                                    session: s,
+                                    onTerminal: _showTerminal,
+                                    onCommand: _runCommand,
+                                    onDraft: _draftCommand,
+                                    bottomTick: _bottomTick,
+                                    active: _paging || chat,
+                                  ),
+                                ),
+                              if (canChat)
+                                _page(
+                                  1,
+                                  chat ? 1 : 0,
+                                  WeatherScene(
+                                    child: SelectionArea(
+                                      key: _chatSelection,
+                                      focusNode: _chatSelectionFocus,
+                                      contextMenuBuilder: _chatSelectionMenu,
+                                      child: _selectable(_chatGeometry, _chatGeometryBox, RawGestureDetector(
+                                        behavior: HitTestBehavior.translucent,
+                                        gestures: _swipeGestures,
+                                        child: ConversationView(
+                                          server: widget.server,
+                                          conversation: _conversation,
+                                          jump: _jump,
+                                          pane: pane,
+                                          session: s,
+                                          accent: accent,
+                                          senderAccents: s.tokens?.characterAccents ?? const {},
+                                          onTerminal: _showTerminal,
+                                          bottomTick: _bottomTick,
+                                          active: _paging || chat,
+                                          draft: _chatInput,
+                                        ),
+                                      )),
+                                    ),
+                                  ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                   ),

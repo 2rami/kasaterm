@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/screens/settings.dart';
+import 'package:kasaterm_mobile/screens/settings_look.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/wide_layout.dart';
+import 'package:kasaterm_mobile/weather/sheet.dart';
 
 import 'fixtures/settings.dart';
 
@@ -16,33 +18,34 @@ void main() {
 
   Finder inGroup(String group, Finder row) => find.descendant(of: find.byKey(Key(group)), matching: row);
 
-  testWidgets('첫 화면은 화면·에이전트·앱 묶음 차례에 PC 와 같은 페이지 이름', (tester) async {
+  testWidgets('첫 화면은 데스크톱과 같은 주제별 묶음과 페이지 이름', (tester) async {
     await phone(tester);
     final fx = SettingsFixture();
     addTearDown(fx.server.close);
     await tester.pumpWidget(fx.screen());
     await tester.pumpAndSettle();
 
-    final titles = ['화면', '에이전트', '앱'];
+    final titles = ['화면', '에이전트', '계정·기기', '앱'];
     final ys = [for (final t in titles) tester.getTopLeft(find.text(t)).dy];
-    expect(ys, orderedEquals([...ys]..sort()), reason: '묶음 차례는 화면 → 에이전트 → 앱');
+    expect(ys, orderedEquals([...ys]..sort()), reason: '묶음 차례는 화면 → 에이전트 → 계정·기기 → 앱');
     expect(find.text('데스크톱'), findsNothing, reason: '옛 「데스크톱」 묶음은 걷었다');
 
     for (final (group, rows) in [
-      ('group-screen', ['settings-look', 'settings-weather']),
-      ('group-agent', ['settings-account', 'claude-accounts', 'character-picks']),
-      ('group-app', ['settings-devices', 'app-release']),
+      ('group-screen', ['settings-look']),
+      ('group-agent', ['claude-accounts', 'character-picks']),
+      ('group-connection', ['settings-account', 'settings-devices']),
+      ('group-app', ['app-release']),
     ]) {
       final rowYs = [
         for (final key in rows) tester.getTopLeft(inGroup(group, find.byKey(Key(key)))).dy,
       ];
       expect(rowYs, orderedEquals([...rowYs]..sort()), reason: '$group 안의 차례');
     }
-    expect(inGroup('group-agent', find.text('계정')), findsOneWidget);
+    expect(inGroup('group-connection', find.text('계정')), findsOneWidget);
     expect(inGroup('group-agent', find.text('코딩 에이전트')), findsOneWidget);
     expect(inGroup('group-agent', find.text('캐릭터')), findsOneWidget);
-    expect(inGroup('group-app', find.text('연결 기기')), findsOneWidget);
-    expect(inGroup('group-app', find.byType(Divider)), findsOneWidget, reason: '설치 기록이 없으면 끝에 빈 줄 선을 남기지 않는다');
+    expect(inGroup('group-connection', find.text('연결 기기')), findsOneWidget);
+    expect(inGroup('group-app', find.byType(Divider)), findsNothing, reason: '설치 기록이 없으면 끝에 빈 줄 선을 남기지 않는다');
     expect(find.text('Google·아이디 로그인 · 일 권한'), findsOneWidget, reason: '계정 줄은 이어진 로그인 방법을 요약');
 
     // 페이지 안의 줄은 첫 화면에 없다.
@@ -93,6 +96,78 @@ void main() {
     expect(find.byKey(const Key('phone-brightness')), findsOneWidget);
     expect(find.text('강조색'), findsOneWidget);
     expect(find.text('둥글게 · 데스크톱 모양'), findsOneWidget);
+
+    final preview = find.byKey(const Key('appearance-preview'));
+    final before = tester.getRect(preview);
+    final controls = find.descendant(
+      of: find.byKey(const PageStorageKey('appearance-controls')),
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(find.text('날씨 켜기'), 160, scrollable: controls);
+    expect(find.text('날씨 켜기').hitTestable(), findsOneWidget);
+    expect(find.widgetWithText(AppBar, '외형'), findsOneWidget);
+    expect(tester.getRect(preview), before);
+    expect(find.text('색과 모양'), findsNothing);
+  });
+
+  testWidgets('색판은 pane만 미리 바꾸고 적용할 때 데스크톱에 저장한다', (tester) async {
+    tester.view.physicalSize = const Size(320, 420);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final fx = SettingsFixture();
+    addTearDown(fx.server.close);
+    await tester.pumpWidget(MaterialApp(home: LookSettingsScreen(server: fx.server)));
+    await tester.pumpAndSettle();
+
+    final openPicker = find.byKey(const Key('appearance-custom-accent'));
+    final preview = find.byKey(const Key('appearance-preview'));
+    final plane = find.byKey(const Key('appearance-accent-plane'));
+    final scroll = find.descendant(
+      of: find.byKey(const PageStorageKey('appearance-controls')),
+      matching: find.byWidgetPredicate((w) => w is Scrollable && w.axisDirection == AxisDirection.down),
+    );
+    final original = Theme.of(tester.element(preview)).colorScheme.primary;
+    await tester.scrollUntilVisible(openPicker.hitTestable(), 110, scrollable: scroll);
+    await tester.tap(openPicker);
+    await tester.pumpAndSettle();
+    expect(tester.widget<WeatherPreview>(preview).accentOutline, isTrue);
+    expect(find.byKey(const Key('appearance-accent-hex')), findsNothing);
+
+    await tester.scrollUntilVisible(plane.hitTestable(), 85, scrollable: scroll);
+    final area = tester.getRect(plane);
+    await tester.dragFrom(area.center, const Offset(42, -20));
+    await tester.pumpAndSettle();
+    expect(Theme.of(tester.element(preview)).colorScheme.primary, isNot(original));
+    expect(fx.accent, 'Blue');
+    expect(fx.paths.where((p) => p.endsWith('settings/action')), isEmpty);
+
+    await tester.scrollUntilVisible(find.text('취소').hitTestable(), 130, scrollable: scroll);
+    await tester.tap(find.text('취소'));
+    await tester.pumpAndSettle();
+    expect(Theme.of(tester.element(preview)).colorScheme.primary, original);
+    expect(fx.accent, 'Blue');
+
+    await tester.scrollUntilVisible(openPicker.hitTestable(), 85, scrollable: scroll);
+    await tester.tap(openPicker);
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('HEX').hitTestable(), 130, scrollable: scroll);
+    await tester.tap(find.text('HEX'));
+    await tester.pumpAndSettle();
+    final hex = find.byKey(const Key('appearance-accent-hex'));
+    await tester.ensureVisible(hex);
+    await tester.enterText(hex, 'nope');
+    await tester.pumpAndSettle();
+    expect(find.text('6자리 색상 코드를 입력하세요'), findsOneWidget);
+    await tester.enterText(hex, '#12a4c8');
+    await tester.pumpAndSettle();
+    expect(Theme.of(tester.element(preview)).colorScheme.primary, const Color(0xff12a4c8));
+    expect(fx.accent, 'Blue');
+    await tester.scrollUntilVisible(find.text('적용').hitTestable(), 100, scrollable: scroll);
+    await tester.tap(find.text('적용'));
+    await tester.pumpAndSettle();
+    expect(fx.accent, '#12a4c8');
+    expect(plane, findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('계정 없이 붙은 주소 연결은 계정·캐릭터·기기 이름·비밀 승인을 감춘다', (tester) async {
@@ -164,9 +239,17 @@ void main() {
     expect(tester.getTopLeft(work).dx, greaterThan(settingsNavWidth), reason: '하위 화면도 오른쪽 칸 안');
     expect(find.byKey(const Key('group-screen')), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('settings-weather')));
+    await tester.tap(find.byKey(const Key('settings-look')));
     await tester.pumpAndSettle();
-    expect(find.widgetWithText(AppBar, '날씨'), findsOneWidget, reason: '두 칸이면 날씨도 시트 대신 페이지');
+    final preview = find.byKey(const Key('appearance-preview'));
+    expect(tester.getTopLeft(preview).dx, greaterThan(settingsNavWidth));
+    final controls = find.descendant(
+      of: find.byKey(const PageStorageKey('appearance-controls')),
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(find.text('날씨 켜기'), 160, scrollable: controls);
+    expect(find.text('날씨 켜기').hitTestable(), findsOneWidget);
+    expect(selected('settings-look'), isTrue);
     expect(find.byType(BottomSheet), findsNothing);
     expect(find.widgetWithText(AppBar, '일 권한'), findsNothing);
   });

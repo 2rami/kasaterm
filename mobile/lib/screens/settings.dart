@@ -9,8 +9,6 @@ import '../relay_account.dart';
 import '../server.dart';
 import '../theme_prefs.dart';
 import '../twins_loading.dart';
-import '../weather/sheet.dart';
-import '../weather/store.dart';
 import '../wide_layout.dart';
 import 'account_profile.dart';
 import 'character_picks.dart';
@@ -18,6 +16,7 @@ import 'claude_accounts.dart';
 import 'controls.dart';
 import 'settings_account.dart';
 import 'settings_devices.dart';
+import 'settings_glyph.dart';
 import 'settings_look.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -43,10 +42,10 @@ class SettingsScreen extends StatefulWidget {
 }
 
 /// 첫 화면의 페이지 줄 — 데스크톱 설정 옆 목록의 같은 이름 페이지.
-enum _Page { look, weather, account, agents, characters, devices }
+enum _Page { look, account, agents, characters, devices }
 
-/// 설정 첫 화면 — 데스크톱 설정 옆 목록과 같은 묶음 셋(화면·에이전트·앱)에 같은 이름의 페이지 줄.
-/// 좁으면(폰) 줄을 눌러 그 페이지로 들어가고, 페이지가 화면 하나뿐이면(코딩 에이전트·캐릭터) 그 화면을, 날씨는 시트를 바로 연다.
+/// 설정 첫 화면 — 데스크톱 설정 옆 목록과 같은 묶음과 페이지 이름.
+/// 좁으면(폰) 줄을 눌러 그 페이지로 들어가고, 페이지가 화면 하나뿐이면(코딩 에이전트·캐릭터) 그 화면을 바로 연다.
 /// 넓으면(아이패드·눕힌 폰, `settingsSplit`) 데스크톱처럼 왼쪽 목록 + 오른쪽 페이지 두 칸이다.
 class _SettingsScreenState extends State<SettingsScreen> {
   Server get server => widget.server;
@@ -128,30 +127,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _loadProfile();
   }
 
-  Widget _pageOf(_Page page) => switch (page) {
-    _Page.look => LookSettingsScreen(server: server),
-    _Page.weather => const WeatherSettingsScreen(),
-    _Page.account => AccountSettingsScreen(
-      api: _api!,
-      providers: _providers,
-      profile: _profile,
-      installId: widget.installId,
-      onProfile: (p) {
-        if (mounted) setState(() => _profile = p);
-      },
-    ),
-    _Page.agents => ClaudeAccountsScreen(server: server),
-    _Page.characters => CharacterPicksScreen(server: server, api: _api!),
-    _Page.devices => DeviceSettingsScreen(server: server, api: _api),
-  };
+  Widget _pageOf(BuildContext context, _Page page) => Theme(
+    data: settingsControlsTheme(Theme.of(context)),
+    child: switch (page) {
+      _Page.look => LookSettingsScreen(server: server),
+      _Page.account => AccountSettingsScreen(
+        api: _api!,
+        providers: _providers,
+        profile: _profile,
+        installId: widget.installId,
+        onProfile: (p) {
+          if (mounted) setState(() => _profile = p);
+        },
+      ),
+      _Page.agents => ClaudeAccountsScreen(server: server),
+      _Page.characters => CharacterPicksScreen(server: server, api: _api!),
+      _Page.devices => DeviceSettingsScreen(server: server, api: _api),
+    },
+  );
 
   void _go(_Page page) {
     if (_split) {
       setState(() => _selected = page);
-    } else if (page == _Page.weather) {
-      unawaited(showWeatherSheet(context));
     } else {
-      unawaited(Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => _pageOf(page))));
+      unawaited(Navigator.of(context).push(MaterialPageRoute<void>(builder: (context) => _pageOf(context, page))));
     }
   }
 
@@ -160,17 +159,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _Page page, {
     required String key,
     required int tone,
-    required IconData icon,
+    required SettingsGlyph mark,
     required String title,
     required String subtitle,
   }) => SettingsRow(
     key: Key(key),
     tone: tone,
-    icon: icon,
+    mark: mark,
     title: title,
     subtitle: subtitle,
     chevron: !_split,
     selected: _split && _selected == page,
+    flat: true,
     onTap: () => _go(page),
   );
 
@@ -307,7 +307,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             constraints: const BoxConstraints(maxWidth: settingsPageMaxWidth + 2 * Look.pagePad),
             child: Navigator(
               key: ValueKey(_selected),
-              onGenerateRoute: (_) => MaterialPageRoute<void>(builder: (_) => _pageOf(_selected)),
+              onGenerateRoute: (_) => MaterialPageRoute<void>(builder: (context) => _pageOf(context, _selected)),
             ),
           ),
         ),
@@ -316,6 +316,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   );
 
   Widget _list() {
+    return Theme(
+      data: settingsControlsTheme(Theme.of(context)),
+      child: _settingsList(),
+    );
+  }
+
+  Widget _settingsList() {
     final account = server.account;
     return TwinBackdrop(
       child: Scaffold(
@@ -330,13 +337,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               api: _api,
               onTap: _api != null && _profile != null ? () => unawaited(_editProfile()) : null,
             ),
-            // 묶음 차례로 하늘·호박을 번갈아 — 묶음 셋은 늘 선다(에이전트엔 코딩 에이전트가 늘 있다).
-            SettingsGroup(key: const Key('group-screen'), title: '화면', children: _screenRows(0)),
-            SettingsGroup(key: const Key('group-agent'), title: '에이전트', children: _agentRows(1)),
-            SettingsGroup(key: const Key('group-app'), title: '앱', children: _appRows(0)),
+            SettingsGroup(flat: true, key: const Key('group-screen'), title: '화면', children: [_lookRow()]),
+            SettingsGroup(flat: true, key: const Key('group-agent'), title: '에이전트', children: _agentRows(1)),
+            SettingsGroup(flat: true, key: const Key('group-connection'), title: '계정·기기', children: _connectionRows(0)),
+            SettingsGroup(flat: true, key: const Key('group-app'), title: '앱', children: _appRows(1)),
             SettingsGroup(
+              flat: true,
               children: [
                 SettingsRow(
+                  flat: true,
                   danger: true,
                   icon: Icons.logout_rounded,
                   title: account == null ? '주소 바꾸기 · 지우기' : '로그아웃',
@@ -351,53 +360,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  /// 「화면」 — 데스크톱 「외형」·「날씨」. 「앱 하단바」는 폰에 없다.
-  List<Widget> _screenRows(int tone) => [
-    ValueListenableBuilder<ThemeMode>(
-      valueListenable: phoneThemeMode,
-      builder: (context, mode, _) => _pageRow(
-        _Page.look,
-        key: 'settings-look',
-        tone: tone,
-        icon: Icons.palette_outlined,
-        title: '외형',
-        subtitle: '${phoneModes.firstWhere((m) => m.$1 == mode).$3} · 강조색 · 모서리',
-      ),
+  Widget _lookRow() => ValueListenableBuilder<ThemeMode>(
+    valueListenable: phoneThemeMode,
+    builder: (context, mode, _) => _pageRow(
+      _Page.look,
+      key: 'settings-look',
+      tone: 0,
+      mark: SettingsGlyph.appearance,
+      title: '외형',
+      subtitle: '${phoneModes.firstWhere((m) => m.$1 == mode).$3} · 색 · 날씨',
     ),
-    ListenableBuilder(
-      listenable: weather.settings,
-      builder: (context, _) {
-        final w = weather.settings.value;
-        return _pageRow(
-          _Page.weather,
-          key: 'settings-weather',
-          tone: tone,
-          icon: Icons.umbrella_outlined,
-          title: '날씨',
-          subtitle: w.enabled ? '${w.amount.label} · ${w.target.label}' : '꺼짐 · 카드와 단추에 비를 내려요',
-        );
-      },
-    ),
-  ];
+  );
 
-  /// 「에이전트」 — 데스크톱 「계정」·「코딩 에이전트」·「캐릭터」. 계정과 학생 명단은 계정 공통 설정이라 계정으로 붙었을 때만.
   List<Widget> _agentRows(int tone) {
     final api = _api;
     return [
-      if (api != null)
-        _pageRow(
-          _Page.account,
-          key: 'settings-account',
-          tone: tone,
-          icon: Icons.manage_accounts_outlined,
-          title: '계정',
-          subtitle: _accountLine(),
-        ),
       _pageRow(
         _Page.agents,
         key: 'claude-accounts',
         tone: tone,
-        icon: Icons.smart_toy_outlined,
+        mark: SettingsGlyph.agents,
         title: '코딩 에이전트',
         subtitle: 'Claude 계정 · 폰에서 다시 로그인',
       ),
@@ -406,7 +388,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _Page.characters,
           key: 'character-picks',
           tone: tone,
-          icon: Icons.groups_2_outlined,
+          mark: SettingsGlyph.characters,
           title: '캐릭터',
           subtitle: '캐릭터 테마와 새 창에 나올 캐릭터 · 모든 기기 같이',
         ),
@@ -425,16 +407,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ways.isEmpty ? '로그인 방법 · 일 권한' : '${ways.join('·')} 로그인 · 일 권한';
   }
 
-  /// 「앱」 — 데스크톱 「연결 기기」와 이 앱의 판. 「앱 일반」·「피드백」은 폰에 없다.
-  List<Widget> _appRows(int tone) => [
+  List<Widget> _connectionRows(int tone) => [
+    if (_api != null)
+      _pageRow(
+        _Page.account,
+        key: 'settings-account',
+        tone: tone,
+        mark: SettingsGlyph.account,
+        title: '계정',
+        subtitle: _accountLine(),
+      ),
     _pageRow(
       _Page.devices,
       key: 'settings-devices',
       tone: tone,
-      icon: Icons.devices_outlined,
+      mark: SettingsGlyph.devices,
       title: '연결 기기',
       subtitle: _api != null ? '기기 이름 · PC 기능 · 비밀 승인 · 브라우저' : 'PC 기능 · 브라우저 · 개발 서버',
     ),
+  ];
+
+  List<Widget> _appRows(int tone) => [
     FutureBuilder<AppRelease?>(
       future: _release,
       builder: (context, snap) {
@@ -443,7 +436,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return SettingsRow(
           key: const Key('app-release'),
           tone: tone,
-          icon: fresh ? Icons.system_update_outlined : Icons.info_outline_rounded,
+          mark: SettingsGlyph.release,
           title: '앱 판',
           subtitle: fresh
               ? '새 판 ${r.version} (${r.build}) · 눌러서 설치'

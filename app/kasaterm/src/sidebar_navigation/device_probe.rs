@@ -8,6 +8,7 @@ pub(super) fn fixture(label: &str, count: usize) -> state::MachinesColMachine {
         label: label.into(), online: true, ago_secs: Some(0), outdated: false,
         mirrored: Vec::new(), closed: 0, web_shells: Vec::new(), link: Default::default(),
         remote: (0..count).map(|n| state::MachinesColRow {
+            background: false, done_until_ms: None,
             pane: String::new(), remote_id: format!("%device-probe-{n}"), remote_cwd: "/workspace/probe".into(),
             name: String::new(), title: format!("작업 {}", n + 1), status: "idle".into(),
             room: format!("검증 방 {}", n + 1), closed: false, rect: Some([0.0, 0.0, 1.0, 1.0]), window: Some(n as u64),

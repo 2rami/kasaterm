@@ -293,6 +293,7 @@ class CharacterPicksScreen extends StatefulWidget {
 
 class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
   late final store = CharacterPicksStore(server: widget.server, api: widget.api);
+  (ThemeCard, RosterMember)? _featured;
 
   @override
   void initState() {
@@ -369,7 +370,13 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
       );
     }
     final theme = Theme.of(context);
-    return ListView(
+    final pick = store.order.firstOrNull;
+    final card = store.themeOf(pick?.$1 ?? themeKeyOf(store.activeTheme));
+    final member = card == null
+        ? null
+        : store.rosterOf(card.key)?.members.where((m) => pick == null || m.name == pick.$2).firstOrNull;
+    final featured = _featured ?? ((card != null && member != null) ? (card, member) : null);
+    final list = ListView(
       padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap * 2),
       children: [
         SettingsGroup(
@@ -412,7 +419,13 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
                 ),
             ],
           ),
-        for (final t in store.themes) _ThemeGroup(store: store, card: t, say: _say),
+        for (final t in store.themes)
+          _ThemeGroup(
+            store: store,
+            card: t,
+            say: _say,
+            onPreview: (member) => setState(() => _featured = (t, member)),
+          ),
         Padding(
           padding: const EdgeInsets.fromLTRB(4, Look.groupGap, 4, 0),
           child: Text(
@@ -423,6 +436,27 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
         ),
       ],
     );
+    if (featured == null) return list;
+    final (previewTheme, student) = featured;
+    return LayoutBuilder(builder: (context, constraints) {
+      final portrait = (constraints.maxHeight * .19).clamp(40.0, 108.0);
+      return Column(children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
+          child: SizedBox(
+            width: double.infinity,
+            child: SettingsOverview(
+              key: const Key('character-preview'),
+              centered: constraints.maxHeight >= 370,
+              art: _Face(store: store, themeId: previewTheme.id, slug: student.slug, size: portrait),
+              title: student.name,
+              detail: '${previewTheme.label} · ${store.isOn(previewTheme.key, student.name) ? '새 창에 사용 중' : '선택 해제됨'}',
+            ),
+          ),
+        ),
+        Expanded(child: list),
+      ]);
+    });
   }
 
   String _themeLabel(String id) =>
@@ -439,11 +473,12 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
 
 /// 테마 하나 — 머리 줄(얼굴·이름·N명 중 K명)을 누르면 펼치고, 펼치면 전부·해제와 학생 칸.
 class _ThemeGroup extends StatelessWidget {
-  const _ThemeGroup({required this.store, required this.card, required this.say});
+  const _ThemeGroup({required this.store, required this.card, required this.say, required this.onPreview});
 
   final CharacterPicksStore store;
   final ThemeCard card;
   final void Function(String?) say;
+  final ValueChanged<RosterMember> onPreview;
 
   @override
   Widget build(BuildContext context) {
@@ -530,7 +565,7 @@ class _ThemeGroup extends StatelessWidget {
                                 ],
                               ),
                               const SizedBox(height: Look.cardGap),
-                              _Grid(store: store, card: card, roster: roster, say: say),
+                              _Grid(store: store, card: card, roster: roster, say: say, onPreview: onPreview),
                             ],
                           ),
                   ),
@@ -556,12 +591,13 @@ class _ThemeGroup extends StatelessWidget {
 }
 
 class _Grid extends StatelessWidget {
-  const _Grid({required this.store, required this.card, required this.roster, required this.say});
+  const _Grid({required this.store, required this.card, required this.roster, required this.say, required this.onPreview});
 
   final CharacterPicksStore store;
   final ThemeCard card;
   final Roster roster;
   final void Function(String?) say;
+  final ValueChanged<RosterMember> onPreview;
 
   @override
   Widget build(BuildContext context) {
@@ -585,7 +621,10 @@ class _Grid extends StatelessWidget {
                   member: m,
                   on: store.isOn(card.key, m.name),
                   rank: explicit ? order.indexWhere((e) => e.$1 == card.key && e.$2 == m.name) : -1,
-                  onTap: (on) async => say(await store.pick(card.key, m.name, on)),
+                  onTap: (on) async {
+                    onPreview(m);
+                    say(await store.pick(card.key, m.name, on));
+                  },
                 ),
               ),
           ],

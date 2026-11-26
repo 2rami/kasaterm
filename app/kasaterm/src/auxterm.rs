@@ -173,7 +173,7 @@ fn draw_term_header_btns(t: &mut AuxTerminal, w: f32) {
 
 /// Ctrl+글자 → 제어바이트(^A=0x01 … ^Z=0x1a). 메인 forward_key 의 같은 표를 winit
 /// KeyCode 기준으로 옮긴 것.
-fn ctrl_byte(code: winit::keyboard::KeyCode) -> Option<u8> {
+pub(crate) fn ctrl_byte(code: winit::keyboard::KeyCode) -> Option<u8> {
     use winit::keyboard::KeyCode;
     let b = match code {
         KeyCode::KeyA => 0x01,

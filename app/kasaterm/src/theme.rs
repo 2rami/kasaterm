@@ -1568,6 +1568,16 @@ pub(crate) fn settings_body() -> [u8; 4] {
     current_settings_plates()[2]
 }
 
+pub(crate) fn weather_settings_plates() -> [[u8; 4]; 3] {
+    let regular = current_settings_plates();
+    let weather = if is_light(regular[2]) {
+        [[228, 239, 250, 255], [234, 242, 252, 255], [243, 248, 254, 255]]
+    } else {
+        [[12, 20, 34, 255], [17, 29, 47, 255], [20, 35, 56, 255]]
+    };
+    std::array::from_fn(|i| lerp(regular[i], weather[i], 0.82))
+}
+
 #[derive(Clone, Copy)]
 struct SettingsLayerColors {
     bg: [u8; 4],
@@ -1610,6 +1620,10 @@ impl Drop for SettingsLayer {
 pub(crate) fn settings_layer(base: [u8; 4]) -> SettingsLayer {
     let colors = settings_layer_colors(base, text(), unpack(S_TEXT_MUTE.load(Ordering::Relaxed)));
     SettingsLayer(SETTINGS_LAYER.with(|layer| layer.replace(Some(colors))))
+}
+
+pub(crate) fn in_settings_layer() -> bool {
+    SETTINGS_LAYER.with(|layer| layer.get().is_some())
 }
 
 pub(crate) fn without_settings_layer() -> SettingsLayer {

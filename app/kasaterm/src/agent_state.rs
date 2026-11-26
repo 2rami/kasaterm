@@ -204,6 +204,7 @@ pub(crate) struct ModuleSigns {
 /// 판정 결과.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Resolved {
+    pub done_until_ms: Option<u64>,
     pub state: AgentState,
     pub source: Option<String>,
     pub completion: Option<u64>,
@@ -612,6 +613,11 @@ impl StateHub {
             .map(|r| r.state.clone())
             .unwrap_or_default()
     }
+    pub(crate) fn indicator_report(&self, surface: &str) -> (Option<u64>, bool) {
+        self.resolved.lock().unwrap().1.get(surface).map_or((None, false), |r|
+            (r.done_until_ms, r.report.as_ref().is_some_and(|report| report.blocked())))
+    }
+
     pub(crate) fn resolved(&self, surface: &str) -> Option<Resolved> {
         self.resolved.lock().unwrap().1.get(surface).cloned()
     }
@@ -676,8 +682,10 @@ impl StateHub {
             let mut evidence = Evidence { harness, ..Default::default() };
             let mut source = None;
             let mut continues = false;
+            let mut remote_done_until = None;
             if kasa_remote::remote::is_remote_pane(id) {
                 let facts = kasa_remote::remote::cached_fresh_pane(id);
+                remote_done_until = facts.as_ref().and_then(|v| v["response_end"]["done_until_ms"].as_u64());
                 let word = facts
                     .as_ref()
                     .and_then(|v| v.get("status").and_then(|s| s.as_str()))
@@ -780,9 +788,21 @@ impl StateHub {
                 Ok(mut reports) => current_report(&mut reports, id, &state),
                 Err(_) => previous.get(id).and_then(|prev| prev.report.clone()),
             };
+            let prior = previous.get(id).filter(|p| p.source == source);
+            let resting = matches!(state, AgentState::Idle | AgentState::Waiting { kind: WaitKind::Idle, .. });
+            let done_until_ms = if !resting || has_error || continues || evidence.bg_active || !evidence.questions.is_empty() {
+                None
+            } else if evidence.remote.is_some() {
+                remote_done_until
+            } else if prior.is_some_and(|p| p.state.is_busy() || (report.is_some() && p.report != report)
+                || (completion.is_some() && p.completion != completion)) && !report.as_ref().is_some_and(|r| r.blocked()) {
+                Some(kasa_socket::board::now_ms() + 6000)
+            } else {
+                prior.and_then(|p| p.done_until_ms)
+            };
             next.insert(
                 id.clone(),
-                Resolved { state, source, completion, questions: evidence.questions, reason,
+                Resolved { done_until_ms, state, source, completion, questions: evidence.questions, reason,
                     bg_active: evidence.bg_active, has_error, intent: evidence.intent, since, continues, report },
             );
         }
@@ -877,6 +897,7 @@ pub(crate) fn response_end(id: &str, r: &Resolved) -> Option<kasa_socket::backen
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     source.hash(&mut hash);
     Some(kasa_socket::backend::ResponseEnd {
+        done_until_ms: r.done_until_ms,
         surface_id: id.to_string(),
         session_id,
         source: format!("{:016x}", hash.finish()),

@@ -1398,6 +1398,8 @@ impl App {
         let cats = [
             ("일반", SettingsCat::General),
             ("외형", SettingsCat::Appearance),
+            ("날씨", SettingsCat::Weather),
+            ("앱 하단바", SettingsCat::Statusbar),
             ("에이전트", SettingsCat::Claude),
             ("계정", SettingsCat::Accounts),
             ("기계", SettingsCat::Machines),
@@ -2864,6 +2866,7 @@ impl App {
                     label: "맥북".into(), online: true, ago_secs: Some(0), outdated: false,
                     closed: 0, web_shells: Vec::new(), link: Default::default(),
                     mirrored: vec![crate::state::MachinesColRow {
+                        background: false, done_until_ms: None,
                         pane: "%2".into(), remote_id: "%13".into(), name: "하치와레".into(),
                         title: "브라우저 연동".into(), status: "working".into(),
                         room: "방 1 · 브라우저".into(), remote_cwd: String::new(), closed: false,
@@ -2872,6 +2875,7 @@ impl App {
                         error: None,
                     }],
                     remote: vec![crate::state::MachinesColRow {
+                        background: false, done_until_ms: None,
                         pane: String::new(), remote_id: "%4".into(), name: "히후미".into(),
                         title: "모바일 연결".into(), status: "idle".into(),
                         room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
@@ -2879,6 +2883,7 @@ impl App {
                         attention_kind: None,
                         error: None,
                     }, crate::state::MachinesColRow {
+                        background: false, done_until_ms: None,
                         pane: String::new(), remote_id: "%5".into(), name: "아루".into(),
                         title: "탭 학생".into(), status: "idle".into(),
                         room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
@@ -2886,6 +2891,7 @@ impl App {
                         attention_kind: None,
                         error: None,
                     }, crate::state::MachinesColRow {
+                        background: false, done_until_ms: None,
                         pane: String::new(), remote_id: "%6".into(), name: "카즈사".into(),
                         title: "옆 자리".into(), status: "waiting".into(),
                         room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
@@ -2895,6 +2901,7 @@ impl App {
                     }, crate::state::MachinesColRow {
                         // 같은 `waiting` 낱말인데 주황으로 부르지 않는 쪽 — 화면에서 둘을
                         // 나란히 놓아야 가름이 도로 무너졌을 때 눈에 띈다.
+                        background: false, done_until_ms: None,
                         pane: String::new(), remote_id: "%7".into(), name: "시로코".into(),
                         title: "다음 지시 기다림".into(), status: "waiting".into(),
                         room: "방 3 · 방치".into(), remote_cwd: String::new(), closed: false,
@@ -4223,7 +4230,7 @@ impl App {
         }
     }
 
-    /// `KASATERM_AUTOSETTINGS_TOUR=<폴더>` — 설정이 열린 뒤 옆 목록의 칸(+캐릭터 테마)을
+    /// `KASATERM_AUTOSETTINGS_TOUR=<폴더>` — 설정이 열린 뒤 옆 목록의 칸과 하위 페이지를
     /// 차례로 열고 `<번호>-<칸>-<쪽>.png` 로 찍는다. 0쪽은 사람이 처음 보는 접힌 화면이고,
     /// 1쪽부터는 보이는 펼침을 다 열고 한 화면씩 내려간다 — 접힌 칸 안의 잔재가 안 보이면
     /// 정리할 목록에서 빠진다. 그림·한도 같은 캐시가 늦게 차므로 한 걸음마다 0.8초를 둔다.
@@ -4239,8 +4246,8 @@ impl App {
             };
             let _ = std::fs::create_dir_all(&dir);
             let mut cats = SettingsCat::nav().to_vec();
-            if !cats.contains(&SettingsCat::Theme) {
-                cats.push(SettingsCat::Theme);
+            if !crate::lite_mode() {
+                cats.extend([SettingsCat::Weather, SettingsCat::Statusbar, SettingsCat::Theme]);
             }
             *guard = Some(SettingsTour {
                 dir: dir.into(),
@@ -4375,6 +4382,25 @@ impl App {
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
             "custom-color-probe" if crate::verification_run() => self.probe_custom_colors(),
+            "appearance-shell-probe" | "appearance-accent-probe" if crate::verification_run() => {
+                let target = self.settings_scene.hits().iter()
+                    .find(|hit| hit.target == crate::native_settings::Target::PreviewShell)
+                    .map(|hit| hit.rect);
+                if let Some((x, y, w, h)) = target {
+                    self.native_settings_click(x + w * 0.5, y + h * 0.5);
+                    self.settings_scene.appearance_shell.send(br#"printf '\033[36m%s%s\033[0m\n' KASA_ PTY_OK"#);
+                    self.settings_scene.appearance_shell.send(b"\r");
+                }
+                if std::env::var("KASATERM_AUTOSETTINGS_ACTION").as_deref() == Ok("appearance-accent-probe") {
+                    self.prime_hit_areas();
+                    let target = self.settings_scene.hits().iter()
+                        .find(|hit| hit.target == crate::native_settings::Target::AccentPreset("purple"))
+                        .map(|hit| hit.rect);
+                    if let Some((x, y, w, h)) = target {
+                        self.native_settings_click(x + w * 0.5, y + h * 0.5);
+                    }
+                }
+            }
             "focus-custom-accent" if crate::verification_run() => self.settings_apply(SettingsAction::FocusColor(SettingsInput::AccentHex)),
             "focus-statusbar-color" if crate::verification_run() => self.settings_apply(SettingsAction::FocusColor(SettingsInput::StatusbarHex("claude"))),
             "settings-search" if crate::verification_run() => {

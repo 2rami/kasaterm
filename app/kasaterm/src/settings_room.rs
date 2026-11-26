@@ -22,9 +22,11 @@ pub(crate) struct SettingsSceneSnapshot {
 ///
 /// 방 순서를 바꾸거나 앞쪽 방을 닫으면 인덱스는 흔들리지만 marker leaf는 그대로다.
 /// 돌아갈 자리도 같은 이유로 window index가 아니라 pane id를 기억한다.
-#[derive(Clone, Debug)]
 pub(crate) struct SettingsScene {
     category: SettingsCat,
+    pub(crate) appearance_jump: Option<SettingsCat>,
+    pub(crate) appearance_shell: crate::native_settings::appearance_shell::PreviewShell,
+    pub(crate) weather_phase: crate::weather::indicator::Phase,
     return_pane: Option<String>,
     cache: crate::native_settings::SettingsCache,
     scroll: f32,
@@ -64,7 +66,10 @@ pub(crate) struct SettingsScene {
 impl Default for SettingsScene {
     fn default() -> Self {
         Self {
-            category: SettingsCat::Students,
+            category: SettingsCat::NAV[0],
+            appearance_jump: None,
+            appearance_shell: Default::default(),
+            weather_phase: crate::weather::indicator::Phase::Working,
             return_pane: None,
             cache: crate::native_settings::SettingsCache::default(),
             scroll: 0.0,
@@ -199,9 +204,14 @@ impl SettingsScene {
     }
 
     pub(crate) fn set_category(&mut self, category: SettingsCat) {
-        // 「터미널」 페이지는 「앱 일반」의 셸 묶음으로 합쳤다 — 옛 딥링크(`shell`)도 그리로 간다.
-        let category = if category == SettingsCat::Shell { SettingsCat::General } else { category };
-        if self.category != category {
+        self.appearance_jump = SettingsCat::APPEARANCE_SECTIONS.contains(&category).then_some(category);
+        let category = match category {
+            SettingsCat::Shell => SettingsCat::General,
+            SettingsCat::Weather | SettingsCat::Statusbar => SettingsCat::Appearance,
+            _ => category,
+        };
+        if category != SettingsCat::Appearance { self.appearance_shell.close(); }
+        if self.category != category || category == SettingsCat::Appearance {
             self.category = category;
             self.scroll = 0.0;
             self.hits.clear();
@@ -267,6 +277,15 @@ impl SettingsScene {
         changed
     }
 
+    pub(crate) fn finish_appearance_jump(&mut self, scroll: f32) -> bool {
+        self.appearance_jump = None;
+        let next = scroll.clamp(0.0, self.scroll_max);
+        let changed = (next - self.scroll).abs() > f32::EPSILON;
+        // Keep hit areas matched to the frame already on screen until the destination is painted.
+        self.scroll = next;
+        changed
+    }
+
     pub(crate) fn invalidate_hits(&mut self) {
         self.hits.clear();
         self.keyboard_focus = None;
@@ -294,6 +313,9 @@ impl SettingsScene {
     pub(crate) fn field_is_current(&self, field: SettingsInput) -> bool {
         self.pending_field_focus == Some(field)
             || self.hits.iter().any(|hit| hit.target == crate::native_settings::Target::Focus(field))
+            || (field == SettingsInput::AccentHex && self.hits.iter().any(|hit| {
+                hit.target == crate::native_settings::Target::Setting(SettingsAction::PickerSV(field))
+            }))
     }
 
     pub(crate) fn set_keyboard_focus(&mut self, target: Option<crate::native_settings::Target>) {
@@ -501,6 +523,7 @@ impl SettingsScene {
     }
 
     pub(crate) fn leave(&mut self) {
+        self.appearance_shell.close();
         self.return_pane = None;
         self.hits.clear();
         self.caret_rect = None;
@@ -1058,9 +1081,23 @@ mod tests {
     }
 
     #[test]
+    fn appearance_links_open_sections_in_one_page() {
+        let mut scene = SettingsScene::default();
+        for section in SettingsCat::APPEARANCE_SECTIONS {
+            scene.set_category(section);
+            assert_eq!(scene.category(), SettingsCat::Appearance);
+            assert_eq!(scene.appearance_jump, Some(section));
+        }
+        scene.set_category(SettingsCat::Appearance);
+        assert_eq!(scene.appearance_jump, None);
+        assert_eq!(scene.scroll(), 0.0);
+    }
+
+    #[test]
     fn keyboard_focus_cycles_forward_backward_and_rejects_stale_categories() {
         use crate::native_settings::Target;
         let mut scene = SettingsScene::default();
+        scene.set_category(SettingsCat::Claude);
         let first = Target::Setting(SettingsAction::ToggleCharacterAppearance);
         let second = Target::Setting(SettingsAction::ToggleClaudePersona);
         keyboard_test_paint(&mut scene, vec![keyboard_test_hit(first.clone(), 0.0), keyboard_test_hit(second.clone(), 40.0)]);

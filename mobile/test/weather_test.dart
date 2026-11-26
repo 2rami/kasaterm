@@ -51,6 +51,42 @@ void main() {
     });
   });
 
+  test('each state can combine a condition with any subset of edges', () {
+    for (final phase in IndicatorPhase.values) {
+      for (var edges = 0; edges < 16; edges++) {
+        final rule = StateIndicator(weather: edges.isEven ? WeatherCondition.snow : null, edges: edges);
+        final settings = on.copyWith(style: RainStyle.showers, indicators: {phase: rule}, beads: false);
+        final restored = WeatherSettings.fromJson(settings.toJson());
+        expect(restored.indicator(phase).edges, edges);
+        expect(restored.indicator(phase).weather, rule.weather);
+        expect(restored.beads, false);
+      }
+    }
+    final older = WeatherSettings.fromJson({'style': 'showers', 'condition': 'snow'});
+    expect(older.indicator(IndicatorPhase.working).weather, WeatherCondition.snow);
+    expect(older.indicator(IndicatorPhase.idle).weather, isNull);
+    expect(older.beads, true);
+  });
+
+  test('work weather restores every condition and defaults older settings to rain', () {
+    expect(WeatherSettings.fromJson({'style': 'showers'}).condition, WeatherCondition.rain);
+    expect(WeatherSettings.fromJson({'condition': 'future'}).condition, WeatherCondition.rain);
+    for (final condition in WeatherCondition.values) {
+      final settings = on.copyWith(style: RainStyle.showers, condition: condition);
+      expect(WeatherSettings.fromJson(settings.toJson()), settings);
+    }
+  });
+
+  test('showers round-trips independently of the liquid effect switches', () {
+    expect(WeatherSettings.fromJson({}).style, RainStyle.liquid);
+    final s = on.copyWith(style: RainStyle.showers, effects: {});
+    expect(WeatherSettings.fromJson(s.toJson()), s);
+    expect(verdict(s, const OsMotion()), (active: true, moving: true));
+    expect(verdict(s, const OsMotion(reduceMotion: true)).moving, false);
+    expect(verdict(s, const OsMotion(reduceTransparency: true)).active, false);
+    expect(verdict(s.copyWith(style: RainStyle.liquid), const OsMotion()).active, false);
+  });
+
   test('「초점 카드만」이면 방금 만진 카드에만 온다', () {
     expect(cardAmount(on, CardWeather.follow, focused: true), RainAmount.drizzle);
     expect(cardAmount(on, CardWeather.follow, focused: false), RainAmount.none);
@@ -122,6 +158,43 @@ void main() {
     tester.platformDispatcher.clearAccessibilityFeaturesTestValue();
     weather.didChangeAccessibilityFeatures();
     expect(weather.reduceMotion.value, isFalse);
+  });
+
+  testWidgets('work rain replaces the outline and stops ticking after it clears', (tester) async {
+    weather.settings.value = on.copyWith(style: RainStyle.showers);
+    final working = ValueNotifier(false);
+    addTearDown(working.dispose);
+    addTearDown(() => weather.settings.value = const WeatherSettings());
+    await tester.pumpWidget(MaterialApp(
+      home: WeatherScene(
+        child: ValueListenableBuilder(
+          valueListenable: working,
+          builder: (_, active, _) => WorkWeather(
+            id: 'pane',
+            phase: active ? IndicatorPhase.working : IndicatorPhase.idle,
+            radius: BorderRadius.zero,
+            builder: (replaces) => SizedBox(width: 120, height: 60, child: Text(replaces ? 'custom' : 'outline')),
+          ),
+        ),
+      ),
+    ));
+    await tester.pump();
+    expect(find.text('custom'), findsOneWidget);
+    expect(tester.binding.transientCallbackCount, 0);
+    working.value = true;
+    await tester.pump();
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    expect(find.text('custom'), findsOneWidget);
+    working.value = false;
+    await tester.pump();
+    expect(find.text('custom'), findsOneWidget);
+    expect(tester.binding.transientCallbackCount, greaterThan(0));
+    for (var i = 0; i < 43; i++) {
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    expect(tester.binding.transientCallbackCount, 0);
   });
 
   testWidgets('날씨가 꺼져 있으면 카드와 화면 층은 아무것도 더 그리지 않는다', (tester) async {

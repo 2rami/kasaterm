@@ -107,6 +107,18 @@ fn contains(rect: Rect, cursor: (f32, f32)) -> bool {
         && cursor.1 < rect.1 + rect.3
 }
 
+pub(crate) fn capsule_radius(rect: Rect) -> f32 {
+    rect.2.min(rect.3) * 0.5
+}
+
+fn control_radius(rect: Rect) -> f32 {
+    if theme::in_settings_layer() && rect.3 <= CONTROL_HEIGHT {
+        capsule_radius(rect)
+    } else {
+        theme::radius_sm()
+    }
+}
+
 pub(crate) fn focus_ring(g: &mut gpu::GpuRenderer, rect: Rect) {
     if rect.2 > 0.0 && rect.3 > 0.0 {
         g.round_rect_stroke(
@@ -114,7 +126,7 @@ pub(crate) fn focus_ring(g: &mut gpu::GpuRenderer, rect: Rect) {
             rect.1,
             rect.2,
             rect.3,
-            theme::radius_sm(),
+            control_radius(rect),
             theme::border_w().max(2.0),
             theme::enforce_contrast_at(theme::accent(), theme::bg(), 3.0),
         );
@@ -124,7 +136,7 @@ pub(crate) fn focus_ring(g: &mut gpu::GpuRenderer, rect: Rect) {
                 rect.1 + 2.0,
                 rect.2 - 4.0,
                 rect.3 - 4.0,
-                (theme::radius_sm() - 2.0).max(0.0),
+                (control_radius(rect) - 2.0).max(0.0),
                 1.0,
                 theme::foreground_on(theme::accent()),
             );
@@ -132,8 +144,31 @@ pub(crate) fn focus_ring(g: &mut gpu::GpuRenderer, rect: Rect) {
     }
 }
 
+pub(crate) fn settings_button_colors(style: Style, hover: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
+    let base = theme::bg();
+    let accent = theme::accent();
+    let text = theme::text();
+    let emphasis = style.enabled && (style.primary || style.active);
+    let tint = if emphasis { accent } else { theme::lerp(text, accent, 0.48) };
+    let wash = match (style.enabled, emphasis, hover) {
+        (false, _, _) => 0.04,
+        (_, true, true) => 0.31,
+        (_, true, _) => 0.23,
+        (_, _, true) => 0.14,
+        _ => 0.08,
+    };
+    let fill = theme::lerp(base, tint, wash);
+    let border = theme::lerp(base, tint, if emphasis { if style.primary { 0.67 } else { 0.52 } } else { wash + 0.09 });
+    let ink = if !style.enabled { theme::text_mute() }
+        else if emphasis { theme::lerp(text, accent, 0.28) }
+        else { text };
+    (fill, border, button_ink(ink, fill))
+}
+
 fn colors(style: Style, hover: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
-    if !style.enabled {
+    if theme::in_settings_layer() && !style.danger {
+        settings_button_colors(style, hover)
+    } else if !style.enabled {
         (theme::surface(), theme::border(), theme::text_mute())
     } else if style.danger {
         let fill = theme::lerp(
@@ -261,13 +296,13 @@ pub(crate) fn panel(g: &mut gpu::GpuRenderer, r: Rect, fill: [u8; 4]) {
 
 pub(crate) fn field(g: &mut gpu::GpuRenderer, r: Rect, focused: bool) {
     let fill = theme::lerp(theme::surface(), theme::bg(), 0.4);
-    g.round_rect_fill(r.0, r.1, r.2, r.3, theme::radius_sm(), fill);
+    g.round_rect_fill(r.0, r.1, r.2, r.3, control_radius(r), fill);
     g.round_rect_stroke(
         r.0,
         r.1,
         r.2,
         r.3,
-        theme::radius_sm(),
+        control_radius(r),
         if focused { 2.0 } else { 1.0 },
         if focused {
             theme::enforce_contrast_at(theme::accent(), fill, 3.0)
@@ -287,13 +322,13 @@ pub(crate) fn text_button(
     let rect = bounds(rect);
     let hover = style.enabled && contains(rect, cursor);
     let (fill, line, ink) = colors(style, hover);
-    g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), fill);
+    g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, control_radius(rect), fill);
     g.round_rect_stroke(
         rect.0,
         rect.1,
         rect.2,
         rect.3,
-        theme::radius_sm(),
+        control_radius(rect),
         theme::border_w().max(1.0),
         line,
     );
@@ -337,13 +372,13 @@ pub(crate) fn icon_button(
         ink
     };
     if hover || style.active {
-        g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), fill);
+        g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, control_radius(rect), fill);
         g.round_rect_stroke(
             rect.0,
             rect.1,
             rect.2,
             rect.3,
-            theme::radius_sm(),
+            control_radius(rect),
             theme::border_w().max(1.0),
             line,
         );

@@ -220,6 +220,7 @@ pub(crate) fn plain_title(title: &str) -> &str {
 
 /// 줄 하나를 그리는 데 필요한 것 — 이 기기 방과 다른 기기 방이 같은 그림을 쓴다.
 pub(crate) struct RowPaint<'a> {
+    pub(crate) custom_indicators: bool,
     pub(crate) student: &'a RowStudent,
     pub(crate) detail: Option<&'a str>,
     /// 얼굴이 없을 때 서는 아이콘.
@@ -301,7 +302,7 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
             crate::render::progress_bar(g, tx, bar_y, bar_w, p.compact_pct);
         }
     }
-    if band.is_none() {
+    if band.is_none() && !p.custom_indicators {
         crate::render::activity_mark(g, rect, theme::radius_sm(), p.busy, p.bg_active, p.cur, 0.0);
     }
 }

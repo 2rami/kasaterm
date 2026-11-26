@@ -210,6 +210,7 @@ mod tests {
 
     fn row(id: &str, window: u64, room: &str) -> state::MachinesColRow {
         state::MachinesColRow {
+            background: false, done_until_ms: None,
             pane: String::new(), remote_id: id.into(), remote_cwd: String::new(), name: String::new(),
             title: String::new(), status: String::new(), room: room.into(), closed: false, rect: None,
             window: Some(window), tab_of: None, attention_kind: None, error: None,

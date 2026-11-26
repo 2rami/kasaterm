@@ -14,6 +14,29 @@ import 'store.dart';
 abstract interface class WeatherPlace {
   Rect? rectIn(RenderBox scene);
   RainAmount get amount;
+  String get placeId;
+}
+
+abstract interface class WorkWeatherPlace implements WeatherPlace {
+  BorderRadius get corners;
+  StateIndicator get indicator;
+}
+
+class _ShowerFade {
+  _ShowerFade(this.amount);
+
+  WeatherCondition condition = WeatherCondition.rain;
+  RainAmount amount;
+  double opacity = 0;
+
+  void step(RainAmount target, double dt, bool moving) {
+    if (target != RainAmount.none) {
+      amount = target;
+      opacity = moving ? math.min(1.0, opacity + dt / 0.35) : 1;
+    } else {
+      opacity = moving ? math.max(0.0, opacity - dt / 1.6) : 0;
+    }
+  }
 }
 
 /// 날씨가 이 화면에서 켜져 있는지와 움직이는지. 카드·층이 같은 답을 본다.
@@ -29,9 +52,10 @@ abstract interface class WeatherPlace {
 /// 물방울. 단추는 화면을 훑어 찾는다(데스크톱이 그 장에 그려진 조작을 모으는 것과 같다) — 화면마다
 /// 단추를 따로 감싸지 않는다. 날씨가 꺼져 있으면 훑기·틱·셰이더가 없다.
 class WeatherScene extends StatefulWidget {
-  const WeatherScene({super.key, required this.child});
+  const WeatherScene({super.key, required this.child, this.workOnly = false});
 
   final Widget child;
+  final bool workOnly;
 
   static WeatherSceneState? maybeOf(BuildContext context) =>
       context.getInheritedWidgetOfExactType<_SceneScope>()?.state;
@@ -68,6 +92,8 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
   static ui.FragmentShader? _rainShader;
 
   final _places = <WeatherPlace>{};
+  final _workPlaces = <WorkWeatherPlace>{};
+  final _workFades = <WorkWeatherPlace, _ShowerFade>{};
   final _spots = <Element, _Spot>{};
   final _guards = <RenderBox>[];
   final _repaint = ValueNotifier<int>(0);
@@ -77,14 +103,42 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
   // dispose 에서 새로 만들면 이미 떨어진 TickerMode 를 찾다 터진다.
   Ticker? _made;
   Ticker get _ticker => _made ??= createTicker(_tick);
-  ui.FragmentShader? _buttons;
+  ui.FragmentShader? _buttons, _showers;
+  Future<void>? _loadingShowers;
+  bool _placesPending = false;
+  bool get _showerStyle => weather.settings.value.style == RainStyle.showers;
   Timer? _scan;
   Duration _last = Duration.zero;
   ({bool active, bool moving}) _v = (active: false, moving: false);
   bool _current = true;
 
   void register(WeatherPlace p) => _places.add(p);
+
   void unregister(WeatherPlace p) => _places.remove(p);
+
+  void registerWork(WorkWeatherPlace p) {
+    _workPlaces.add(p);
+    workChanged();
+  }
+
+  void unregisterWork(WorkWeatherPlace p) {
+    _workPlaces.remove(p);
+    _workFades.remove(p);
+    workChanged();
+  }
+
+  void workChanged() {
+    if (!_showerStyle || _placesPending) return;
+    _placesPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _placesPending = false;
+      if (!mounted) return;
+      if (!_v.moving) _advanceShowers(0);
+      _updateScan();
+      _kick();
+      _repaint.value++;
+    });
+  }
 
   RenderBox? get _sceneBox {
     final r = _paintKey.currentContext?.findRenderObject();
@@ -105,6 +159,11 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
     setState(() => _buttons = _buttonsProgram!.fragmentShader());
   }
 
+  Future<void> _loadShowers() async {
+    final program = await ui.FragmentProgram.fromAsset('shaders/weather_showers.frag');
+    if (mounted) setState(() => _showers = program.fragmentShader());
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -120,28 +179,60 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
     _repaint.dispose();
     _time.dispose();
     _buttons?.dispose();
+    _showers?.dispose();
     super.dispose();
   }
 
   void _sync() {
     if (!mounted) return;
-    final v = weatherVerdictOf(context);
-    final wasActive = _v.active;
+    final v = widget.workOnly && !_showerStyle
+        ? (active: false, moving: false)
+        : weatherVerdictOf(context);
     _v = v;
-    if (v.active && _buttons == null) _load();
-    final s = weather.settings.value;
-    final wantsButtons = v.active && _current && s.has(Effect.buttons);
-    if (wantsButtons && _scan == null) {
+    if (v.active && _showerStyle) {
+      _loadingShowers ??= _loadShowers();
+    } else if (v.active && _buttons == null) {
+      _load();
+    }
+    if (!v.active || !_showerStyle) {
+      _workFades.clear();
+    } else if (!v.moving) {
+      _advanceShowers(0);
+    }
+    _updateScan();
+    _kick();
+    setState(() {});
+    _repaint.value++;
+  }
+
+  bool get _wetWork => _workFades.isNotEmpty || _workPlaces.any((p) => p.amount != RainAmount.none || p.indicator.edges != 0);
+
+  void _updateScan() {
+    final wantsScan = _v.active && _current &&
+        (_showerStyle ? _wetWork : weather.settings.value.has(Effect.buttons));
+    if (wantsScan && _scan == null) {
       _scan = Timer.periodic(const Duration(milliseconds: 300), (_) => _collect());
       _collect();
-    } else if (!wantsButtons && _scan != null) {
+    } else if (!wantsScan && _scan != null) {
       _scan?.cancel();
       _scan = null;
       _spots.clear();
+      _guards.clear();
     }
-    _kick();
-    if (wasActive != v.active) setState(() {});
-    _repaint.value++;
+  }
+
+  void _advanceShowers(double dt) {
+    if (!_v.active || !_showerStyle) return;
+    for (final p in _workPlaces) {
+      final target = p.amount;
+      final rule = p.indicator;
+      if (target != RainAmount.none || rule.edges != 0) _workFades.putIfAbsent(p, () => _ShowerFade(target));
+      final fade = _workFades[p];
+      if (fade == null) continue;
+      if (rule.weather != null) fade.condition = rule.weather!;
+      fade.step(target, dt, _v.moving);
+      if (fade.opacity == 0 && rule.edges == 0) _workFades.remove(p);
+    }
   }
 
   bool get _raining =>
@@ -149,11 +240,13 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
       backgroundAmount(weather.settings.value) != RainAmount.none;
 
   void _kick() {
-    final want = _v.moving && _current && (_raining || _spots.values.any((s) => s.busy));
-    if (want && !_ticker.isActive) {
+    final wetScene = _showerStyle ? _wetWork : _raining || _spots.values.any((s) => s.busy);
+    final want = _v.moving && _current && wetScene;
+    final ticking = _made?.isActive ?? false;
+    if (want && !ticking) {
       _last = Duration.zero;
       _ticker.start();
-    } else if (!want && _ticker.isActive) {
+    } else if (!want && ticking) {
       _ticker.stop();
     }
   }
@@ -162,6 +255,10 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
     final dt = _last == Duration.zero ? 1 / 60 : math.min(0.05, (now - _last).inMicroseconds / 1e6);
     _last = now;
     _time.value = (_time.value + dt) % 1000;
+    if (_showerStyle) {
+      _advanceShowers(dt);
+      if (!_wetWork) _updateScan();
+    }
     for (final s in _spots.values) {
       final steps = (dt * 480).ceil().clamp(1, 64);
       final h = dt / steps;
@@ -203,7 +300,7 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
         if (r is RenderBox) _guards.add(r);
         return;
       }
-      if (enabled != null) {
+      if (enabled != null && !_showerStyle) {
         final r = e.findRenderObject();
         if (r is RenderBox) {
           final spot = _spots[e];
@@ -238,6 +335,7 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
   }
 
   void _press(Offset global, bool down) {
+    if (_showerStyle) return;
     final scene = _sceneBox;
     if (scene == null) return;
     final local = scene.globalToLocal(global);
@@ -290,7 +388,7 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
             key: _paintKey,
             fit: StackFit.passthrough,
             children: [
-              if (active && rain != null)
+              if (active && !_showerStyle && rain != null)
                 Positioned.fill(
                   child: IgnorePointer(
                     child: RepaintBoundary(
@@ -310,7 +408,13 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
                   ),
                 ),
               KeyedSubtree(key: const ValueKey('weather-scene-child'), child: widget.child),
-              if (active && _buttons != null && weather.settings.value.has(Effect.buttons))
+              if (active && _showerStyle && _showers != null)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: RepaintBoundary(child: CustomPaint(painter: _ShowersPainter(this, _showers!, dark, Theme.of(context).colorScheme.primary))),
+                  ),
+                ),
+              if (active && !_showerStyle && _buttons != null && weather.settings.value.has(Effect.buttons))
                 Positioned.fill(
                   child: IgnorePointer(
                     child: CustomPaint(painter: _ButtonsPainter(this, _buttons!, dark)),
@@ -322,6 +426,76 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
       ),
     );
   }
+}
+
+class _ShowersPainter extends CustomPainter {
+  _ShowersPainter(this.scene, this.shader, this.dark, this.barColor) : super(repaint: scene._repaint);
+
+  final Color barColor;
+  final WeatherSceneState scene;
+  final bool dark;
+  final ui.FragmentShader shader;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final box = scene._sceneBox;
+    if (box == null || scene._workFades.isEmpty) return;
+    final bounds = Offset.zero & size;
+    final settings = weather.settings.value;
+    final moving = scene._v.moving;
+    final paint = Paint();
+    shader
+      ..setFloat(2, scene._time.value)
+      ..setFloat(4, settings.wind * 0.68)
+      ..setFloat(6, moving ? 1 : 0)
+      ..setFloat(8, dark ? 1 : 0)
+      ..setFloat(14, settings.beads ? 1 : 0)
+      ..setFloat(16, barColor.r)..setFloat(17, barColor.g)..setFloat(18, barColor.b);
+
+    void draw(Rect area, Offset origin, _ShowerFade fade, double seed, double pass) {
+      shader
+        ..setFloat(0, origin.dx)
+        ..setFloat(1, origin.dy)
+        ..setFloat(3, const [0.0, 0.24, 0.62, 1.0][fade.amount.index])
+        ..setFloat(5, seed)
+        ..setFloat(7, pass)
+        ..setFloat(9, fade.opacity);
+      canvas.drawRect(area, paint..shader = shader);
+    }
+
+    canvas.save();
+    canvas.clipRect(bounds);
+    for (final field in scene._guards) {
+      if (field.attached && field.hasSize) {
+        final rect = field.localToGlobal(Offset.zero, ancestor: box) & field.size;
+        canvas.clipRect(rect.inflate(6), clipOp: ui.ClipOp.difference);
+      }
+    }
+    for (final MapEntry(key: place, value: fade) in scene._workFades.entries) {
+      final rect = place.rectIn(box);
+      if (rect == null || rect.isEmpty || !rect.overlaps(bounds)) continue;
+      final seed = (place.placeId.hashCode % 997).toDouble();
+      canvas.save();
+      canvas.clipRRect(place.corners.toRRect(rect));
+      shader
+        ..setFloat(10, fade.condition.material.toDouble())
+        ..setFloat(11, fade.condition.variant.toDouble())
+        ..setFloat(12, rect.width)..setFloat(13, rect.height)
+        ..setFloat(15, place.indicator.edges.toDouble());
+      if (fade.opacity > 0) draw(rect, rect.topLeft, fade, seed, 1);
+      if (place.indicator.edges != 0) draw(rect, rect.topLeft, fade, seed, 3);
+      canvas.restore();
+      // The splash clears the clip on the top edge without crossing the scene's input guards.
+      if (fade.condition.material == 0 && moving && fade.opacity > 0.28 && rect.width > 16) {
+        draw(Rect.fromLTRB(rect.left + 8, rect.top - 32, rect.right - 8, rect.top + 2),
+            rect.topLeft, fade, seed, 2);
+      }
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_ShowersPainter old) => true;
 }
 
 class _ButtonsPainter extends CustomPainter {

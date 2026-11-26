@@ -1093,6 +1093,9 @@ pub(crate) fn paint(
         caret_rect,
         multiline_layouts: Vec::new(),
         motion_preview_visible: false,
+        weather_preview: None,
+        appearance_scroll: None,
+        preview_shell_size: None,
     }
 }
 

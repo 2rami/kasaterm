@@ -1195,6 +1195,9 @@ impl App {
                 self.settings_input = Some(SettingsInput::CustomThemeLabel);
             }
             SettingsAction::FocusPaletteHex(i) => {
+                if self.settings_scene.category() == SettingsCat::Appearance {
+                    self.settings_scene.appearance_jump = Some(SettingsCat::Appearance);
+                }
                 if theme::active_custom_slug().is_none() {
                     self.settings_apply(SettingsAction::StartCustomTheme);
                 }
@@ -3266,12 +3269,12 @@ impl App {
     /// 콜백은 `App` 을 못 들고 오므로 색만 통에 놓고 가고, 꺼내는 건 여기다.
     pub(crate) fn pump_eyedropper(&mut self) {
         let Some((field, rgb)) = crate::eyedropper::take_picked() else { return; };
-        if !field.is_color() { return; }
+        if !field.is_color() || (field == SettingsInput::AccentHex && self.settings_input != Some(field)) { return; }
         let previous = self.set_palette_edit.clone();
         let previous_hsv = self.set_picker_hsv;
         self.set_palette_edit = theme::hex_str(rgb);
         if self.settings_input == Some(field) { self.settings_scene.mark_field_dirty(); }
-        self.apply_color_edit(field);
+        self.update_color_edit(field);
         if self.settings_input != Some(field) {
             self.set_palette_edit = previous;
             self.set_picker_hsv = previous_hsv;
@@ -3290,13 +3293,29 @@ impl App {
         self.settings_input = Some(field);
     }
 
+    pub(crate) fn update_color_edit(&mut self, field: SettingsInput) {
+        if field == SettingsInput::AccentHex {
+            if let Some(rgb) = theme::parse_hex(&self.set_palette_edit) {
+                self.sync_picker_hsv(rgb);
+                self.preview_color_edit(field, rgb);
+            }
+        } else {
+            self.apply_color_edit(field);
+        }
+    }
+
     pub(crate) fn apply_color_edit(&mut self, field: SettingsInput) {
         let Some(rgb) = theme::parse_hex(&self.set_palette_edit) else { return; };
         self.sync_picker_hsv(rgb);
         let hex = theme::hex_str(rgb);
         match field {
             SettingsInput::PaletteHex(slot) => self.apply_palette_edit(slot),
-            SettingsInput::AccentHex => self.settings_apply(SettingsAction::Accent(hex)),
+            SettingsInput::AccentHex => {
+                let accent = theme::ACCENT_PRESETS.iter()
+                    .find(|(_, color)| color[..3] == rgb)
+                    .map_or(hex, |(name, _)| (*name).to_owned());
+                self.settings_apply(SettingsAction::Accent(accent));
+            }
             SettingsInput::StatusbarHex(id) => self.settings_apply(SettingsAction::SetStatusbarColor(id.to_string(), hex)),
             _ => {}
         }

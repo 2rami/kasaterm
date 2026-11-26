@@ -4,6 +4,7 @@ import '../claude_style.dart' show claudeBrand;
 import '../contrast.dart';
 import '../look.dart';
 import '../shell_blocks.dart' show tildePath;
+import 'settings_glyph.dart';
 
 /// 입력칸 오른쪽 보내기 44×44 — 글이 있으면 강조 채움·화살표, 없으면 톤 채움·흐린 화살표.
 /// 대화(`round`)는 A 이전 모습이라 늘 강조색으로 채운 원이다.
@@ -173,11 +174,122 @@ class LabeledField extends StatelessWidget {
   );
 }
 
+class SettingsOverview extends StatelessWidget {
+  const SettingsOverview({
+    super.key,
+    required this.art,
+    required this.title,
+    this.detail,
+    this.centered = false,
+  });
+
+  final Widget art;
+  final String title;
+  final String? detail;
+  final bool centered;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final summary = Column(
+      crossAxisAlignment: centered ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(title, style: theme.textTheme.titleMedium, textAlign: centered ? TextAlign.center : null),
+        if (detail case final text?) ...[
+          const SizedBox(height: 4),
+          Text(
+            text,
+            style: theme.textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+            textAlign: centered ? TextAlign.center : null,
+          ),
+        ],
+      ],
+    );
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Color.alphaBlend(colors.primary.withValues(alpha: 0.08), colors.surface),
+        borderRadius: Look.cardCorners,
+        border: Border.all(color: colors.outlineVariant),
+      ),
+      child: centered
+          ? Column(children: [art, const SizedBox(height: 12), summary])
+          : Row(children: [art, const SizedBox(width: 14), Expanded(child: summary)]),
+    );
+  }
+}
+
+ThemeData settingsControlsTheme(ThemeData theme) {
+  const shape = WidgetStatePropertyAll(StadiumBorder());
+  final input = theme.inputDecorationTheme;
+  final scheme = theme.colorScheme;
+  OutlineInputBorder roundedInput(InputBorder? border, BorderSide fallback) =>
+      OutlineInputBorder(
+        borderRadius: BorderRadius.circular(999),
+        borderSide: border?.borderSide ?? fallback,
+      );
+
+  ButtonStyle painted(ButtonStyle? style, {bool primary = false}) {
+    ({Color fill, Color line, Color ink}) palette(Set<WidgetState> states) => settingsButtonColors(
+      scheme,
+      primary: primary,
+      enabled: !states.contains(WidgetState.disabled),
+      hovered: states.contains(WidgetState.hovered) || states.contains(WidgetState.focused),
+    );
+    return (style ?? const ButtonStyle()).copyWith(
+      shape: shape,
+      backgroundColor: WidgetStateProperty.resolveWith((states) => palette(states).fill),
+      foregroundColor: WidgetStateProperty.resolveWith((states) => palette(states).ink),
+      side: WidgetStateProperty.resolveWith((states) => BorderSide(color: palette(states).line)),
+    );
+  }
+
+  return theme.copyWith(
+    filledButtonTheme: FilledButtonThemeData(
+      style: painted(theme.filledButtonTheme.style, primary: true),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(style: painted(theme.outlinedButtonTheme.style)),
+    elevatedButtonTheme: ElevatedButtonThemeData(style: painted(theme.elevatedButtonTheme.style)),
+    textButtonTheme: TextButtonThemeData(
+      style: (theme.textButtonTheme.style ?? const ButtonStyle()).copyWith(
+        shape: shape,
+        foregroundColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.disabled)) {
+            return scheme.onSurfaceVariant.withValues(alpha: 0.66);
+          }
+          final ink = Color.lerp(scheme.onSurface, scheme.primary, 0.38)!;
+          return enforceContrast(ink, scheme.surface, 4.5);
+        }),
+      ),
+    ),
+    iconButtonTheme: IconButtonThemeData(
+      style: (theme.iconButtonTheme.style ?? const ButtonStyle()).copyWith(shape: shape),
+    ),
+    inputDecorationTheme: input.copyWith(
+      border: roundedInput(input.border, BorderSide.none),
+      enabledBorder: roundedInput(input.enabledBorder, BorderSide.none),
+      disabledBorder: roundedInput(input.disabledBorder, BorderSide.none),
+      focusedBorder: roundedInput(input.focusedBorder, BorderSide(color: scheme.primary, width: 1.5)),
+      errorBorder: roundedInput(input.errorBorder, BorderSide(color: scheme.error)),
+      focusedErrorBorder: roundedInput(input.focusedErrorBorder, BorderSide(color: scheme.error, width: 1.5)),
+    ),
+  );
+}
+
 /// 설정 묶음 — 흐린 제목 하나와 둥근 판, 안의 줄 사이는 글자 시작점부터 선(design.md 「설정」).
 class SettingsGroup extends StatelessWidget {
-  const SettingsGroup({super.key, this.title, required this.children, this.inset});
+  const SettingsGroup({
+    super.key,
+    this.title,
+    required this.children,
+    this.inset,
+    this.flat = false,
+  });
 
   final String? title;
+  final bool flat;
   final List<Widget> children;
 
   /// 줄 사이 선이 시작하는 x — 기본은 `SettingsRow` 의 글자 시작점. 다른 줄(목록 타일)은 그 글자선을 준다.
@@ -186,7 +298,19 @@ class SettingsGroup extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final inset = this.inset ?? Look.cardPad + Look.tile + 12;
+    final inset = this.inset ?? (flat ? 0 : Look.cardPad + Look.tile + 12);
+    final rows = Material(
+      type: MaterialType.transparency,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final (i, row) in children.indexed) ...[
+            if (i > 0) Divider(height: 1, indent: inset),
+            row,
+          ],
+        ],
+      ),
+    );
     return Padding(
       padding: const EdgeInsets.only(top: Look.groupGap),
       child: Column(
@@ -194,30 +318,26 @@ class SettingsGroup extends StatelessWidget {
         children: [
           if (title != null)
             Padding(
-              padding: const EdgeInsets.fromLTRB(4, 0, 4, Look.groupTitleGap),
+              padding: EdgeInsets.fromLTRB(
+                flat ? 0 : 4,
+                0,
+                4,
+                Look.groupTitleGap,
+              ),
               child: Text(
                 title!,
-                style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-              ),
-            ),
-          DecoratedBox(
-            decoration: TwinTone.of(context).cardBox(),
-            child: ClipRRect(
-              borderRadius: Look.cardCorners,
-              child: Material(
-                type: MaterialType.transparency,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (final (i, row) in children.indexed) ...[
-                      if (i > 0) Divider(height: 1, indent: inset),
-                      row,
-                    ],
-                  ],
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
                 ),
               ),
             ),
-          ),
+          if (flat)
+            rows
+          else
+            DecoratedBox(
+              decoration: TwinTone.of(context).cardBox(),
+              child: ClipRRect(borderRadius: Look.cardCorners, child: rows),
+            ),
         ],
       ),
     );
@@ -229,7 +349,8 @@ class SettingsGroup extends StatelessWidget {
 class SettingsRow extends StatelessWidget {
   const SettingsRow({
     super.key,
-    required this.icon,
+    this.icon,
+    this.mark,
     required this.title,
     this.subtitle,
     this.trailing,
@@ -240,9 +361,11 @@ class SettingsRow extends StatelessWidget {
     this.danger = false,
     this.selected = false,
     this.logo,
+    this.flat = false,
   });
 
-  final IconData icon;
+  final IconData? icon;
+  final SettingsGlyph? mark;
 
   /// 타일 안에 아이콘 대신 그릴 그림(공급자 로고). 크기는 아이콘과 같다.
   final Widget? logo;
@@ -257,6 +380,7 @@ class SettingsRow extends StatelessWidget {
 
   /// 넓은 설정의 왼쪽 목록에서 오른쪽에 열린 페이지 — 고른 칸과 같은 강조 18% 물.
   final bool selected;
+  final bool flat;
 
   @override
   Widget build(BuildContext context) {
@@ -268,15 +392,28 @@ class SettingsRow extends StatelessWidget {
     final row = ConstrainedBox(
       constraints: const BoxConstraints(minHeight: Look.settingRow),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: Look.cardPad, vertical: 10),
+        padding: EdgeInsets.symmetric(
+          horizontal: flat ? 0 : Look.cardPad,
+          vertical: 10,
+        ),
         child: Row(
           children: [
             Container(
-              width: Look.tile,
-              height: Look.tile,
-              decoration: BoxDecoration(color: tileFill, borderRadius: Look.smallCorners),
+              width: flat ? Look.iconSize : Look.tile,
+              height: flat ? Look.iconSize : Look.tile,
+              decoration: flat
+                  ? null
+                  : BoxDecoration(color: tileFill, shape: BoxShape.circle),
               alignment: Alignment.center,
-              child: logo ?? Icon(icon, size: Look.iconSize, color: tileInk),
+              child:
+                  logo ??
+                  (mark == null
+                      ? Icon(icon, size: Look.iconSize, color: tileInk)
+                      : SettingsMark(
+                          mark!,
+                          size: Look.iconSize,
+                          color: tileInk,
+                        )),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -286,13 +423,17 @@ class SettingsRow extends StatelessWidget {
                 children: [
                   Text(
                     title,
-                    style: theme.textTheme.titleSmall?.copyWith(color: danger ? scheme.error : null),
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      color: danger ? scheme.error : null,
+                    ),
                   ),
                   if (subtitle != null) ...[
                     const SizedBox(height: Look.rowGap),
                     Text(
                       subtitle!,
-                      style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   ],
                 ],
@@ -302,7 +443,10 @@ class SettingsRow extends StatelessWidget {
             if (chevron)
               Padding(
                 padding: const EdgeInsets.only(left: 4),
-                child: Icon(Icons.chevron_right_rounded, color: scheme.onSurfaceVariant),
+                child: Icon(
+                  Icons.chevron_right_rounded,
+                  color: scheme.onSurfaceVariant,
+                ),
               ),
           ],
         ),
@@ -315,21 +459,47 @@ class SettingsRow extends StatelessWidget {
             children: [
               row,
               Padding(
-                padding: const EdgeInsets.fromLTRB(Look.cardPad, 0, Look.cardPad, Look.cardPad),
+                padding: const EdgeInsets.fromLTRB(
+                  Look.cardPad,
+                  0,
+                  Look.cardPad,
+                  Look.cardPad,
+                ),
                 child: below,
               ),
             ],
           );
-    final marked = selected ? ColoredBox(color: scheme.primary.withValues(alpha: 0.18), child: body) : body;
-    final pressable = onTap == null ? marked : InkWell(onTap: onTap, child: marked);
-    return selected ? Semantics(container: true, selected: true, child: pressable) : pressable;
+    final marked = selected
+        ? Ink(
+            decoration: ShapeDecoration(
+              color: scheme.primary.withValues(alpha: 0.18),
+              shape: const StadiumBorder(),
+            ),
+            child: body,
+          )
+        : body;
+    final pressable = onTap == null
+        ? marked
+        : InkWell(
+            onTap: onTap,
+            customBorder: const StadiumBorder(),
+            child: marked,
+          );
+    return selected
+        ? Semantics(container: true, selected: true, child: pressable)
+        : pressable;
   }
 }
 
 /// 글자 대신 아이콘으로 고르는 알약 — 줄 오른쪽에 선다. 고른 칸만 강조 물 위 강조 아이콘, 나머지는 흐린 아이콘.
 /// 이름은 길게 누르면 뜨는 말풍선과 줄 보조글이 말한다(2026-10-01 「텍스트말고 아이콘으로」).
 class IconChoice<T> extends StatelessWidget {
-  const IconChoice({super.key, required this.options, required this.selected, this.onSelect});
+  const IconChoice({
+    super.key,
+    required this.options,
+    required this.selected,
+    this.onSelect,
+  });
 
   final List<(T, IconData, String)> options;
   final T? selected;
@@ -340,10 +510,9 @@ class IconChoice<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
+    final active = settingsButtonColors(scheme, selected: true);
+    return SizedBox(
       height: Look.tap,
-      padding: const EdgeInsets.all(Look.choiceInset),
-      decoration: ShapeDecoration(shape: const StadiumBorder(), color: scheme.surfaceContainerHigh),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -357,19 +526,30 @@ class IconChoice<T> extends StatelessWidget {
                 child: InkWell(
                   customBorder: const StadiumBorder(),
                   onTap: onSelect == null ? null : () => onSelect!(value),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    width: Look.tap,
-                    decoration: ShapeDecoration(
-                      shape: const StadiumBorder(),
-                      color: value == selected ? scheme.primary.withValues(alpha: 0.18) : Colors.transparent,
-                    ),
-                    child: Icon(
-                      icon,
-                      size: Look.iconSize,
-                      color: value == selected
-                          ? scheme.primary
-                          : scheme.onSurfaceVariant.withValues(alpha: onSelect == null ? 0.5 : 1),
+                  child: SizedBox.square(
+                    dimension: Look.tap,
+                    child: Center(
+                      child: AnimatedContainer(
+                        duration: MediaQuery.disableAnimationsOf(context)
+                            ? Duration.zero
+                            : const Duration(milliseconds: 180),
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: value == selected
+                              ? active.fill
+                              : Colors.transparent,
+                          border: value == selected ? Border.all(color: active.line) : null,
+                        ),
+                        child: Icon(
+                          icon,
+                          size: Look.iconSize,
+                          color: value == selected
+                              ? active.ink
+                              : scheme.onSurfaceVariant.withValues(alpha: onSelect == null ? 0.5 : 1),
+                        ),
+                      ),
                     ),
                   ),
                 ),

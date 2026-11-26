@@ -46,6 +46,8 @@ class Pane {
     this.waitingFor,
     this.error,
     this.idleSecs,
+    this.doneUntilMs,
+    this.reportedFailure = false,
     this.busySecs,
     this.closed = false,
     this.undocked = false,
@@ -90,6 +92,8 @@ class Pane {
 
   /// 쉬기 시작한 지 몇 초.
   final int? idleSecs;
+  final int? doneUntilMs;
+  final bool reportedFailure;
 
   /// 도는 중에 들어온 지 몇 초 — 목록 줄 띠 끝의 시간. 데스크톱 배치도 칸과 같은 판정이다.
   final int? busySecs;
@@ -247,6 +251,13 @@ class Pane {
       _ => null,
     },
     idleSecs: (j['idle_secs'] as num?)?.toInt(),
+    reportedFailure: j['done_outcome'] == 'failed',
+    doneUntilMs: switch (j['response_end']) {
+      {'done_until_ms': final int until} => until,
+      {'continues': true} || {'error': true} => 0,
+      _ => j['done_outcome'] == 'succeeded' && j['done_at_ms'] is num
+          ? (j['done_at_ms'] as num).toInt() + 6000 : null,
+    },
     busySecs: (j['busy_secs'] as num?)?.toInt(),
     closed: j['closed'] == true,
     undocked: j['undocked'] == true,

@@ -13,6 +13,7 @@ class SettingsFixture {
   static const _session = (account: 'fixture', device: 'phone-fixture', token: 'settings-fixture-token');
 
   final paths = <String>[];
+  String accent = 'Blue';
 
   late final MockClient client = MockClient(answer);
 
@@ -48,10 +49,17 @@ class SettingsFixture {
         ],
       });
     }
+    if (path.endsWith('settings/action')) {
+      final action = jsonDecode(req.body) as Map<String, dynamic>;
+      if (action['action'] == 'accent' && action['id'] is String) {
+        accent = action['id'] as String;
+        return _json({'ok': true});
+      }
+    }
     if (path.endsWith('settings/values')) {
       return _json({
         'appearance': {
-          'accent': 'Blue',
+          'accent': accent,
           'accents': [
             {'name': 'Blue', 'hex': '#5B9BF5'},
             {'name': 'Pink', 'hex': '#F28DB2'},

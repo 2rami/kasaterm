@@ -27,6 +27,26 @@ fn remote_collapsed_summary(online: bool, rows: &[&state::MachinesColRow], done:
 /// (기기 라벨, 원격 %id) → 깜빡임을 멈췄는가. 끝났는데 아직 안 본 원격 칸만 담긴다(`chrome::sync_remote_done_marks`).
 type DoneMarks = std::collections::HashMap<(String, String), bool>;
 
+fn collect_indicator(g: &mut gpu::GpuRenderer, machine: &state::MachinesColMachine, deck: &[&state::MachinesColRow], rect: Rect) {
+    use crate::weather::indicator::{Phase, RemoteIndicator};
+    if !g.custom_indicators || !machine.online { return; }
+    let Some(head) = deck.first().filter(|p| !p.closed) else { return };
+    let deadline = deck.iter().filter_map(|p| p.done_until_ms).max().filter(|v| *v > kasa_socket::board::now_ms());
+    let phase = if let Some(p) = deck.iter().find(|p| p.needs_you()) {
+        if p.attention_kind.as_deref() == Some("permission") { Phase::Permission } else { Phase::Question }
+    } else if deck.iter().any(|p| p.status == "compacting") { Phase::Compacting }
+    else if deck_busy(deck) { Phase::Working }
+    else if deck.iter().any(|p| p.error.is_some()) { Phase::Error }
+    else if deck.iter().any(|p| p.background) { Phase::Background }
+    else if deadline.is_some() { Phase::Done }
+    else if deck.iter().any(|p| p.status == "idle" || p.attention_kind.as_deref() == Some("idle")) { Phase::Idle }
+    else { return };
+    g.remote_indicators.push(RemoteIndicator {
+        key: crate::weather::key_of(&format!("remote:{}:{}", machine.label, head.remote_id)),
+        rect: [rect.0, rect.1, rect.2, rect.3], phase, done_until_ms: deadline,
+    });
+}
+
 /// 칸(바깥 pane 과 그 탭들) 중 못 본 끝남이 있나 — 값은 전부 깜빡임을 멈췄는가. 닫힌 칸은 묻지 않는다.
 fn deck_done(done: &DoneMarks, label: &str, deck: &[&state::MachinesColRow]) -> Option<bool> {
     deck.iter().filter(|r| !r.closed)
@@ -422,6 +442,7 @@ fn draw_cell(
     let row = deck[0];
     let (mx, my, mw, mh) = cell;
     let Some(visible) = clipped(cell, view) else { return };
+    collect_indicator(g, machine, deck, visible);
     let hover = hit(cursor, visible);
     // 끌고 있는 칸은 옅게, 놓일 칸은 테두리로 — 본기기 pane 끌기와 같은 신호.
     let dragging = drag.is_some_and(|d| d == row.remote_id.as_str());
@@ -471,7 +492,7 @@ fn draw_cell(
         g.queue_icon("terminal", fx + (face - size) / 2.0, fy + (face - size) / 2.0, size, theme::text_dim());
     }
     let has_bar = crate::render::minimap_has_bar(mw, mh);
-    if signal.is_none() {
+    if signal.is_none() && !g.custom_indicators {
         crate::render::activity_mark(g, (mx, my, mw, mh), 2.0, busy, false, cur, if cur { 1.5 } else { 0.0 });
     }
     // 탭은 바닥의 점 줄 — 첫 점(바깥 자리)이 넓고, 나머지는 흐리게. 본기기와 같은 그림.
@@ -536,9 +557,11 @@ fn draw_list_row(
 ) {
     let head = deck.iter().find(|r| !r.name.is_empty()).copied().unwrap_or(deck[0]);
     let Some(visible) = clipped(row, view) else { return };
+    collect_indicator(g, machine, deck, visible);
     let hover = hit(cursor, visible);
     g.hover_pointer |= hover && !head.closed;
     crate::sidebar_pulse::paint_row(g, row, &crate::sidebar_pulse::RowPaint {
+        custom_indicators: g.custom_indicators,
         student,
         detail: None,
         icon: "terminal",
@@ -1457,6 +1480,7 @@ mod tests {
 
     fn machine() -> state::MachinesColMachine {
         let row = |pane: &str, remote: &str, room: &str| state::MachinesColRow {
+            background: false, done_until_ms: None,
             pane: pane.into(), remote_id: remote.into(), room: room.into(), remote_cwd: String::new(),
             name: String::new(), title: String::new(), status: String::new(), closed: false, rect: None,
             window: None, tab_of: None, attention_kind: None, error: None,
@@ -1522,6 +1546,7 @@ mod tests {
     #[test]
     fn only_permission_and_question_blink_orange() {
         let row = |status: &str, kind: Option<&str>| state::MachinesColRow {
+            background: false, done_until_ms: None,
             pane: String::new(), remote_id: "%1".into(), room: "A".into(), remote_cwd: String::new(),
             name: String::new(), title: String::new(), status: status.into(), closed: false,
             rect: None, window: None, tab_of: None, attention_kind: kind.map(str::to_string), error: None,

@@ -1408,6 +1408,7 @@ impl App {
             }
         }
         self.pane_busy_check = Some(now);
+        self.chrome_dirty |= self.weather.poll_indicator_deadline();
         self.release_finished_agent_identities();
         // 이사(agent-stop)로 학생을 내준 pane 의 sid 주장 걷기 — HTTP 핸들러는 App
         // 상태를 못 만져 큐로 넘긴다. 걷자마자 저장까지 해 둔다: 몇 초 안에 앱이
