@@ -617,7 +617,7 @@ void main() {
     String? failure;
     tearDown(() {
       InlineCardVisibility.showAll = false;
-      InlineCardVisibility.shown.value = const {};
+      InlineCardVisibility.flipped.value = const {};
     });
     setUp(() {
       InlineCardVisibility.showAll = true;
@@ -750,16 +750,22 @@ void main() {
       );
     });
 
-    testWidgets('미디어 카드는 기본으로 가린 띠로 서고 누르면 카드가 펼쳐진다', (tester) async {
+    testWidgets('영상은 가린 띠로, 음성은 보인 채 서고 눈·띠로 뒤집는다', (tester) async {
       InlineCardVisibility.showAll = false;
-      await pumpChat(tester, '소리요.\n\n${mediaBlock(_audio, 4)}');
+      await pumpChat(
+        tester,
+        '영상과 소리요.\n\n${mediaBlock(_video, 12)}\n${mediaBlock(_audio, 4)}',
+      );
       await tester.pumpAndSettle();
-      expect(find.text('tone.m4a'), findsOneWidget);
-      expect(find.textContaining('· 가려짐'), findsOneWidget);
-      expect(find.byIcon(Icons.visibility_off_outlined), findsOneWidget);
+      expect(find.text('demo clip.mp4'), findsOneWidget);
+      expect(find.textContaining('· 가려짐'), findsOneWidget, reason: '영상만 가린다');
+      expect(find.byIcon(Icons.visibility_outlined), findsOneWidget, reason: '음성 카드는 처음부터 보인다');
+      await tester.tap(find.byIcon(Icons.visibility_outlined));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('· 가려짐'), findsNWidgets(2));
       await tester.tap(find.text('tone.m4a'));
       await tester.pumpAndSettle();
-      expect(find.textContaining('가려짐'), findsNothing);
+      expect(find.textContaining('· 가려짐'), findsOneWidget);
       expect(find.byIcon(Icons.visibility_outlined), findsOneWidget);
       expect(opened, isEmpty, reason: '띠를 누르면 펼칠 뿐 틀지 않는다');
     });

@@ -20,7 +20,7 @@ void main() {
   setUp(() => InlineCardVisibility.showAll = true);
   tearDown(() {
     InlineCardVisibility.showAll = false;
-    InlineCardVisibility.shown.value = const {};
+    InlineCardVisibility.flipped.value = const {};
   });
   test(
     'display blocks preserve surrounding markdown and validate every row',

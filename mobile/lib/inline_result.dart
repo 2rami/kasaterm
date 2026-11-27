@@ -145,7 +145,7 @@ class InlineResultBody extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: ValueListenableBuilder<Set<String>>(
-              valueListenable: InlineCardVisibility.shown,
+              valueListenable: InlineCardVisibility.flipped,
               builder: (context, _, _) {
                 final key = 'ki:${machine ?? ''}:$id';
                 void flip() => InlineCardVisibility.toggle(key);

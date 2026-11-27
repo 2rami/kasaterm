@@ -1,5 +1,5 @@
-//! 칸 안 결과 카드(`[[ki:]]` 그림·`[[km:]]` 음성·영상·PDF·웹·파일)의 가림. 기본은 가림이고, 카드 오른쪽 위 눈 단추로
-//! 이 실행 동안 보이게 한다(같은 카드는 어느 칸·창에서든 같이 바뀐다).
+//! 칸 안 결과 카드(`[[ki:]]` 그림·`[[km:]]` 음성·영상·PDF·웹·파일)의 가림. 그림·영상·PDF·파일은 가린 채, 음성·웹은
+//! 보인 채 서고([`note_kind`]), 눈 단추·띠로 이 실행 동안 뒤집는다(같은 카드는 어느 칸·창에서든 같이 바뀐다).
 //!
 //! 가려도 카드가 잡은 줄은 그대로다 — 그 줄의 주인은 칸의 프로그램(Claude Code·Codex)이라 앱이 줄 수를 못 바꾼다.
 //! 가린 카드는 보이는 부분 맨 위에 머리 띠 하나만 그린다. 띠 어디를 눌러도 보이고, 보이는 카드는 눈만 눌러 가린다.
@@ -18,9 +18,28 @@ const EYE: f32 = 28.0;
 /// 가린 그림 띠의 최소 폭 — 세로로 긴 그림은 상자가 좁아 글자가 안 들어간다.
 const BAR_MIN_W: f32 = 200.0;
 
-fn shown_set() -> &'static Mutex<HashSet<String>> {
-    static SHOWN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    SHOWN.get_or_init(Default::default)
+/// 처음 모습에서 뒤집은 카드.
+fn flipped_set() -> &'static Mutex<HashSet<String>> {
+    static FLIPPED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    FLIPPED.get_or_init(Default::default)
+}
+
+/// 처음부터 보이는 카드 — 음성·웹. 가릴 큰 그림이 없어 가리면 누름만 한 번 늘었다. 종류는 카드 정보를 받아야 알아,
+/// 받기 전에는 가린 띠(「불러오는 중」)로 선다.
+fn open_set() -> &'static Mutex<HashSet<String>> {
+    static OPEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    OPEN.get_or_init(Default::default)
+}
+
+/// 미디어 카드의 종류를 알린다 — 음성·웹이면 처음부터 보인다.
+pub(crate) fn note_kind(key: &str, kind: &str) {
+    if matches!(kind, "audio" | "web") {
+        if let Ok(mut open) = open_set().lock() {
+            if !open.contains(key) {
+                open.insert(key.to_owned());
+            }
+        }
+    }
 }
 
 /// 창마다 이번 프레임에 그린 누름 자리(카드 열쇠, 자리).
@@ -39,11 +58,12 @@ pub(crate) fn is_card(key: &str) -> bool {
 }
 
 pub(crate) fn shown(key: &str) -> bool {
-    shown_set().lock().is_ok_and(|s| s.contains(key))
+    let open = open_set().lock().is_ok_and(|s| s.contains(key));
+    open != flipped_set().lock().is_ok_and(|s| s.contains(key))
 }
 
 fn toggle(key: &str) {
-    if let Ok(mut s) = shown_set().lock() {
+    if let Ok(mut s) = flipped_set().lock() {
         if !s.remove(key) {
             s.insert(key.to_owned());
         }
@@ -171,6 +191,17 @@ mod tests {
         assert_eq!(visible_images(std::slice::from_ref(&a)).len(), 1);
         toggle(&a.key);
         assert!(!shown(&a.key));
+    }
+
+    #[test]
+    fn audio_and_web_cards_start_shown_and_others_stay_hidden() {
+        for (key, kind, open) in [("media:k:audio0000000000000", "audio", true), ("media:k:web00000000000000", "web", true),
+            ("media:k:video000000000000", "video", false), ("media:k:pdf00000000000000", "pdf", false)] {
+            note_kind(key, kind);
+            assert_eq!(shown(key), open, "{kind}");
+            toggle(key);
+            assert_eq!(shown(key), !open, "{kind} 은 눈으로 뒤집힌다");
+        }
     }
 
     #[test]

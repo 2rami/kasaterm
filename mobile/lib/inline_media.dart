@@ -129,6 +129,9 @@ class InlineMedia {
 
   bool get isVideo => kind == InlineMediaKind.video;
 
+  /// 처음부터 보이는 카드 — 음성·웹([InlineCardVisibility.isShown]).
+  bool get opensShown => kind == InlineMediaKind.audio || kind == InlineMediaKind.web;
+
   /// 화면에 보일 이름 — 경로가 섞여 와도 마지막 조각만.
   String get title {
     final leaf = name.split(RegExp(r'[/\\]')).last.trim();
@@ -441,8 +444,8 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
       final key = 'km:${widget.machine ?? ''}:${widget.id}';
       void flip() => InlineCardVisibility.toggle(key);
       return ValueListenableBuilder<Set<String>>(
-        valueListenable: InlineCardVisibility.shown,
-        builder: (context, _, _) => InlineCardVisibility.isShown(key)
+        valueListenable: InlineCardVisibility.flipped,
+        builder: (context, _, _) => InlineCardVisibility.isShown(key, open: media.opensShown)
             ? CardEye(onHide: flip, child: _card(loaded, media))
             : HiddenCardBar(
                 icon: switch (media.kind) {

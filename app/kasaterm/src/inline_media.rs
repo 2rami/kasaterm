@@ -368,6 +368,9 @@ pub(crate) fn paint(
         }
         let live = live.filter(|l| *l.reference == reference);
         let asset = cache::get(&reference);
+        if let Ok(Some(asset)) = &asset {
+            crate::card_eye::note_kind(&slot.key, &asset.media.kind);
+        }
         if !crate::card_eye::shown(&slot.key) {
             // 가린 카드는 머리 띠 하나 — 누르면 `card_eye` 가 받아 보이게 한다. 눈 단추도 거기서 그린다.
             let b = crate::card_eye::bar(slot);

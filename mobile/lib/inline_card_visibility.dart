@@ -2,21 +2,24 @@ import 'package:flutter/material.dart';
 
 import 'look.dart';
 
-/// 대화 속 결과 카드(그림·음성·영상·PDF·웹·파일)의 가림. 기본은 가림이고, 오른쪽 위 눈으로 이 실행 동안 보인다 —
-/// PC `card_eye` 와 같은 규칙. 같은 카드는 어느 대화에서든 같이 바뀐다.
+/// 대화 속 결과 카드(그림·음성·영상·PDF·웹·파일)의 가림. 그림·영상·PDF·파일은 가린 채, 음성·웹은 보인 채 서고
+/// ([open]), 눈·띠로 이 실행 동안 뒤집는다 — PC `card_eye` 와 같은 규칙. 같은 카드는 어느 대화에서든 같이 바뀐다.
 abstract final class InlineCardVisibility {
-  static final shown = ValueNotifier<Set<String>>(const {});
+  /// 처음 모습에서 뒤집은 카드.
+  static final flipped = ValueNotifier<Set<String>>(const {});
 
   /// 카드 모양을 보는 옛 시험이 쓰는 스위치 — 켜면 모든 카드가 보인 채로 선다.
   @visibleForTesting
   static bool showAll = false;
 
-  static bool isShown(String key) => showAll || shown.value.contains(key);
+  /// [open] — 처음부터 보이는 카드(음성·웹). 가릴 큰 그림이 없어 가리면 누름만 한 번 늘었다.
+  static bool isShown(String key, {bool open = false}) =>
+      showAll || open != flipped.value.contains(key);
 
   static void toggle(String key) {
-    final next = {...shown.value};
+    final next = {...flipped.value};
     if (!next.remove(key)) next.add(key);
-    shown.value = next;
+    flipped.value = next;
   }
 }
 
