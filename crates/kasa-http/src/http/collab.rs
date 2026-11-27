@@ -43,10 +43,11 @@ async fn term_chat_send(backend: Arc<dyn Backend>, Json(body): Json<serde_json::
     if surface.is_empty() || text.is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "surface·text 가 필요해요" }));
     }
-    // 보낸 자리(폰·미러한 기기)를 글 끝 꼬리표로 — 세션이 어디서 온 말인지 안다(`tell::origin_tag`).
+    // 보낸 자리(폰·미러한 기기)를 글 끝 꼬리표로 — 세션이 어디서 온 말인지 안다(`tell::origin_tag`). 셸 칸의 명령
+    // 보내기도 이 길이라, 하네스가 아니면 붙이지 않는다(붙이면 명령 인자가 된다).
     let text = match body["from"].as_str().and_then(kasa_socket::tell::origin_tag) {
-        Some(tag) => format!("{text} {tag}"),
-        None => text,
+        Some(tag) if backend.pane_runs_agent(&surface) => format!("{text} {tag}"),
+        _ => text,
     };
     let sent = body["message_id"].as_str().filter(|id| kasa_socket::tell::valid_id(id).is_ok());
     if let Some(id) = sent {
@@ -521,7 +522,7 @@ mod tests {
     async fn mirror_chat_input_goes_through_the_safe_tell() {
         use super::*;
         #[derive(Default)]
-        struct Desk { refuse: bool, tells: std::sync::Mutex<Vec<serde_json::Value>>, pasted: std::sync::Mutex<Vec<String>> }
+        struct Desk { refuse: bool, agent: bool, tells: std::sync::Mutex<Vec<serde_json::Value>>, pasted: std::sync::Mutex<Vec<String>> }
         impl Backend for Desk {
             fn list_workspaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
             fn current_workspace(&self) -> anyhow::Result<Option<kasa_socket::backend::WorkspaceInfo>> { Ok(None) }
@@ -535,6 +536,7 @@ mod tests {
                 self.tells.lock().unwrap().push(params.clone());
                 Ok(serde_json::json!({"state": "accepted"}))
             }
+            fn pane_runs_agent(&self, _: &str) -> bool { self.agent }
         }
         let desk = Arc::new(Desk::default());
         let Json(answer) = term_chat_send(desk.clone(), Json(serde_json::json!({"surface": "%3", "text": " 폰에서 친 말 "}))).await;
@@ -552,9 +554,16 @@ mod tests {
         assert_eq!(fresh.pasted.lock().unwrap().len(), 1);
 
         // 보낸 자리를 글 끝 꼬리표로 — 세션이 폰에서 온 말인지 안다.
-        let tagged = Arc::new(Desk::default());
+        let tagged = Arc::new(Desk { agent: true, ..Default::default() });
         let Json(_) = term_chat_send(tagged.clone(), Json(serde_json::json!({"surface": "%5", "text": "짧게 답해", "from": "phone"}))).await;
         assert_eq!(tagged.tells.lock().unwrap()[0]["body"], "짧게 답해 ⟦폰⟧");
+
+        // 셸 칸의 명령 보내기에는 꼬리표가 명령 인자가 되니 붙이지 않는다.
+        let shell = Arc::new(Desk { refuse: true, ..Default::default() });
+        let Json(answer) = term_chat_send(shell.clone(), Json(serde_json::json!({"surface": "%6", "text": "ls -la", "from": "phone"}))).await;
+        assert_eq!(answer["via"], "paste");
+        let pasted = shell.pasted.lock().unwrap()[0].clone();
+        assert!(pasted.contains("ls -la") && !pasted.contains('⟦'), "셸에 간 줄: {pasted:?}");
 
         // 다른 기기·학생이 여는 tell 창구로는 사람의 말 표지를 달 수 없다.
         let Json(refused) = collab_tell_post(desk.clone(), Json(serde_json::json!({"surface_id": "%3", "body": "끼어들기", "policy": "person"}))).await;

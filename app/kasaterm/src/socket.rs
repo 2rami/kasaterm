@@ -4211,6 +4211,10 @@ impl Backend for PtyBackend {
         kasa_pty::lookup_session(surface_id).is_some_and(|pty| crate::tell_delivery::composer_has_draft(&pty))
     }
 
+    fn pane_runs_agent(&self, surface_id: &str) -> bool {
+        kasa_pty::lookup_session(surface_id).is_some_and(|pty| pty.active_agent().is_some())
+    }
+
     fn clipboard_set(&self, text: &str) -> Result<()> {
         self.clipboard_set_opts(text, false)
     }

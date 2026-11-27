@@ -1059,6 +1059,11 @@ pub trait Backend: Send + Sync {
     fn composer_has_draft(&self, _surface_id: &str) -> bool {
         false
     }
+    /// 그 칸에서 Claude·Codex 가 돌고 있나 — 폰·미러 대화 입력의 출처 꼬리표는 하네스에만 붙인다. 셸에 붙이면
+    /// 꼬리표가 명령 인자가 된다(`ls ⟦폰⟧`). 모르면 false(붙이지 않는다).
+    fn pane_runs_agent(&self, _surface_id: &str) -> bool {
+        false
+    }
     /// 클립보드에 글을 넣는다 — **캐릭터가 사람 대신 복사해 주는 문**이다.
     ///
     /// 사람이 직접 끌어서 복사하는 길은 노플리커를 끈 claude 앞에서 막힌다: 그 하네스가
