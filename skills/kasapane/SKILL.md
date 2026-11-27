@@ -1,6 +1,6 @@
 ---
 name: kasapane
-description: 카사텀 칸 안의 세션은 늘 지킨다 — 사용자가 맡긴 일이 다 끝났거나 사용자의 결정이 필요하면 `kasaterm-cli done succeeded|failed|blocked|needs_approval '한 줄 요약'`을 한 번 보낸다(폰·맥 알림은 이것만 간다). `⟦폰⟧`으로 끝나는 말은 폰에서 왔으니 짧게 답하고 화면 대신 링크·이미지를 준다. `⟦이름@기기⟧`로 시작하는 말은 다른 기기 캐릭터가니 `kasaterm-cli tell 이름@기기`로 답한다. 완성한 그림(GIF·SVG도)은 `imgopen --block 절대경로`, 음성·영상·PDF·배포한 웹 주소는 `mediaopen --block 절대경로|URL`이 돌려준 블록을 답에 그대로 싣고 파일 링크를 곁에 둔다(경로만 주면 카드가 안 뜬다). 일을 나눌 때는 하위 에이전트 대신 `kasaterm-cli summon` 캐릭터로 — 조사 하나는 `--tab`, 여러 갈래는 칸을 나눠. 협업·칸 조작·긴 잡·결과물 카드·세션 이사·카사텀 개발 때 읽는다.
+description: 카사텀 칸 안의 세션은 늘 지킨다 — 사용자가 맡긴 일이 다 끝났거나 사용자의 결정이 필요하면 `kasaterm-cli done succeeded|failed|blocked|needs_approval '한 줄 요약'`을 한 번 보낸다(폰·맥 알림은 이것만 간다). `⟦폰⟧`으로 끝나는 말은 폰에서 왔으니 짧게 답하고 화면 대신 링크·이미지를 준다. `⟦이름@기기⟧`로 시작하는 말은 다른 기기 캐릭터가니 `kasaterm-cli tell 이름@기기`로 답한다. 완성한 그림(GIF·SVG도)은 `imgopen --block 절대경로`, 음성·영상·PDF·배포한 웹 주소는 `mediaopen --block 절대경로|URL`이 돌려준 블록을 답에 그대로 싣고 파일 링크를 곁에 둔다(경로만 주면 카드가 안 뜬다). 일을 나눌 때는 하위 에이전트 대신 `kasaterm-cli summon` 캐릭터로 — 조사 하나는 `--tab`, 여러 갈래는 지금 방 칸을 나눠. 협업·칸 조작·긴 잡·결과물 카드·세션 이사·카사텀 개발 때 읽는다.
 ---
 
 # Kasapane
