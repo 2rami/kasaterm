@@ -212,6 +212,7 @@ fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
         .into_iter()
         .map(|end| (end.surface_id.clone(), end))
         .collect();
+    let history = kasa_students::notes::history();
     // 학생색(header_color) — 이름을 그 학생의 색으로 칠한다(사이드바의 학생 테마).
     // 캐릭터 매칭 규칙이 서버(find_character)에 이미 있으니 클라에 JSON 파싱을
     // 중복시키지 않고 여기서 hex 로 얹는다.
@@ -268,9 +269,16 @@ fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
             let harness = b
                 .and_then(|p| p.harness.clone())
                 .or_else(|| kasa_pty::lookup_session(&id).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string()));
-            serde_json::json!({
+            let surface_key = kasa_collab::surface_keys::get(&id);
+            let session = response_ends.get(&id).and_then(|end| end.session_id.as_deref());
+            let note = surface_key.as_deref().and_then(|surface| {
+                history.iter().find(|note| note.target.as_ref().is_some_and(|target| {
+                    target.surface == surface && target.session.as_deref() == session
+                }))
+            });
+            let mut row = serde_json::json!({
                 "id": id,
-                "surface_key": kasa_collab::surface_keys::get(&id),
+                "surface_key": surface_key,
                 "rect": rects.get(&id).map(|(r, _)| r),
                 "tab_of": rects.get(&id).and_then(|(_, t)| t.clone()),
                 "room_label": pane_windows.get(&id).and_then(|w| room_labels.get(w)),
@@ -351,7 +359,15 @@ fn term_panes_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
                 "model": agent_cfg.get(&id).map(|(m, _)| m.clone()).filter(|s| !s.is_empty()),
                 "effort": agent_cfg.get(&id).map(|(_, e)| e.clone()).filter(|s| !s.is_empty()),
                 "response_end": response_ends.get(&id),
-            })
+            });
+            row["notifications_owned"] = true.into();
+            if let Some(note) = note {
+                row["notification_id"] = note.id.into();
+                row["notification_read"] = note.read.into();
+                row["notification_report"] = note.event.as_deref().and_then(|event| event.strip_prefix("report:"))
+                    .and_then(|key| key.parse::<u64>().ok()).into();
+            }
+            row
         })
         .collect();
     rows

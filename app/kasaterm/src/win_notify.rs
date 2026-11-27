@@ -73,9 +73,15 @@ struct Request {
     body: String,
     character: Option<String>,
     route: Option<(String, Option<String>)>,
+    note: Option<u64>,
 }
 
-static WORKER: OnceLock<mpsc::Sender<Request>> = OnceLock::new();
+enum Notification {
+    Show(Request),
+    Withdraw(Vec<u64>),
+}
+
+static WORKER: OnceLock<mpsc::Sender<Notification>> = OnceLock::new();
 /// 알림을 누르면 앞으로 올릴 본창. 활성화기는 COM 스레드에서 불려 `App` 에 닿지 못한다.
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -137,18 +143,25 @@ pub(crate) fn install(proxy: EventLoopProxy<UserEvent>, window: &winit::window::
 }
 
 /// 토스트로 낸다. 일꾼이 없으면(조용한 실행·라이트·아직 부팅 전) false를 돌려준다.
-pub(crate) fn toast(title: &str, body: &str, character: Option<&str>, route: Option<(&str, Option<&str>)>) -> bool {
+pub(crate) fn toast(title: &str, body: &str, character: Option<&str>, route: Option<(&str, Option<&str>)>, note: Option<u64>) -> bool {
     let Some(tx) = WORKER.get() else { return false };
-    tx.send(Request {
+    tx.send(Notification::Show(Request {
         title: title.to_string(),
         body: body.to_string(),
         character: character.map(str::to_string),
         route: route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
-    })
+        note,
+    }))
     .is_ok()
 }
 
-fn run_worker(id: &'static Identity, proxy: EventLoopProxy<UserEvent>, rx: mpsc::Receiver<Request>) {
+pub(crate) fn withdraw_notes(ids: &[u64]) {
+    if let Some(tx) = WORKER.get() {
+        let _ = tx.send(Notification::Withdraw(ids.to_vec()));
+    }
+}
+
+fn run_worker(id: &'static Identity, proxy: EventLoopProxy<UserEvent>, rx: mpsc::Receiver<Notification>) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
@@ -159,12 +172,22 @@ fn run_worker(id: &'static Identity, proxy: EventLoopProxy<UserEvent>, rx: mpsc:
         eprintln!("[notify] 토스트 활성화기 등록 실패 — 눌러도 칸으로 못 간다: {e}");
     }
     let mut seq = 0u64;
-    for req in rx {
-        seq += 1;
-        let shown = show(id, &req, seq);
-        // OS에서 끈 알림을 앱 배너로 되살리지 않는다.
-        if let Err(e) = shown {
-            if e.code() != E_ACCESSDENIED { eprintln!("[notify] 알림센터 배달 실패: {e}"); }
+    for command in rx {
+        match command {
+            Notification::Show(req) => {
+                seq += 1;
+                if let Err(e) = show(id, &req, seq) {
+                    if e.code() != E_ACCESSDENIED { eprintln!("[notify] 알림센터 배달 실패: {e}"); }
+                }
+            }
+            Notification::Withdraw(ids) => {
+                if let Ok(history) = ToastNotificationManager::History() {
+                    let (group, app) = (HSTRING::from("student"), HSTRING::from(id.aumid));
+                    for note in ids {
+                        let _ = history.RemoveGroupedTagWithId(&note_tag(note), &group, &app);
+                    }
+                }
+            }
         }
     }
 }
@@ -177,12 +200,21 @@ fn show(id: &Identity, req: &Request, seq: u64) -> windows::core::Result<()> {
     if notifier.Setting().is_ok_and(|s| s != NotificationSetting::Enabled) {
         return Err(E_ACCESSDENIED.into());
     }
-    let launch = crate::chrome::notify_ident(seq, req.route.as_ref().map(|(p, s)| (p.as_str(), s.as_deref())));
+    let route = req.route.as_ref().map(|(p, s)| (p.as_str(), s.as_deref()));
+    let launch = req.note.map_or_else(|| crate::chrome::notify_ident(seq, route), |note| crate::chrome::note_notify_ident(note, route));
     let image = req.character.as_deref().and_then(|c| crate::chrome::student_profile_file(c, None));
     let doc = XmlDocument::new()?;
     doc.LoadXml(&HSTRING::from(toast_xml(&req.title, &req.body, image.as_deref(), &launch)))?;
     let toast = ToastNotification::CreateToastNotification(&doc)?;
+    if let Some(note) = req.note {
+        toast.SetTag(&note_tag(note))?;
+        toast.SetGroup(&HSTRING::from("student"))?;
+    }
     notifier.Show(&toast)
+}
+
+fn note_tag(note: u64) -> HSTRING {
+    HSTRING::from(format!("{note:016x}"))
 }
 
 fn xml_escape(s: &str) -> String {
@@ -314,7 +346,7 @@ impl INotificationActivationCallback_Impl for Activator_Impl {
         bring_forward();
         let args = unsafe { args.to_string() }.unwrap_or_default();
         if let Some((pane, sid)) = crate::chrome::notify_route(&args) {
-            let _ = self.proxy.send_event(UserEvent::NotifyFocus { pane, sid });
+            let _ = self.proxy.send_event(UserEvent::NotifyFocus { pane, sid, note: crate::chrome::notification_note_id(&args) });
         }
         Ok(())
     }

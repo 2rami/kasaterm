@@ -197,6 +197,14 @@ async fn term_path_get(
 /// 학생 쪽지 목록 — 최근 것부터. 폰 허브의 종 아이콘과 다른 기기의 하단바 「학생 쪽지」가 읽는다. 기기는 5초마다
 /// 붙은 기기 전부에 묻으니 `?unread=1` 로 안 읽은 것만 받는다(읽은 것까지 200건을 매번 나르지 않게).
 async fn term_notes_get(q: Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    if let Some(id) = q.get("notification_id").and_then(|v| v.parse::<u64>().ok()) {
+        let note = kasa_students::notes::history().into_iter().find(|note| note.id == id);
+        return Json(serde_json::json!(note));
+    }
+    if q.get("read_ids").is_some_and(|v| v == "1") {
+        let ids = kasa_students::notes::history().into_iter().filter(|note| note.read).map(|note| note.id).collect::<Vec<_>>();
+        return Json(serde_json::json!(ids));
+    }
     let mut notes = kasa_students::notes::list();
     if q.get("unread").is_some_and(|v| v == "1") {
         notes.retain(|n| !n.read);
@@ -229,20 +237,38 @@ async fn term_push_token_post(req: axum::extract::Request) -> axum::response::Re
 }
 
 /// 읽음 표시 — `{"ids":[1,2]}` 또는 `{"all":true}`.
-async fn term_notes_read_post(body: Bytes) -> impl IntoResponse {
+async fn term_notes_read_post(backend: Arc<dyn Backend>, body: Bytes) -> impl IntoResponse {
     #[derive(serde::Deserialize)]
     struct Req {
         #[serde(default)]
         ids: Vec<u64>,
         #[serde(default)]
         all: bool,
+        pane: Option<String>,
+        target: Option<kasa_students::notes::Target>,
     }
     let req: Req = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": format!("본문을 못 읽었어요: {e}") })),
     };
-    let n = kasa_students::notes::mark_read(&req.ids, req.all);
-    Json(serde_json::json!({ "ok": true, "marked": n }))
+    let changed = match (req.pane, req.target) {
+        (Some(pane), Some(target)) if !req.all && req.ids.is_empty() => {
+            let valid = kasa_collab::surface_keys::get(&pane).as_deref() == Some(target.surface.as_str())
+                && !kasa_remote::remote::is_remote_pane(&pane)
+                && backend.response_ends().into_iter()
+                    .find(|end| end.surface_id == pane).and_then(|end| end.session_id) == target.session;
+            if !valid {
+                return Json(serde_json::json!({"ok": false, "error": "session_changed"}));
+            }
+            kasa_students::notes::read_target(&pane, &target)
+        }
+        (None, None) => kasa_students::notes::read_ids(&req.ids, req.all),
+        _ => return Json(serde_json::json!({"ok": false, "error": "bad_read_target"})),
+    };
+    if !changed.is_empty() {
+        kasa_wire::changes::bump();
+    }
+    Json(serde_json::json!({"ok": true, "marked": changed.len(), "read_ids": changed.iter().map(|n| n.id).collect::<Vec<_>>() }))
 }
 
 /// 지우기 — `{"ids":[1,2]}` 또는 `{"all":true}`. 폰이 옆으로 밀어 지운다.
@@ -326,6 +352,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let gitcol_wait_backend = backend.clone();
     let clip_backend = backend.clone();
     let cd_backend = backend.clone();
+    let notes_backend = backend.clone();
     axum::Router::new()
         .route("/term/cd", post(move |req| term_cd_post(cd_backend.clone(), req)))
         .route("/term/changes", get(term_changes_handler))
@@ -351,7 +378,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         // 학생 쪽지 — 앱이 알림을 낼 때 남기고 폰 종 목록이 읽는다(notes.rs 머리말).
         .route("/term/notes", get(term_notes_get))
 .route("/term/push-token", post(term_push_token_post))
-        .route("/term/notes/read", post(term_notes_read_post))
+        .route("/term/notes/read", post(move |body| term_notes_read_post(notes_backend.clone(), body)))
         .route("/term/notes/delete", post(term_notes_delete_post))
         // 클립보드 — 하단바 「최근 복사」 목록을 폰과 나눈다.
         .route(

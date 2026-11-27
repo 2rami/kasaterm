@@ -32,16 +32,20 @@ const NOTE_KINDS: [&str; 6] = ["done_ok", "done_fail", "permission", "question",
 pub(super) fn routes() -> Router<Gate> {
     Router::new()
         .route("/relay/push/alert", axum::routing::post(alert))
+        .route("/relay/push/read", axum::routing::post(read))
         .route("/relay/push/face/{name}", get(face::fetch).put(face::upload))
 }
 
 /// 기기 → 최근 1분 동안 받은 알림 시각. 1분짜리라 메모리에만 둔다.
 #[derive(Default)]
-pub(super) struct Meter(Mutex<HashMap<String, VecDeque<Instant>>>);
+pub(super) struct Meter {
+    times: Mutex<HashMap<String, VecDeque<Instant>>>,
+    notes: Mutex<HashMap<String, Instant>>,
+}
 
 impl Meter {
     fn allow(&self, device: &str, now: Instant) -> bool {
-        let mut seen = self.0.lock().unwrap();
+        let mut seen = self.times.lock().unwrap();
         seen.retain(|_, times| {
             while times.front().is_some_and(|t| now.duration_since(*t) >= WINDOW) {
                 times.pop_front();
@@ -54,6 +58,14 @@ impl Meter {
         }
         times.push_back(now);
         true
+    }
+    fn first_note(&self, account: &str, collapse: &str, now: Instant) -> bool {
+        let mut sent = self.notes.lock().unwrap();
+        sent.retain(|_, at| now.duration_since(*at) < WINDOW);
+        match sent.entry(format!("{account}/{collapse}")) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(slot) => { slot.insert(now); true }
+        }
     }
 }
 
@@ -135,7 +147,11 @@ fn payload(body: AlertBody, device: &str, machine_id: &str) -> Result<(Value, Op
         return Err("bad_face");
     }
     let machine = format!("~{machine_id}");
-    let collapse = collapse.map_or_else(|| lone_collapse(device), |c| collapse_id(device, &c));
+    let note_id = kasa_device::push::alert_note_id(collapse.as_deref());
+    let collapse = match note_id {
+        Some(id) => kasa_device::push::note_collapse(machine_id, id),
+        None => collapse.map_or_else(|| lone_collapse(device), |c| collapse_id(device, &c)),
+    };
     let payload = json!({
         "aps": {
             "alert": {"title": body.title, "body": body.body},
@@ -149,6 +165,7 @@ fn payload(body: AlertBody, device: &str, machine_id: &str) -> Result<(Value, Op
         "sender": sender,
         "url": url,
         "collapse": collapse,
+        "note_id": note_id,
     });
     Ok((payload, face))
 }
@@ -190,12 +207,46 @@ async fn alert(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
     if !gate.push_alerts.allow(&device, Instant::now()) {
         return json_err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
     }
+    if payload["note_id"].is_u64() && payload["collapse"].as_str()
+        .is_some_and(|id| !gate.push_alerts.first_note(&rec.account, id, Instant::now()))
+    {
+        return axum::Json(json!({"ok": true, "phones": 0, "duplicate": true})).into_response();
+    }
     let linked = avatar.is_some();
     if let Some(url) = avatar {
         payload["avatar"] = url.into();
     }
     let phones = approvals::send_push(&gate, &rec.account, payload);
     axum::Json(json!({"ok": true, "phones": phones, "face": linked})).into_response()
+}
+
+#[derive(Deserialize)]
+struct ReadBody {
+    ids: Vec<u64>,
+}
+
+async fn read(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let Some((_, rec)) = gate.device_of(req.headers()) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let Some(machine_id) = rec.machine_id.filter(|m| !m.is_empty() && rec.kind == "desktop") else {
+        return json_err(StatusCode::FORBIDDEN, "desktop_only");
+    };
+    let Ok(Ok(bytes)) = tokio::time::timeout(Duration::from_secs(10), axum::body::to_bytes(req.into_body(), MAX_BODY)).await else {
+        return json_err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let Ok(mut body) = serde_json::from_slice::<ReadBody>(&bytes) else {
+        return json_err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    body.ids.sort_unstable();
+    body.ids.dedup();
+    if body.ids.is_empty() || body.ids.len() > 200 || body.ids[0] == 0 {
+        return json_err(StatusCode::BAD_REQUEST, "bad_read_ids");
+    }
+    let machine = format!("~{machine_id}");
+    let payload = kasa_device::push::read_payload(Some(&machine), &body.ids);
+    let phones = approvals::send_push(&gate, &rec.account, payload);
+    axum::Json(json!({"ok": true, "phones": phones})).into_response()
 }
 
 #[cfg(test)]
@@ -315,6 +366,20 @@ mod tests {
             let (p, sent) = payload(body, "dev_a", "machine-a").unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!((p["kind"].as_str(), sent), (Some(kind), Some(face)));
         }
+    }
+
+    #[test]
+    fn note_collapse_follows_the_origin_instead_of_the_registration() {
+        let make = |device, machine, id| {
+            let mut alert = body("done");
+            alert.collapse = Some(format!("note-{id}"));
+            payload(alert, device, machine).unwrap().0
+        };
+        let first = make("device-a", "machine-a", 5);
+        assert_eq!(first["note_id"], 5);
+        assert_eq!(first["collapse"], make("device-b", "machine-a", 5)["collapse"]);
+        assert_ne!(first["collapse"], make("device-a", "machine-b", 5)["collapse"]);
+        assert_ne!(first["collapse"], make("device-a", "machine-a", 6)["collapse"]);
     }
 
     #[test]
@@ -439,6 +504,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_desktop_can_publish_its_read_receipt() {
+        let rig = Rig::new().await;
+        let desk = rig.device("dev_desk", "tester", "desktop");
+        let phone = rig.device("dev_phone", "tester", "phone");
+        let read = |token| rig.post("/relay/push/read", token, json!({"ids": [5, 5]}));
+        assert_eq!(read(None).await.0, 401);
+        assert_eq!(read(Some(&phone)).await.0, 403);
+        assert_eq!(read(Some(&desk)).await, (200, json!({"ok": true, "phones": 0})));
+        let payload = kasa_device::push::read_payload(Some("~machine-dev_desk"), &[5, 7]);
+        assert_eq!(payload["read_ids"], json!([5, 7]));
+        assert_eq!(payload["aps"], json!({"content-available": 1}));
+    }
+
+    #[tokio::test]
+    async fn a_retried_note_is_accepted_once() {
+        let rig = Rig::new().await;
+        let desk = rig.device("dev_desk", "tester", "desktop");
+        let mut note = done();
+        note["collapse"] = "note-8".into();
+        assert_eq!(rig.alert(Some(&desk), note.clone()).await.0, 200);
+        assert_eq!(rig.alert(Some(&desk), note.clone()).await, (200, json!({"ok": true, "phones": 0, "duplicate": true})));
+        note["collapse"] = "note-9".into();
+        assert!(rig.alert(Some(&desk), note).await.1.get("duplicate").is_none());
+    }
+
+    #[tokio::test]
     async fn bad_kinds_text_and_fields_are_refused() {
         let rig = Rig::new().await;
         let desk = rig.device("dev_desk", "tester", "desktop");
@@ -557,7 +648,7 @@ mod tests {
         let id = rig.face_id("tester", &face.hash).expect("그림을 맡았다");
         assert_eq!(kasa_device::push::relay_alert(&rig.base, &desk, &alert, Some(&face)).await, 1);
         assert_eq!(rig.face_id("tester", &face.hash), Some(id));
-        let uploads = rig.gate.push_alerts.0.lock().unwrap().get("face:dev_desk").map(VecDeque::len);
+        let uploads = rig.gate.push_alerts.times.lock().unwrap().get("face:dev_desk").map(VecDeque::len);
         assert_eq!(uploads, Some(1), "같은 그림은 다시 안 올린다");
         assert_eq!(kasa_device::push::relay_alert(&rig.base, &desk, &alert, None).await, 1);
     }

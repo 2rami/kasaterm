@@ -38,6 +38,38 @@ class PushBridge {
   String? _registeredToken;
   Future<void> _registration = Future.value();
 
+  static Future<void> withdraw(String? machine, List<int> ids) async {
+    if (ids.isEmpty) return;
+    try {
+      await _ch.invokeMethod<void>('withdraw', {'machine': machine, 'read_ids': ids});
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  static Future<void> reconcile(Server server) async {
+    try {
+      final machines = await _ch.invokeListMethod<String>('deliveredMachines') ?? const [];
+      await Future.wait([
+        for (final machine in machines)
+          () async {
+            final route = machine.isEmpty ? null : machine;
+            try {
+              await withdraw(route, await server.readNotificationIds(route));
+            } on ServerException {
+              // The origin may be offline when the phone returns to the foreground.
+            }
+          }(),
+      ]);
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
   /// 연결된 서버가 정해질 때마다 부른다 — 토큰이 이미 있으면 바로 맡긴다.
   Future<void> bind(Server server, Future<void> Function(AppLink) onTap) async {
     if (server.account case final account?) {
@@ -254,6 +286,7 @@ class PushBridge {
       AppLink(
         machine: (machine == null || machine.isEmpty) ? null : machine,
         pane: pane,
+        notificationId: m['note_id'] as int?,
       ),
     );
   }

@@ -19,6 +19,7 @@ import os
   private var screenVideo: ScreenVideoPlugin?
   private var pendingTap: [String: Any]?
   private var lastToken: String?
+  private static let readNotificationsKey = "kasaReadNotifications"
   private var pushEnabled = UserDefaults.standard.bool(forKey: "kasaLegacyPushEnabled")
   private var webAuth: ASWebAuthenticationSession?
   private var webAuthGen = 0
@@ -248,6 +249,17 @@ import os
         result(tap)
       case "token":
         result(self.lastToken.map { ["token": $0, "env": Self.env] })
+      case "withdraw":
+        let args = call.arguments as? [AnyHashable: Any] ?? [:]
+        self.withdraw(args) { _ in result(nil) }
+      case "deliveredMachines":
+        UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+          let machines = Set(delivered.compactMap { notification -> String? in
+            let info = notification.request.content.userInfo
+            return Self.noteID(info).map { _ in Self.notificationMachine(info) }
+          })
+          DispatchQueue.main.async { result(machines.sorted()) }
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -301,10 +313,64 @@ import os
 
   private static func payload(_ info: [AnyHashable: Any]) -> [String: Any] {
     var out: [String: Any] = [:]
-    for key in ["machine", "pane", "kind", "approval"] {
+    for key in ["machine", "pane", "kind", "approval", "url"] {
       if let v = info[key] as? String { out[key] = v }
     }
+    out["note_id"] = noteID(info)
     return out
+  }
+
+  private static func notificationMachine(_ info: [AnyHashable: Any]) -> String {
+    info["machine"] as? String ?? ""
+  }
+
+  private static func noteID(_ info: [AnyHashable: Any]) -> Int? {
+    if let id = info["note_id"] as? Int, id > 0 { return id }
+    if let collapse = info["collapse"] as? String,
+      let marker = collapse.range(of: "-note-", options: .backwards),
+      let id = Int(collapse[marker.upperBound...]), id > 0 { return id }
+    return nil
+  }
+
+  private func withdraw(_ info: [AnyHashable: Any], completion: @escaping (Bool) -> Void) {
+    let machine = Self.notificationMachine(info)
+    let ids = Set(info["read_ids"] as? [Int] ?? [])
+    guard !ids.isEmpty else { completion(false); return }
+    var read = UserDefaults.standard.dictionary(forKey: Self.readNotificationsKey) as? [String: [Int]] ?? [:]
+    let known = Set(read[machine] ?? [])
+    read[machine] = Array(known.union(ids).sorted().suffix(200))
+    UserDefaults.standard.set(read, forKey: Self.readNotificationsKey)
+    let center = UNUserNotificationCenter.current()
+    center.getDeliveredNotifications { delivered in
+      let removed = delivered.filter {
+        let data = $0.request.content.userInfo
+        return Self.notificationMachine(data) == machine && Self.noteID(data).map(ids.contains) == true
+      }.map { $0.request.identifier }
+      center.removeDeliveredNotifications(withIdentifiers: removed)
+      let remaining = delivered.filter {
+        Self.noteID($0.request.content.userInfo) != nil && !removed.contains($0.request.identifier)
+      }.count
+      DispatchQueue.main.async {
+        if #available(iOS 16.0, *) {
+          center.setBadgeCount(remaining) { _ in completion(!removed.isEmpty) }
+        } else {
+          UIApplication.shared.applicationIconBadgeNumber = remaining
+          completion(!removed.isEmpty)
+        }
+      }
+    }
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+    fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+  ) {
+    guard userInfo["kind"] as? String == "notification:read" else {
+      super.application(application, didReceiveRemoteNotification: userInfo, fetchCompletionHandler: completionHandler)
+      return
+    }
+    withdraw(userInfo) { changed in completionHandler(changed ? .newData : .noData) }
   }
 
   // 앱이 앞에 떠 있어도 배너·소리를 낸다 — 다른 학생 화면을 보는 중일 수 있다.
@@ -314,7 +380,14 @@ import os
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
     // 원격 승인은 앱이 제 띠를 세운다 — 앞에 떠 있을 때 시스템 배너까지 내면 같은 요청이 두 번 보인다.
-    let kind = notification.request.content.userInfo["kind"] as? String
+    let info = notification.request.content.userInfo
+    let kind = info["kind"] as? String
+    if let id = Self.noteID(info),
+      let read = UserDefaults.standard.dictionary(forKey: Self.readNotificationsKey) as? [String: [Int]],
+      read[Self.notificationMachine(info)]?.contains(id) == true {
+      completionHandler([])
+      return
+    }
     if notification.request.identifier == Self.releaseNotice {
       completionHandler([])
       return
@@ -335,7 +408,13 @@ import os
       completionHandler()
       return
     }
-    let tap = Self.payload(response.notification.request.content.userInfo)
+    let info = response.notification.request.content.userInfo
+    if let id = Self.noteID(info) {
+      withdraw(["machine": Self.notificationMachine(info), "read_ids": [id]]) { _ in }
+    } else {
+      center.removeDeliveredNotifications(withIdentifiers: [response.notification.request.identifier])
+    }
+    let tap = Self.payload(info)
     if let ch = channel {
       ch.invokeMethod("onTap", arguments: tap)
     } else {

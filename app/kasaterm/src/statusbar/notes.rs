@@ -77,6 +77,18 @@ pub(crate) fn forget() {
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+pub(crate) fn view_origin(label: String, pane: String, target: kasa_students::notes::Target) {
+    std::thread::spawn(move || {
+        let Some(machine) = kasa_device::machines::find(&label) else { return };
+        let body = serde_json::json!({"pane": pane, "target": target});
+        if kasa_remote::remote::remote_post_json(&machine.base, "/term/notes/read", &body)
+            .is_ok_and(|result| result["ok"] == true)
+        {
+            kasa_device::machines::poke();
+        }
+    });
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Change { Read, Delete }
 
@@ -253,7 +265,7 @@ mod tests {
     }
 
     fn note(id: u64, kind: &str, when: u64, read: bool) -> Note {
-        Note { id, pane: format!("%{id}"), character: "학생".into(), kind: kind.into(), summary: "본문".into(), when, read, request_id: None }
+        Note { id, pane: format!("%{id}"), character: "학생".into(), kind: kind.into(), summary: "본문".into(), when, read, request_id: None, target: None, event: None }
     }
 
     #[test]

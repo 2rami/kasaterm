@@ -26,6 +26,10 @@ fn remote_seat(route: &str, label: &str, row: &serde_json::Value) -> Option<crat
         label: label.to_string(),
         remote_id: id,
         surface_key,
+        session_id: (!session.is_empty()).then(|| session.to_owned()),
+        notifications_owned: row["notifications_owned"].as_bool().unwrap_or(false),
+        notice: row["notification_id"].as_u64().zip(row["notification_read"].as_bool()),
+        notice_report: row["notification_report"].as_u64(),
         name: text("name").unwrap_or_default(),
         detail: text("last_reply").unwrap_or_default(),
         session: text("title").unwrap_or_default(),
@@ -72,7 +76,7 @@ mod notification_surface_tests {
         ]);
         let seat = crate::state::RemoteSeat {
             key: String::new(), label: "nachoneko".into(), remote_id: "%3".into(), surface_key: Some("new".into()),
-            name: String::new(), detail: String::new(), session: String::new(),
+            ..Default::default()
         };
         let mut found = mirrors_of(&index, &seat);
         found.sort();
@@ -285,7 +289,7 @@ mod quick_instruction_tests {
 pub(crate) const ROOM_FIELD: &str = "room-rename";
 
 pub(crate) enum BellEntry<'a> {
-    Report,
+    Report(u64),
     Choice(Option<&'a str>),
     PushOnly,
 }
@@ -590,7 +594,6 @@ impl App {
         let character = self.notification_character(id);
         let who = character.clone().unwrap_or_else(|| "pane".to_string());
         let heading = self.notification_heading(id, &who);
-        let sid = self.pane_claude_sid.get(id).cloned();
         let is_active_pane = self.notification_surface_is_visible(id);
         let background_window = self.window_of_pane(id).filter(|wi| *wi != self.active_window);
         match ev {
@@ -613,10 +616,7 @@ impl App {
                 if let Some(report) = report.as_ref() {
                     let body = kasa_agents::ring::finished(Some(report), self.pane_last_words(id).as_deref());
                     let dedup = format!("done:{id}:{key:016x}");
-                    self.ring_phone(id, &heading, character.as_deref(), &body, "done", format!("done-/{id}"), &dedup, BellEntry::Report);
-                    if !(self.window_focused && is_active_pane) {
-                        notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
-                    }
+                    self.ring_phone(id, &heading, character.as_deref(), &body, "done", format!("done-/{id}"), &dedup, BellEntry::Report(report.key));
                 }
             }
             Transition::Blocked { report } => {
@@ -630,8 +630,7 @@ impl App {
                 }
                 let body = kasa_agents::ring::blocked(&report, self.pane_last_words(id).as_deref());
                 let dedup = format!("blocked:{id}:{}", report.key);
-                self.ring_phone(id, &heading, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup, BellEntry::Report);
-                notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
+                self.ring_phone(id, &heading, character.as_deref(), &body, "waiting:blocked", format!("blocked-/{id}"), &dedup, BellEntry::Report(report.key));
             }
             // 60초 방치는 알릴 일이 아니다 — 학생이 답을 마치고 서 있는 것뿐이고, 그건 완료 알림과
             // 입력창 위 손 흔들기가 이미 말했다. 여기서 토스트·알림·읽지 않음을 세우면 승인처럼
@@ -723,6 +722,18 @@ impl App {
                 self.notify_flash.remove(&local);
             }
         }
+        let remotely_read: Vec<_> = seats.iter().filter(|seat| seat.notice.is_some_and(|(_, read)| read)
+            && self.info.machines_col.remote_seats.iter().any(|old| old.key == seat.key && old.notice != seat.notice))
+            .cloned().collect();
+        for seat in &remotely_read {
+            let col = &mut self.info.machines_col;
+            col.remote_unread.remove(&seat.key);
+            col.remote_quiet.remove(&seat.key);
+            for mirror in self.remote_mirrors(seat) {
+                self.unread_panes.remove(&mirror);
+                self.notify_flash.remove(&mirror);
+            }
+        }
         let col = &mut self.info.machines_col;
         // 끊긴 동안에도 옛 신원을 보존해야 재접속 때 바뀐 세션의 표시를 걷을 수 있다.
         seats.extend(col.remote_seats.iter().filter(|old| {
@@ -768,6 +779,12 @@ impl App {
             Transition::Blocked { report } => Some((kasa_agents::ring::blocked(report, said), format!("blocked:{key}:{}", report.key))),
             _ => return,
         };
+        let report_key = match &event {
+            Transition::Finished { report, .. } => report.as_ref().map(|report| report.key),
+            Transition::Blocked { report } => Some(report.key),
+            _ => None,
+        };
+        let was_read = report_key.is_some() && seat.notice_report == report_key && seat.notice.is_some_and(|(_, read)| read);
         let now = std::time::Instant::now();
         let mirrors = self.remote_mirrors(&seat);
         let mut looking = false;
@@ -780,19 +797,19 @@ impl App {
             }
             if self.window_focused && self.notification_surface_is_visible(id) {
                 looking = true;
-            } else {
+            } else if !was_read {
                 self.unread_panes.insert(id.clone());
             }
         }
         let col = &mut self.info.machines_col;
         col.remote_quiet.remove(key);
-        if !looking {
+        if !looking && !was_read {
             col.remote_unread.insert(key.to_string());
         } else {
             col.remote_unread.remove(key);
         }
         self.chrome_dirty = true;
-        let Some((body, dedupe)) = alert.filter(|_| !looking) else { return };
+        let Some((body, dedupe)) = alert.filter(|_| !looking && !was_read && !seat.notifications_owned) else { return };
         let who = if seat.name.is_empty() { "pane" } else { seat.name.as_str() };
         notify_desktop(
             &format!("{} ({})", kasa_agents::ring::title(who, &seat.session), seat.label),
@@ -842,9 +859,24 @@ impl App {
         let seats = std::mem::take(&mut self.info.machines_col.remote_seats);
         let mut marks = std::collections::HashMap::new();
         let index = self.remote_mirror_index();
+        let mut still_viewing = None;
         for seat in &seats {
             let mirrors = mirrors_of(&index, seat);
             let looking = self.window_focused && mirrors.iter().any(|id| self.notification_surface_is_visible(id));
+            if looking && seat.notifications_owned {
+                let pending = seat.notice.filter(|(_, read)| !read);
+                if let (Some(surface), Some((note_id, _))) = (seat.surface_key.as_deref(), pending) {
+                    let now = std::time::Instant::now();
+                    let sent = self.remote_notification_view.as_ref().filter(|(key, id, sent)| {
+                        *key == seat.key && *id == note_id && now.duration_since(*sent) < std::time::Duration::from_secs(5)
+                    }).map(|(_, _, sent)| *sent);
+                    if sent.is_none() {
+                        let target = kasa_students::notes::Target { surface: surface.into(), session: seat.session_id.clone() };
+                        crate::statusbar::notes::view_origin(seat.label.clone(), seat.remote_id.clone(), target);
+                    }
+                    still_viewing = Some((seat.key.clone(), note_id, sent.unwrap_or(now)));
+                }
+            }
             let col = &mut self.info.machines_col;
             if looking {
                 col.remote_unread.remove(&seat.key);
@@ -872,6 +904,7 @@ impl App {
                 marks.insert((seat.label.clone(), seat.remote_id.clone()), quiet);
             }
         }
+        self.remote_notification_view = still_viewing;
         let col = &mut self.info.machines_col;
         col.remote_seats = seats;
         if col.done_marks != marks {
@@ -941,14 +974,12 @@ impl App {
         let character = self.notification_character(id);
         let who = character.clone().unwrap_or_else(|| "pane".to_string());
         let heading = self.notification_heading(id, &who);
-        let sid = self.pane_claude_sid.get(id).cloned();
         let (body, push_kind) = match kind {
             crate::agent_state::WaitKind::Permission => (self.permission_words(id, reason), "waiting:permission"),
             _ => (kasa_agents::ring::question(reason), "waiting:question"),
         };
         let dedup = key.map(|key| format!("question:{id}:{key}")).unwrap_or_else(|| format!("approval:{id}"));
         self.ring_phone(id, &heading, character.as_deref(), &body, push_kind, format!("wait-/{id}"), &dedup, BellEntry::Choice(key));
-        notify_desktop(&heading, &body, character.as_deref(), Some(&dedup), Some((id, sid.as_deref())));
     }
 
     /// 저절로 안 풀리는 오류·한도·세션 팅김 — 칸을 깨워 반짝이고 읽지 않음만 세운다. 맥·폰 알림은 보내지 않는다:
@@ -975,31 +1006,51 @@ impl App {
         kasa_agents::ring::title(who, session.as_deref().unwrap_or_default())
     }
 
-    /// 이 기계 칸의 알림을 폰에도 — 맥 알림과 같은 사건·같은 말이다(`kasa_agents::ring`). 폰은 사람이 자리에 없을 때 보는
-    /// 것이라 이 칸을 보고 있어도 보낸다. 다른 기계 칸은 그 기계가 스스로 보낸다.
+    pub(crate) fn notification_target(&self, pane: &str) -> kasa_students::notes::Target {
+        let surface = kasa_collab::surface_keys::ensure(pane);
+        let session = self.collab.hub.resolved(pane)
+            .and_then(|r| crate::agent_state::response_end(pane, &r))
+            .and_then(|end| end.session_id);
+        kasa_students::notes::Target { surface, session }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn ring_phone(&self, id: &str, heading: &str, character: Option<&str>, body: &str, kind: &str, collapse: String, dedup: &str, bell: BellEntry<'_>) {
         if kasa_remote::remote::is_remote_pane(id) || crate::lite_mode() || !notify_dedup_passes(&format!("phone:{dedup}")) {
             return;
         }
-        let note = match bell {
-            BellEntry::Report => Some(None),
-            BellEntry::Choice(request_id) => Some(request_id),
-            BellEntry::PushOnly => None,
+        let mut collapse = collapse;
+        let (event, request_id) = match bell {
+            BellEntry::Report(report) => (Some(format!("report:{report}")), None),
+            BellEntry::Choice(call) => {
+                let event = call.map(|id| format!("question:{id}")).unwrap_or_else(|| {
+                    format!("{kind}:{}", kasa_socket::tell::now_ms())
+                });
+                (Some(event), call)
+            }
+            BellEntry::PushOnly => (None, None),
         };
-        if let Some(request_id) = note {
-            if (!crate::verification_run() || std::env::var_os("KASATERM_NOTES_FILE").is_some())
-                && kasa_students::notes::add(
-                    id, character.unwrap_or(""), kind.strip_prefix("waiting:").unwrap_or(kind), body, request_id,
-                ).is_some()
-            {
+        if let Some(event) = event {
+            let reading = self.window_focused && self.notification_surface_is_visible(id);
+            let target = self.notification_target(id);
+            let mut note_id = None;
+            if !crate::verification_run() || std::env::var_os("KASATERM_NOTES_FILE").is_some() {
+                let Some(note) = kasa_students::notes::record(
+                    id, character.unwrap_or(""), kind.strip_prefix("waiting:").unwrap_or(kind),
+                    body, request_id, &target, &event, reading,
+                ) else { return };
+                note_id = Some(note.id);
+                collapse = format!("note-{}", note.id);
                 crate::statusbar::notes::forget();
                 kasa_wire::changes::bump();
             }
+            if reading {
+                return;
+            }
+            notify_desktop_inner(heading, body, character, Some(dedup), Some((id, target.session.as_deref())), note_id);
         }
-        // 격리 실행은 사람의 폰을 울리지 않는다 — 시험이 볼 수 있게 탐침 파일에만 남긴다.
         if crate::verification_run() {
-            notification_probe(&serde_json::json!({"phone": kind, "title": heading, "body": body, "pane": id}));
+            notification_probe(&serde_json::json!({"phone": kind, "title": heading, "body": body, "pane": id, "note": kasa_device::push::alert_note_id(Some(&collapse))}));
             return;
         }
         kasa_device::push::send_detached(kasa_device::push::Alert {
@@ -1137,11 +1188,55 @@ impl App {
     /// it) and push the count to the Dock badge when it changes. Called every
     /// tick from `about_to_wait` — cheap unless the count actually moves.
     pub(crate) fn sync_dock_badge(&mut self) {
-        if self.window_focused {
-            let ws = self.ws.lock().unwrap();
-            if let Some(active) = visible_notification_surface(&ws) {
-                self.unread_panes.remove(&active);
+        let active = self.window_focused.then(|| visible_notification_surface(&self.ws.lock().unwrap())).flatten();
+        if let Some(pane) = active.as_ref() {
+            let unread = self.unread_panes.remove(pane);
+            if self.notification_view.as_ref() != Some(pane) || unread {
+                if kasa_remote::remote::is_remote_pane(pane) {
+                    withdraw_desktop_legacy(pane, None);
+                } else {
+                    let target = self.notification_target(pane);
+                    if !crate::verification_run() || std::env::var_os("KASATERM_NOTES_FILE").is_some() {
+                        kasa_students::notes::read_target(pane, &target);
+                    }
+                    withdraw_desktop_legacy(pane, target.session.as_deref());
+                }
             }
+        }
+        self.notification_view = active;
+        let reads = kasa_students::notes::take_reads();
+        if !reads.is_empty() {
+            let ids = reads.iter().map(|note| note.id).collect::<Vec<_>>();
+            withdraw_desktop_notes(&reads, &ids);
+            let history = kasa_students::notes::history();
+            if !crate::verification_run() {
+                // A later quiet push can replace an earlier one while iOS is asleep.
+                let read_ids = history.iter().filter(|note| note.read).take(128).map(|note| note.id).collect();
+                kasa_device::push::read_detached(read_ids);
+            }
+            for note in reads {
+                let pane = match note.target.as_ref() {
+                    Some(t) => {
+                        let Some(pane) = kasa_collab::surface_keys::find(&t.surface) else { continue };
+                        pane
+                    }
+                    None => note.pane,
+                };
+                let target = self.notification_target(&pane);
+                if note.target.as_ref().is_none_or(|notified| *notified == target)
+                    && !history.iter().any(|other| !other.read && other.belongs_to(&pane, &target)) {
+                    self.unread_panes.remove(&pane);
+                    self.notify_flash.remove(&pane);
+                    if let Some(wi) = self.window_of_pane(&pane) {
+                        if !self.unread_panes.iter().any(|other| self.window_of_pane(other) == Some(wi)) {
+                            self.window_alert.remove(&wi);
+                        }
+                    }
+                }
+            }
+            crate::statusbar::notes::forget();
+            kasa_wire::changes::bump();
+            self.chrome_dirty = true;
         }
         let n = self.unread_panes.len();
         if n != self.dock_badge_n {
@@ -3826,18 +3921,25 @@ pub(crate) fn notify_desktop(
     title: &str, body: &str, character: Option<&str>, dedup: Option<&str>,
     route: Option<(&str, Option<&str>)>,
 ) {
+    notify_desktop_inner(title, body, character, dedup, route, None);
+}
+
+fn notify_desktop_inner(
+    title: &str, body: &str, character: Option<&str>, dedup: Option<&str>,
+    route: Option<(&str, Option<&str>)>, note: Option<u64>,
+) {
     if crate::lite_mode() || dedup.is_some_and(|k| !notify_dedup_passes(k)) { return; }
     let windows_rig = cfg!(windows) && std::env::var_os("KASATERM_NOTIFY_TOAST").is_some();
     if crate::verification_run() && !windows_rig {
-        notification_probe(&serde_json::json!({"title": title, "body": body, "route": route}));
+        notification_probe(&serde_json::json!({"title": title, "body": body, "route": route, "note": note}));
         return;
     }
     #[cfg(target_os = "macos")]
     if desktop_notice_allowed(is_bundled(), NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 1) {
-        notify_native(title, body, character, route);
+        notify_native(title, body, character, route, note);
     }
     #[cfg(windows)]
-    { let _ = crate::win_notify::toast(title, body, character, route); }
+    { let _ = crate::win_notify::toast(title, body, character, route, note); }
 }
 
 /// 눌렀을 때 갈 자리를 알림 식별자에 싣는다 — `kasaterm-notify-{seq}|{pane}|{sid}`. pane id(`%116`)도
@@ -3849,6 +3951,69 @@ pub(crate) fn notify_ident(seq: u64, route: Option<(&str, Option<&str>)>) -> Str
         Some((pane, sid)) => format!("kasaterm-notify-{seq}|{pane}|{}", sid.unwrap_or("")),
         None => format!("kasaterm-notify-{seq}"),
     }
+}
+
+pub(crate) fn note_notify_ident(id: u64, route: Option<(&str, Option<&str>)>) -> String {
+    notify_ident(id, route).replacen("kasaterm-notify-", "kasaterm-note-", 1)
+}
+
+pub(crate) fn notification_note_id(ident: &str) -> Option<u64> {
+    ident.split('|').next()?.strip_prefix("kasaterm-note-")?.parse().ok()
+}
+
+fn withdraw_desktop_notes(_notes: &[kasa_students::notes::Note], ids: &[u64]) {
+    if crate::verification_run() {
+        notification_probe(&serde_json::json!({"withdraw_notes": ids}));
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSArray, NSString};
+        use objc2_user_notifications::UNUserNotificationCenter;
+        if is_bundled() {
+            let ids = _notes.iter().filter_map(|note| {
+                let target = note.target.as_ref()?;
+                let ident = note_notify_ident(note.id, Some((&note.pane, target.session.as_deref())));
+                Some(NSString::from_str(&ident))
+            }).collect::<Vec<_>>();
+            let ids = NSArray::from_retained_slice(&ids);
+            let center = UNUserNotificationCenter::currentNotificationCenter();
+            center.removePendingNotificationRequestsWithIdentifiers(&ids);
+            center.removeDeliveredNotificationsWithIdentifiers(&ids);
+        }
+    }
+    #[cfg(windows)]
+    crate::win_notify::withdraw_notes(ids);
+}
+
+fn withdraw_desktop_legacy(pane: &str, session: Option<&str>) {
+    if crate::verification_run() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (pane, session) = (pane.to_owned(), session.map(str::to_owned));
+        withdraw_native(move |ident| {
+            ident.starts_with("kasaterm-notify-") && notify_route(ident).is_some_and(|route| route.0 == pane && route.1 == session)
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn withdraw_native(matches: impl Fn(&str) -> bool + 'static) {
+    use objc2_foundation::{NSArray, NSString};
+    use objc2_user_notifications::{UNNotification, UNUserNotificationCenter};
+    if !is_bundled() { return; }
+    let callback = block2::RcBlock::new(move |delivered: std::ptr::NonNull<NSArray<UNNotification>>| {
+        let delivered = unsafe { delivered.as_ref() };
+        let ids = delivered.iter().map(|note| note.request().identifier())
+            .filter(|id| matches(&id.to_string())).collect::<Vec<_>>();
+        if !ids.is_empty() {
+            UNUserNotificationCenter::currentNotificationCenter()
+                .removeDeliveredNotificationsWithIdentifiers(&NSArray::<NSString>::from_retained_slice(&ids));
+        }
+    });
+    UNUserNotificationCenter::currentNotificationCenter().getDeliveredNotificationsWithCompletionHandler(&callback);
 }
 
 /// 알림 식별자에서 갈 자리를 꺼낸다. 자리 표시(`kasaterm-notify-3||`)나 형식이 안 맞는 것은 None —
@@ -3984,6 +4149,7 @@ fn notify_native(
     body: &str,
     character: Option<&str>,
     route: Option<(&str, Option<&str>)>,
+    note: Option<u64>,
 ) {
     use objc2_foundation::{NSArray, NSString, NSURL};
     use objc2_user_notifications::{
@@ -3994,7 +4160,7 @@ fn notify_native(
     // Unique id per request so rapid completions don't replace each other.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let route_ident = notify_ident(seq, route);
+    let route_ident = note.map_or_else(|| notify_ident(seq, route), |id| note_notify_ident(id, route));
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));

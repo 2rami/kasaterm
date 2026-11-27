@@ -158,12 +158,13 @@ async fn post_once(
     payload: &Value,
     collapse: Option<&str>,
 ) -> Result<(), (reqwest::StatusCode, String)> {
+    let background = payload["kind"] == "notification:read";
     let mut req = client()
         .post(format!("{}/3/device/{token}", host_of(env)))
         .header("authorization", format!("bearer {bearer}"))
         .header("apns-topic", TOPIC)
-        .header("apns-push-type", "alert")
-        .header("apns-priority", "10")
+        .header("apns-push-type", if background { "background" } else { "alert" })
+        .header("apns-priority", if background { "5" } else { "10" })
         .json(payload);
     if let Some(c) = collapse {
         req = req.header("apns-collapse-id", c.chars().take(64).collect::<String>());
@@ -291,6 +292,50 @@ pub struct Alert {
     pub avatar_slug: Option<String>,
     /// 학생이 보여 주려 연 페이지 — 폰이 알림을 누르면 pane 대신 이 주소를 연다.
     pub url: Option<String>,
+}
+
+pub fn alert_note_id(collapse: Option<&str>) -> Option<u64> {
+    collapse?.strip_prefix("note-")?.parse::<u64>().ok().filter(|id| *id > 0)
+}
+
+pub fn note_collapse(machine: &str, id: u64) -> String {
+    let hash = ring::digest::digest(&ring::digest::SHA256, machine.as_bytes());
+    let machine = hash.as_ref()[..12].iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    format!("kt-{machine}-note-{id}")
+}
+
+pub fn read_payload(machine: Option<&str>, ids: &[u64]) -> Value {
+    serde_json::json!({
+        "aps": {"content-available": 1},
+        "kind": "notification:read",
+        "machine": machine,
+        "read_ids": ids,
+    })
+}
+
+pub fn read_detached(ids: Vec<u64>) {
+    if ids.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("kasa-push-read".into()).spawn(move || {
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            rt.block_on(async {
+                if let Some((cred, _)) = crate::device_auth::capture() {
+                    let url = format!("{}/relay/push/read", cred.relay.trim_end_matches('/'));
+                    let _ = relay_client().post(url).bearer_auth(&cred.token)
+                        .json(&serde_json::json!({ "ids": ids })).send().await;
+                }
+                if let Some(key) = load_key() {
+                    if let Ok(bearer) = jwt(&key) {
+                        let payload = read_payload(None, &ids);
+                        for phone in tokens() {
+                            let _ = post_once(&phone.env, &phone.token, &bearer, &payload, None).await;
+                        }
+                    }
+                }
+            });
+        }
+    });
 }
 
 fn notification_thread(alert: &Alert) -> String {
@@ -443,6 +488,9 @@ async fn send_local(alert: &Alert) -> usize {
             return 0;
         }
     };
+    let note_id = alert_note_id(alert.collapse.as_deref());
+    let machine = note_id.and_then(|_| crate::mobile::machine_identity());
+    let stable_collapse = note_id.zip(machine.as_deref()).map(|(id, machine)| note_collapse(machine, id));
     let mut sent = 0;
     for t in list {
         // 얼굴 주소는 폰마다 다르다(자기 서버 주소 밑의 `term/avatar/<slug>.png`).
@@ -463,8 +511,9 @@ async fn send_local(alert: &Alert) -> usize {
             "sender": alert.sender,
             "avatar": avatar,
             "url": alert.url,
+            "note_id": note_id,
         });
-        let collapse = alert.collapse.as_deref();
+        let collapse = stable_collapse.as_deref().or(alert.collapse.as_deref());
         match post_once(&t.env, &t.token, &bearer, &payload, collapse).await {
             Ok(()) => sent += 1,
             Err((status, text)) if text.contains("BadDeviceToken") => {
@@ -502,8 +551,8 @@ async fn send_local(alert: &Alert) -> usize {
 pub async fn send_to(env: &str, token: &str, payload: &Value, collapse: &str) -> Result<(), (u16, String)> {
     let Some(key) = load_key() else { return Err((0, "no_key".into())) };
     let bearer = jwt(&key).map_err(|e| (0, e))?;
-    post_once(env, token, &bearer, payload, Some(collapse))
-        .await
+    let collapse = (payload["kind"] != "notification:read").then_some(collapse);
+    post_once(env, token, &bearer, payload, collapse).await
         .map_err(|(status, text)| (status.as_u16(), text))
 }
 

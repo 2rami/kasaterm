@@ -28,6 +28,25 @@ pub struct Note {
     pub read: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Target>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Target {
+    pub surface: String,
+    pub session: Option<String>,
+}
+
+impl Note {
+    pub fn belongs_to(&self, pane: &str, target: &Target) -> bool {
+        match &self.target {
+            Some(own) => own == target,
+            None => self.pane == pane,
+        }
+    }
 }
 
 impl Note {
@@ -67,11 +86,17 @@ const KEEP: usize = 200;
 
 /// 파일 하나를 여러 요청이 동시에 고치지 않게 — 읽고 쓰는 사이에 남이 끼면 한쪽이 사라진다.
 static LOCK: Mutex<()> = Mutex::new(());
+static READS: Mutex<Vec<Note>> = Mutex::new(Vec::new());
 
 fn path() -> Option<PathBuf> {
     std::env::var_os("KASATERM_NOTES_FILE")
         .map(PathBuf::from)
-        .or_else(|| kasa_socket::home_dir().map(|h| h.join(".config/kasaterm/notes.json")))
+        .or_else(|| {
+            if std::env::var_os("KASATERM_WINDOW_SIZE").is_some() || std::env::var_os("KASATERM_WINDOW_POS").is_some() {
+                return None;
+            }
+            kasa_socket::home_dir().map(|h| h.join(".config/kasaterm/notes.json"))
+        })
 }
 
 fn load(path: &Path) -> FileBody {
@@ -86,7 +111,9 @@ fn save(path: &Path, body: &FileBody) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let text = serde_json::to_string_pretty(body).map_err(|e| std::io::Error::other(e.to_string()))?;
-    std::fs::write(path, text)
+    let pending = path.with_extension("pending.json");
+    std::fs::write(&pending, text)?;
+    std::fs::rename(pending, path)
 }
 
 fn now_secs() -> u64 {
@@ -123,13 +150,21 @@ fn visible(notes: Vec<Note>, choices: Option<&HashMap<String, Choices>>) -> Vec<
     }).collect()
 }
 
-fn add_to(path: &Path, pane: &str, character: &str, kind: &str, summary: &str, request_id: Option<&str>) -> Option<Note> {
+fn add_to(
+    path: &Path, pane: &str, character: &str, kind: &str, summary: &str, request_id: Option<&str>,
+    notice: Option<(&Target, &str)>, read: bool,
+) -> Option<Note> {
     let summary = summary.trim();
     if summary.is_empty() || pane.trim().is_empty() || pane.trim() == "disk" || !KINDS.contains(&kind) {
         return None;
     }
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut body = load(path);
+    if let Some((target, event)) = notice {
+        if body.notes.iter().any(|note| note.target.as_ref() == Some(target) && note.event.as_deref() == Some(event)) {
+            return None;
+        }
+    }
     body.next_id = body.next_id.max(1);
     let note = Note {
         id: body.next_id,
@@ -138,8 +173,10 @@ fn add_to(path: &Path, pane: &str, character: &str, kind: &str, summary: &str, r
         kind: kind.to_string(),
         summary: summary.to_string(),
         when: now_secs(),
-        read: false,
+        read,
         request_id: request_id.map(str::to_owned),
+        target: notice.map(|(target, _)| target.clone()),
+        event: notice.map(|(_, event)| event.to_owned()),
     };
     body.next_id += 1;
     body.notes.push(note.clone());
@@ -151,20 +188,25 @@ fn add_to(path: &Path, pane: &str, character: &str, kind: &str, summary: &str, r
     Some(note)
 }
 
-fn mark_read_in(path: &Path, ids: &[u64], all: bool) -> usize {
+fn read_in(path: &Path, matches: impl Fn(&Note) -> bool) -> Vec<Note> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut body = load(path);
-    let mut n = 0;
+    let mut changed = Vec::new();
     for note in &mut body.notes {
-        if !note.read && (all || ids.contains(&note.id)) {
+        if !note.read && matches(note) {
             note.read = true;
-            n += 1;
+            changed.push(note.clone());
         }
     }
-    if n > 0 && save(path, &body).is_err() {
-        return 0;
+    if !changed.is_empty() && save(path, &body).is_err() {
+        return Vec::new();
     }
-    n
+    changed
+}
+
+#[cfg(test)]
+fn mark_read_in(path: &Path, ids: &[u64], all: bool) -> usize {
+    read_in(path, |note| all || ids.contains(&note.id)).len()
 }
 
 /// 지우기 — `all` 이면 전부. 돌려주는 값은 지운 개수.
@@ -182,20 +224,56 @@ fn remove_in(path: &Path, ids: &[u64], all: bool) -> usize {
 
 /// 최근 것부터.
 pub fn list() -> Vec<Note> {
-    let Some(path) = path() else { return Vec::new() };
-    let notes = list_from(&path);
+    let notes = history();
     let choices = CHOICES.lock().unwrap_or_else(|e| e.into_inner());
     visible(notes, choices.as_ref())
 }
 
 /// 사람에게 간 알림 한 건을 남긴다 — [`KINDS`] 밖의 종류·빈 본문은 안 받는다.
 pub fn add(pane: &str, character: &str, kind: &str, summary: &str, request_id: Option<&str>) -> Option<Note> {
-    add_to(&path()?, pane, character, kind, summary, request_id)
+    add_to(&path()?, pane, character, kind, summary, request_id, None, false)
 }
 
 /// 읽음 표시 — `all` 이면 전부. 돌려주는 값은 새로 읽음이 된 개수.
 pub fn mark_read(ids: &[u64], all: bool) -> usize {
-    path().map(|p| mark_read_in(&p, ids, all)).unwrap_or(0)
+    read_ids(ids, all).len()
+}
+
+pub fn record(
+    pane: &str, character: &str, kind: &str, summary: &str, request_id: Option<&str>,
+    target: &Target, event: &str, read: bool,
+) -> Option<Note> {
+    add_to(&path()?, pane, character, kind, summary, request_id, Some((target, event)), read)
+}
+
+pub fn read_ids(ids: &[u64], all: bool) -> Vec<Note> {
+    change_read(|note| all || ids.contains(&note.id))
+}
+
+pub fn read_target(pane: &str, target: &Target) -> Vec<Note> {
+    change_read(|note| note.belongs_to(pane, target))
+}
+
+fn change_read(matches: impl Fn(&Note) -> bool) -> Vec<Note> {
+    let mut pending = READS.lock().unwrap_or_else(|e| e.into_inner());
+    let changed = path().map(|p| read_in(&p, matches)).unwrap_or_default();
+    if !changed.is_empty() {
+        pending.extend(changed.iter().cloned());
+        let excess = pending.len().saturating_sub(KEEP);
+        pending.drain(..excess);
+    }
+    changed
+}
+
+pub fn take_reads() -> Vec<Note> {
+    std::mem::take(&mut *READS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+pub fn history() -> Vec<Note> {
+    path().map(|p| {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        list_from(&p)
+    }).unwrap_or_default()
 }
 
 /// 폰이 옆으로 밀어 지우거나 「모두 읽음」으로 비운 것 — 돌려주는 값은 지운 개수.
@@ -214,21 +292,21 @@ mod tests {
     }
 
     fn add(p: &Path, pane: &str, summary: &str) -> Option<Note> {
-        add_to(p, pane, "유우카", "done", summary, None)
+        add_to(p, pane, "유우카", "done", summary, None, None, false)
     }
 
     #[test]
     fn only_the_two_alert_kinds_are_kept_or_listed() {
         let p = tmp("kinds");
-        assert!(add_to(&p, "%3", "유우카", "link", "페이지", None).is_none(), "알림 두 가지 밖은 안 받는다");
+        assert!(add_to(&p, "%3", "유우카", "link", "페이지", None, None, false).is_none(), "알림 두 가지 밖은 안 받는다");
         for kind in KINDS {
-            assert!(add_to(&p, "%3", "유우카", kind, "본문", None).is_some(), "{kind}");
+            assert!(add_to(&p, "%3", "유우카", kind, "본문", None, None, false).is_some(), "{kind}");
         }
         let mut body = load(&p);
         body.notes.push(Note { id: 99, pane: "%1".into(), character: String::new(), kind: "done_ok".into(),
-            summary: "옛 나쵸 쪽지".into(), when: 1, read: false, request_id: None });
+            summary: "옛 나쵸 쪽지".into(), when: 1, read: false, request_id: None, target: None, event: None });
         body.notes.push(Note { id: 100, pane: "disk".into(), character: String::new(), kind: "blocked".into(),
-            summary: "디스크 경고".into(), when: 1, read: false, request_id: None });
+            summary: "디스크 경고".into(), when: 1, read: false, request_id: None, target: None, event: None });
         save(&p, &body).unwrap();
         assert_eq!(list_from(&p).len(), KINDS.len(), "옛 쪽지와 디스크 경고는 목록에 표시하지 않는다");
     }
@@ -246,7 +324,7 @@ mod tests {
             ("question", Some("another")),
             ("question", Some("current")),
         ] {
-            add_to(&p, "%3", "", kind, "본문", request).unwrap();
+            add_to(&p, "%3", "", kind, "본문", request, None, false).unwrap();
         }
         mark_read_in(&p, &[8], false);
         let active = HashMap::from([("%3".to_string(), Choices {
@@ -263,7 +341,7 @@ mod tests {
     #[test]
     fn old_unkeyed_notes_stay_hidden_during_a_new_wait() {
         let p = tmp("unkeyed");
-        let note = add_to(&p, "%4", "", "permission", "본문", None).unwrap();
+        let note = add_to(&p, "%4", "", "permission", "본문", None, None, false).unwrap();
         let mut active = HashMap::from([("%4".to_string(), Choices {
             permission: true, question: false, question_ids: HashSet::new(), since: note.when,
         })]);
@@ -286,6 +364,20 @@ mod tests {
         assert_eq!(mark_read_in(&p, &[1], false), 0, "이미 읽은 건 다시 안 센다");
         assert_eq!(mark_read_in(&p, &[], true), 1);
         assert!(list_from(&p).iter().all(|n| n.read));
+    }
+
+    #[test]
+    fn repeated_reports_and_reused_pane_numbers_keep_their_identity() {
+        let path = tmp("receipt");
+        let first = Target { surface: "stable".into(), session: Some("first".into()) };
+        let next = Target { session: Some("next".into()), ..first.clone() };
+        let add = |pane, target, event| add_to(&path, pane, "", "done", "finished", None, Some((target, event)), false);
+        let old = add("%3", &first, "completed:1").unwrap();
+        assert!(add("%7", &first, "completed:1").is_none());
+        let new = add("%3", &next, "completed:1").unwrap();
+        let read = read_in(&path, |note| note.belongs_to("%7", &first));
+        assert_eq!(read.iter().map(|note| note.id).collect::<Vec<_>>(), [old.id]);
+        assert_eq!(list_from(&path).iter().filter(|note| !note.read).map(|note| note.id).collect::<Vec<_>>(), [new.id]);
     }
 
     #[test]

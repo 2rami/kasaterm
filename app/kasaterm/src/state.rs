@@ -338,6 +338,10 @@ pub(crate) struct RemoteSeat {
     pub(crate) label: String,
     pub(crate) remote_id: String,
     pub(crate) surface_key: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) notifications_owned: bool,
+    pub(crate) notice: Option<(u64, bool)>,
+    pub(crate) notice_report: Option<u64>,
     pub(crate) name: String,
     /// 알림 본문 재료 — 그 칸 학생이 마지막에 한 말(원본 행의 `last_reply`).
     pub(crate) detail: String,

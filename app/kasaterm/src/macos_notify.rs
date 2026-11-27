@@ -71,7 +71,7 @@ define_class!(
                 let _ = self
                     .ivars()
                     .proxy
-                    .send_event(UserEvent::NotifyFocus { pane, sid });
+                    .send_event(UserEvent::NotifyFocus { pane, sid, note: crate::chrome::notification_note_id(&ident) });
             }
             completion.call(());
         }

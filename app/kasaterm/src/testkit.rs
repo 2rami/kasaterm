@@ -154,6 +154,27 @@ impl App {
         if Instant::now() < at || FIRED.swap(true, Ordering::Relaxed) {
             return;
         }
+        if crate::verification_run() && std::env::var_os("KASATERM_NOTES_FILE").is_some()
+            && std::env::var("KASATERM_AUTONOTIFY_READ").as_deref() == Ok("1")
+        {
+            let pane = {
+                let ws = self.ws.lock().unwrap();
+                ws.active_pane.as_ref().map(|outer| ws.active_tab_pid(outer))
+            };
+            let Some(pane) = pane else { return };
+            let focused = self.window_focused;
+            self.window_focused = false;
+            for source in ["runtime", "transcript"] {
+                self.ring_phone(&pane, "Notification probe", None, "Report 101", "done", String::new(),
+                    source, crate::chrome::BellEntry::Report(101));
+            }
+            self.window_focused = true;
+            self.ring_phone(&pane, "Notification probe", None, "Report 102", "done", String::new(),
+                "visible", crate::chrome::BellEntry::Report(102));
+            self.window_focused = focused;
+            self.unread_panes.insert(pane);
+            return;
+        }
         eprintln!("[autonotify] 데스크톱 알림 발사");
         crate::chrome::notify_desktop("아리스 프로브", "알림 아이콘 경로 확인", None, None, None);
     }

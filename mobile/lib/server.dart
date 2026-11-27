@@ -54,6 +54,8 @@ class Pane {
     this.session,
     this.harness,
     this.surfaceKey,
+    this.agentSessionId,
+    this.notificationId,
     this.mirrorOf,
     this.contextPct,
     this.compactPct,
@@ -110,6 +112,8 @@ class Pane {
   /// claude·codex — 상태줄 앞의 작은 로고.
   final String? harness;
   final String? surfaceKey;
+  final String? agentSessionId;
+  final int? notificationId;
 
   /// 이 자리가 다른 기계 pane 의 거울이면 그 기계 이름. 몸통은 저쪽에 있다.
   final String? mirrorOf;
@@ -264,6 +268,11 @@ class Pane {
     session: j['session'] as String?,
     harness: j['harness'] as String?,
     surfaceKey: j['surface_key'] as String?,
+    agentSessionId: switch (j['response_end']) {
+      {'session_id': final String id} => id,
+      _ => null,
+    },
+    notificationId: j['notification_id'] as int?,
     mirrorOf: j['mirror_of'] as String?,
     contextPct: (j['context_pct'] as num?)?.toInt(),
     compactPct: (j['compact_pct'] as num?)?.toInt(),
@@ -295,6 +304,7 @@ class Pane {
     'session': ?session,
     'harness': ?harness,
     'surface_key': ?surfaceKey,
+    if (agentSessionId != null) 'response_end': {'session_id': agentSessionId},
     'mirror_of': ?mirrorOf,
     'branch': ?branch,
     'model_label': ?modelLabel,
@@ -320,6 +330,7 @@ class Pane {
     session: session,
     harness: harness,
     surfaceKey: surfaceKey,
+    agentSessionId: agentSessionId,
     mirrorOf: mirrorOf,
     branch: branch,
     modelLabel: modelLabel,
@@ -1931,6 +1942,28 @@ class Server {
     ];
   }
 
+  Future<Note?> notificationNote(int id, {String? machine}) async {
+    final data = await _getJson('term/notes', query: {'notification_id': '$id'}, machine: machine);
+    if (data is! Map || data['id'] != id) return null;
+    return Note.fromJson(data.cast<String, Object?>(), machine: machine);
+  }
+
+  Future<List<int>> readNotificationIds(String? machine) async {
+    final data = await _getJson('term/notes', query: {'read_ids': '1'}, machine: machine, timeout: const Duration(seconds: 10));
+    return data is List ? data.whereType<int>().toList() : const [];
+  }
+
+  Future<List<int>> markPaneRead(Pane pane) async {
+    final surface = pane.surfaceKey;
+    if (surface == null || surface.isEmpty || pane.mirrorOf != null) return const [];
+    final data = await _postJsonOk('term/notes/read', {
+      'pane': pane.id,
+      'target': {'surface': surface, 'session': pane.agentSessionId},
+    }, machine: pane.machine);
+    final ids = data['read_ids'];
+    return ids is List ? ids.whereType<int>().toList() : const [];
+  }
+
   Future<void> markNotesRead({
     List<int> ids = const [],
     bool all = false,
@@ -1971,6 +2004,14 @@ class Server {
     Map<String, Object?> body, {
     String? machine,
   }) async {
+    await _postJsonOk(path, body, machine: machine);
+  }
+
+  Future<Map<String, Object?>> _postJsonOk(
+    String path,
+    Map<String, Object?> body, {
+    String? machine,
+  }) async {
     final res = await _mutate(path, machine: machine, json: body);
     final j = res.statusCode == 200 ? jsonDecode(res.body) : null;
     if (j is! Map || j['ok'] != true) {
@@ -1978,6 +2019,7 @@ class Server {
         (j is Map ? j['error'] as String? : null) ?? '안 됐다 (${res.statusCode})',
       );
     }
+    return j.cast<String, Object?>();
   }
 
   void close() {
@@ -2081,6 +2123,8 @@ class Note {
     required this.when,
     required this.read,
     this.machine,
+    this.surface,
+    this.sessionId,
   });
 
   /// 알림 두 가지 — 고를 것(permission · question · blocked)과 완료(done). 데스크톱 `notes::KINDS`.
@@ -2097,6 +2141,13 @@ class Note {
   final bool read;
   final String? machine;
 
+  final String? surface;
+  final String? sessionId;
+
+  bool matchesPane(Pane view) => surface == null
+      ? pane == view.id
+      : surface == view.surfaceKey && sessionId == view.agentSessionId;
+
   String get key => '${machine ?? ''}|$id';
 
   Note copyWith({bool? read}) => Note(
@@ -2108,6 +2159,8 @@ class Note {
     when: when,
     read: read ?? this.read,
     machine: machine,
+    surface: surface,
+    sessionId: sessionId,
   );
 
   static Note fromJson(Map<String, Object?> j, {String? machine}) => Note(
@@ -2121,6 +2174,14 @@ class Note {
     ),
     read: j['read'] == true,
     machine: machine,
+    surface: switch (j['target']) {
+      {'surface': final String surface} => surface,
+      _ => null,
+    },
+    sessionId: switch (j['target']) {
+      {'session': final String session} => session,
+      _ => null,
+    },
   );
 }
 

@@ -903,7 +903,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::NotifyFocus { pane, sid } => {
+            UserEvent::NotifyFocus { pane, sid, note } => {
                 use crate::native_settings::device_account::work;
                 if pane == work::ACTION {
                     let id = sid.clone().unwrap_or_default();
@@ -916,17 +916,25 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // 알림을 쏜 시점의 세션과 지금 그 pane 의 세션이 같을 때만 옮긴다.
-                // surface id 는 재사용되므로, 그 사이 pane 이 닫히고 번호가 새 셸에
-                // 넘어갔으면 엉뚱한 자리로 끌려간다 — 그때는 아무 데도 안 가는 게 맞다.
-                let same = match sid.as_deref() {
-                    Some(s) => self.pane_claude_sid.get(pane).is_some_and(|c| c == s),
-                    // 세션을 못 실은 알림(순정 셸 pane)은 존재 확인까지만.
-                    None => self.ws.lock().unwrap().panes.contains_key(pane),
+                let pane = if let Some(id) = note {
+                    let Some(entry) = kasa_students::notes::history().into_iter().find(|entry| entry.id == *id) else { return };
+                    kasa_students::notes::mark_read(&[*id], false);
+                    let Some(target) = entry.target else { return };
+                    let Some(live) = kasa_collab::surface_keys::find(&target.surface) else { return };
+                    if self.notification_target(&live) != target {
+                        return;
+                    }
+                    live
+                } else {
+                    let same = match sid.as_deref() {
+                        Some(s) => self.pane_claude_sid.get(pane).is_some_and(|c| c == s),
+                        None => self.window_of_pane(pane).is_some(),
+                    };
+                    if !same {
+                        return;
+                    }
+                    pane.clone()
                 };
-                if !same {
-                    return;
-                }
                 // 배너를 눌렀는데 창이 뒤에(트레이로 숨겨) 있으면 누른 뜻이 없다. 방 전환은
                 // `SocketFocus` 가 하므로 여기서는 창만 앞으로 올리고 넘긴다.
                 self.show_main_window();

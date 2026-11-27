@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'hub_prefs.dart';
 import 'hub_snapshot.dart';
 import 'machine_look.dart';
+import 'push.dart';
 import 'server.dart';
 
 /// 쪽지에서 그 학생에게 보낸 답 — 앱이 도는 동안만 기억한다.
@@ -704,6 +705,7 @@ class HubModel extends ChangeNotifier {
       return;
     }
     if (_disposed) return;
+    unawaited(PushBridge.withdraw(machine, [for (final note in list) if (note.read) note.id]));
     final fresh = list.where((n) => !n.read && !_seenNotes.contains(n.key));
     if (_notesPrimed.contains(key) && fresh.isNotEmpty) {
       HapticFeedback.lightImpact();
@@ -907,7 +909,10 @@ class HubModel extends ChangeNotifier {
     try {
       await Future.wait([
         for (final entry in idsByMachine.entries)
-          server.markNotesRead(ids: entry.value, machine: entry.key).catchError((Object _) {}),
+          Future.wait([
+            PushBridge.withdraw(entry.key, entry.value),
+            server.markNotesRead(ids: entry.value, machine: entry.key).catchError((Object _) {}),
+          ]),
       ]);
     } finally {
       _markingNotesRead.removeAll(reading);
@@ -919,6 +924,7 @@ class HubModel extends ChangeNotifier {
     _editNotes(
       (l) => [for (final x in l) x.key == n.key ? x.copyWith(read: true) : x],
     );
+    unawaited(PushBridge.withdraw(n.machine, [n.id]));
     try {
       await server.markNotesRead(ids: [n.id], machine: n.machine);
     } catch (_) {}
@@ -945,7 +951,7 @@ class HubModel extends ChangeNotifier {
       if (s.route != n.machine) continue;
       for (final r in s.rooms) {
         for (final p in r.panes) {
-          if (p.id == n.pane) return p;
+          if (n.matchesPane(p)) return p;
         }
       }
     }

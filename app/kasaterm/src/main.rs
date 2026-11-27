@@ -3936,6 +3936,7 @@ enum UserEvent {
     NotifyFocus {
         pane: String,
         sid: Option<String>,
+        note: Option<u64>,
     },
     /// 활성 pane 의 shell OS pid 질의(socket 스레드 → GUI 동기 RPC,
     /// SocketSplit 의 Sender 패턴). GET /mode 등 방 판정이 쓰는
@@ -5669,6 +5670,8 @@ struct App {
     /// haven't been opened since — drives the Dock badge count. Cleared when
     /// the pane becomes the focused active pane (`sync_dock_badge`).
     unread_panes: std::collections::HashSet<String>,
+    notification_view: Option<String>,
+    remote_notification_view: Option<(String, u64, std::time::Instant)>,
     /// 앱이 뜬 시각. 막 켜진 동안은 상태 판정이 한 번 흔들린다 — 훅·기록·명부가 아직 다 안
     /// 모여 일하는 중으로 보였다가 곧 쉬는 중이 되고, 그 사이가 「완료」 전이로 읽힌다.
     /// 그것을 알림·읽지 않음으로 세우면 껐다 켤 때마다 안 본 것이 쌓인 것처럼 보인다.
@@ -6319,6 +6322,8 @@ impl App {
             sidebar_row_drag: None,
             pane_claude_seen: std::collections::HashSet::new(),
             unread_panes: std::collections::HashSet::new(),
+            notification_view: None,
+            remote_notification_view: None,
             dock_badge_n: 0,
             collab: Default::default(),
             last_window_title_check: None,

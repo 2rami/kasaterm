@@ -82,6 +82,25 @@ void main() {
     expect(links.single.pane, isNull);
   });
 
+  test('foreground reconciliation withdraws only read IDs from each origin', () async {
+    final calls = <Object?>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'deliveredMachines') return ['~a', '~b'];
+          if (call.method == 'withdraw') calls.add(call.arguments);
+          return null;
+        });
+    final server = Server(Uri.parse('http://localhost:8765/'), client: MockClient((request) async {
+      expect(request.url.queryParameters, {'read_ids': '1'});
+      return http.Response(request.url.path.contains('~a') ? '[12, 17]' : '[]', 200);
+    }));
+    await PushBridge.reconcile(server);
+    expect(calls, [
+      {'machine': '~a', 'read_ids': [12, 17]},
+    ]);
+    server.close();
+  });
+
   test('server without a push key still owns its saved token', () async {
     final events = <String>[];
     final first = PushServer('first', events, ready: false);

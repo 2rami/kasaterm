@@ -459,6 +459,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       ApprovalCenter.instance.setForeground(true);
       unawaited(PushBridge.instance.retryCleanup());
+      if (_connection.server case final server?) unawaited(PushBridge.reconcile(server));
       unawaited(phoneThemeSync.refresh());
       unawaited(weather.refresh());
       if (_connection.server == null) unawaited(_connection.retry());
@@ -518,12 +519,18 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     final pane = link.pane;
     if (pane == null) return;
     final List<Pane> panes;
+    Note? note;
     try {
+      if (link.notificationId case final id?) {
+        await server.markNotesRead(ids: [id], machine: link.machine);
+        note = await server.notificationNote(id, machine: link.machine);
+        if (note == null) return;
+      }
       panes = await server.panes(machine: link.machine);
     } on ServerException {
       return;
     }
-    final found = panes.where((p) => p.id == pane).firstOrNull;
+    final found = panes.where((p) => note?.matchesPane(p) ?? p.id == pane).firstOrNull;
     if (found == null ||
         nav == null ||
         !mounted ||
@@ -612,6 +619,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   void _loadTokens(Server server) {
     // 서버가 정해지는 자리가 여기 하나라 푸시 등록도 같이 건다.
     PushBridge.instance.bind(server, _openLink);
+    unawaited(PushBridge.reconcile(server));
     server.designTokens().then((t) {
       if (t == null ||
           !mounted ||

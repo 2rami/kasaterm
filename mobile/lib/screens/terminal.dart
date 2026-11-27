@@ -17,6 +17,7 @@ import '../grid_select.dart';
 import '../hardware_keys.dart';
 import '../live_input.dart';
 import '../resume_spot.dart';
+import '../push.dart';
 import '../image_attachment.dart';
 import '../photo_attachment_button.dart';
 import '../hub_model.dart';
@@ -100,6 +101,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
   late Pane _pane = widget.pane;
   Timer? _paneTimer;
   bool _paneRefreshing = false;
+  (String, String?, int?)? _readView;
+  bool _markingView = false;
+
 
   /// 바로 치기(기본) — 확정된 글자가 곧바로 화면의 입력상자에 붙는다. 끄면 아래
   /// 칸에 적어 두었다 한 번에 보낸다(긴 글을 다듬을 때).
@@ -262,7 +266,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
     super.initState();
     _chatInput.text = widget.initialChatDraft;
     _input.text = widget.initialTermDraft;
-    _lifecycle = AppLifecycleListener(onHide: _keepSpot);
+    _lifecycle = AppLifecycleListener(onHide: _keepSpot, onResume: () {
+      _readView = null;
+      unawaited(_refreshPane());
+    });
     _facing.addListener(_followView);
     BackgroundGrace.instance.addListener(_graceChanged);
     _inputFocus.onKeyEvent = _onHardwareKey;
@@ -270,6 +277,28 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _chatFocus.addListener(_focusMoved);
     _session.connect();
     _startPaneRefresh();
+    WidgetsBinding.instance.addPostFrameCallback((_) => unawaited(_readPane(_pane)));
+  }
+
+  Future<void> _readPane(Pane pane) async {
+    if (!mounted || _markingView || pane.closed || pane.mirrorOf != null) return;
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if ((lifecycle != null && lifecycle != AppLifecycleState.resumed) ||
+        ModalRoute.of(context)?.isCurrent == false) {
+      return;
+    }
+    final view = (pane.viewKey, pane.agentSessionId, pane.notificationId);
+    if (view == _readView) return;
+    _markingView = true;
+    try {
+      final ids = await widget.server.markPaneRead(pane);
+      await PushBridge.withdraw(pane.machine, ids);
+      _readView = view;
+    } on ServerException {
+      // The next pane poll retries a view that the origin did not acknowledge.
+    } finally {
+      _markingView = false;
+    }
   }
 
   void _startPaneRefresh() {
@@ -288,8 +317,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
     try {
       final panes = await widget.server.panes(machine: widget.pane.machine);
       final found = panes.where((p) => p.id == widget.pane.id).firstOrNull;
-      if (found == null || !mounted || _samePane(found, _pane)) return;
-      setState(() => _pane = found);
+      if (found == null || !mounted ||
+          (widget.pane.surfaceKey != null && found.surfaceKey != widget.pane.surfaceKey)) {
+        return;
+      }
+      unawaited(_readPane(found));
+      if (!_samePane(found, _pane)) setState(() => _pane = found);
     } catch (_) {
       // 목록 한 번 못 받은 것 — 화면은 열 때 정보로 계속 그린다.
     } finally {
