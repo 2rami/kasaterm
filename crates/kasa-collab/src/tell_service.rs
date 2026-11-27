@@ -44,7 +44,8 @@ pub fn take_for_session(backend: &dyn Backend, surface: &str, via: &str) -> Resu
     };
     let Some(record) = candidate else { return Ok(None) };
     // 명령은 입력칸에 쳐야 돈다 — 쉬는 차례의 붙여넣기 길에 남긴다. 뒤의 쪽지도 순서를 지켜 그 뒤에 선다.
-    if tell::is_slash_command(&record.body) { return Ok(None); }
+    // 사람이 보낸 말도 입력칸으로 — 훅 맥락으로 넘기면 대화 기록에 사람 말로 안 남아 폰 말풍선이 못 걷힌다.
+    if tell::is_slash_command(&record.body) || record.person { return Ok(None); }
     let identity = backend.collab_tell_identity(surface)?;
     // 코덱스 훅은 claude 의 차례 막기·맥락 덧붙이기 꼴을 모른다 — 붙여넣기 길에 둔다.
     if Address::parse(&identity).ok().as_ref() != Some(&record.address)
@@ -118,13 +119,15 @@ pub fn submit(backend: &dyn Backend, params: &Value, wake: impl FnOnce() -> Resu
         if let Some(existing) = store.existing(id,&address,&body)? { return Ok(existing.receipt()); }
     }
     ensure!(current_address(backend,&address.surface_id)? == address, "target identity changed; refresh the board");
-    // Reject policy is evaluated on the GUI thread, alongside IME and draft state.
-    ensure!(matches!(params["policy"].as_str().unwrap_or("queue"),"queue"|"reject"), "policy must be queue or reject");
+    // Reject policy is evaluated on the GUI thread, alongside IME and draft state. `person` is a person's own
+    // message from another device's conversation view (`/term/chat-send`): it does not wait for the turn to end.
+    let policy = params["policy"].as_str().unwrap_or("queue");
+    ensure!(matches!(policy,"queue"|"reject"|"person"), "policy must be queue, reject or person");
     let identity = backend.collab_tell_identity(&address.surface_id)?;
     ensure!(Address::parse(&identity)? == address,"target changed while accepting message");
     let receiver_pid = identity["agent_pid"].as_u64().context("current agent process evidence unavailable")? as u32;
     let record = ledger()?.lock().map_err(|_|anyhow::anyhow!("tell ledger lock failed"))?
-        .accept_with_policy(id,address,body,params["ttl_seconds"].as_u64().unwrap_or(tell::QUEUE_TTL_SECONDS),params["policy"] == "reject",receiver_pid,
+        .accept_with_policy(id,address,body,params["ttl_seconds"].as_u64().unwrap_or(tell::QUEUE_TTL_SECONDS),policy == "reject",policy == "person",receiver_pid,
             params["title"].as_str().unwrap_or("").to_owned())?;
     if wake().is_err() {
         return Ok(transition(id,State::Failed,"GUI delivery event was not accepted")?.receipt());

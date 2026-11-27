@@ -30,8 +30,9 @@ fn board_rows(backend: &dyn Backend) -> Vec<serde_json::Value> {
 
 
 /// `POST /term/chat-send` `{surface, text}` — 거울(다른 기기·폰) 대화 보기의 입력(`docs/mirror-render.md`).
-/// 안전한 tell 로 넣는다 — 승인·질문 창이면 기다리고 초안·한글 조합은 안 건드리며, 일하는 칸이면 진행 중인 턴
-/// 안으로 들어간다. 그것도 거절되면(막 띄워 신원이 안 선 칸) 옛 `/send` 붙여넣기. mod 칸을 mod 에 맡기던 길은
+/// 사람의 말로 안전한 tell 에 넣는다(`policy: person`) — 승인·질문 창이면 기다리고 초안·한글 조합은 안 건드리며,
+/// 일하는 칸이면 쪽지처럼 차례 끝까지 기다리지 않고 책상에서 친 말처럼 바로 넣는다(claude 는 예약 줄, codex 는
+/// 진행 중인 턴). 그것도 거절되면(막 띄워 신원이 안 선 칸) 옛 `/send` 붙여넣기. mod 칸을 mod 에 맡기던 길은
 /// 일하는 내내 묶고 plugin 머리를 붙여 걷었다(2026-10-07).
 ///
 /// `message_id`(`kt1.…`)를 보내면 같은 말의 다시 보내기다 — 폰은 답을 못 받으면 같은 표식으로 다시 보낸다(앱에
@@ -56,7 +57,7 @@ async fn term_chat_send(backend: Arc<dyn Backend>, Json(body): Json<serde_json::
     let id = sent.map_or_else(kasa_socket::tell::new_message_id, str::to_string);
     let claimed = sent.map(str::to_string);
     let result = tokio::task::spawn_blocking(move || {
-        let params = serde_json::json!({ "surface_id": surface, "message_id": id, "body": text });
+        let params = serde_json::json!({ "surface_id": surface, "message_id": id, "body": text, "policy": "person" });
         match backend.collab_tell(&params) {
             Ok(receipt) => serde_json::json!({ "ok": true, "via": "tell", "receipt": receipt }),
             Err(refused) => match backend.send_text(Some(&surface), &submit_payload(&text)) {
@@ -415,6 +416,10 @@ async fn collab_read_handler(
 }
 
 pub(crate) async fn collab_tell_post(backend: Arc<dyn Backend>, Json(params): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    // 사람의 말 표지는 이 기기의 대화 보기 입력(`/term/chat-send`)만 단다 — 학생 쪽지가 줄을 건너뛰지 못하게.
+    if params["policy"] == "person" {
+        return Json(serde_json::json!({"ok":false,"error":"policy person is reserved for the conversation view input"}));
+    }
     match tokio::task::spawn_blocking(move || backend.collab_tell(&params)).await {
         Ok(Ok(value)) => Json(value),
         Ok(Err(error)) => Json(serde_json::json!({"ok":false,"error":error.to_string()})),
@@ -537,6 +542,7 @@ mod tests {
         let tells = desk.tells.lock().unwrap();
         assert_eq!((tells[0]["surface_id"].as_str(), tells[0]["body"].as_str()), (Some("%3"), Some("폰에서 친 말")));
         assert!(tells[0]["message_id"].as_str().is_some_and(|id| id.starts_with("kt1.")));
+        assert_eq!(tells[0]["policy"], "person", "사람의 말은 일하는 칸에도 차례 끝을 기다리지 않는다");
         assert!(desk.pasted.lock().unwrap().is_empty());
         drop(tells);
 
@@ -549,6 +555,11 @@ mod tests {
         let tagged = Arc::new(Desk::default());
         let Json(_) = term_chat_send(tagged.clone(), Json(serde_json::json!({"surface": "%5", "text": "짧게 답해", "from": "phone"}))).await;
         assert_eq!(tagged.tells.lock().unwrap()[0]["body"], "짧게 답해 ⟦폰⟧");
+
+        // 다른 기기·학생이 여는 tell 창구로는 사람의 말 표지를 달 수 없다.
+        let Json(refused) = collab_tell_post(desk.clone(), Json(serde_json::json!({"surface_id": "%3", "body": "끼어들기", "policy": "person"}))).await;
+        assert_eq!(refused["ok"], false);
+        assert_eq!(desk.tells.lock().unwrap().len(), 1);
     }
 
     /// 폰이 답을 못 받아 같은 표식으로 다시 보내면 한 번만 들어간다. 못 넣은 말은 다시 보내기가 들어간다.

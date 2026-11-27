@@ -72,6 +72,12 @@ fn still_taking(taking: Option<Taking>, busy: bool) -> bool {
     }
 }
 
+/// 차례가 끝날 때까지 붙들 쪽지인가. 사람의 말은 책상에서 친 말과 같다 — 일하는 칸이면 claude 는 예약 줄에
+/// 세우고 codex 는 진행 중인 턴에 넣는다. 앞 쪽지를 받는 중이어도 기다리지 않는다.
+fn waits_for_turn(person: bool, busy: bool, taking: Option<Taking>) -> bool {
+    !person && (busy || still_taking(taking, busy))
+}
+
 #[derive(Default)]
 struct Scheduler { cursor: Option<String>, active: HashSet<String> }
 
@@ -79,8 +85,13 @@ impl Scheduler {
     fn select(&mut self, pending: Vec<Record>, limit: usize) -> Vec<Record> {
         let mut recipients = BTreeMap::<String,Record>::new();
         for record in pending {
-            if !self.active.contains(&record.address.surface_id) {
-                recipients.entry(record.address.surface_id.clone()).or_insert(record);
+            if self.active.contains(&record.address.surface_id) { continue; }
+            // 칸마다 맨 앞 하나 — 사람의 말은 차례 끝을 기다리는 쪽지들 앞에 선다.
+            match recipients.entry(record.address.surface_id.clone()) {
+                std::collections::btree_map::Entry::Vacant(slot) => { slot.insert(record); }
+                std::collections::btree_map::Entry::Occupied(mut first) => {
+                    if record.person && !first.get().person { first.insert(record); }
+                }
             }
         }
         let mut ordered: Vec<_> = recipients.into_iter().collect();
@@ -506,7 +517,7 @@ impl App {
         if !empty { return Ok(()); }
         let surface = record.address.surface_id.as_str();
         let busy = self.collab.hub.state(surface).is_busy();
-        if busy || still_taking(taking().lock().unwrap().get(surface).copied(), busy) { return Err(Hold::Busy); }
+        if waits_for_turn(record.person, busy, taking().lock().unwrap().get(surface).copied()) { return Err(Hold::Busy); }
         if pty.input_draft_recent(DRAFT_TRUST) || !pty.input_quiet_for(TYPING_QUIET) { return Err(Hold::Typing); }
         if !prompt_empty_at(&cells,screen.cursor_row as usize,screen.cursor_col as usize,harness) { return Err(Hold::Draft); }
         Ok(())
@@ -644,7 +655,7 @@ mod tests {
             machine_id:"fixture-local-machine".into(),surface_key:surface.into(),surface_id:surface.into(),
             session_id:"session".into(),instance_id:"instance".into()},body:"hello".into(),
             body_hash:kasa_socket::tell::fingerprint("hello"),state:State::Accepted,reason:String::new(),
-            accepted_at_ms:0,updated_at_ms:0,expires_at_ms:u64::MAX,reject_if_busy:false,receiver_agent_pid:1,title:String::new()}
+            accepted_at_ms:0,updated_at_ms:0,expires_at_ms:u64::MAX,reject_if_busy:false,person:false,receiver_agent_pid:1,title:String::new()}
     }
 
     #[test]
@@ -795,6 +806,16 @@ mod tests {
         assert_eq!(selected.len(),2);
         assert!(scheduler.select(vec![record("%1"),record("%2")],WORKERS).is_empty());
         assert_eq!(scheduler.select(vec![record("%3")],WORKERS).len(),1);
+    }
+
+    #[test]
+    fn a_persons_message_does_not_wait_for_the_turn_or_behind_queued_notes() {
+        let just_sent = Some(Taking { submitted: Instant::now(), seen_busy: false });
+        assert!(waits_for_turn(false,true,None) && waits_for_turn(false,false,just_sent), "쪽지는 차례 끝·앞 쪽지를 기다린다");
+        assert!(!waits_for_turn(true,true,None) && !waits_for_turn(true,false,just_sent));
+        let person = Record { person: true, ..record("%1") };
+        let selected = Scheduler::default().select(vec![record("%1"),person.clone(),record("%1")],WORKERS);
+        assert_eq!(selected.iter().map(|r|r.message_id.as_str()).collect::<Vec<_>>(),[person.message_id.as_str()]);
     }
 
     #[derive(Clone)]

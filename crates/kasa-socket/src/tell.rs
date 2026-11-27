@@ -195,6 +195,10 @@ pub struct Record {
     pub expires_at_ms: u64,
     #[serde(default)]
     pub reject_if_busy: bool,
+    /// 사람이 다른 기기(폰·미러한 기기)의 대화 보기에서 보낸 말. 책상에서 친 말처럼 일하는 칸에도 바로 넣는다 —
+    /// 쪽지처럼 차례 끝까지 붙들면 폰에 「보내는 중」만 남았다가 사람이 터미널로 다시 쳐서 두 번 들어갔다(2026-11-27).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub person: bool,
     #[serde(default)]
     pub receiver_agent_pid: u32,
     /// 받는 학생의 「지금 일」. 비어 있지 않으면 전달이 끝난 순간 그 창 이름이 이것으로 바뀐다 —
@@ -324,10 +328,10 @@ impl Ledger {
         Ok(None)
     }
     pub fn accept(&mut self, id: &str, address: Address, body: String, ttl_seconds: u64) -> Result<Record> {
-        self.accept_with_policy(id,address,body,ttl_seconds,false,0,String::new())
+        self.accept_with_policy(id,address,body,ttl_seconds,false,false,0,String::new())
     }
     #[allow(clippy::too_many_arguments)]
-    pub fn accept_with_policy(&mut self, id: &str, address: Address, body: String, ttl_seconds: u64, reject_if_busy: bool, receiver_agent_pid: u32, title: String) -> Result<Record> {
+    pub fn accept_with_policy(&mut self, id: &str, address: Address, body: String, ttl_seconds: u64, reject_if_busy: bool, person: bool, receiver_agent_pid: u32, title: String) -> Result<Record> {
         let body = normalize(&body)?;
         if let Some(record) = self.existing(id, &address, &body)? { return Ok(record); }
         ensure!((1..=3600).contains(&ttl_seconds), "ttl_seconds must be between 1 and 3600");
@@ -335,7 +339,7 @@ impl Ledger {
         let now = now_ms();
         let record = Record { message_id: id.into(), address, body_hash: fingerprint(&body), body,
             state: State::Accepted, reason: STORED_REASON.into(), accepted_at_ms: now,
-            updated_at_ms: now, expires_at_ms: (now + ttl_seconds * 1000).min(issued_at(id)? + RECEIPT_LIFETIME_MS), reject_if_busy, receiver_agent_pid, title: normalize_title(&title)? };
+            updated_at_ms: now, expires_at_ms: (now + ttl_seconds * 1000).min(issued_at(id)? + RECEIPT_LIFETIME_MS), reject_if_busy, person, receiver_agent_pid, title: normalize_title(&title)? };
         let evicted = self.make_room(&record)?;
         self.records.insert(id.into(), record.clone());
         if let Err(error) = self.forget(&evicted).and_then(|()| self.persist()) {
@@ -582,10 +586,19 @@ mod tests {
         assert!(normalize_title("a\x1b[2Jb").is_err());
         let mut ledger = ledger();
         let id = new_message_id();
-        let record = ledger.accept_with_policy(&id,address(),"hello".into(),900,false,0,"  세션 이름\n바꾸기 ".into()).unwrap();
+        let record = ledger.accept_with_policy(&id,address(),"hello".into(),900,false,false,0,"  세션 이름\n바꾸기 ".into()).unwrap();
         assert_eq!(record.title, "세션 이름 바꾸기");
         let plain = ledger.accept(&new_message_id(),address(),"plain".into(),900).unwrap();
         assert!(plain.title.is_empty() && !serde_json::to_string(&plain).unwrap().contains("\"title\""), "제목 없는 옛 꼴 그대로");
+    }
+    #[test] fn person_messages_survive_the_ledger_and_plain_tells_keep_the_old_shape() {
+        let mut ledger = ledger();
+        let id = new_message_id();
+        let person = ledger.accept_with_policy(&id,address(),"폰에서 친 말".into(),900,false,true,0,String::new()).unwrap();
+        let stored: Record = serde_json::from_str(&serde_json::to_string(&person).unwrap()).unwrap();
+        assert!(stored.person);
+        let plain = ledger.accept(&new_message_id(),address(),"쪽지".into(),900).unwrap();
+        assert!(!plain.person && !serde_json::to_string(&plain).unwrap().contains("\"person\""));
     }
     #[test] fn hold_reasons_round_trip_and_old_sentences_stay_unknown() {
         for hold in Hold::ALL { assert_eq!(Hold::from_reason(hold.reason()), Some(hold)); }
@@ -661,7 +674,7 @@ mod tests {
             let body = format!("{n:0>body_len$}");
             ledger.records.insert(id.clone(), Record { message_id: id.clone(), address: address(), body_hash: fingerprint(&body), body,
                 state: state(n), reason: "test".into(), accepted_at_ms: issued, updated_at_ms: issued, expires_at_ms: issued + 3_600_000,
-                reject_if_busy: false, receiver_agent_pid: 0, title: String::new() });
+                reject_if_busy: false, person: false, receiver_agent_pid: 0, title: String::new() });
         }
         ledger.persist().unwrap();
         ids

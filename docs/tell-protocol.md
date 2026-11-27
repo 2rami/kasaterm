@@ -2,7 +2,8 @@
 
 `collab.tell` / `POST /collab/tell` accepts
 `{message_id:"kt1.<unix-ms>.<unique-hex-nonce>", address:{machine_id,surface_key,surface_id,session_id,instance_id}, body,
-policy:"queue"|"reject", ttl_seconds:3600, title?, notify?}`. Optional `title` (one line, at most 60 characters) is the
+policy:"queue"|"reject", ttl_seconds:3600, title?, notify?}`. (`policy:"person"` is set only by the conversation view input,
+see "A person's message" below; `POST /collab/tell` refuses it.) Optional `title` (one line, at most 60 characters) is the
 receiver's current work: once the message is `submitted`, the receiving machine renames that pane to it (pinned,
 so the sidebar, pane header and board `title` all follow) and hands it to that pane's next turn-start hook, which
 returns it as the UserPromptSubmit `sessionTitle` — Claude's own session name (`/resume`, agents list, the rename
@@ -77,6 +78,16 @@ and submits everything queued as one prompt when the turn ends: several messages
 in as a single input, and a tool run was cut off ("Request interrupted"). For the same reason one pane takes one
 message at a time: after an Enter the next message to that pane waits until the receiver is seen working and
 then resting, or 15 s pass without it starting. Approval/question screens defer it until the selection UI is gone.
+
+A person's message (`policy:"person"`) is the exception. `POST /term/chat-send` — the conversation view on the phone
+or on a mirroring machine, and the notification reply field — sends what a person typed. That message does not
+wait for the turn to end, and it does not wait behind earlier messages still being taken. It is pasted into a working
+pane the way the person's own typing would be: Claude puts it in its queue (the phone shows it as 「예약」), and Codex
+adds it to the running turn. It also goes ahead of notes already waiting for that pane, and the session-take hooks
+leave it to the input box so the transcript records it as the person's turn. A draft, recent typing, IME composition
+and approval/question screens still defer it. From 2026-11-18 to 2026-11-27 it waited like a note: the phone showed
+「보내는 중」 for a whole Codex turn (14 minutes), the person typed the same words in the phone terminal, and the
+held copy went in again when the turn ended.
 
 Screen menu options require a separator after their numbered dot (`1. Yes`); decimals
 such as `1.1000배` or `6.2px` are draft text. Claude can put those numbers immediately
