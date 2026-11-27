@@ -33,6 +33,7 @@ import 'terminal.dart';
 import 'desktop_tools.dart';
 import 'desktop_controls.dart';
 import 'hub_drag.dart';
+import 'hub_order.dart';
 
 export '../machine_look.dart' show parseHexColor;
 
@@ -411,7 +412,8 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
       // 아이패드·가로 화면에선 방 상자가 여러 열로 선다 — 한 방이 화면 폭을 다 먹으면
       // 한 칸짜리 방의 지도가 화면 반을 차지한다.
       final rooms = <Widget>[];
-      for (final sourceRoom in s.rooms) {
+      for (final sourceRoom in _model.orderedRooms(s)) {
+        final roomFolded = _model.view.isRoomFolded(s.layoutKey, sourceRoom.layoutKey);
         final room = sourceRoom.visible(_model.view.hidden);
         if (room.panes.isEmpty && sourceRoom.panes.isNotEmpty) continue;
         final inside = <Widget>[
@@ -419,10 +421,12 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
             title: room.title,
             icon: icon,
             color: tint,
+            folded: roomFolded,
+            onFold: () => _model.toggleRoomFold(s, sourceRoom),
             onMenu: s.online ? () => _roomSheet(s, sourceRoom) : () => explainOffline(context, '방을 고칠'),
           ),
         ];
-        final hasMap = room.rects.isNotEmpty && shape != HubShape.list;
+        final hasMap = !roomFolded && room.rects.isNotEmpty && shape != HubShape.list;
         if (hasMap) {
           inside.add(
             _MiniMap(
@@ -436,7 +440,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
           );
         }
         // 「지도만」이라도 지도를 못 그리는 방(옛 서버)은 목록으로 — 학생이 사라지면 안 된다.
-        if (!(shape == HubShape.map && hasMap)) {
+        if (!roomFolded && !(shape == HubShape.map && hasMap)) {
           for (final (i, p) in room.panes.indexed) {
             inside.add(
               Appear(
@@ -449,19 +453,21 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
             );
           }
         }
+        final content = Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: inside,
+        );
         rooms.add(
           _RoomBox(
-            child: WeatherCard(
+            key: ValueKey((s.layoutKey, sourceRoom.layoutKey)),
+            child: roomFolded ? content : WeatherCard(
               id: 'room:${s.machine ?? ''}|${room.title}',
               mood: moodOf(
                 room.panes.map(
                   (p) => weatherMood(StatusStyle.of(p, theme.colorScheme).mood),
                 ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: inside,
-              ),
+              child: content,
             ),
           ),
         );
@@ -532,7 +538,7 @@ class _ViewMenu extends StatelessWidget {
     final view = model.view;
     // 고른 값은 기기 제 이름으로 적어 두고(보기 기억이 이름을 바꿔도 안 풀린다) 계정 이름으로 보인다.
     final machines = [
-      for (final s in model.sections)
+      for (final s in model.orderedSections)
         if (s.machine != null) (s.machine!, machineName(s.machine!, route: s.route)),
     ];
     final rootName = machineName(model.rootName ?? '이 기계', local: true);
@@ -579,6 +585,13 @@ class _ViewMenu extends StatelessWidget {
         _pick('지도만', view.shape == HubShape.map, () {
           model.setView(view.copyWith(shape: HubShape.map));
         }),
+        if (model.sections.length > 1 || model.sections.any((s) => s.rooms.length > 1)) ...[
+          const PopupMenuDivider(),
+          PopupMenuItem<VoidCallback>(
+            value: () => HubOrderSheet.show(context, model),
+            child: const Text('목록 순서'),
+          ),
+        ],
       ],
     );
   }
@@ -890,7 +903,7 @@ class _SharedSectionState extends State<_SharedSection> {
 
 /// 방 하나 = 둥근 판 하나(쌍둥이 결). 날씨 유리가 판 모서리 밖으로 안 나가게 같은 모서리로 자른다.
 class _RoomBox extends StatelessWidget {
-  const _RoomBox({required this.child});
+  const _RoomBox({super.key, required this.child});
 
   final Widget child;
 
@@ -910,6 +923,8 @@ class _RoomHeader extends StatelessWidget {
     required this.icon,
     required this.color,
     this.onMenu,
+    this.onFold,
+    this.folded = false,
   });
 
   final String title;
@@ -918,6 +933,8 @@ class _RoomHeader extends StatelessWidget {
 
   /// 방 메뉴(pane 추가·이름·닫기). 안 닿는 기계엔 안 단다.
   final VoidCallback? onMenu;
+  final VoidCallback? onFold;
+  final bool folded;
 
   @override
   Widget build(BuildContext context) {
@@ -956,6 +973,15 @@ class _RoomHeader extends StatelessWidget {
             ),
           ] else
             const Spacer(),
+          if (onFold != null)
+            IconButton(
+              tooltip: folded ? '방 펼치기' : '방 접기',
+              onPressed: onFold,
+              icon: Icon(
+                folded ? Icons.chevron_right : Icons.expand_more,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
           if (onMenu != null)
             IconButton(
               tooltip: '방 메뉴',

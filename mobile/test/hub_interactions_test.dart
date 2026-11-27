@@ -120,6 +120,76 @@ void main() {
     },
   );
 
+  test('device and room order survive storage and always retain new entries', () async {
+    final fixture = HubFixture();
+    final prefs = HubPrefs(scope: 'fixture');
+    final model = HubModel(fixture.server, prefs: prefs);
+    addTearDown(() {
+      model.dispose();
+      fixture.server.close();
+    });
+    final rooms = HubModel.rooms(
+      [Pane.fromJson({...fixture.rows[0], 'window': 0}), Pane.fromJson({...fixture.rows[1], 'window': 1})],
+      ['같은 방', '같은 방'],
+    );
+    expect(rooms[0].layoutKey, isNot(rooms[1].layoutKey));
+    final root = HubSection(machine: null, online: true, rooms: rooms);
+    const remote = HubSection(machine: '검증 맥', route: 'id:remote', online: true, rooms: []);
+    const added = HubSection(machine: '새 기기', route: 'id:new', online: true, rooms: []);
+    model.sections = [root, remote, added];
+    await model.orderDevices([remote.layoutKey, '사라진 기기', root.layoutKey]);
+    await model.orderRooms(root.layoutKey, [rooms[1].layoutKey, rooms[0].layoutKey]);
+    await model.toggleRoomFold(root, rooms[0]);
+    await model.toggleFold(remote);
+    model.view = await prefs.load();
+
+    expect(model.visible, [remote, root, added]);
+    expect(model.orderedRooms(root), rooms.reversed);
+    expect(model.view.isRoomFolded(root.layoutKey, rooms[0].layoutKey), isTrue);
+    expect(model.view.isRoomFolded(root.layoutKey, rooms[1].layoutKey), isFalse);
+    expect(model.view.isRoomFolded(remote.layoutKey, rooms[0].layoutKey), isFalse);
+    expect(model.view.isFolded(remote.machine), isTrue);
+  });
+
+  testWidgets('room folds independently and can be reordered while folded', (tester) async {
+    final fixture = HubFixture();
+    fixture.rows[1]['window'] = 1;
+    await const HubPrefs(scope: 'fixture').save(const HubView(shape: HubShape.list));
+    await pumpHub(tester, fixture);
+
+    await tester.tap(find.byTooltip('방 접기').first);
+    await flush(tester);
+    expect(find.byKey(ValueKey('hub-drag-${fixture.pane(0).viewKey}')), findsNothing);
+    expect(tile(fixture.pane(1)), findsOneWidget);
+
+    await tester.tap(find.byTooltip('보기'));
+    await flush(tester);
+    await tester.tap(find.text('목록 순서'));
+    await flush(tester);
+    final handle = tester.getCenter(find.byTooltip('검증 방 순서 이동'));
+    final gesture = await tester.startGesture(handle);
+    await gesture.moveBy(const Offset(0, 26));
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 86));
+    await tester.pump(const Duration(milliseconds: 200));
+    await gesture.up();
+    await flush(tester);
+    final reorderList = find.byType(ReorderableListView);
+    expect(
+      tester.getTopLeft(find.descendant(of: reorderList, matching: find.text('방 2'))).dy,
+      lessThan(tester.getTopLeft(find.descendant(of: reorderList, matching: find.text('검증 방'))).dy),
+    );
+    await tester.tapAt(const Offset(20, 100));
+    await flush(tester);
+
+    expect(tester.getTopLeft(find.text('방 2')).dy, lessThan(tester.getTopLeft(find.text('검증 방')).dy));
+    expect(find.byKey(ValueKey('hub-drag-${fixture.pane(0).viewKey}')), findsNothing);
+    await tester.tap(find.byTooltip('방 펼치기'));
+    await flush(tester);
+    expect(tile(fixture.pane(0)), findsOneWidget);
+    expect(fixture.commands, isEmpty);
+  });
+
   testWidgets('live hub app bar keeps only notes, view and settings', (tester) async {
     await pumpHub(tester, HubFixture());
     expect(find.byTooltip('캐릭터 쪽지'), findsOneWidget);

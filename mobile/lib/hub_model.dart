@@ -30,10 +30,13 @@ class HubRoom {
   const HubRoom({
     required this.title,
     required this.panes,
+    this.preferenceKey,
     this.rects = const [],
     this.aspect,
   });
   final String title;
+  final String? preferenceKey;
+  String get layoutKey => preferenceKey ?? title;
   final List<Pane> panes;
 
   /// 데스크톱에서의 자리 — 비어 있으면 미니맵 없이 목록만.
@@ -49,6 +52,7 @@ class HubRoom {
     bool keepSurface(String id) => paneOf(id) == null || ids.contains(id);
     return HubRoom(
       title: title,
+      preferenceKey: preferenceKey,
       panes: kept,
       aspect: aspect,
       rects: [
@@ -123,6 +127,7 @@ class HubSection {
 
   /// 요청에 쓰는 안정 route. `machine`은 사람에게 보여 줄 이름으로만 남긴다.
   final String? route;
+  String get layoutKey => route ?? machine ?? '';
 
   /// 지금 닿는가. 거짓이면 [rooms] 는 마지막으로 본 모습([Pane.frozen])이고 조작은 저장한 대화 읽기뿐이다.
   final bool online;
@@ -184,7 +189,38 @@ class HubModel extends ChangeNotifier {
 
   /// 지금 보기로 거른 목록. 고른 기기가 목록에서 사라졌으면(이름이 바뀌거나 꺼짐)
   /// 빈 화면 대신 전부를 보인다.
-  List<HubSection> get visible => filterSections(sections, view.machine);
+  List<HubSection> get orderedSections =>
+      _ordered(sections, view.deviceOrder, (section) => section.layoutKey);
+
+  List<HubSection> get visible => filterSections(orderedSections, view.machine);
+
+  List<HubRoom> orderedRooms(HubSection section) => _ordered(
+    section.rooms,
+    view.roomOrders[section.layoutKey] ?? const [],
+    (room) => room.layoutKey,
+  );
+
+  static List<T> _ordered<T extends Object>(
+    List<T> items,
+    List<String> order,
+    String Function(T) key,
+  ) {
+    if (order.isEmpty) return items;
+    final remaining = {for (final item in items) key(item): item};
+    return [
+      for (final id in order) ?remaining.remove(id),
+      ...remaining.values,
+    ];
+  }
+
+  Future<void> orderDevices(List<String> keys) =>
+      setView(view.copyWith(deviceOrder: keys));
+
+  Future<void> orderRooms(String device, List<String> keys) =>
+      setView(view.copyWith(roomOrders: {...view.roomOrders, device: keys}));
+
+  Future<void> toggleRoomFold(HubSection section, HubRoom room) =>
+      setView(view.toggleRoomFolded(section.layoutKey, room.layoutKey));
 
   @visibleForTesting
   static List<HubSection> filterSections(
@@ -200,6 +236,7 @@ class HubModel extends ChangeNotifier {
   }
 
   Future<void> setView(HubView next) async {
+    if (_disposed) return;
     view = next;
     notifyListeners();
     _saveView = _saveView
@@ -937,24 +974,27 @@ class HubModel extends ChangeNotifier {
     }
     final layoutOf = {for (final l in layouts) l.idx: l};
     final windows = byWindow.keys.toList()..sort();
-    return [
-      for (final w in windows)
-        HubRoom(
-          // 배치가 실어 온 이름이 먼저다 — 원격 기계는 `/sessions` 라벨이 없어 「방 N」으로 떨어졌다.
-          title: (layoutOf[w]?.title ?? '').isNotEmpty
-              ? layoutOf[w]!.title
-              : w < labels.length && labels[w].isNotEmpty
-              ? labels[w]
-              : '방 ${w + 1}',
-          rects: layoutOf[w]?.rects ?? const [],
-          aspect: layoutOf[w]?.aspect,
-          panes: byWindow[w]!
-            ..sort((a, b) {
-              final r = _rank(a).compareTo(_rank(b));
-              return r != 0 ? r : a.name.compareTo(b.name);
-            }),
-        ),
-    ];
+    final titles = <String, int>{};
+    return windows.map((w) {
+      final layout = layoutOf[w];
+      final title = switch (layout?.title) {
+        final value? when value.isNotEmpty => value,
+        _ when w < labels.length && labels[w].isNotEmpty => labels[w],
+        _ => '방 ${w + 1}',
+      };
+      final occurrence = titles.update(title, (count) => count + 1, ifAbsent: () => 0);
+      return HubRoom(
+        title: title,
+        preferenceKey: '$occurrence:$title',
+        rects: layout?.rects ?? const [],
+        aspect: layout?.aspect,
+        panes: byWindow[w]!
+          ..sort((a, b) {
+            final r = _rank(a).compareTo(_rank(b));
+            return r != 0 ? r : a.name.compareTo(b.name);
+          }),
+      );
+    }).toList();
   }
 
   /// 창 밖 셸 — 방 안 순서처럼 내 차례·하는 중을 앞에.

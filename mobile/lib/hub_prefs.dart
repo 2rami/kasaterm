@@ -13,6 +13,9 @@ class HubView {
     this.shape = HubShape.both,
     this.folded = const {},
     this.hidden = const {},
+    this.foldedRooms = const {},
+    this.deviceOrder = const [],
+    this.roomOrders = const {},
   });
 
   final String? machine;
@@ -22,6 +25,9 @@ class HubView {
   /// 화면 몇 장을 넘어가, 지금 안 보는 기계는 이름만 남긴다(2026-09-08 지시).
   final Set<String> folded;
   final Set<String> hidden;
+  final Set<String> foldedRooms;
+  final List<String> deviceOrder;
+  final Map<String, List<String>> roomOrders;
 
   bool get allMachines => machine == null;
 
@@ -34,17 +40,35 @@ class HubView {
     return copyWith(folded: next);
   }
 
+  String _roomKey(String device, String room) => jsonEncode([device, room]);
+
+  bool isRoomFolded(String device, String room) =>
+      foldedRooms.contains(_roomKey(device, room));
+
+  HubView toggleRoomFolded(String device, String room) {
+    final key = _roomKey(device, room);
+    final next = {...foldedRooms};
+    if (!next.remove(key)) next.add(key);
+    return copyWith(foldedRooms: next);
+  }
+
   HubView copyWith({
     String? machine,
     bool clearMachine = false,
     HubShape? shape,
     Set<String>? folded,
     Set<String>? hidden,
+    Set<String>? foldedRooms,
+    List<String>? deviceOrder,
+    Map<String, List<String>>? roomOrders,
   }) => HubView(
     machine: clearMachine ? null : (machine ?? this.machine),
     shape: shape ?? this.shape,
     folded: folded ?? this.folded,
     hidden: hidden ?? this.hidden,
+    foldedRooms: foldedRooms ?? this.foldedRooms,
+    deviceOrder: deviceOrder ?? this.deviceOrder,
+    roomOrders: roomOrders ?? this.roomOrders,
   );
 }
 
@@ -58,6 +82,7 @@ class HubPrefs {
   static const _shapeKey = 'hub.shape';
   static const _foldedKey = 'hub.folded';
   static const _hiddenKey = 'hub.hidden';
+  static const _arrangementKey = 'hub.arrangement';
   static const _all = '*';
   static const _storage = FlutterSecureStorage();
 
@@ -67,6 +92,10 @@ class HubPrefs {
       final s = await _storage.read(key: _shapeKey);
       final f = await _storage.read(key: _key(_foldedKey));
       final h = await _storage.read(key: _key(_hiddenKey));
+      final arrangement = _arrangement(
+        await _storage.read(key: _key(_arrangementKey)),
+      );
+      final roomOrders = arrangement['room_orders'];
       return HubView(
         machine: m == null || m == _all ? null : m,
         shape: HubShape.values.firstWhere(
@@ -75,6 +104,14 @@ class HubPrefs {
         ),
         folded: decodeFolded(f),
         hidden: decodeHidden(h),
+        foldedRooms: _strings(arrangement['folded_rooms']).toSet(),
+        deviceOrder: _strings(arrangement['device_order']),
+        roomOrders: {
+          if (roomOrders is Map)
+            for (final entry in roomOrders.entries)
+              if (entry.key is String)
+                entry.key as String: _strings(entry.value),
+        },
       );
     } catch (_) {
       return const HubView();
@@ -93,10 +130,30 @@ class HubPrefs {
         key: _key(_hiddenKey),
         value: encodeHidden(v.hidden),
       );
+      await _storage.write(
+        key: _key(_arrangementKey),
+        value: jsonEncode({
+          'folded_rooms': v.foldedRooms.toList(),
+          'device_order': v.deviceOrder,
+          'room_orders': v.roomOrders,
+        }),
+      );
     } catch (_) {
       // 저장소가 막혀도 이번 화면은 고른 대로 보인다 — 다음에 다시 고르면 된다.
     }
   }
+
+  static Map<String, dynamic> _arrangement(String? text) {
+    try {
+      final value = jsonDecode(text ?? '{}');
+      return value is Map<String, dynamic> ? value : const {};
+    } on FormatException {
+      return const {};
+    }
+  }
+
+  static List<String> _strings(Object? value) =>
+      value is List ? value.whereType<String>().toSet().toList() : const [];
 }
 
 String encodeHidden(Set<String> keys) =>
