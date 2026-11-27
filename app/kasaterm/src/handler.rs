@@ -7217,8 +7217,16 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // Drain menu clicks from muda's global channel. The "오른쪽 패널" item
         // toggles the in-window right column (open/close).
+        #[cfg(target_os = "macos")]
+        if let Some(pet) = self.tray.as_mut().and_then(|t| t.pet.as_mut()) {
+            pet.refresh();
+        }
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
-            if let Some(tray) = self.tray.as_ref() {
+            if let Some(tray) = self.tray.as_mut() {
+                #[cfg(target_os = "macos")]
+                if tray.pet.as_mut().is_some_and(|pet| pet.handle(&ev.id)) {
+                    continue;
+                }
                 if tray.open.id() == &ev.id {
                     self.show_main_window();
                     continue;

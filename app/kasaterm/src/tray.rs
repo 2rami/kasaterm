@@ -1,6 +1,10 @@
 //! 트레이(맥 메뉴 막대·Windows 알림 영역) — 창의 닫기 단추는 앱을 숨기기만 하고, 여기 「종료」로만 끈다. 학생 세션이
 //! 창을 닫았다고 같이 꺼지면 안 된다(2026-11-19 「x하면 트레이로 가게, 거기서 종료해야 꺼지게, 클로드앱처럼」).
-//! 맥은 숨기기가 ⌘H 와 같아(앱 숨김) Dock 아이콘·⌘Tab 으로도 돌아온다. ⌘Q 는 그대로 끈다.
+//! 맥은 숨기기가 ⌘H 와 같아(앱 숨김) Dock 아이콘·⌘Tab 으로도 돌아온다. ⌘Q 는 그대로 끈다. 맥 메뉴에는 바탕화면 펫을
+//! 다루는 카사펫 칸도 있다(`pet.rs`).
+
+#[cfg(target_os = "macos")]
+mod pet;
 
 use muda::{Menu, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -11,6 +15,8 @@ pub(crate) struct Tray {
     _icon: TrayIcon,
     pub open: MenuItem,
     pub quit: MenuItem,
+    #[cfg(target_os = "macos")]
+    pub pet: Option<pet::PetMenu>,
 }
 
 /// 트레이를 세운다. 격리 검증 실행·lite 는 사람의 메뉴 막대를 어지럽히지 않게 세우지 않고 예전처럼 닫기가 끈다.
@@ -21,7 +27,15 @@ pub(crate) fn create(proxy: &winit::event_loop::EventLoopProxy<UserEvent>) -> Op
     let open = MenuItem::new("카사텀 열기", true, None);
     let quit = MenuItem::new("종료", true, None);
     let menu = Menu::new();
-    menu.append_items(&[&open, &PredefinedMenuItem::separator(), &quit]).ok()?;
+    menu.append_items(&[&open, &PredefinedMenuItem::separator()]).ok()?;
+    #[cfg(target_os = "macos")]
+    let pet = pet::PetMenu::new();
+    #[cfg(target_os = "macos")]
+    if let Some(pet) = pet.as_ref() {
+        menu.append_items(&pet.items()).ok()?;
+        menu.append(&PredefinedMenuItem::separator()).ok()?;
+    }
+    menu.append(&quit).ok()?;
     let icon = tray_icon_image()?;
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -40,7 +54,13 @@ pub(crate) fn create(proxy: &winit::event_loop::EventLoopProxy<UserEvent>) -> Op
             let _ = proxy.send_event(UserEvent::ShowMainWindow);
         }
     }));
-    Some(Tray { _icon: tray, open, quit })
+    Some(Tray {
+        _icon: tray,
+        open,
+        quit,
+        #[cfg(target_os = "macos")]
+        pet,
+    })
 }
 
 /// 우산 표(하단바·설치 화면과 같은 Lucide 우산). 맥은 검정 본뜨기, Windows 는 강조색 판 위 흰 우산(앱 표와 같은 결).
