@@ -361,6 +361,14 @@ import os
     }
   }
 
+  override func responds(to selector: Selector!) -> Bool {
+    // Flutter only advertises the background notification callback when a plugin supplies it.
+    if selector == NSSelectorFromString("application:didReceiveRemoteNotification:fetchCompletionHandler:") {
+      return true
+    }
+    return super.responds(to: selector)
+  }
+
   override func application(
     _ application: UIApplication,
     didReceiveRemoteNotification userInfo: [AnyHashable: Any],
