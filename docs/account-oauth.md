@@ -77,7 +77,7 @@ OAuth sign-up records the provider, sign-up time and a display name in the ident
 ## Client API
 
 - `GET /relay/oauth/providers` returns public provider availability, whether new sign-up is allowed, and `redirect_login: true` when the relay supports redirect login. Clients use the typed-code flow against relays without it.
-- `POST /relay/oauth/start` accepts `provider`, `kind` (`desktop` or `phone`), `machine_id`, `label`, and optional `link`. Linking also requires the existing device's bearer token.
+- `POST /relay/oauth/start` accepts `provider`, `kind` (`desktop`, `phone` or `launcher`; a `launcher` credential only reaches `/relay/launcher/*`, `whoami` and `logout`, see `crates/kasa-gateway/src/gateway_launcher.rs`), `machine_id`, `label`, and optional `link`. Linking also requires the existing device's bearer token.
   - Redirect login adds `code_challenge` (base64url SHA-256 of the verifier, 43 characters), `code_challenge_method: "S256"`, `redirect_uri`, and optional `state` (up to 128 characters of `[A-Za-z0-9-._~]`). The verifier is 43–128 characters of the same set; send 32 random bytes as unpadded base64url. It returns `authorization_url`, `request_id` and `expires_in` only. A partial set of these fields is `invalid_request`; an unlisted redirect is `invalid_redirect_uri`.
   - Without them it returns `authorization_url`, `request_id`, `poll_token`, `user_code`, and `expires_in`.
 - Open `authorization_url` (always the relay's own `/relay/oauth/authorize/{request_id}`) in the system browser or the platform's authentication session, never an embedded credential form.

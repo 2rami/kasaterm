@@ -55,6 +55,8 @@ mod conversations;
 mod shared_rooms;
 #[path = "gateway_login_vault.rs"]
 mod login_vault;
+#[path = "gateway_launcher.rs"]
+mod launcher;
 
 use kasa_device::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
@@ -101,7 +103,7 @@ struct Uplink {
 struct DeviceRec {
     token_hash: String,
     account: String,
-    /// `desktop` 은 업링크로 붙는 카사텀, `phone` 은 카사모바일.
+    /// `desktop` 은 업링크로 붙는 카사텀, `phone` 은 카사모바일, `launcher` 는 카사런처(`gateway_launcher.rs`).
     kind: String,
     #[serde(default)]
     machine_id: Option<String>,
@@ -270,6 +272,7 @@ pub struct Gate {
     push_faces: Arc<push_alert::Faces>,
     /// 닉네임·올린 프사(`gateway_profile.rs`).
     profiles: Arc<profile::Profiles>,
+    launcher: Arc<launcher::Board>,
     /// 기기들이 알린 카사넷 id — 국내 중계 허용 파일로 내놓는다(`gateway_kasanet.rs`).
     kasanet_ids: Arc<kasanet::Ids>,
     auth_changes: tokio::sync::watch::Sender<u64>,
@@ -384,6 +387,7 @@ impl Gate {
             push_alerts: Arc::default(),
             push_faces: Arc::new(push_alert::Faces::open(state_path.as_deref())),
             profiles: Arc::new(profile::Profiles::open(state_path.as_deref())),
+            launcher: Arc::default(),
             kasanet_ids: Arc::new(kasanet::Ids::open(state_path.as_deref())),
             auth_changes: tokio::sync::watch::channel(0).0,
             state_path,
@@ -426,16 +430,21 @@ impl Gate {
 
     /// `Authorization: Bearer <기기 토큰>` 의 주인. 폐기됐거나 계정이 막혔으면 None.
     fn device_of(&self, headers: &axum::http::HeaderMap) -> Option<(String, DeviceRec)> {
-        let token = headers
-            .get(header::AUTHORIZATION)?
-            .to_str()
-            .ok()?
-            .strip_prefix("Bearer ")?
-            .trim();
-        self.device_by_token(token)
+        self.device_by_token(bearer(headers)?)
     }
 
+    /// 런처 토큰도 받는다 — `whoami`·`logout` 과 런처 길만 쓴다.
+    fn any_device_of(&self, headers: &axum::http::HeaderMap) -> Option<(String, DeviceRec)> {
+        self.any_device_by_token(bearer(headers)?)
+    }
+
+    /// 카사텀·폰의 기기 토큰. 런처 토큰은 여기서 거절한다 — 앱 판만 다루는 런처 토큰이 업링크·계정 프록시
+    /// (칸 조작)·설정 동기화에 닿지 않게, 새 길도 이것을 쓰면 저절로 막힌다.
     fn device_by_token(&self, token: &str) -> Option<(String, DeviceRec)> {
+        self.any_device_by_token(token).filter(|(_, d)| d.kind != launcher::KIND)
+    }
+
+    fn any_device_by_token(&self, token: &str) -> Option<(String, DeviceRec)> {
         if !token.starts_with(kasa_identity::relay_auth::TOKEN_PREFIX) || token.len() > 200 {
             return None;
         }
@@ -541,6 +550,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(conversations::routes())
         .merge(shared_rooms::routes())
         .merge(login_vault::routes())
+        .merge(launcher::routes())
         .merge(kasanet::routes())
         .merge(login_vault::store_routes("/relay/browser-sync", |gate| &gate.browser_sync))
         .route("/relay/uplink", get(uplink_ws))
@@ -565,6 +575,10 @@ async fn uplink_ws(State(gate): State<Gate>, ws: WebSocketUpgrade) -> impl IntoR
 }
 
 // ── 계정 로그인과 기기 ──────────────────────────────────────────────────────────
+
+fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
+    Some(headers.get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?.trim())
+}
 
 fn json_err(status: StatusCode, code: &str) -> axum::response::Response {
     (status, axum::Json(serde_json::json!({ "ok": false, "error": code }))).into_response()
@@ -618,10 +632,11 @@ async fn login(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
     let kind = match b.kind.as_str() {
         "" | "desktop" => "desktop",
         "phone" => "phone",
+        launcher::KIND => launcher::KIND,
         _ => return json_err(StatusCode::BAD_REQUEST, "bad_kind"),
     };
     let machine_id = b.machine_id.filter(|m| valid_machine_id(m));
-    if kind == "desktop" && machine_id.is_none() {
+    if kind != "phone" && machine_id.is_none() {
         return json_err(StatusCode::BAD_REQUEST, "machine_id_required");
     }
     let label: String = b.label.trim().chars().filter(|c| !c.is_control()).take(60).collect();
@@ -644,13 +659,13 @@ async fn login(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         eprintln!("[gateway] 로그인 실패 — 계정 {account:?}, 출처 {ip}");
         return json_err(StatusCode::UNAUTHORIZED, "bad_credentials");
     };
-    if kind == "desktop" {
+    if kind != "phone" {
         let old: Vec<String> = gate
             .devices
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, d)| d.revoked_at.is_none() && d.account == account && d.kind == "desktop" && d.machine_id == machine_id)
+            .filter(|(_, d)| d.revoked_at.is_none() && d.account == account && d.kind == kind && d.machine_id == machine_id)
             .map(|(id, _)| id.clone())
             .collect();
         for id in old {
@@ -680,7 +695,7 @@ async fn login(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
 }
 
 async fn whoami(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
-    let Some((id, d)) = gate.device_of(&headers) else {
+    let Some((id, d)) = gate.any_device_of(&headers) else {
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     axum::Json(serde_json::json!({
@@ -778,7 +793,7 @@ async fn account_sync_patch(State(gate): State<Gate>, req: axum::extract::Reques
 }
 
 async fn logout(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
-    let Some((id, _)) = gate.device_of(&headers) else {
+    let Some((id, _)) = gate.any_device_of(&headers) else {
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     gate.revoke(&id);

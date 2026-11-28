@@ -137,7 +137,7 @@ async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         Ok(input) => input,
         Err(error) => return error,
     };
-    if !matches!(input.kind.as_str(), "desktop" | "phone") || !valid_machine_id(&input.machine_id) {
+    if !matches!(input.kind.as_str(), "desktop" | "phone" | super::launcher::KIND) || !valid_machine_id(&input.machine_id) {
         return json_err(StatusCode::BAD_REQUEST, "bad_device");
     }
     let native = match native(&input) {
