@@ -9,6 +9,8 @@
 //! - 받는 쪽은 `GET /relay/launcher/sync` 를 25초까지 걸어 두고, 명령이 오거나 같은 계정 기기의 판이 바뀌면
 //!   바로 돌아온다 — 진행 막대가 다른 기기 화면에서도 따라 움직인다.
 //! - 상태는 메모리에만 둔다. 관문이 다시 뜨면 런처들이 1분 안에 다시 올린다.
+//! - `GET /relay/launcher/channels` 는 공개 GitHub 릴리스가 아닌 앱(카사브라우저)의 업데이트 창구 주소·토큰을 허락된 계정의
+//!   런처에게만 준다. 허락은 상태 파일 옆 `relay-launcher-channels.json`(0600)을 사람이 고쳐 정한다 — 그 파일이 없으면 아무에게도 안 준다.
 
 use super::*;
 use serde::Deserialize;
@@ -224,6 +226,50 @@ pub(super) fn routes() -> Router<Gate> {
         .route("/relay/launcher/state", axum::routing::put(put_state))
         .route("/relay/launcher/sync", get(sync))
         .route("/relay/launcher/devices/{id}/install", axum::routing::post(install))
+        .route("/relay/launcher/channels", get(channels))
+}
+
+#[derive(Deserialize)]
+struct ChannelGrant {
+    url: String,
+    token: String,
+    #[serde(default)]
+    accounts: Vec<String>,
+}
+
+/// 묻는 계정에 허락된 창구만. 요청마다 파일을 읽는다 — 사람이 허락을 고치면 관문을 다시 켜지 않아도 된다.
+fn granted_channels(gate: &Gate, account: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let Some(path) = gate.state_path.as_ref().map(|p| p.with_file_name("relay-launcher-channels.json")) else {
+        return out;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return out;
+    };
+    let Ok(grants) = serde_json::from_str::<HashMap<String, ChannelGrant>>(&text) else {
+        eprintln!("[gateway] relay-launcher-channels.json 을 읽지 못했어요 — 창구를 아무에게도 주지 않아요");
+        return out;
+    };
+    for (name, grant) in grants {
+        // 토큰은 https 로만 보낸다 — 파일을 잘못 고쳐 토큰이 평문 주소로 새지 않게.
+        if !valid_app_id(&name) || !grant.url.starts_with("https://") || grant.token.is_empty() {
+            continue;
+        }
+        if grant.accounts.iter().any(|a| a == account) {
+            out.insert(name, json!({ "url": grant.url.trim_end_matches('/'), "token": grant.token }));
+        }
+    }
+    out
+}
+
+/// `GET /relay/launcher/channels` — 이 계정에 허락된 업데이트 창구.
+async fn channels(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let (_, rec) = match launcher(&gate, &headers) {
+        Ok(found) => found,
+        Err(denied) => return denied,
+    };
+    let body = json!({ "ok": true, "channels": granted_channels(&gate, &rec.account) });
+    ([(header::CACHE_CONTROL, "no-store")], axum::Json(body)).into_response()
 }
 
 fn launcher(gate: &Gate, headers: &axum::http::HeaderMap) -> Result<(String, DeviceRec), axum::response::Response> {

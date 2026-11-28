@@ -148,3 +148,29 @@ async fn state_change_ends_the_wait_of_other_launchers() {
     assert_eq!(woke["devices"][0]["apps"][0]["phase"], "downloading");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn channels_go_only_to_granted_accounts_over_https() {
+    let (gate, dir) = rig();
+    std::fs::write(
+        dir.join("relay-launcher-channels.json"),
+        json!({
+            "kasa-browser": {"url": "https://update.example/", "token": "channel-secret", "accounts": ["tester"]},
+            "plain": {"url": "http://update.example", "token": "leak", "accounts": ["tester"]},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let addr = spawn_relay(gate).await;
+    let mine = login(addr, "tester", "launcher", "launcher-chan-1").await;
+    let other = login(addr, "other", "launcher", "launcher-chan-2").await;
+    let desktop = login(addr, "tester", "desktop", "launcher-chan-3").await;
+
+    let (status, body) = get_json(addr, "/relay/launcher/channels", &mine).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["channels"], json!({"kasa-browser": {"url": "https://update.example", "token": "channel-secret"}}));
+    assert_eq!(get_json(addr, "/relay/launcher/channels", &other).await.1["channels"], json!({}));
+    assert_eq!(get_json(addr, "/relay/launcher/channels", &desktop).await.0, 403);
+    assert_eq!(get_json(addr, "/relay/launcher/channels", "kdt_nope").await.0, 401);
+    let _ = std::fs::remove_dir_all(&dir);
+}
