@@ -268,6 +268,15 @@ e275f7bb 관문으로 교체(21:15:08, sha256 1a0755f2…, `/relay/launcher/chan
 `/usr/local/bin/kasa-relay.bak-20261128-211508`(옆에 `.info`). 확인: 무토큰 `/relay/launcher/channels` 401, 데스크톱 재접속,
 error·panic 0, 허락된 계정의 런처가 창구에서 카사브라우저 최신 판을 읽고 맥·Windows 격리 폴더에 깔았다.
 
+## 카사런처 모바일 교체 기록 (2026-11-29)
+
+3fb7c023 관문으로 교체(01:57:08, `/relay/launcher/ios-apps` 와 OAuth 되돌아오기 스킴 `kasalauncher:`). 서비스 파일·env 변경 없음.
+교체 전 판(e275f7bb, sha256 1a0755f2…)은 `/usr/local/bin/kasa-relay.bak-20261129-015708`(옆에 `.info`). 되돌리기는 그 파일을 제자리로
+놓고 `sudo systemctl restart kasa-relay` — 옛 관문에선 아이폰 런처 로그인이 `invalid_redirect_uri` 로 막힌다. 확인: `/relay/health` 200,
+무토큰 `/relay/launcher/ios-apps` 401, `kasalauncher://oauth` 로 oauth/start 가 authorization_url 을 줌, 데스크톱 넷 재접속, error·panic 0,
+관리자 계정 런처 토큰으로 ios-apps 가 latest·latest-<번들> 판 다섯을 줌. 같은 때 아이폰 런처(`com.debimarlene.kasalauncher`)
+App ID 를 등록하고 맥미니에서 Ad Hoc 판을 올린 뒤 `gateway.sh sync-install` 로 서울에도 놓았다(이번엔 3분 남짓 걸렸다).
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서
