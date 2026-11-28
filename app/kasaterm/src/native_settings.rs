@@ -469,6 +469,14 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             Some(note) => format!("{sub} · {note}"),
             None => sub,
         };
+        let login_left = probe
+            .as_ref()
+            .filter(|value| value.verified && value.logged_in)
+            .and_then(|value| crate::settings::claude_login_left(&value.email, &value.org));
+        let sub = match &login_left {
+            Some((left, _)) => format!("{sub} · {left}"),
+            None => sub,
+        };
         let dir = crate::settings::claude_runtime_usage_dir(&account.id, &active_id);
         let usage = app.claude_account_usage(&account.id);
         let usage_state = match crate::settings::claude_usage_state(
@@ -497,6 +505,7 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             sub,
             sub_kind: match probe {
                 _ if org_note.is_some() => "danger",
+                _ if login_left.as_ref().is_some_and(|(_, urgent)| *urgent) => "danger",
                 Some(ref value) if value.verified && !value.logged_in => "danger",
                 Some(_) => "mute",
                 None => "faint",

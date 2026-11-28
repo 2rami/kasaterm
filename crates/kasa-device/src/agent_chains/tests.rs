@@ -378,7 +378,8 @@ fn each_mapped_slot_reports_its_chain_and_login_expiry() {
         ..Held::default()
     }];
     let logins = chain_logins(&[slot("acct-1", false), slot("acct-2", false), slot("bench", true), slot("acct-9", false)], &map, &chains);
-    assert_eq!(logins.len(), 2);
-    assert_eq!((logins[0].slot.as_str(), logins[0].state.as_str(), logins[0].login_expires_at), ("acct-1", "ok", 42));
+    assert_eq!(logins.len(), 3);
+    assert_eq!((logins[0].slot.as_str(), logins[0].state.as_str(), logins[0].login_expires_at, logins[0].bench), ("acct-1", "ok", 42, false));
     assert_eq!((logins[1].slot.as_str(), logins[1].state.as_str()), ("acct-2", "missing"));
+    assert_eq!((logins[2].slot.as_str(), logins[2].login_expires_at, logins[2].bench), ("bench", 42, true), "활성 계정도 끝을 알린다");
 }

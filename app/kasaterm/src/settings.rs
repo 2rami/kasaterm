@@ -2656,6 +2656,15 @@ impl App {
                     kind = "danger";
                     sub_code = None;
                 }
+                if logged_in != Some(false) {
+                    if let Some((left, urgent)) = probe.as_ref().and_then(|p| claude_login_left(&p.email, &p.org)) {
+                        sub = format!("{sub} · {left}");
+                        if urgent {
+                            kind = "danger";
+                        }
+                        sub_code = None;
+                    }
+                }
                 let numbered = format!("계정 {}", idx + 1);
                 let name = account_display(&id, &label, &numbered);
                 let name_code = (name == numbered).then_some("account_numbered");
@@ -5747,6 +5756,50 @@ fn org_notes() -> &'static OrgNotes {
 /// 신원 조회 스레드가 채워 둔 그 슬롯의 별명·조직 어긋남 알림. 화면은 읽기만 한다.
 pub(crate) fn account_org_note(id: &str) -> Option<String> {
     org_notes().lock().ok()?.get(id).cloned().flatten()
+}
+
+/// 재로그인 도구(`claude-renew`)가 끝 4일 앞에 다시 로그인하니, 3일 안으로 들어왔으면 그 길이 막힌 것이다.
+const LOGIN_URGENT_MS: u64 = 3 * 86_400_000;
+
+/// 그 계정 로그인이 끝날 때까지 남은 때(`로그인 21일 남음`)와 급한지. Claude 로그인 수명은 갱신으로 안 늘어
+/// 약 28일 뒤 끊기므로 그 전에 다시 로그인해야 한다. 기준은 관문이 쥔 그 계정 사슬이라 활성 계정도 나온다.
+pub(crate) fn claude_login_left(email: &str, org: &str) -> Option<(String, bool)> {
+    if !email.contains('@') {
+        return None;
+    }
+    let key = kasa_device::agent_accounts::account_key("claude", email, org, "");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
+    login_left_label(kasa_device::agent_chains::login_expires_at(&key)?, now)
+}
+
+/// 이미 끝났으면 None — 그때는 사슬이 「다시 로그인」으로 바뀌어 그쪽 표시가 맡는다.
+fn login_left_label(expires_at: u64, now: u64) -> Option<(String, bool)> {
+    const DAY: u64 = 86_400_000;
+    const HOUR: u64 = 3_600_000;
+    let left = expires_at.checked_sub(now).filter(|left| *left > 0)?;
+    let text = if left >= DAY {
+        format!("로그인 {}일 남음", left / DAY)
+    } else {
+        format!("로그인 {}시간 남음", (left / HOUR).max(1))
+    };
+    Some((text, left <= LOGIN_URGENT_MS))
+}
+
+#[cfg(test)]
+mod login_left_tests {
+    use super::login_left_label;
+
+    #[test]
+    fn days_then_hours_and_red_inside_three_days() {
+        const DAY: u64 = 86_400_000;
+        assert_eq!(login_left_label(21 * DAY + DAY / 2, 0), Some(("로그인 21일 남음".into(), false)));
+        assert_eq!(login_left_label(3 * DAY + 1, 0), Some(("로그인 3일 남음".into(), false)));
+        assert_eq!(login_left_label(3 * DAY, 0), Some(("로그인 3일 남음".into(), true)));
+        assert_eq!(login_left_label(DAY / 24 * 5, 0), Some(("로그인 5시간 남음".into(), true)));
+        assert_eq!(login_left_label(60_000, 0), Some(("로그인 1시간 남음".into(), true)));
+        assert_eq!(login_left_label(5, 5), None, "끝난 로그인은 다시 로그인 표시가 맡는다");
+        assert_eq!(login_left_label(5, 9), None);
+    }
 }
 
 /// 앞 슬롯과 같은 계정(같은 이메일·조직)이면 그 슬롯 이름. 승인 화면이 브라우저에 이미

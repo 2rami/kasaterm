@@ -1087,20 +1087,32 @@ fn save_map(map: &BTreeMap<String, String>, owners: &BTreeMap<String, Owner>) {
     }
 }
 
-/// 화면용 마지막 관측 — 열쇠와 상태뿐, 토큰은 오래 쥐지 않는다.
-fn seen() -> &'static std::sync::Mutex<Vec<(String, String)>> {
-    static SEEN: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String)>>> = std::sync::OnceLock::new();
+/// 화면용 마지막 관측 사슬 하나 — 토큰은 오래 쥐지 않는다.
+struct SeenChain {
+    key: String,
+    state: String,
+    login_expires_at: u64,
+}
+
+fn seen() -> &'static std::sync::Mutex<Vec<SeenChain>> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Vec<SeenChain>>> = std::sync::OnceLock::new();
     SEEN.get_or_init(Default::default)
 }
 
 /// 그 계정 사슬의 마지막 관측 상태 — `ok`·`reconnect_required`, 관문에 없으면 None.
 pub fn chain_state(key: &str) -> Option<String> {
-    seen().lock().ok()?.iter().find(|(k, _)| k == key).map(|(_, state)| state.clone())
+    seen().lock().ok()?.iter().find(|c| c.key == key).map(|c| c.state.clone())
 }
 
 /// 관문이 그 계정 사슬을 멀쩡히 쥐고 있나(마지막 관측).
 pub fn held(key: &str) -> bool {
-    seen().lock().is_ok_and(|s| s.iter().any(|(k, state)| k == key && state == "ok"))
+    seen().lock().is_ok_and(|s| s.iter().any(|c| c.key == key && c.state == "ok"))
+}
+
+/// 그 계정 사슬의 로그인이 끝나는 때(ms, 마지막 관측). 슬롯이 아니라 열쇠로 찾으므로 작업대에 실린 활성 계정도
+/// 나온다. 관문이 모르거나 옛 관문이라 안 적었으면 None.
+pub fn login_expires_at(key: &str) -> Option<u64> {
+    seen().lock().ok()?.iter().find(|c| c.key == key && c.login_expires_at > 0).map(|c| c.login_expires_at)
 }
 
 /// A remembered email does not mean adoption finished. Reuse its registered slot
@@ -1355,7 +1367,10 @@ pub async fn sync_once(
     }
     let chains = gateway.list().await?;
     if let Ok(mut s) = seen().lock() {
-        *s = chains.iter().map(|c| (c.key.clone(), c.state.clone())).collect();
+        *s = chains
+            .iter()
+            .map(|c| SeenChain { key: c.key.clone(), state: c.state.clone(), login_expires_at: c.login_expires_at })
+            .collect();
     }
     ledger.manage(managed_keys(slots, map, &learned.keys));
     ledger.observe(&chains);
@@ -1512,13 +1527,15 @@ pub struct ChainLogin {
     pub org: String,
     pub state: String,
     pub login_expires_at: u64,
+    /// 작업대에 실린 활성 계정이다. 이 기기는 작업대 로그인을 맡기므로 슬롯 금고에 다시 로그인해도 다른 계정으로
+    /// 바꾸기 전까지는 사슬이 안 바뀐다 — 재로그인 도구가 이걸 보고 길을 가른다.
+    pub bench: bool,
 }
 
 /// 슬롯마다 맡긴 사슬을 찾아 상태를 붙인다. 관문이 모르는 사슬은 `missing` 이다.
 pub fn chain_logins(slots: &[Slot], map: &BTreeMap<String, String>, chains: &[Held]) -> Vec<ChainLogin> {
     slots
         .iter()
-        .filter(|slot| !slot.bench)
         .filter_map(|slot| {
             let key = map.get(&slot.id)?;
             let chain = chains.iter().find(|c| &c.key == key);
@@ -1529,6 +1546,7 @@ pub fn chain_logins(slots: &[Slot], map: &BTreeMap<String, String>, chains: &[He
                 org: chain.map(|c| c.org.clone()).unwrap_or_default(),
                 state: chain.map_or_else(|| "missing".into(), |c| c.state.clone()),
                 login_expires_at: chain.map_or(0, |c| c.login_expires_at),
+                bench: slot.bench,
             })
         })
         .collect()
