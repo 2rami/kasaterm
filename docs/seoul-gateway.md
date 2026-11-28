@@ -251,6 +251,15 @@ x86_64-unknown-linux-gnu.2.36` 으로 지었다. 교체 전 운영 판(11-18 17:
 본다. 확인: `/relay/health` 200, 무토큰 `/relay/login-vault/escrow` 404 → 401, `/relay/login-vault/joins` 401 → 404, 무토큰
 whoami·login-vault·browser-sync 401(전후 같음), 맥미니·2R4MI 재접속, 교체 뒤 관문 기록 error·panic 0.
 
+## 카사런처 기기 묶음 교체 기록 (2026-11-28)
+
+012550d7 관문으로 교체(20:59:31, sha256 571517df…, `/relay/launcher/*` 와 기기 종류 `launcher`). `gateway.sh build`(도커)로 지었고 서비스
+파일·env 변경 없음. 교체 전 운영 판(11-27 11:07 기동, 기록 없음 — a27071d1 커밋 9분 뒤라 그 판으로 추정, sha256 4ccfb7ed…)은
+`/usr/local/bin/kasa-relay.bak-20261128-205931`(옆에 `.info`). 되돌리기는 그 파일을 제자리로 놓고 `sudo systemctl restart kasa-relay` —
+옛 관문은 launcher 토큰을 다른 길에서 거르지 않으니 되돌린 뒤엔 `/relay/devices` 에서 kind `launcher` 기기를 폐기한다. 확인: `/relay/health`
+200, 무토큰 whoami·devices·account-sync 401(전후 같음), `/relay/launcher/sync` 404 → 401, 데스크톱 다섯 30초 안에 재접속, 관문 기록
+error·panic 0. 실제 GitHub 되돌아오기 로그인으로 받은 런처 토큰은 whoami 만 통하고 devices·account-sync·profile 은 401 이었다.
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서
