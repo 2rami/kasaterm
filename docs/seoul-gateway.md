@@ -260,6 +260,14 @@ whoami·login-vault·browser-sync 401(전후 같음), 맥미니·2R4MI 재접속
 200, 무토큰 whoami·devices·account-sync 401(전후 같음), `/relay/launcher/sync` 404 → 401, 데스크톱 다섯 30초 안에 재접속, 관문 기록
 error·panic 0. 실제 GitHub 되돌아오기 로그인으로 받은 런처 토큰은 whoami 만 통하고 devices·account-sync·profile 은 401 이었다.
 
+## 카사런처 창구 열쇠 교체 기록 (2026-11-28)
+
+e275f7bb 관문으로 교체(21:15:08, sha256 1a0755f2…, `/relay/launcher/channels`). 같은 때 상태 폴더에 `relay-launcher-channels.json`
+(0600, kasa-relay 소유 — 카사브라우저 창구 주소·토큰·허락 계정 `2rami`)을 놓았다. 토큰은 미니 창구 폴더의 `token` 첫 줄을 ssh 로
+이어 옮겨 화면·기록에 안 나왔다. 허락을 고치려면 그 파일만 고친다(요청마다 읽는다). 교체 전 판(012550d7)은
+`/usr/local/bin/kasa-relay.bak-20261128-211508`(옆에 `.info`). 확인: 무토큰 `/relay/launcher/channels` 401, 데스크톱 재접속,
+error·panic 0, 허락된 계정의 런처가 창구에서 카사브라우저 최신 판을 읽고 맥·Windows 격리 폴더에 깔았다.
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서
