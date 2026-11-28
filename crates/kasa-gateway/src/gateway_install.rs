@@ -79,6 +79,23 @@ impl Gate {
         (ok && dir.join(IPA).is_file()).then_some((dir, meta))
     }
 
+    /// 앱마다의 지금 판 — 카사텀은 `latest`, 다른 앱은 `latest-<번들 id>` 포인터.
+    fn releases(&self) -> Vec<(String, Meta)> {
+        let Some(dir) = self.install_dir.as_ref() else { return Vec::new() };
+        let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+        let mut out: Vec<(String, Meta)> = entries
+            .flatten()
+            .filter(|e| e.file_name().to_str().is_some_and(|n| n == "latest" || n.starts_with("latest-")))
+            .filter_map(|e| {
+                let token = std::fs::read_to_string(e.path()).ok()?.trim().to_string();
+                let (_, meta) = self.release(&token)?;
+                Some((token, meta))
+            })
+            .collect();
+        out.sort_by(|a, b| a.1.title.cmp(&b.1.title));
+        out
+    }
+
     fn current_release(&self) -> Option<(String, Meta)> {
         let token = std::fs::read_to_string(self.install_dir.as_ref()?.join("latest")).ok()?;
         let token = token.trim().to_string();
@@ -302,6 +319,32 @@ async fn latest(
     });
     // `waits` 가 없는 옛 관문은 have·wait 를 모른 채 곧바로 답한다 — 폰은 그때 천천히 다시 묻는다.
     axum::Json(serde_json::json!({ "ok": true, "release": release, "waits": true })).into_response()
+}
+
+/// `GET /relay/launcher/ios-apps` — 모바일 런처가 보여 줄 아이폰 앱들의 지금 판과 설치 링크. `latest` 와 같은 까닭으로
+/// 관리자 계정에만 준다 — 등록되지 않은 기기의 사람에게 못 까는 판을 내밀지 않는다.
+pub(super) async fn launcher_ios_apps(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let Some((_, device)) = gate.any_device_of(&headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    if !gate.is_admin(&device.account) {
+        return axum::Json(serde_json::json!({ "ok": true, "apps": [] })).into_response();
+    }
+    let Some(origin) = gate.public_origin(&headers) else {
+        return json_err(StatusCode::SERVICE_UNAVAILABLE, "no_origin");
+    };
+    let apps: Vec<serde_json::Value> = gate
+        .releases()
+        .into_iter()
+        .map(|(token, meta)| {
+            let (page, install) = links(&origin, &token);
+            serde_json::json!({
+                "bundle_id": meta.bundle_id, "title": meta.title, "version": meta.version, "build": meta.build,
+                "uploaded": meta.uploaded, "page": page, "install": install,
+            })
+        })
+        .collect();
+    ([(header::CACHE_CONTROL, "no-store")], axum::Json(serde_json::json!({ "ok": true, "apps": apps }))).into_response()
 }
 
 /// 관리 화면(`/relay/admin`)의 「설치 링크 · 기기」 칸. 기기 수는 서명기가 등록·재서명 때마다 적는 `devices.json` 을 읽는다

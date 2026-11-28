@@ -9,6 +9,7 @@
 //! - 받는 쪽은 `GET /relay/launcher/sync` 를 25초까지 걸어 두고, 명령이 오거나 같은 계정 기기의 판이 바뀌면
 //!   바로 돌아온다 — 진행 막대가 다른 기기 화면에서도 따라 움직인다.
 //! - 상태는 메모리에만 둔다. 관문이 다시 뜨면 런처들이 1분 안에 다시 올린다.
+//! - `GET /relay/launcher/ios-apps` 는 모바일 런처가 띄울 아이폰 앱 판과 Ad Hoc 설치 링크(`gateway_install.rs`) — 관리자 계정에만.
 //! - `GET /relay/launcher/channels` 는 공개 GitHub 릴리스가 아닌 앱(카사브라우저)의 업데이트 창구 주소·토큰을 허락된 계정의
 //!   런처에게만 준다. 허락은 상태 파일 옆 `relay-launcher-channels.json`(0600)을 사람이 고쳐 정한다 — 그 파일이 없으면 아무에게도 안 준다.
 
@@ -227,6 +228,7 @@ pub(super) fn routes() -> Router<Gate> {
         .route("/relay/launcher/sync", get(sync))
         .route("/relay/launcher/devices/{id}/install", axum::routing::post(install))
         .route("/relay/launcher/channels", get(channels))
+        .route("/relay/launcher/ios-apps", get(super::install::launcher_ios_apps))
 }
 
 #[derive(Deserialize)]

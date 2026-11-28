@@ -333,3 +333,51 @@ fn admin_section_shows_counts_room_left_and_masked_registrations() {
     assert!(html.contains("…31801C") && !html.contains("00008140-001059A4"));
     assert!(html.contains("&lt;b&gt;폰") && !html.contains("1.2.3.4"));
 }
+
+#[tokio::test]
+async fn launcher_ios_apps_lists_every_app_pointer_for_admins_only() {
+    let dir = std::env::temp_dir().join(format!("kasa-install-{}", uuid::Uuid::new_v4()));
+    let addr = serve(gate_in(&dir, "boss")).await;
+    put_release(&dir, TOKEN, "2611280101");
+    let other = "Nm4pQ8rT2vX6zB1cD5fG9hJk";
+    let at = dir.join("relay-install").join(other);
+    std::fs::create_dir_all(&at).unwrap();
+    std::fs::write(at.join(IPA), b"ipa").unwrap();
+    std::fs::write(
+        at.join("meta.json"),
+        json!({"bundle_id":"com.nachoneko.chat","version":"1.2.0","build":"2611280202","title":"Nacho","uploaded":10}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("relay-install/latest-com.nachoneko.chat"), other).unwrap();
+    std::fs::write(dir.join("relay-install/latest-com.broken"), "not-a-token").unwrap();
+
+    let launcher = |account: &'static str| async move {
+        let reply: Value = reqwest::Client::new()
+            .post(format!("http://{addr}/relay/login"))
+            .json(&json!({"account":account,"password":"correct horse","machine_id":format!("{account}-launcher"),"kind":"launcher"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        reply["token"].as_str().unwrap().to_string()
+    };
+    let ask = |token: Option<String>| async move {
+        let mut req = reqwest::Client::new().get(format!("http://{addr}/relay/launcher/ios-apps"));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let reply = req.send().await.unwrap();
+        (reply.status().as_u16(), reply.json::<Value>().await.unwrap_or_default())
+    };
+    assert_eq!(ask(None).await.0, 401);
+    let (status, guest) = ask(Some(launcher("guest").await)).await;
+    assert_eq!((status, guest["apps"].clone()), (200, json!([])));
+    let (_, boss) = ask(Some(launcher("boss").await)).await;
+    let apps = boss["apps"].as_array().unwrap();
+    assert_eq!(apps.len(), 2);
+    let builds: Vec<&str> = apps.iter().map(|a| a["build"].as_str().unwrap()).collect();
+    assert!(builds.contains(&"2611280101") && builds.contains(&"2611280202"));
+    assert!(apps.iter().all(|a| a["install"].as_str().unwrap().starts_with("itms-services://")));
+}

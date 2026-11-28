@@ -14,7 +14,7 @@ pub const TTL: Duration = Duration::from_secs(600);
 /// Lifetime of the one-time code handed to an app's redirect URI; the app redeems it immediately.
 pub const CODE_TTL: Duration = Duration::from_secs(120);
 /// Private-use URI schemes of first-party apps that may receive a login result (RFC 8252 §7.1).
-const APP_SCHEMES: [&str; 2] = ["kasaterm", "nachochat"];
+const APP_SCHEMES: [&str; 3] = ["kasaterm", "nachochat", "kasalauncher"];
 const MAX_PENDING: usize = 256;
 /// Wrong passwords a held sign-in survives before it must start over.
 const MAX_CLAIM_FAILURES: u8 = 5;
